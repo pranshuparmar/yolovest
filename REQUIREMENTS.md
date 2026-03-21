@@ -17,7 +17,7 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR-1.1 | Deploy OpenClaw as the autonomous orchestration layer — the bot runs 24/7 as an always-on agent | P0 |
-| FR-1.2 | Configure OpenClaw heartbeat (every 15 min during market hours, every 60 min outside) to monitor system health, check positions, and trigger scheduled tasks | P0 |
+| FR-1.2 | Configure OpenClaw heartbeat to monitor system health, check positions, and trigger scheduled tasks. Intervals configurable via `heartbeat.market_hours_interval_min` (default: `15`) and `heartbeat.off_hours_interval_min` (default: `60`) | P0 |
 | FR-1.3 | Implement OpenClaw Skills for each capability: `market-scan`, `news-fetch`, `trade-execute`, `report-generate`, `model-retrain`, `risk-check` | P0 |
 | FR-1.4 | Use OpenClaw's messaging integration for Telegram — trade alerts, daily summaries, error notifications | P0 |
 | FR-1.5 | OpenClaw Memory — persist agent state, trading context, conversation history, and reasoning across restarts using OpenClaw's Markdown-based memory system | P1 |
@@ -52,9 +52,9 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-3.1 | Daily pre-market scan: scan entire NSE universe and shortlist 20-30 candidate stocks based on momentum, volume, and news | P0 |
-| FR-3.2 | Stock ranking algorithm combining: technical score (40%), volume/momentum (25%), news sentiment (20%), fundamental quality (15%) | P0 |
-| FR-3.3 | Filter out illiquid stocks (min avg daily volume threshold), stocks in ban period (F&O ban list), and stocks with pending corporate actions | P0 |
+| FR-3.1 | Daily pre-market scan: scan NSE universe and shortlist candidates based on momentum, volume, and news. Shortlist size configurable via `scanning.shortlist_size` (default: `25`) | P0 |
+| FR-3.2 | Stock ranking algorithm with configurable weights via `scanning.weights`: `technical` (default: `0.40`), `volume_momentum` (default: `0.25`), `news_sentiment` (default: `0.20`), `fundamental` (default: `0.15`). Must sum to 1.0. | P0 |
+| FR-3.3 | Filter out illiquid stocks below `scanning.min_avg_daily_volume` (default: `500000`), stocks in F&O ban period, and stocks with pending corporate actions | P0 |
 | FR-3.4 | Maintain a dynamic watchlist that updates throughout the day as new data comes in | P1 |
 | FR-3.5 | Track sector rotation — identify which sectors are showing strength/weakness | P2 |
 | FR-3.6 | Use Gemini to cross-validate top-ranked stocks against current market narrative | P1 |
@@ -63,7 +63,7 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-4.1 | Feature engineering: RSI, MACD, Bollinger Bands, VWAP, ATR, volume profile, OBV, SuperTrend, moving averages (9/21/50/200 EMA) | P0 |
+| FR-4.1 | Feature engineering: RSI, MACD, Bollinger Bands, VWAP, ATR, volume profile, OBV, SuperTrend, moving averages. EMA periods configurable via `strategy.ema_periods` (default: `[9, 21, 50, 200]`). Individual indicators toggleable via `strategy.indicators` map. | P0 |
 | FR-4.2 | XGBoost/LightGBM model trained on historical features to generate buy/sell/hold signals with confidence scores | P0 |
 | FR-4.3 | Separate models for intraday (short features, 1-5min candles) and swing (daily features, multi-day patterns) | P0 |
 | FR-4.4 | Gemini-powered trade review: before every trade, send full context (signal, indicators, news sentiment, portfolio state, market conditions) to Gemini for approval/rejection/resize recommendation | P0 |
@@ -73,23 +73,32 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 
 ### FR-5: Risk Management
 
-| ID | Requirement | Priority |
-|----|------------|----------|
-| FR-5.1 | Max risk per trade: 2% of total capital | P0 |
-| FR-5.2 | Max total portfolio exposure: 60% of capital (40% always in cash) | P0 |
-| FR-5.3 | Max open positions: 3 simultaneous | P0 |
-| FR-5.4 | Max single stock exposure: 25% of portfolio | P0 |
-| FR-5.5 | Daily loss circuit breaker: stop all trading if daily loss exceeds 3% of capital | P0 |
-| FR-5.6 | Weekly loss circuit breaker: reduce position sizing by 50% if weekly loss exceeds 5% | P0 |
-| FR-5.7 | Mandatory stop-loss on every trade (no exceptions). SL must be set at order time | P0 |
-| FR-5.8 | Trailing stop-loss: once a trade is in profit by 1.5x the risk, trail the SL to breakeven; continue trailing as price moves favorably | P1 |
-| FR-5.9 | Market hours enforcement: no new orders outside 9:15 AM - 3:15 PM IST (configurable). Square-off orders allowed until 3:20 PM. | P0 |
-| FR-5.10 | Auto square-off: close all intraday (MIS) positions by 3:15 PM IST (configurable via `market_hours.square_off` in config.yaml). Swing positions (CNC) are held overnight. | P0 |
-| FR-5.11 | Gemini risk review: LLM acts as a second opinion on risk before execution — can veto trades that look dangerous | P0 |
-| FR-5.12 | If Gemini API is down, fall back to rules-only risk management (never block trading on LLM availability) | P0 |
-| FR-5.13 | Correlation check: avoid opening multiple positions in the same sector/theme simultaneously | P2 |
-| FR-5.14 | **Emergency kill switch**: Telegram commands (`/stop` to pause trading, `/kill` to square off everything) + dashboard button. Immediately cancels all open/pending orders. `/kill` also squares off all open positions at market price. | P0 |
-| FR-5.15 | Kill switch state persists across restarts — once `/stop` is triggered, bot stays paused until explicitly resumed via `/resume` | P0 |
+**All risk parameters are configurable via `risk` section in config.yaml. Defaults shown below are conservative starting values.**
+
+| ID | Requirement | Config Key | Default | Priority |
+|----|------------|-----------|---------|----------|
+| FR-5.1 | Max risk per trade as % of total capital | `risk.max_risk_per_trade_pct` | `0.02` (2%) | P0 |
+| FR-5.2 | Max total portfolio exposure as % of capital (rest stays in cash) | `risk.max_portfolio_exposure_pct` | `0.60` (60%) | P0 |
+| FR-5.3 | Max simultaneous open positions | `risk.max_open_positions` | `3` | P0 |
+| FR-5.4 | Max single stock exposure as % of portfolio | `risk.max_single_stock_pct` | `0.25` (25%) | P0 |
+| FR-5.5 | Daily loss circuit breaker — stop all trading if daily loss exceeds this % of capital | `risk.daily_loss_limit_pct` | `0.03` (3%) | P0 |
+| FR-5.6 | Weekly loss circuit breaker — reduce position sizing by `weekly_loss_sizing_reduction` if weekly loss exceeds this % | `risk.weekly_loss_limit_pct` | `0.05` (5%) | P0 |
+| FR-5.6a | Position sizing reduction factor when weekly circuit breaker triggers | `risk.weekly_loss_sizing_reduction` | `0.50` (50%) | P0 |
+| FR-5.7 | Mandatory stop-loss on every trade (no exceptions). SL must be set at order time. Enable/disable enforcement. | `risk.mandatory_stop_loss` | `true` | P0 |
+| FR-5.8 | Trailing stop-loss: once trade profit exceeds `trailing_sl_trigger_multiple` × risk, trail SL to breakeven and continue trailing | `risk.trailing_sl_enabled` | `true` | P1 |
+| FR-5.8a | Profit multiple of risk at which trailing SL activates | `risk.trailing_sl_trigger_multiple` | `1.5` | P1 |
+| FR-5.8b | Trailing SL step size as % of price (how tightly it trails) | `risk.trailing_sl_step_pct` | `0.005` (0.5%) | P1 |
+| FR-5.9 | Market hours enforcement — no new orders outside configured window | `market_hours.order_start` / `market_hours.order_end` | `09:15` / `15:15` | P0 |
+| FR-5.9a | Extended window for square-off orders after `order_end` | `market_hours.square_off_extension` | `"00:05"` (5 min) | P0 |
+| FR-5.10 | Auto square-off all intraday (MIS) positions at configured time. Swing (CNC) held overnight. | `market_hours.square_off` | `15:15` | P0 |
+| FR-5.11 | Gemini risk review — LLM second opinion before execution, can veto trades | `risk.llm_review_enabled` | `true` | P0 |
+| FR-5.12 | If Gemini API is down, fall back to rules-only risk management (never block trading on LLM availability) | `risk.llm_fallback_to_rules` | `true` | P0 |
+| FR-5.13 | Correlation check — max positions allowed in same sector simultaneously | `risk.max_same_sector_positions` | `1` | P2 |
+| FR-5.14 | **Emergency kill switch**: Telegram commands (`/stop` to pause, `/kill` to square off everything) + dashboard button | `risk.kill_switch_enabled` | `true` | P0 |
+| FR-5.15 | Kill switch state persists across restarts — stays paused until `/resume` | `risk.kill_switch_persistent` | `true` | P0 |
+| FR-5.16 | Minimum confidence score from ML model required to take a trade | `risk.min_confidence_score` | `0.65` | P0 |
+| FR-5.17 | Max number of trades per day (to avoid overtrading) | `risk.max_trades_per_day` | `10` | P1 |
+| FR-5.18 | Cooldown period (minutes) after a losing trade before next entry | `risk.loss_cooldown_minutes` | `15` | P2 |
 
 ### FR-6: Order Execution
 
@@ -100,7 +109,7 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 | FR-6.3 | Handle Kite daily re-authentication: generate `request_token` → `access_token` flow each morning (manual TOTP or automated via Selenium as fallback) | P0 |
 | FR-6.4 | Order lifecycle tracking: placed → open → filled/rejected/cancelled — with timestamps | P0 |
 | FR-6.5 | Reconcile local position state with broker state periodically (every heartbeat) | P0 |
-| FR-6.6 | Retry failed orders with exponential backoff (max 3 retries) | P1 |
+| FR-6.6 | Retry failed orders with exponential backoff. Max retries configurable via `execution.max_order_retries` (default: `3`), base delay via `execution.retry_base_delay_sec` (default: `2`) | P1 |
 | FR-6.7 | Slippage tracking: record expected vs actual fill price for every trade | P1 |
 | FR-6.8 | Respect Kite API rate limits: 10 req/s aggregate across all endpoints per API key | P0 |
 | FR-6.9 | Respect external data source rate limits: jugaad-data (use built-in caching), yfinance (add delays between requests), tvDatafeed (respect TradingView limits) | P0 |
@@ -112,8 +121,8 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 | FR-7.1 | Log every prediction: symbol, predicted direction, confidence, predicted target, predicted timeframe | P0 |
 | FR-7.2 | After the predicted timeframe elapses, record actual outcome: actual price movement, actual PnL | P0 |
 | FR-7.3 | Maintain a prediction scoreboard: accuracy by symbol, by strategy, by market condition, by timeframe | P0 |
-| FR-7.4 | Weekly model retraining: every Saturday, retrain ML models using accumulated prediction vs actual data | P0 |
-| FR-7.5 | A/B testing: when a new model is trained, run it in shadow mode alongside the current model for 1 week before promoting | P1 |
+| FR-7.4 | Scheduled model retraining using accumulated prediction vs actual data. Schedule configurable via `retraining.schedule_cron` (default: `"0 6 * * 6"` — Saturday 6 AM) | P0 |
+| FR-7.5 | A/B testing: new model runs in shadow mode alongside current model before promoting. Shadow duration configurable via `retraining.shadow_mode_days` (default: `7`) | P1 |
 | FR-7.6 | Use Gemini to analyze prediction failures — identify patterns in what the model gets wrong | P1 |
 | FR-7.7 | Version all model artifacts with metrics (accuracy, Sharpe, drawdown) so we can rollback if a new model underperforms | P0 |
 | FR-7.8 | Track Gemini's own trade review accuracy — did its approvals/rejections lead to better outcomes? | P2 |
@@ -125,9 +134,9 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 | FR-8.1 | FastAPI web dashboard: portfolio overview, open positions, today's trades, PnL chart, equity curve | P0 |
 | FR-8.2 | WebSocket live updates: push trade executions and position changes in real time | P1 |
 | FR-8.3 | Trade detail view: for any trade, show the full reasoning chain (ML signal → Gemini review → risk check → execution → outcome) | P0 |
-| FR-8.4 | Daily report: auto-generated at market close — today's trades, PnL, prediction accuracy, top signals, market summary | P0 |
-| FR-8.5 | Weekly report: cumulative PnL, model performance trends, prediction accuracy trends, Gemini review analysis | P0 |
-| FR-8.6 | Telegram integration: real-time trade alerts (entry/exit), daily summary at 4 PM IST, weekly summary on Saturday | P0 |
+| FR-8.4 | Daily report: auto-generated at market close — today's trades, PnL, prediction accuracy, top signals, market summary. Time configurable via `reports.daily_report_time` (default: `"16:00"`) | P0 |
+| FR-8.5 | Weekly report: cumulative PnL, model performance trends, prediction accuracy trends, Gemini review analysis. Day/time configurable via `reports.weekly_report_cron` (default: `"0 10 * * 6"` — Saturday 10 AM) | P0 |
+| FR-8.6 | Telegram integration: real-time trade alerts (entry/exit), daily summary, weekly summary. Alert types individually toggleable via `notifications.telegram.alerts` map (`trade_entry`, `trade_exit`, `daily_summary`, `weekly_summary`, `errors`) | P0 |
 | FR-8.7 | Historical report access: query any date range for full trade history and performance metrics | P1 |
 | FR-8.8 | Audit log: every action (data fetch, signal, risk check, LLM call, order, fill) logged with timestamp and full context | P0 |
 | FR-8.9 | Dashboard auth: basic password protection (single user, personal use) | P1 |
@@ -139,7 +148,7 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 | ID | Requirement |
 |----|------------|
 | NFR-1 | **Reliability**: Bot must recover from crashes without manual intervention. OpenClaw heartbeat detects failures and restarts. |
-| NFR-2 | **Latency**: Trade execution pipeline (signal → risk check → order) must complete within 2 seconds for intraday trades. |
+| NFR-2 | **Latency**: Trade execution pipeline (signal → risk check → order) must complete within configurable threshold `execution.max_pipeline_latency_sec` (default: `2`). |
 | NFR-3 | **Data integrity**: All market data, predictions, and trade records must be persisted to SQLite with WAL mode for concurrent access. |
 | NFR-4 | **Security**: API keys stored as environment variables, never in code or config files. Docker deployment with restricted network access. |
 | NFR-5 | **Auditability**: Every decision point must be logged. Full reconstruction of any trade's reasoning chain must be possible. |
@@ -388,19 +397,76 @@ market_data:
   bhavcopy_dir: ./data/bhavcopy   # path to downloaded NSE Bhavcopy CSVs
   cache_ttl_minutes: 15           # cache fetched data to reduce API calls
 
-trading:
-  symbols: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
+heartbeat:
+  market_hours_interval_min: 15   # heartbeat frequency during market hours
+  off_hours_interval_min: 60      # heartbeat frequency outside market hours
+
+scanning:
+  seed_symbols: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]  # initial watchlist (scanner expands dynamically)
+  shortlist_size: 25              # number of candidate stocks from daily scan
+  min_avg_daily_volume: 500000    # filter out stocks below this avg daily volume
+  weights:                        # ranking algorithm weights (must sum to 1.0)
+    technical: 0.40
+    volume_momentum: 0.25
+    news_sentiment: 0.20
+    fundamental: 0.15
+
+strategy:
   exchange: NSE
-  interval: "5minute"
-  max_position_pct: 0.05       # max 5% of portfolio per trade
-  max_daily_loss_pct: 0.03     # stop trading if down 3% in a day
-  max_open_positions: 3
+  interval: "5minute"             # default candle interval
+  ema_periods: [9, 21, 50, 200]   # moving average periods
+  indicators:                     # toggle individual indicators
+    rsi: true
+    macd: true
+    bollinger_bands: true
+    vwap: true
+    atr: true
+    volume_profile: true
+    obv: true
+    supertrend: true
+
+risk:
+  max_risk_per_trade_pct: 0.02        # 2% of capital per trade
+  max_portfolio_exposure_pct: 0.60    # 60% max exposure, 40% always cash
+  max_open_positions: 3               # simultaneous open positions
+  max_single_stock_pct: 0.25          # 25% max in one stock
+  daily_loss_limit_pct: 0.03          # stop trading if down 3% today
+  weekly_loss_limit_pct: 0.05         # weekly circuit breaker at 5%
+  weekly_loss_sizing_reduction: 0.50  # reduce sizing by 50% when weekly breaker hits
+  mandatory_stop_loss: true           # enforce SL on every trade
+  trailing_sl_enabled: true           # enable trailing stop-loss
+  trailing_sl_trigger_multiple: 1.5   # activate trailing SL at 1.5x risk in profit
+  trailing_sl_step_pct: 0.005         # trail SL in 0.5% steps
+  llm_review_enabled: true            # Gemini risk review before execution
+  llm_fallback_to_rules: true         # rules-only if LLM unavailable
+  max_same_sector_positions: 1        # correlation check — max positions per sector
+  kill_switch_enabled: true           # enable /stop and /kill commands
+  kill_switch_persistent: true        # kill switch survives restarts
+  min_confidence_score: 0.65          # minimum ML confidence to take a trade
+  max_trades_per_day: 10              # max trades per day (anti-overtrading)
+  loss_cooldown_minutes: 15           # wait after a losing trade before next entry
 
 market_hours:
   open: "09:15"
   close: "15:30"
-  square_off: "15:15"          # auto square-off intraday positions
+  order_start: "09:15"           # earliest time for new orders
+  order_end: "15:15"             # latest time for new orders
+  square_off: "15:15"            # auto square-off intraday positions
+  square_off_extension: "00:05"  # extra window for square-off orders after order_end
   timezone: "Asia/Kolkata"
+
+execution:
+  max_order_retries: 3            # retry failed orders this many times
+  retry_base_delay_sec: 2         # exponential backoff base (2s, 4s, 8s)
+  max_pipeline_latency_sec: 2     # signal→risk→order must complete within this
+
+retraining:
+  schedule_cron: "0 6 * * 6"     # retrain schedule (Saturday 6 AM)
+  shadow_mode_days: 7             # run new model in shadow for N days before promoting
+
+reports:
+  daily_report_time: "16:00"      # daily report generation time (IST)
+  weekly_report_cron: "0 10 * * 6"  # weekly report (Saturday 10 AM)
 
 dashboard:
   host: "0.0.0.0"
@@ -411,6 +477,13 @@ notifications:
     enabled: false
     bot_token: ${TELEGRAM_BOT_TOKEN}
     chat_id: ${TELEGRAM_CHAT_ID}
+    alerts:                       # toggle individual alert types
+      trade_entry: true
+      trade_exit: true
+      daily_summary: true
+      weekly_summary: true
+      errors: true
+      kill_switch: true           # alert when kill switch is triggered
 ```
 
 ---
