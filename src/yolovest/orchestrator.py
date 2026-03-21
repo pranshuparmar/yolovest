@@ -7,6 +7,7 @@ heartbeat mutex (skip-on-overrun), and consecutive skip alerting.
 import asyncio
 import logging
 from datetime import datetime
+from typing import Any
 
 from yolovest.context import AppContext
 from yolovest.skills import SKILL_REGISTRY
@@ -79,10 +80,12 @@ class HeartbeatOrchestrator:
         """Get an instantiated skill by name."""
         return self._skills.get(name)
 
-    async def run_heartbeat(self) -> dict[str, SkillResult]:
+    async def run_heartbeat(self) -> dict[str, Any]:
         """Execute one heartbeat cycle.
 
-        Returns a dict of skill_name -> SkillResult for all skills that ran.
+        Returns a dict with skill results and metadata. SkillResult values are
+        keyed by skill name; metadata keys include 'skipped', 'aborted',
+        'signal_pipeline', 'consecutive_skips', 'symbol'.
         """
         # Mutex: skip if already running
         if self._lock.locked():
@@ -275,12 +278,15 @@ class HeartbeatOrchestrator:
 
             try:
                 results = await self.run_heartbeat()
-                if results:
-                    succeeded = sum(1 for r in results.values() if r.success)
+                if results and not results.get("skipped"):
+                    skill_results = [
+                        r for r in results.values() if isinstance(r, SkillResult)
+                    ]
+                    succeeded = sum(1 for r in skill_results if r.success)
                     logger.info(
                         "Heartbeat completed: %d/%d skills succeeded",
                         succeeded,
-                        len(results),
+                        len(skill_results),
                     )
             except Exception:
                 logger.exception("Unhandled error in heartbeat")

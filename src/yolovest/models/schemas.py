@@ -54,13 +54,6 @@ class Signal(BaseModel):
     model_version: str
     features_snapshot: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("confidence_score")
-    @classmethod
-    def validate_confidence(cls, v: float) -> float:
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("confidence_score must be in [0.0, 1.0]")
-        return v
-
 
 class Trade(BaseModel):
     """Executed (or pending) trade with full lifecycle tracking."""
@@ -124,13 +117,6 @@ class SentimentResult(BaseModel):
     sentiment: Literal["bullish", "bearish", "neutral"]
     confidence: float = Field(ge=0.0, le=1.0)
     key_drivers: list[str] = Field(default_factory=list)
-
-    @field_validator("confidence")
-    @classmethod
-    def validate_confidence(cls, v: float) -> float:
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("confidence must be in [0.0, 1.0]")
-        return v
 
 
 # ---------------------------------------------------------------------------

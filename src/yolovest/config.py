@@ -6,11 +6,18 @@ Supports environment variable expansion for secrets (${VAR_NAME}).
 
 import os
 import re
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
+
+
+def _parse_time(t: str) -> dt_time:
+    """Parse HH:MM string to datetime.time for safe comparison."""
+    parts = t.strip().split(":")
+    return dt_time(int(parts[0]), int(parts[1]))
 
 
 def _expand_env_vars(value: object) -> object:
@@ -155,20 +162,26 @@ class MarketHoursConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_time_ordering(self) -> "MarketHoursConfig":
-        if self.order_start >= self.order_end:
+        t_open = _parse_time(self.open)
+        t_close = _parse_time(self.close)
+        t_order_start = _parse_time(self.order_start)
+        t_order_end = _parse_time(self.order_end)
+        t_square_off = _parse_time(self.square_off)
+
+        if t_order_start >= t_order_end:
             raise ValueError(
                 f"market_hours.order_start ({self.order_start}) must be before "
                 f"order_end ({self.order_end})"
             )
-        if self.order_start < self.open:
+        if t_order_start < t_open:
             raise ValueError(
                 f"order_start ({self.order_start}) cannot be before market open ({self.open})"
             )
-        if self.order_end > self.close:
+        if t_order_end > t_close:
             raise ValueError(
                 f"order_end ({self.order_end}) cannot be after market close ({self.close})"
             )
-        if self.square_off > self.close:
+        if t_square_off > t_close:
             raise ValueError(
                 f"square_off ({self.square_off}) cannot be after market close ({self.close})"
             )

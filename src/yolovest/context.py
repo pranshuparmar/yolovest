@@ -8,6 +8,7 @@ Uses Protocol types so concrete implementations can be swapped.
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Any, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
 
 from yolovest.config import AppConfig
 from yolovest.events import EventBus
@@ -108,16 +109,23 @@ class MarketHoursChecker:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._mh = config.market_hours
+        self._tz = ZoneInfo(config.market_hours.timezone)
 
     def _parse_time(self, time_str: str) -> time:
         """Parse HH:MM string to time object."""
         parts = time_str.split(":")
         return time(int(parts[0]), int(parts[1]))
 
+    def _now(self) -> datetime:
+        """Current time in configured timezone."""
+        return datetime.now(self._tz)
+
     def is_market_hours(self, now: datetime | None = None) -> bool:
-        """Check if the current time is within market hours."""
+        """Check if the current time is within market hours (in configured timezone)."""
         if now is None:
-            now = datetime.now()
+            now = self._now()
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=self._tz)
 
         # Check if today is a weekend
         if now.weekday() >= 5:  # Saturday=5, Sunday=6
@@ -136,7 +144,7 @@ class MarketHoursChecker:
     def is_holiday(self, check_date: date | None = None) -> bool:
         """Check if a date is an NSE holiday."""
         if check_date is None:
-            check_date = date.today()
+            check_date = self._now().date()
 
         date_str = check_date.isoformat()
         return date_str in self._mh.holidays
@@ -144,7 +152,7 @@ class MarketHoursChecker:
     def get_square_off_time(self, check_date: date | None = None) -> time:
         """Get the square-off time, accounting for early close days."""
         if check_date is None:
-            check_date = date.today()
+            check_date = self._now().date()
 
         date_str = check_date.isoformat()
 
@@ -158,7 +166,9 @@ class MarketHoursChecker:
     def is_order_window(self, now: datetime | None = None) -> bool:
         """Check if the current time is within the order placement window."""
         if now is None:
-            now = datetime.now()
+            now = self._now()
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=self._tz)
 
         if not self.is_market_hours(now):
             return False

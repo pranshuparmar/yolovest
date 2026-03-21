@@ -225,6 +225,67 @@ class TestPerSignalRiskCheckFails:
         assert "signal-1/trade-execute" in result
 
 
+class TestGenerateSignalsFails:
+    async def test_generate_signals_fails_skips_signal_chain(self, orchestrator_context):
+        ctx = orchestrator_context
+        gen = _make_stub(ctx, "generate-signals", succeed=False)
+        orch = _build_orchestrator(ctx, {"generate-signals": gen})
+        result = await orch.run_heartbeat()
+
+        assert result["generate-signals"].success is False
+        assert "signal_pipeline" not in result
+        assert "position-monitor" in result
+
+    async def test_generate_signals_fails_runs_position_monitor(self, orchestrator_context):
+        ctx = orchestrator_context
+        gen = _make_stub(ctx, "generate-signals", succeed=False)
+        orch = _build_orchestrator(ctx, {"generate-signals": gen})
+        result = await orch.run_heartbeat()
+
+        assert "position-monitor" in result
+        assert result["position-monitor"].success is True
+
+
+class TestLLMReviewFallback:
+    async def test_llm_review_fails_with_fallback_continues(self, orchestrator_context):
+        """FR-5.12: If LLM is down and llm_fallback_to_rules=True, auto-approve."""
+        ctx = orchestrator_context
+        ctx.config.risk.llm_fallback_to_rules = True
+
+        gen = _make_stub(
+            ctx, "generate-signals", succeed=True,
+            data={"signals": [{"symbol": "RELIANCE"}]},
+        )
+        llm = _make_stub(ctx, "llm-review", succeed=False)
+
+        orch = _build_orchestrator(ctx, {"generate-signals": gen, "llm-review": llm})
+        result = await orch.run_heartbeat()
+
+        # LLM failed but fallback to rules means trade-execute should still run
+        assert "signal-0/llm-review" in result
+        assert result["signal-0/llm-review"].success is False
+        assert "signal-0/trade-execute" in result
+
+    async def test_llm_review_fails_without_fallback_skips(self, orchestrator_context):
+        """FR-5.12: If LLM is down and llm_fallback_to_rules=False, skip signal."""
+        ctx = orchestrator_context
+        ctx.config.risk.llm_fallback_to_rules = False
+
+        gen = _make_stub(
+            ctx, "generate-signals", succeed=True,
+            data={"signals": [{"symbol": "RELIANCE"}]},
+        )
+        llm = _make_stub(ctx, "llm-review", succeed=False)
+
+        orch = _build_orchestrator(ctx, {"generate-signals": gen, "llm-review": llm})
+        result = await orch.run_heartbeat()
+
+        # LLM failed and no fallback means signal should be skipped
+        assert "signal-0/llm-review" in result
+        assert result["signal-0/llm-review"].success is False
+        assert "signal-0/trade-execute" not in result
+
+
 class TestHeartbeatMutex:
     async def test_concurrent_heartbeat_is_skipped(self, orchestrator_context):
         ctx = orchestrator_context
