@@ -2,7 +2,7 @@
 
 ## Context
 
-Building a **fully autonomous AI-driven Indian stock trading platform** for personal use. The platform will operate on a "YOLO" basis — zero human intervention for trade decisions — while maintaining full transparency through reports, dashboards, and Telegram alerts. It uses **OpenClaw** as the autonomous agent orchestration layer, **Gemini API** (Google AI Pro) for LLM reasoning, ML models for signal generation, and **Zerodha Kite Connect** for execution.
+Building a **fully autonomous AI-driven Indian stock trading platform** for personal use. The platform will operate on a "YOLO" basis — zero human intervention for trade decisions — while maintaining full transparency through reports, dashboards, and Telegram alerts. It uses **OpenClaw** as the autonomous agent orchestration layer, **Gemini API** (Google AI Pro) for LLM reasoning, ML models for signal generation, and **Zerodha Kite Connect (free personal tier)** for execution. Market data is sourced from **free external providers** (jugaad-data, yfinance, tvDatafeed) to keep the platform self-sufficient with zero recurring costs.
 
 **Starting capital:** Under ₹1L, conservative risk appetite (max 2% per trade).
 **Trading style:** Primarily intraday and swing (2-10 days), with flexibility for positional.
@@ -25,9 +25,16 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 
 ### FR-2: Market Data Ingestion & News Intelligence
 
+**Data Source Strategy:** Use free external providers for all market data. Zerodha Kite Connect free tier is used for execution only (no market data). The ₹500/month Kite data plan is an optional upgrade for real-time streaming, not a dependency.
+
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-2.1 | Fetch OHLCV candle data from Zerodha Kite Connect (1min, 5min, 15min, daily intervals) | P0 |
+| FR-2.1 | **Data source abstraction layer** (`MarketDataBase` ABC) — pluggable providers behind a unified interface, with automatic fallback chain | P0 |
+| FR-2.1a | **Primary (Daily/EOD):** `jugaad-data` — scrapes NSE directly, actively maintained, built-in caching. History from 2013+. | P0 |
+| FR-2.1b | **Fallback (Daily/EOD):** `yfinance` — Yahoo Finance via `.NS` suffix. 20 years history. Fragile rate limits, use as backup only. | P0 |
+| FR-2.1c | **Intraday (5min/15min):** `tvDatafeed` — TradingView unofficial API. Free tier: 5min bars, last 15 days. Sufficient for POC intraday signals. | P1 |
+| FR-2.1d | **Seed data:** One-time download of NSE Bhavcopy CSVs for deep historical backtesting (2013+). | P1 |
+| FR-2.1e | **Optional upgrade:** Kite Connect data plan (₹500/month) for real-time streaming + full historical via `kite.historical_data()`. Architecture must support this as a drop-in provider. | P2 |
 | FR-2.2 | Ingest NSE/BSE official data: corporate announcements, bulk/block deals, FII/DII activity, delivery data | P0 |
 | FR-2.3 | Scrape/fetch news from MoneyControl, Economic Times Markets, LiveMint — headlines, analyst ratings, target prices | P1 |
 | FR-2.4 | Fetch fundamental data from Screener.in — PE, PB, debt ratios, quarterly results, promoter holdings | P1 |
@@ -95,7 +102,8 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 | FR-6.5 | Reconcile local position state with broker state periodically (every heartbeat) | P0 |
 | FR-6.6 | Retry failed orders with exponential backoff (max 3 retries) | P1 |
 | FR-6.7 | Slippage tracking: record expected vs actual fill price for every trade | P1 |
-| FR-6.8 | Respect Kite API rate limits: 3 req/s for orders, 1 req/s for historical data | P0 |
+| FR-6.8 | Respect Kite API rate limits: 10 req/s aggregate across all endpoints per API key | P0 |
+| FR-6.9 | Respect external data source rate limits: jugaad-data (use built-in caching), yfinance (add delays between requests), tvDatafeed (respect TradingView limits) | P0 |
 
 ### FR-7: Prediction Tracking & Self-Learning
 
@@ -152,6 +160,7 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 | **Intraday Square-off** | Auto square-off at 3:15 PM IST (configurable via config.yaml). Swing positions use CNC order type and are held overnight. |
 | **News Sources** | Use ALL available sources — RSS feeds, NSE/BSE official APIs, Google News API, Gemini web grounding, Screener.in, Trendlyne. Maximize coverage. |
 | **Kill Switch** | Both Telegram (`/stop`, `/kill`) and dashboard button. Immediately cancels all open orders and optionally squares off all positions. |
+| **Market Data** | Free external sources only (jugaad-data, yfinance, tvDatafeed). Zero recurring cost. Kite ₹500/month data plan is optional upgrade, not a dependency. |
 
 All open questions have been resolved. No remaining blockers for implementation.
 
@@ -165,7 +174,8 @@ All open questions have been resolved. No remaining blockers for implementation.
 | Tax implications | Short-term capital gains (STCG) at 20% for equity held < 1 year. Intraday profits taxed as speculative business income. |
 | Audit requirement | If turnover exceeds ₹10 crore (speculative) or ₹10 crore (non-speculative), tax audit is mandatory. Unlikely at ₹1L capital. |
 | Zerodha API ToS | Automated login (Selenium) may violate ToS. API usage for trading is explicitly allowed. |
-| Data scraping | Scraping NSE/BSE data may have restrictions. Use official APIs where available. |
+| Data scraping | Scraping NSE/BSE data may have restrictions. Use official APIs where available. jugaad-data uses built-in caching to minimize scraping impact. |
+| Static IP requirement | SEBI retail algo trading regulations may require a static IP for API-based order placement. Monitor compliance requirements. |
 
 ---
 
@@ -175,7 +185,8 @@ All open questions have been resolved. No remaining blockers for implementation.
 |-----------|--------|
 | Agent Orchestration | OpenClaw (model-agnostic, heartbeat, skills, Telegram integration) |
 | Language | Python 3.12+ |
-| Broker | Zerodha Kite Connect API |
+| Broker (execution) | Zerodha Kite Connect API (free personal tier — execution only) |
+| Market Data | jugaad-data (primary) + yfinance (fallback) + tvDatafeed (intraday) |
 | LLM (runtime) | Gemini API via Google AI Pro (trade review, sentiment, analysis) |
 | LLM (development) | Claude Max (building, debugging, iterating) |
 | ML | XGBoost + LightGBM + scikit-learn |
@@ -194,7 +205,7 @@ All open questions have been resolved. No remaining blockers for implementation.
 - Project scaffold, config system, database schema
 - Broker abstraction + Zerodha implementation
 - LLM abstraction + Gemini implementation
-- Market data ingestion (OHLCV from Kite)
+- Market data abstraction (`MarketDataBase` ABC) + free providers (jugaad-data, yfinance, tvDatafeed)
 - Feature engineering (technical indicators)
 
 ### Phase 2: Intelligence Layer
@@ -267,13 +278,15 @@ All open questions have been resolved. No remaining blockers for implementation.
 │  └──────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────┘
 
-Broker Abstraction Layer:         LLM Abstraction Layer:
-┌──────────────────┐              ┌──────────────────┐
-│  BrokerBase      │  ← ABC      │  LLMBase         │  ← ABC
-├──────────────────┤              ├──────────────────┤
-│  ZerodhaBroker   │              │  GeminiLLM       │  ← Google AI Pro
-│  (future) IBBrkr │              │  (future) others │
-└──────────────────┘              └──────────────────┘
+Broker Abstraction:      LLM Abstraction:         Market Data Abstraction:
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────────┐
+│  BrokerBase      │←ABC │  LLMBase         │←ABC │  MarketDataBase      │←ABC
+├──────────────────┤     ├──────────────────┤     ├──────────────────────┤
+│  ZerodhaBroker   │     │  GeminiLLM       │     │  JugaadDataProvider  │ ← primary
+│  (future) IBBrkr │     │  (future) others │     │  YFinanceProvider    │ ← fallback
+└──────────────────┘     └──────────────────┘     │  TVDatafeedProvider  │ ← intraday
+                                                   │  (opt) KiteProvider  │ ← paid upgrade
+                                                   └──────────────────────┘
 ```
 
 ### LLM Abstraction Interface
@@ -315,7 +328,12 @@ yolovest/
 │       │   └── gemini.py       # Google Gemini implementation
 │       ├── data/
 │       │   ├── __init__.py
-│       │   ├── ingester.py     # Fetch OHLCV candles via broker API
+│       │   ├── base.py         # MarketDataBase ABC (data source abstraction)
+│       │   ├── jugaad.py       # jugaad-data provider (primary, daily/EOD)
+│       │   ├── yfinance.py     # yfinance provider (fallback, daily)
+│       │   ├── tvfeed.py       # tvDatafeed provider (intraday 5m/15m)
+│       │   ├── bhavcopy.py     # NSE Bhavcopy CSV importer (seed data)
+│       │   ├── ingester.py     # Orchestrates data fetching with fallback chain
 │       │   ├── features.py     # Feature engineering (indicators, derived)
 │       │   └── db.py           # SQLite read/write, migrations
 │       ├── strategy/
@@ -363,6 +381,13 @@ llm:
   review_every_trade: true
   fallback_to_rules: true         # if LLM unavailable, use rules-only
 
+market_data:
+  daily_provider: jugaad          # jugaad | yfinance
+  daily_fallback: yfinance        # fallback if primary fails
+  intraday_provider: tvdatafeed   # tvdatafeed | kite (paid)
+  bhavcopy_dir: ./data/bhavcopy   # path to downloaded NSE Bhavcopy CSVs
+  cache_ttl_minutes: 15           # cache fetched data to reduce API calls
+
 trading:
   symbols: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
   exchange: NSE
@@ -394,11 +419,19 @@ notifications:
 
 ### Zerodha Kite Connect
 
-- **Authentication**: Kite uses a login flow that generates a `request_token` daily. The bot needs to handle daily re-authentication (manual or automated).
-- **Historical data**: Available via `kite.historical_data()` — OHLCV candles at various intervals.
+- **Tier**: Free personal API (Kite Connect Personal) — execution APIs only, no market data.
+- **Authentication**: OAuth-style login flow that generates a `request_token` daily. Bot needs daily re-auth (manual TOTP or automated).
 - **Order types**: Market, Limit, SL, SL-M supported.
-- **WebSocket**: Kite Ticker for real-time price streaming.
-- **Rate limits**: 3 requests/second for most endpoints, 1 request/second for historical data.
+- **Rate limits**: 10 requests/second aggregate across all endpoints per API key.
+- **Paid upgrade (optional)**: ₹500/month adds real-time streaming (Kite Ticker WebSocket) + historical OHLCV via `kite.historical_data()`. Not needed for POC.
+- **Static IP**: May be required per SEBI retail algo trading regulations (monitor).
+
+### Free Market Data Sources
+
+- **jugaad-data** (primary, daily/EOD): Scrapes NSE directly, built-in caching, actively maintained (last update March 2026). History from 2013+.
+- **yfinance** (fallback, daily): Yahoo Finance via `.NS` suffix. 20 years history. Fragile — rate-limited unpredictably. Use as backup.
+- **tvDatafeed** (intraday): Unofficial TradingView API. Free tier: 5min bars, last 15 days. Multiple timeframes (1m, 5m, 15m, daily).
+- **NSE Bhavcopy CSVs** (seed data): Free download from NSE reports section. Daily EOD from 2013+. One-time bulk import for backtesting.
 
 ### Gemini API (Google AI Pro)
 
