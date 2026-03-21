@@ -241,3 +241,196 @@ All open questions have been resolved. No remaining blockers for implementation.
 6. **OpenClaw health test**: kill the agent, verify heartbeat detects and restarts
 7. **Telegram test**: verify all alert types (trade, daily summary, error) are delivered
 8. **End-to-end paper run**: full autonomous day of paper trading with all systems active
+
+---
+
+## 8. Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                       YoloVest Core                          │
+│                                                              │
+│  ┌──────────┐  ┌───────────┐  ┌────────────────────────┐    │
+│  │  Market   │  │ Strategy  │  │  Risk Manager          │    │
+│  │  Data     │→ │  Engine   │→ │  (rules + LLM review)  │    │
+│  │  Ingester │  │  (ML)     │  │                        │    │
+│  └──────────┘  └───────────┘  └────────────────────────┘    │
+│       │              │               │                       │
+│       ▼              ▼               ▼                       │
+│  ┌──────────┐  ┌───────────┐  ┌────────────────────────┐    │
+│  │  DB      │  │ Backtester│  │  Order Executor        │    │
+│  │ (SQLite) │  │           │  │  (Broker Interface)    │    │
+│  └──────────┘  └───────────┘  └────────────────────────┘    │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │  FastAPI Dashboard + WebSocket live updates          │    │
+│  └──────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────┘
+
+Broker Abstraction Layer:         LLM Abstraction Layer:
+┌──────────────────┐              ┌──────────────────┐
+│  BrokerBase      │  ← ABC      │  LLMBase         │  ← ABC
+├──────────────────┤              ├──────────────────┤
+│  ZerodhaBroker   │              │  GeminiLLM       │  ← Google AI Pro
+│  (future) IBBrkr │              │  (future) others │
+└──────────────────┘              └──────────────────┘
+```
+
+### LLM Abstraction Interface
+
+```python
+class LLMBase(ABC):
+    @abstractmethod
+    async def review_trade(self, context: TradeContext) -> TradeReview: ...
+
+    @abstractmethod
+    async def analyze_sentiment(self, symbol: str, headlines: list[str]) -> SentimentResult: ...
+```
+
+---
+
+## 9. Project Structure
+
+```
+yolovest/
+├── pyproject.toml              # Project config, dependencies
+├── Dockerfile
+├── docker-compose.yml
+├── config.yaml                 # Trading config (symbols, limits, intervals)
+├── src/
+│   └── yolovest/
+│       ├── __init__.py
+│       ├── main.py             # Entry point, scheduler setup
+│       ├── config.py           # Pydantic settings/config models
+│       ├── models/
+│       │   ├── __init__.py
+│       │   └── schemas.py      # Data models (Trade, Signal, Position, etc.)
+│       ├── broker/
+│       │   ├── __init__.py
+│       │   ├── base.py         # Abstract broker interface (ABC)
+│       │   └── zerodha.py      # Zerodha Kite Connect implementation
+│       ├── llm/
+│       │   ├── __init__.py
+│       │   ├── base.py         # Abstract LLM interface (ABC)
+│       │   └── gemini.py       # Google Gemini implementation
+│       ├── data/
+│       │   ├── __init__.py
+│       │   ├── ingester.py     # Fetch OHLCV candles via broker API
+│       │   ├── features.py     # Feature engineering (indicators, derived)
+│       │   └── db.py           # SQLite read/write, migrations
+│       ├── strategy/
+│       │   ├── __init__.py
+│       │   ├── ml_signal.py    # XGBoost/sklearn signal model
+│       │   └── backtest.py     # Backtesting engine
+│       ├── risk/
+│       │   ├── __init__.py
+│       │   └── manager.py      # Position sizing, limits, circuit breakers, LLM review
+│       ├── execution/
+│       │   ├── __init__.py
+│       │   └── executor.py     # Order placement, fills, retries via broker
+│       └── dashboard/
+│           ├── __init__.py
+│           ├── app.py          # FastAPI app
+│           ├── routes.py       # API routes + WebSocket
+│           └── templates/      # Jinja2 HTML templates
+│               └── index.html
+├── tests/
+│   ├── test_features.py
+│   ├── test_strategy.py
+│   ├── test_risk.py
+│   └── test_executor.py
+└── scripts/
+    ├── train_model.py          # Train/retrain ML model
+    └── backtest_runner.py      # Run backtests from CLI
+```
+
+---
+
+## 10. Config Example (config.yaml)
+
+```yaml
+mode: paper  # paper | live
+
+broker:
+  name: zerodha
+  api_key: ${KITE_API_KEY}        # from environment
+  api_secret: ${KITE_API_SECRET}
+
+llm:
+  provider: gemini
+  model: gemini-2.5-pro           # or gemini-2.5-flash for lower latency
+  api_key: ${GEMINI_API_KEY}
+  review_every_trade: true
+  fallback_to_rules: true         # if LLM unavailable, use rules-only
+
+trading:
+  symbols: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
+  exchange: NSE
+  interval: "5minute"
+  max_position_pct: 0.05       # max 5% of portfolio per trade
+  max_daily_loss_pct: 0.03     # stop trading if down 3% in a day
+  max_open_positions: 3
+
+market_hours:
+  open: "09:15"
+  close: "15:30"
+  square_off: "15:15"          # auto square-off intraday positions
+  timezone: "Asia/Kolkata"
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8080
+
+notifications:
+  telegram:
+    enabled: false
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+```
+
+---
+
+## 11. API & Broker Notes
+
+### Zerodha Kite Connect
+
+- **Authentication**: Kite uses a login flow that generates a `request_token` daily. The bot needs to handle daily re-authentication (manual or automated).
+- **Historical data**: Available via `kite.historical_data()` — OHLCV candles at various intervals.
+- **Order types**: Market, Limit, SL, SL-M supported.
+- **WebSocket**: Kite Ticker for real-time price streaming.
+- **Rate limits**: 3 requests/second for most endpoints, 1 request/second for historical data.
+
+### Gemini API (Google AI Pro)
+
+- **Quota**: Baseline quota included with AI Pro subscription; AI credits consumed after baseline is exhausted.
+- **Models**: Gemini 2.5 Pro (best reasoning) or Gemini 2.5 Flash (faster, cheaper quota usage).
+- **Rate limits**: Varies by model and tier; implement exponential backoff.
+- **API Key**: Generate from Google AI Studio (aistudio.google.com).
+
+---
+
+## 12. Getting Started
+
+```bash
+# Install
+pip install -e ".[dev]"
+
+# Configure
+cp config.example.yaml config.yaml
+# Set env vars: KITE_API_KEY, KITE_API_SECRET, GEMINI_API_KEY
+
+# Ingest historical data
+python -m yolovest.main ingest --symbol RELIANCE --days 90
+
+# Train model
+python scripts/train_model.py
+
+# Run backtest
+python scripts/backtest_runner.py
+
+# Start bot (paper mode)
+python -m yolovest.main run
+
+# Start dashboard
+python -m yolovest.dashboard.app
+```
