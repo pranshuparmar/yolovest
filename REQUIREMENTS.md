@@ -18,7 +18,7 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 |----|------------|----------|
 | FR-1.1 | Deploy OpenClaw as the autonomous orchestration layer — the bot runs 24/7 as an always-on agent | P0 |
 | FR-1.2 | Configure OpenClaw heartbeat to monitor system health, check positions, and trigger scheduled tasks. Intervals configurable via `heartbeat.market_hours_interval_min` (default: `15`) and `heartbeat.off_hours_interval_min` (default: `60`) | P0 |
-| FR-1.3 | Implement 15 OpenClaw Skills (see `src/yolovest/skills/`). Each skill is a discrete, independently invocable capability: | P0 |
+| FR-1.3 | Implement 15 OpenClaw Skills (see Skill Manifest below). Each skill is a discrete, independently invocable capability: | P0 |
 
 **Skill Manifest:**
 
@@ -47,7 +47,7 @@ health-check → ingest-data → market-scan → generate-signals
   → position-monitor
 ```
 | FR-1.4 | Use OpenClaw's messaging integration for Telegram — trade alerts, daily summaries, error notifications | P0 |
-| FR-1.5 | OpenClaw Memory — persist agent state, trading context, conversation history, and reasoning across restarts using OpenClaw's Markdown-based memory system | P1 |
+| FR-1.5 | OpenClaw Memory — persist agent state, trading context, conversation history, and reasoning across restarts using OpenClaw's Markdown-based memory system | P0 |
 | FR-1.6 | Implement graceful degradation — if OpenClaw agent crashes, positions are protected (no open orders left hanging), and agent auto-restarts | P0 |
 
 ### FR-2: Market Data Ingestion & News Intelligence
@@ -63,7 +63,7 @@ health-check → ingest-data → market-scan → generate-signals
 | FR-2.1d | **Seed data:** One-time download of NSE Bhavcopy CSVs for deep historical backtesting (2013+). | P1 |
 | FR-2.1e | **Optional upgrade:** Kite Connect data plan (₹500/month) for real-time streaming + full historical via `kite.historical_data()`. Architecture must support this as a drop-in provider. | P2 |
 | FR-2.2 | Ingest NSE/BSE official data: corporate announcements, bulk/block deals, FII/DII activity, delivery data | P0 |
-| FR-2.3 | Scrape/fetch news from MoneyControl, Economic Times Markets, LiveMint — headlines, analyst ratings, target prices | P1 |
+| FR-2.3 | Scrape/fetch news from MoneyControl, Economic Times Markets, LiveMint — headlines, analyst ratings, target prices | P0 |
 | FR-2.4 | Fetch fundamental data from Screener.in — PE, PB, debt ratios, quarterly results, promoter holdings | P1 |
 | FR-2.5 | Fetch technical screener data from Trendlyne — momentum scores, volume breakouts, technical signals | P1 |
 | FR-2.6 | Ingest economic calendar events (RBI policy, US Fed, GDP data, earnings dates) | P1 |
@@ -73,7 +73,7 @@ health-check → ingest-data → market-scan → generate-signals
 | FR-2.10 | Fetch pre-market data (GIFT Nifty, global indices, overnight US market moves) before market open | P1 |
 | FR-2.11 | Use Gemini with web grounding to search and summarize real-time market news beyond what RSS/APIs provide | P0 |
 | FR-2.12 | Fetch Google Finance data for broader market sentiment and global cues | P1 |
-| FR-2.13 | Aggregate all news sources with deduplication — same news from multiple sources should be merged, not double-counted in sentiment | P1 |
+| FR-2.13 | Aggregate all news sources with deduplication — same news from multiple sources should be merged, not double-counted in sentiment | P0 |
 
 ### FR-3: Dynamic Stock Scanning & Ranking
 
@@ -95,8 +95,9 @@ health-check → ingest-data → market-scan → generate-signals
 | FR-4.3 | Separate models for intraday (short features, 1-5min candles) and swing (daily features, multi-day patterns). Decision logic: use intraday model during market hours for MIS trades, swing model for CNC/overnight trades. Default trade type configurable via `strategy.default_trade_type` (default: `"intraday"`). | P0 |
 | FR-4.4 | Gemini-powered trade review: before every trade, send full context (signal, indicators, news sentiment, portfolio state, market conditions) to Gemini for approval/rejection/resize recommendation | P0 |
 | FR-4.5 | Signal must include: entry price, target price, stop-loss price, position size, expected holding period, confidence score | P0 |
-| FR-4.6 | Backtesting engine: simulate strategies on historical data, compute Sharpe ratio, max drawdown, win rate, profit factor | P0 |
+| FR-4.6 | Backtesting engine: simulate strategies on historical data, compute Sharpe ratio, max drawdown, win rate, profit factor. Minimum deployment thresholds: Sharpe > `strategy.backtest_min_sharpe` (default: `1.0`), max drawdown < `strategy.backtest_max_drawdown_pct` (default: `0.20` i.e. 20%). | P0 |
 | FR-4.7 | Walk-forward validation: backtest must use rolling train/test windows (no lookahead bias). Backtest without walk-forward is invalid. | P0 |
+| FR-4.8 | Minimum confidence score from ML model required to generate a tradeable signal. Signals below threshold are discarded before risk-check. Configurable via `risk.min_confidence_score` (default: `0.65`). | P0 |
 
 ### FR-5: Risk Management
 
@@ -120,12 +121,12 @@ health-check → ingest-data → market-scan → generate-signals
 | FR-5.10 | Auto square-off all intraday (MIS) positions at configured time. Swing (CNC) held overnight. | `market_hours.square_off` | `15:15` | P0 |
 | FR-5.11 | Gemini risk review — LLM second opinion before execution, can veto trades | `risk.llm_review_enabled` | `true` | P0 |
 | FR-5.12 | If Gemini API is down, fall back to rules-only risk management (never block trading on LLM availability) | `risk.llm_fallback_to_rules` | `true` | P0 |
-| FR-5.13 | Correlation check — max positions allowed in same sector simultaneously | `risk.max_same_sector_positions` | `1` | P2 |
+| FR-5.13 | Correlation check — max positions allowed in same sector simultaneously | `risk.max_same_sector_positions` | `1` | P0 |
 | FR-5.14 | **Emergency kill switch**: Telegram commands (`/stop` to pause, `/kill` to square off everything) + dashboard button | `risk.kill_switch_enabled` | `true` | P0 |
 | FR-5.15 | Kill switch state persists across restarts — stays paused until `/resume` | `risk.kill_switch_persistent` | `true` | P0 |
-| FR-5.16 | Minimum confidence score from ML model required to take a trade | `risk.min_confidence_score` | `0.65` | P0 |
+| ~~FR-5.16~~ | *Moved to FR-4.8 (signal generation filter)* | — | — | — |
 | FR-5.17 | Max number of trades per day (to avoid overtrading) | `risk.max_trades_per_day` | `10` | P1 |
-| FR-5.18 | Cooldown period (minutes) after a losing trade before next entry | `risk.loss_cooldown_minutes` | `15` | P2 |
+| FR-5.18 | Cooldown period (minutes) after a losing trade before next entry | `risk.loss_cooldown_minutes` | `15` | P1 |
 
 ### FR-6: Order Execution
 
@@ -136,7 +137,7 @@ health-check → ingest-data → market-scan → generate-signals
 | FR-6.3 | Handle Kite daily re-authentication: semi-automated — bot sends Telegram reminder at 9 AM, user pastes `request_token`, bot exchanges for `access_token`. ~30 seconds daily. | P0 |
 | FR-6.4 | Order lifecycle tracking: placed → open → partially_filled → filled/rejected/cancelled — with timestamps. Partial fill handling: if <100% filled within `execution.order_timeout_sec` (default: `30`), cancel remainder. SL set for filled quantity only. | P0 |
 | FR-6.5 | Reconcile local position state with broker state periodically (every heartbeat) | P0 |
-| FR-6.6 | Retry failed orders with exponential backoff. Max retries configurable via `execution.max_order_retries` (default: `3`), base delay via `execution.retry_base_delay_sec` (default: `2`) | P1 |
+| FR-6.6 | Retry failed orders with exponential backoff. Max retries configurable via `execution.max_order_retries` (default: `3`), base delay via `execution.retry_base_delay_sec` (default: `2`) | P0 |
 | FR-6.7 | Slippage tracking: record expected vs actual fill price for every trade | P1 |
 | FR-6.8 | Respect Kite API rate limits: 10 req/s aggregate across all endpoints per API key | P0 |
 | FR-6.9 | Respect external data source rate limits: jugaad-data (use built-in caching), yfinance (add delays between requests), tvDatafeed (respect TradingView limits) | P0 |
@@ -152,7 +153,7 @@ health-check → ingest-data → market-scan → generate-signals
 | FR-7.5 | A/B testing: new model runs in shadow mode alongside current model before promoting. Shadow duration configurable via `retraining.shadow_mode_days` (default: `7`) | P1 |
 | FR-7.6 | Use Gemini to analyze prediction failures — identify patterns in what the model gets wrong | P1 |
 | FR-7.7 | Version all model artifacts with metrics (accuracy, Sharpe, drawdown) so we can rollback if a new model underperforms | P0 |
-| FR-7.8 | Track Gemini's own trade review accuracy — did its approvals/rejections lead to better outcomes? | P2 |
+| FR-7.8 | Track Gemini's own trade review accuracy — did its approvals/rejections lead to better outcomes? | P1 |
 
 ### FR-8: Reporting & Dashboard
 
@@ -166,7 +167,33 @@ health-check → ingest-data → market-scan → generate-signals
 | FR-8.6 | Telegram integration: real-time trade alerts (entry/exit), daily summary, weekly summary. Alert types individually toggleable via `notifications.telegram.alerts` map (`trade_entry`, `trade_exit`, `daily_summary`, `weekly_summary`, `errors`) | P0 |
 | FR-8.7 | Historical report access: query any date range for full trade history and performance metrics | P1 |
 | FR-8.8 | Audit log: every action (data fetch, signal, risk check, LLM call, order, fill) logged with timestamp and full context | P0 |
-| FR-8.9 | Dashboard auth: basic password protection (single user, personal use) | P1 |
+| FR-8.9 | Dashboard auth: basic password protection (single user, personal use) | P0 |
+
+### FR-9: Capital & Portfolio Management
+
+| ID | Requirement | Priority |
+|----|------------|----------|
+| FR-9.1 | Track current portfolio value (cash + unrealized positions) as "total capital". Initial amount configurable via `capital.initial_amount` (default: `100000`). | P0 |
+| FR-9.2 | Transaction cost modeling — include brokerage (Zerodha: ₹20 or 0.03%), STT, stamp duty, GST, exchange fees in all PnL calculations and backtesting. | P0 |
+| FR-9.3 | Capital exhaustion detection — when remaining cash < minimum viable trade size, pause new signals and alert via Telegram. | P0 |
+| FR-9.4 | Margin usage toggle — `risk.margin_usage_enabled` (default: `false`). MIS gets leverage but we don't use it unless explicitly enabled. | P0 |
+
+### FR-10: Database & Data Management
+
+| ID | Requirement | Priority |
+|----|------------|----------|
+| FR-10.1 | SQLite schema versioned via migration scripts. | P0 |
+| FR-10.2 | Automated daily DB backup. Configurable via `database.backup_enabled` (default: `true`), `database.backup_cron` (default: `"0 18 * * *"`), `database.backup_dir` (default: `./backups`). | P0 |
+| FR-10.3 | Data retention policy — OHLCV: 2 years, audit logs: 1 financial year (Apr-Mar), predictions: 1 year. Configurable via `database.retention.ohlcv_days`, `database.retention.audit_log_days`, `database.retention.predictions_days`. | P1 |
+| FR-10.4 | Data staleness validation — reject data older than `market_data.stale_threshold_minutes` (default: `30`). If all providers return stale data, skip signal generation. | P0 |
+
+### FR-11: Market Calendar & Holiday Handling
+
+| ID | Requirement | Priority |
+|----|------------|----------|
+| FR-11.1 | NSE holiday calendar — maintain holiday list (fetch from NSE or manual config via `market_hours.holidays`). No trading activity on holidays. | P0 |
+| FR-11.2 | Early close handling — configurable via `market_hours.early_close_days`. Adjust square-off time accordingly. | P1 |
+| FR-11.3 | Market status check in all `should_run()` — skills must verify market is actually open, not just check weekday+time. | P0 |
 
 ---
 
@@ -175,7 +202,7 @@ health-check → ingest-data → market-scan → generate-signals
 | ID | Requirement |
 |----|------------|
 | NFR-1 | **Reliability**: Bot must recover from crashes without manual intervention. OpenClaw heartbeat detects failures and restarts. |
-| NFR-2 | **Latency**: Trade execution pipeline (signal → risk check → order) must complete within configurable threshold `execution.max_pipeline_latency_sec` (default: `2`). |
+| NFR-2 | **Latency**: Trade execution pipeline (signal → risk check → order placement) must complete within configurable threshold `execution.max_pipeline_latency_sec` (default: `2`). LLM review is asynchronous and excluded from this latency requirement. |
 | NFR-3 | **Data integrity**: All market data, predictions, and trade records must be persisted to SQLite with WAL mode for concurrent access. |
 | NFR-4 | **Security**: API keys stored as environment variables, never in code or config files. Docker deployment with restricted network access. |
 | NFR-5 | **Auditability**: Every decision point must be logged. Full reconstruction of any trade's reasoning chain must be possible. |
@@ -207,9 +234,10 @@ All open questions have been resolved. No remaining blockers for implementation.
 | Area | Status |
 |------|--------|
 | Algo trading for retail | **Legal** — SEBI allows retail algo trading via broker APIs. No registration needed for personal use. |
-| Tax implications | Short-term capital gains (STCG) at 20% for equity held < 1 year. Intraday profits taxed as speculative business income. |
+| Tax implications | Tax rates per prevailing law. System tracks trades for tax export; actual computation is out of scope. Intraday profits taxed as speculative business income. |
 | Audit requirement | If turnover exceeds ₹10 crore (speculative) or ₹10 crore (non-speculative), tax audit is mandatory. Unlikely at ₹1L capital. |
-| Zerodha API ToS | Automated login (Selenium) may violate ToS. API usage for trading is explicitly allowed. |
+| Zerodha API ToS | API usage for trading is explicitly allowed. Semi-automated auth via user-pasted request_token. |
+| Tax data export | System must export trade data in CA-friendly format for ITR filing. |
 | Data scraping | Scraping NSE/BSE data may have restrictions. Use official APIs where available. jugaad-data uses built-in caching to minimize scraping impact. |
 | Static IP requirement | SEBI retail algo trading regulations may require a static IP for API-based order placement. Monitor compliance requirements. |
 
@@ -237,8 +265,15 @@ All open questions have been resolved. No remaining blockers for implementation.
 
 ## 6. Implementation Phases (High-Level)
 
+### Phase 0: Skill Infrastructure & Orchestration
+- Set up OpenClaw as the orchestration layer: context object (`self.ctx`), skill registry, orchestrator, event bus
+- Heartbeat loop configuration
+- Telegram messaging integration
+- `kill-switch`, `health-check`, `auth-broker` skill stubs
+
 ### Phase 1: Foundation & Data Pipeline
-- Project scaffold, config system, database schema
+- Project scaffold, config system
+- Database schema design and migration setup (FR-10.1)
 - Broker abstraction + Zerodha implementation
 - LLM abstraction + Gemini implementation
 - Market data abstraction (`MarketDataBase` ABC) + free providers (jugaad-data, yfinance, tvDatafeed)
@@ -256,6 +291,7 @@ All open questions have been resolved. No remaining blockers for implementation.
 - LLM trade review gate
 - Order executor with paper trading mode
 - Position tracking & reconciliation
+- `kill-switch` full implementation, `health-check` full implementation
 
 ### Phase 4: Self-Learning Loop
 - Prediction tracking system
@@ -263,14 +299,7 @@ All open questions have been resolved. No remaining blockers for implementation.
 - Model versioning & A/B testing
 - Prediction accuracy dashboard
 
-### Phase 5: OpenClaw Integration
-- Set up OpenClaw as the orchestration layer
-- Implement Skills for each capability
-- Heartbeat configuration
-- Telegram messaging integration
-- 24/7 autonomous operation
-
-### Phase 6: Dashboard & Reporting
+### Phase 5: Dashboard & Reporting
 - FastAPI dashboard with live updates
 - Daily/weekly auto-generated reports
 - Telegram summaries
@@ -281,13 +310,20 @@ All open questions have been resolved. No remaining blockers for implementation.
 ## 7. Verification Plan
 
 1. **Unit tests** for every module (features, risk rules, signal generation)
-2. **Paper trading for 2+ weeks** before any live trading
-3. **Backtest validation**: run strategies on 6 months of historical data, verify Sharpe > 1.0
-4. **Prediction tracking validation**: verify prediction vs actual logging is accurate
-5. **Gemini integration test**: verify trade review gate works, verify fallback when API is down
-6. **OpenClaw health test**: kill the agent, verify heartbeat detects and restarts
-7. **Telegram test**: verify all alert types (trade, daily summary, error) are delivered
-8. **End-to-end paper run**: full autonomous day of paper trading with all systems active
+2. **Skill isolation tests**: unit test for each skill with mocked context
+3. **Risk-check test**: verify all FR-5 rules with edge cases (boundary values, combinations)
+4. **Square-off test**: verify retry/escalation on failure (including extension window expiry)
+5. **Kill switch test**: verify `/stop`, `/kill`, `/resume` end-to-end (including persistence across restarts)
+6. **Market holiday test**: verify no trading activity on holidays
+7. **Capital exhaustion test**: verify pause when cash runs out or falls below minimum trade size
+8. **Partial fill test**: verify correct behavior on partial fills (SL for filled qty, remainder cancelled)
+9. **Paper trading for 2+ weeks** before any live trading
+10. **Backtest validation**: run strategies on 6 months of historical data, verify Sharpe > 1.0
+11. **Prediction tracking validation**: verify prediction vs actual logging is accurate
+12. **Gemini integration test**: verify trade review gate works, verify fallback when API is down
+13. **OpenClaw health test**: kill the agent, verify heartbeat detects and restarts
+14. **Telegram test**: verify all alert types (trade, daily summary, error) are delivered
+15. **End-to-end paper run**: full autonomous day of paper trading with all systems active
 
 ---
 
@@ -423,6 +459,9 @@ yolovest/
 ```yaml
 mode: paper  # paper | live
 
+capital:
+  initial_amount: 100000              # starting capital in INR
+
 broker:
   name: zerodha
   api_key: ${KITE_API_KEY}        # from environment
@@ -439,6 +478,7 @@ market_data:
   intraday_provider: tvdatafeed   # tvdatafeed | kite (paid)
   bhavcopy_dir: ./data/bhavcopy   # path to downloaded NSE Bhavcopy CSVs
   cache_ttl_minutes: 15           # cache fetched data to reduce API calls
+  stale_threshold_minutes: 30     # reject data older than this many minutes
 
 heartbeat:
   market_hours_interval_min: 15   # heartbeat frequency during market hours
@@ -467,6 +507,9 @@ strategy:
     volume_profile: true
     obv: true
     supertrend: true
+  default_trade_type: "intraday"    # intraday | swing
+  backtest_min_sharpe: 1.0          # minimum Sharpe ratio for model deployment
+  backtest_max_drawdown_pct: 0.20   # maximum drawdown % for model deployment
 
 risk:
   max_risk_per_trade_pct: 0.02        # 2% of capital per trade
@@ -488,6 +531,8 @@ risk:
   min_confidence_score: 0.65          # minimum ML confidence to take a trade
   max_trades_per_day: 10              # max trades per day (anti-overtrading)
   loss_cooldown_minutes: 15           # wait after a losing trade before next entry
+  margin_usage_enabled: false        # MIS leverage disabled unless explicitly enabled
+  weekly_reset_day: "monday"         # day when weekly circuit breaker resets
 
 market_hours:
   open: "09:15"
@@ -497,11 +542,24 @@ market_hours:
   square_off: "15:15"            # auto square-off intraday positions
   square_off_extension: "00:05"  # extra window for square-off orders after order_end
   timezone: "Asia/Kolkata"
+  holidays: []                   # list of NSE holiday dates (YYYY-MM-DD)
+  early_close_days: {}           # map of date → early close time (e.g., "2026-03-30": "13:00")
 
 execution:
   max_order_retries: 3            # retry failed orders this many times
   retry_base_delay_sec: 2         # exponential backoff base (2s, 4s, 8s)
-  max_pipeline_latency_sec: 2     # signal→risk→order must complete within this
+  max_pipeline_latency_sec: 2     # signal→risk→order must complete within this (LLM excluded)
+  paper_slippage_pct: 0.001      # simulated slippage for paper trading (0.1%)
+  order_timeout_sec: 30          # cancel unfilled remainder after this many seconds
+
+database:
+  backup_enabled: true             # enable daily DB backups
+  backup_cron: "0 18 * * *"       # backup schedule (daily 6 PM)
+  backup_dir: ./backups            # backup directory
+  retention:
+    ohlcv_days: 730                # OHLCV data retention (2 years)
+    audit_log_days: 365            # audit log retention (1 financial year)
+    predictions_days: 365          # prediction data retention (1 year)
 
 retraining:
   schedule_cron: "0 6 * * 6"     # retrain schedule (Saturday 6 AM)
@@ -728,3 +786,27 @@ python -m yolovest.dashboard.app
 | PM | 7 | 13 | 8 | — | — |
 | BA | — | — | — | 53 | 21 |
 | **Unique actionable** | **17** | **20** | **15** | **10 new** | **top 10 ACs proposed** |
+
+---
+
+## 14. Glossary
+
+| Term | Definition |
+|------|-----------|
+| MIS | Margin Intraday Square-off — Zerodha order product type for intraday trades. Positions auto-squared by broker at end of day. |
+| CNC | Cash and Carry — Zerodha order product type for delivery (swing/positional) trades. Positions held overnight. |
+| SL | Stop-Loss order — a limit order triggered when price reaches a specified level, used to cap losses. |
+| SL-M | Stop-Loss Market order — like SL but executes as a market order once triggered. Guarantees fill, not price. |
+| TOTP | Time-based One-Time Password — used for Zerodha two-factor authentication during login. |
+| OHLCV | Open, High, Low, Close, Volume — standard candlestick data format for price bars. |
+| Bhavcopy | NSE's end-of-day equity data file containing closing prices, volumes, and trade statistics for all listed securities. |
+| GIFT Nifty | GIFT Nifty (formerly SGX Nifty) — Nifty 50 futures traded on Gujarat International Finance Tec-City (GIFT City) exchange. Used as a pre-market indicator for Indian markets. |
+| F&O Ban | SEBI-imposed ban on fresh F&O positions when open interest exceeds 95% of market-wide position limit (MWPL). Stocks in ban can only reduce existing positions. |
+| FII/DII | Foreign Institutional Investors / Domestic Institutional Investors — their daily buy/sell data is a key market sentiment indicator. |
+| WAL mode | Write-Ahead Logging — SQLite journaling mode that enables concurrent reads during writes, improving performance. |
+| ATR | Average True Range — volatility indicator measuring the average range of price movement over N periods. Used for stop-loss sizing. |
+| OBV | On-Balance Volume — cumulative volume indicator that relates volume to price change. Used to confirm trends. |
+| VWAP | Volume-Weighted Average Price — average price weighted by volume, commonly used as an intraday benchmark. |
+| MWPL | Market-Wide Position Limit — SEBI-defined maximum open interest allowed for a stock's F&O contracts. |
+| STT | Securities Transaction Tax — tax levied on every stock exchange transaction in India. |
+| Sharpe ratio | Risk-adjusted return metric: (portfolio return − risk-free rate) / standard deviation of returns. Higher is better; >1.0 is acceptable, >2.0 is good. |
