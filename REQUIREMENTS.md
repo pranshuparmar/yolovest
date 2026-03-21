@@ -36,7 +36,10 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 | FR-2.7 | Use Gemini API to summarize and extract actionable sentiment from raw news data — classify as bullish/bearish/neutral per symbol | P0 |
 | FR-2.8 | Store all ingested data in SQLite with timestamps for historical reference | P0 |
 | FR-2.9 | Rate-limit all data fetching to respect source APIs and avoid IP bans | P0 |
-| FR-2.10 | Fetch pre-market data (SGX Nifty, global indices, overnight US market moves) before market open | P2 |
+| FR-2.10 | Fetch pre-market data (SGX Nifty/GIFT Nifty, global indices, overnight US market moves) before market open | P1 |
+| FR-2.11 | Use Gemini with web grounding to search and summarize real-time market news beyond what RSS/APIs provide | P0 |
+| FR-2.12 | Fetch Google Finance data for broader market sentiment and global cues | P1 |
+| FR-2.13 | Aggregate all news sources with deduplication — same news from multiple sources should be merged, not double-counted in sentiment | P1 |
 
 ### FR-3: Dynamic Stock Scanning & Ranking
 
@@ -73,11 +76,13 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 | FR-5.6 | Weekly loss circuit breaker: reduce position sizing by 50% if weekly loss exceeds 5% | P0 |
 | FR-5.7 | Mandatory stop-loss on every trade (no exceptions). SL must be set at order time | P0 |
 | FR-5.8 | Trailing stop-loss: once a trade is in profit by 1.5x the risk, trail the SL to breakeven; continue trailing as price moves favorably | P1 |
-| FR-5.9 | Market hours enforcement: no orders outside 9:15 AM - 3:20 PM IST (3:20 not 3:30 to avoid closing auction volatility) | P0 |
-| FR-5.10 | Auto square-off: close all intraday positions by 3:15 PM IST | P0 |
+| FR-5.9 | Market hours enforcement: no new orders outside 9:15 AM - 3:15 PM IST (configurable). Square-off orders allowed until 3:20 PM. | P0 |
+| FR-5.10 | Auto square-off: close all intraday (MIS) positions by 3:15 PM IST (configurable via `market_hours.square_off` in config.yaml). Swing positions (CNC) are held overnight. | P0 |
 | FR-5.11 | Gemini risk review: LLM acts as a second opinion on risk before execution — can veto trades that look dangerous | P0 |
 | FR-5.12 | If Gemini API is down, fall back to rules-only risk management (never block trading on LLM availability) | P0 |
 | FR-5.13 | Correlation check: avoid opening multiple positions in the same sector/theme simultaneously | P2 |
+| FR-5.14 | **Emergency kill switch**: Telegram commands (`/stop` to pause trading, `/kill` to square off everything) + dashboard button. Immediately cancels all open/pending orders. `/kill` also squares off all open positions at market price. | P0 |
+| FR-5.15 | Kill switch state persists across restarts — once `/stop` is triggered, bot stays paused until explicitly resumed via `/resume` | P0 |
 
 ### FR-6: Order Execution
 
@@ -144,29 +149,11 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 | **F&O Trading** | Equity (cash segment) only for now. Architecture designed to support F&O in future. |
 | **Starting Mode** | Paper trading for most strategies + tiny live trades (₹5-10K) to test real execution pipeline. |
 | **Hosting** | Decide later — Docker Compose makes it portable. Build first, deploy when ready. |
+| **Intraday Square-off** | Auto square-off at 3:15 PM IST (configurable via config.yaml). Swing positions use CNC order type and are held overnight. |
+| **News Sources** | Use ALL available sources — RSS feeds, NSE/BSE official APIs, Google News API, Gemini web grounding, Screener.in, Trendlyne. Maximize coverage. |
+| **Kill Switch** | Both Telegram (`/stop`, `/kill`) and dashboard button. Immediately cancels all open orders and optionally squares off all positions. |
 
-## 3.1 Remaining Open Questions
-
-### Q1: Intraday Auto Square-off Timing
-Zerodha auto-squares-off at 3:20 PM with penalties. Should our bot:
-- Square off at 3:15 PM (safe margin)?
-- Hold swing positions overnight (requires CNC order type)?
-- Convert winning intraday positions to swing if conditions met?
-
-### Q2: News Source Approach
-Web scraping MoneyControl/ET Markets may violate their ToS. Options:
-- Use their RSS feeds (publicly available)
-- Use Google News API for financial news
-- Use NSE official APIs (most reliable, no legal risk)
-- Use Gemini with web grounding to search/summarize market news
-- **Recommendation**: Use RSS feeds + NSE official APIs + Gemini web grounding. Avoid direct scraping.
-
-### Q3: Emergency Kill Switch
-Should there be a way to immediately halt all trading via:
-- Telegram command (`/stop` or `/kill`)
-- Dashboard button
-- Both?
-- **Recommendation**: Both. This is critical safety infrastructure.
+All open questions have been resolved. No remaining blockers for implementation.
 
 ---
 
