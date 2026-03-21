@@ -18,7 +18,34 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 |----|------------|----------|
 | FR-1.1 | Deploy OpenClaw as the autonomous orchestration layer — the bot runs 24/7 as an always-on agent | P0 |
 | FR-1.2 | Configure OpenClaw heartbeat to monitor system health, check positions, and trigger scheduled tasks. Intervals configurable via `heartbeat.market_hours_interval_min` (default: `15`) and `heartbeat.off_hours_interval_min` (default: `60`) | P0 |
-| FR-1.3 | Implement OpenClaw Skills for each capability: `market-scan`, `news-fetch`, `trade-execute`, `report-generate`, `model-retrain`, `risk-check` | P0 |
+| FR-1.3 | Implement 14 OpenClaw Skills (see `src/yolovest/skills/`). Each skill is a discrete, independently invocable capability: | P0 |
+
+**Skill Manifest:**
+
+| Skill | Trigger | Schedule | Covers FRs | Description |
+|-------|---------|----------|-----------|-------------|
+| `auth-broker` | CRON | `0 9 * * 1-5` (9 AM weekdays) | FR-6.3 | Daily Kite re-authentication |
+| `ingest-data` | HEARTBEAT | — | FR-2.1-2.9, 2.12-2.13 | OHLCV + news + fundamentals + sentiment |
+| `ingest-premarket` | CRON | `30 8 * * 1-5` (8:30 AM) | FR-2.10-2.11 | GIFT Nifty, global cues, Gemini web summary |
+| `market-scan` | HEARTBEAT | — | FR-3.1-3.6 | Scan NSE, rank stocks, produce watchlist |
+| `generate-signals` | HEARTBEAT | — | FR-4.1-4.5 | ML feature eng → buy/sell/hold signals |
+| `risk-check` | EVENT | per signal | FR-5.1-5.18 | Validate signal against all risk rules |
+| `llm-review` | EVENT | per signal | FR-4.4, FR-5.11-5.12 | Gemini trade approval gate |
+| `trade-execute` | EVENT | per approved signal | FR-6.1-6.2, 6.4-6.9 | Place orders (paper or live) |
+| `position-monitor` | HEARTBEAT | — | FR-6.5, FR-5.8 | Reconcile, trail SLs, track PnL |
+| `square-off` | CRON | `market_hours.square_off` | FR-5.9-5.10 | Auto close intraday positions |
+| `predict-track` | EVENT + HEARTBEAT | — | FR-7.1-7.3 | Log predictions, score outcomes |
+| `model-retrain` | CRON | `retraining.schedule_cron` | FR-7.4-7.7 | Retrain ML, version, A/B test |
+| `report-generate` | CRON | daily + weekly crons | FR-8.4-8.6 | Daily/weekly reports + Telegram |
+| `health-check` | HEARTBEAT | — | FR-1.2, FR-1.6 | System health, crash recovery |
+| `kill-switch` | MANUAL | Telegram `/stop` `/kill` `/resume` | FR-5.14-5.15 | Emergency stop/kill/resume |
+
+**Skill execution order per heartbeat (market hours):**
+```
+health-check → ingest-data → market-scan → generate-signals
+  → [per signal]: risk-check → llm-review → trade-execute → predict-track
+  → position-monitor
+```
 | FR-1.4 | Use OpenClaw's messaging integration for Telegram — trade alerts, daily summaries, error notifications | P0 |
 | FR-1.5 | OpenClaw Memory — persist agent state, trading context, conversation history, and reasoning across restarts using OpenClaw's Markdown-based memory system | P1 |
 | FR-1.6 | Implement graceful degradation — if OpenClaw agent crashes, positions are protected (no open orders left hanging), and agent auto-restarts | P0 |
@@ -349,6 +376,24 @@ yolovest/
 │       │   ├── __init__.py
 │       │   ├── ml_signal.py    # XGBoost/sklearn signal model
 │       │   └── backtest.py     # Backtesting engine
+│       ├── skills/
+│       │   ├── __init__.py         # Skill registry (SKILL_REGISTRY dict)
+│       │   ├── base.py             # SkillBase ABC, SkillResult, SkillTrigger
+│       │   ├── auth_broker.py      # Daily Kite re-authentication
+│       │   ├── ingest_data.py      # OHLCV + news + fundamentals + sentiment
+│       │   ├── ingest_premarket.py  # Pre-market global cues
+│       │   ├── market_scan.py      # NSE scan, rank, filter → watchlist
+│       │   ├── generate_signals.py  # ML feature eng → trade signals
+│       │   ├── risk_check.py       # Validate against all risk rules
+│       │   ├── llm_review.py       # Gemini trade approval gate
+│       │   ├── trade_execute.py    # Place orders (paper/live)
+│       │   ├── position_monitor.py  # Reconcile, trail SLs, track PnL
+│       │   ├── square_off.py       # Auto close intraday positions
+│       │   ├── predict_track.py    # Log predictions, score outcomes
+│       │   ├── model_retrain.py    # Retrain ML, version, A/B test
+│       │   ├── report_generate.py  # Daily/weekly reports + Telegram
+│       │   ├── health_check.py     # System health, crash recovery
+│       │   └── kill_switch.py      # Emergency stop/kill/resume
 │       ├── risk/
 │       │   ├── __init__.py
 │       │   └── manager.py      # Position sizing, limits, circuit breakers, LLM review
