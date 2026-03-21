@@ -666,7 +666,39 @@ python -m yolovest.dashboard.app
 | M14 | No glossary — terms like MIS, CNC, SL-M, WAL, GIFT Nifty, F&O ban, Bhavcopy, TOTP undefined. | BA |
 | M15 | First-time setup / onboarding flow not documented. Section 12 lists commands but not prereqs. | BA |
 
-### 13.5 PM: Missing Config Validations
+### 13.5 BA: Requirement Quality Summary (53 Defects, 21 Improvements, 8 Observations)
+
+**New Critical Defects from BA (not already captured above):**
+
+| # | Finding | Affected FRs |
+|---|---------|-------------|
+| B1 | **FR-1.3 says "14 skills" but manifest table and implementation have 15.** Count discrepancy. | FR-1.3 |
+| B2 | **FR-5.5 circuit breaker: no reset condition.** "Stop all trading" — when does it reset? Next market open? Manual resume? | FR-5.5 |
+| B3 | **FR-5.6 weekly breaker: no reset definition.** Rolling 7 days? Calendar week? Monday open? No `weekly_reset` config. | FR-5.6 |
+| B4 | **No capital exhaustion handling.** When cash hits zero or below min trade size, behavior is undefined. | FR-5.1, FR-5.2 |
+| B5 | **No config hot-reload mechanism.** Changing parameters mid-day requires restart. No FR addresses live config updates. | All config-dependent FRs |
+| B6 | **FR-5.16 is misplaced.** Listed under Risk (FR-5) but enforced in `generate-signals` (FR-4 domain). `risk-check` never validates confidence. | FR-5.16 |
+| B7 | **FR-1.6 implementation doesn't match requirement.** Requirement says "positions are protected." Implementation only sends alert — no protective square-off or order cancellation. | FR-1.6 |
+| B8 | **FR-4.6/4.7 (backtesting) have no skill.** Listed in `scripts/` only. Should clarify: skill or standalone script? | FR-4.6, FR-4.7 |
+| B9 | **Tax/audit trail incomplete.** No turnover calculation, no ITR-3/ITR-4 export fields, no tax-filing-friendly data format. STCG rate stated as 20% (correct post-2024 budget) but should not be hardcoded. | Section 4 |
+| B10 | **FR-6.3 Selenium option must be removed.** Three conflicting statements about auth. Selenium flagged as ToS-violating by our own Legal section — should not be in an FR. | FR-6.3 |
+
+**BA: Proposed Acceptance Criteria for Top 10 FRs:**
+
+| FR | Proposed AC |
+|----|------------|
+| FR-1.6 | On crash: cancel all pending orders within 30s of restart. Existing SL orders untouched on broker. Auto-restart within 60s. Alert if broker connectivity lost >5min with open positions. |
+| FR-2.7 | Sentiment output: `{symbol, sentiment: bullish|bearish|neutral, confidence: 0.0-1.0, key_drivers: list[str]}`. Latency <5s per symbol batch. |
+| FR-2.13 | Duplicates = same entity + same event within 4h window. Must reduce article count by >=30% when multiple sources active. |
+| FR-4.2 | Confidence scores are calibrated probabilities [0.0, 1.0]. Weekly calibration check during model retrain. |
+| FR-4.6 | Backtest on 6 months must complete in <10min. Must output: Sharpe, max drawdown, return, win rate, profit factor. Min Sharpe 1.0 for deployment. |
+| FR-5.5 | On trigger: stop new signals, discard pipeline orders, keep existing positions+SLs. Alert within 10s. Reset at next market open (9:15 AM). |
+| FR-5.6 | Weekly period: Monday 9:15 AM → Friday 15:30 PM. Resets Monday 9:15 AM. Status in daily report. |
+| FR-7.4 | Min data: 100 scored predictions + 50 completed trades before retrain proceeds. Skip with log if threshold not met. |
+| FR-8.8 | Retain logs for 1 financial year (Apr-Mar). Append-only. Fields: timestamp_ist, action_type, skill_name, input_summary, output_summary, duration_ms. |
+| FR-5.14 | `/kill` must cancel all orders + square off all positions within 30s. Telegram confirmation sent back to user. |
+
+### 13.6 PM: Missing Config Validations
 
 | Validation | Documented? |
 |------------|-------------|
@@ -677,14 +709,24 @@ python -m yolovest.dashboard.app
 | `mode` must be "paper" or "live" | No |
 | `execution.max_pipeline_latency_sec` referenced in NFR-2 but never enforced in code | No |
 
-### 13.6 Summary Scorecard
+### 13.7 Summary Scorecard
 
 | Area | Score | Notes |
 |------|-------|-------|
 | **Strategic completeness** | 7/10 | Strong core. Missing disaster recovery, gap risk, cost modeling. |
 | **Implementation readiness** | 5/10 | No context object, no schemas, no DB design, no orchestrator. Phase 5 must become Phase 0. |
-| **Requirement quality** | 6/10 | Good structure. Many FRs lack acceptance criteria. Config traceability gaps. Auth flow contradictory. |
-| **Test coverage** | 4/10 | Only 3 of 14 skills have verification items. 10 missing test files. No integration tests for critical path. |
-| **Risk management** | 8/10 | FR-5 is comprehensive and configurable. But gap risk, circuit breaker exit logic, and partial fills are blind spots. |
-| **Architecture readiness** | 4/10 | LLMBase has 2 of 6 needed methods. No typed schemas. No DB schema. Skill triggers need rework (dual-trigger, pending state). |
-| **Overall** | **5.7/10** | **Solid requirements + skill design, but architecture prerequisites (context, schemas, DB, orchestrator) are completely missing. Cannot write production code until C11-C17 are resolved.** |
+| **Requirement quality** | 5/10 | 53 BA defects. Many FRs lack AC. Auth contradictory. Circuit breaker resets undefined. Capital exhaustion unhandled. |
+| **Test coverage** | 4/10 | Only 3 of 14 skills have verification items. 10 missing test files. No integration tests. |
+| **Risk management** | 7/10 | FR-5 is comprehensive. But gap risk, breaker reset/exit logic, partial fills, capital exhaustion are blind spots. |
+| **Architecture readiness** | 4/10 | LLMBase 2/6 methods. No typed schemas. No DB schema. Skill triggers need rework. |
+| **Regulatory/Compliance** | 5/10 | SEBI status vague. Tax trail incomplete. Selenium violates own Legal section. No holiday calendar. |
+| **Overall** | **5.3/10** | **Strong vision + skill architecture. 17 CRITICALs + 20 HIGHs + 10 BA defects before Phase 1. BA proposed ACs for top 10 FRs ready to incorporate.** |
+
+### 13.8 Combined Finding Count
+
+| Source | Critical | High | Medium | BA Defects | BA Improvements |
+|--------|----------|------|--------|------------|-----------------|
+| CEO | 5 | 8 | 6 | — | — |
+| PM | 7 | 13 | 8 | — | — |
+| BA | — | — | — | 53 | 21 |
+| **Unique actionable** | **17** | **20** | **15** | **10 new** | **top 10 ACs proposed** |
