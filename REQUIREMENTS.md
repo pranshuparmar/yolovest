@@ -18,7 +18,7 @@ Building a **fully autonomous AI-driven Indian stock trading platform** for pers
 |----|------------|----------|
 | FR-1.1 | Deploy OpenClaw as the autonomous orchestration layer — the bot runs 24/7 as an always-on agent | P0 |
 | FR-1.2 | Configure OpenClaw heartbeat to monitor system health, check positions, and trigger scheduled tasks. Intervals configurable via `heartbeat.market_hours_interval_min` (default: `15`) and `heartbeat.off_hours_interval_min` (default: `60`) | P0 |
-| FR-1.3 | Implement 14 OpenClaw Skills (see `src/yolovest/skills/`). Each skill is a discrete, independently invocable capability: | P0 |
+| FR-1.3 | Implement 15 OpenClaw Skills (see `src/yolovest/skills/`). Each skill is a discrete, independently invocable capability: | P0 |
 
 **Skill Manifest:**
 
@@ -70,7 +70,7 @@ health-check → ingest-data → market-scan → generate-signals
 | FR-2.7 | Use Gemini API to summarize and extract actionable sentiment from raw news data — classify as bullish/bearish/neutral per symbol | P0 |
 | FR-2.8 | Store all ingested data in SQLite with timestamps for historical reference | P0 |
 | FR-2.9 | Rate-limit all data fetching to respect source APIs and avoid IP bans | P0 |
-| FR-2.10 | Fetch pre-market data (SGX Nifty/GIFT Nifty, global indices, overnight US market moves) before market open | P1 |
+| FR-2.10 | Fetch pre-market data (GIFT Nifty, global indices, overnight US market moves) before market open | P1 |
 | FR-2.11 | Use Gemini with web grounding to search and summarize real-time market news beyond what RSS/APIs provide | P0 |
 | FR-2.12 | Fetch Google Finance data for broader market sentiment and global cues | P1 |
 | FR-2.13 | Aggregate all news sources with deduplication — same news from multiple sources should be merged, not double-counted in sentiment | P1 |
@@ -91,12 +91,12 @@ health-check → ingest-data → market-scan → generate-signals
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR-4.1 | Feature engineering: RSI, MACD, Bollinger Bands, VWAP, ATR, volume profile, OBV, SuperTrend, moving averages. EMA periods configurable via `strategy.ema_periods` (default: `[9, 21, 50, 200]`). Individual indicators toggleable via `strategy.indicators` map. | P0 |
-| FR-4.2 | XGBoost/LightGBM model trained on historical features to generate buy/sell/hold signals with confidence scores | P0 |
-| FR-4.3 | Separate models for intraday (short features, 1-5min candles) and swing (daily features, multi-day patterns) | P0 |
+| FR-4.2 | XGBoost/LightGBM model trained on historical features to generate buy/sell/hold signals with confidence scores. Confidence score = calibrated probability [0.0, 1.0], validated during each model retraining cycle. | P0 |
+| FR-4.3 | Separate models for intraday (short features, 1-5min candles) and swing (daily features, multi-day patterns). Decision logic: use intraday model during market hours for MIS trades, swing model for CNC/overnight trades. Default trade type configurable via `strategy.default_trade_type` (default: `"intraday"`). | P0 |
 | FR-4.4 | Gemini-powered trade review: before every trade, send full context (signal, indicators, news sentiment, portfolio state, market conditions) to Gemini for approval/rejection/resize recommendation | P0 |
 | FR-4.5 | Signal must include: entry price, target price, stop-loss price, position size, expected holding period, confidence score | P0 |
 | FR-4.6 | Backtesting engine: simulate strategies on historical data, compute Sharpe ratio, max drawdown, win rate, profit factor | P0 |
-| FR-4.7 | Walk-forward validation: backtest must use rolling train/test windows (no lookahead bias) | P1 |
+| FR-4.7 | Walk-forward validation: backtest must use rolling train/test windows (no lookahead bias). Backtest without walk-forward is invalid. | P0 |
 
 ### FR-5: Risk Management
 
@@ -104,12 +104,12 @@ health-check → ingest-data → market-scan → generate-signals
 
 | ID | Requirement | Config Key | Default | Priority |
 |----|------------|-----------|---------|----------|
-| FR-5.1 | Max risk per trade as % of total capital | `risk.max_risk_per_trade_pct` | `0.02` (2%) | P0 |
+| FR-5.1 | Max risk per trade as % of total capital. "Total capital" = current portfolio value (cash + unrealized positions value). | `risk.max_risk_per_trade_pct` | `0.02` (2%) | P0 |
 | FR-5.2 | Max total portfolio exposure as % of capital (rest stays in cash) | `risk.max_portfolio_exposure_pct` | `0.60` (60%) | P0 |
 | FR-5.3 | Max simultaneous open positions | `risk.max_open_positions` | `3` | P0 |
 | FR-5.4 | Max single stock exposure as % of portfolio | `risk.max_single_stock_pct` | `0.25` (25%) | P0 |
-| FR-5.5 | Daily loss circuit breaker — stop all trading if daily loss exceeds this % of capital | `risk.daily_loss_limit_pct` | `0.03` (3%) | P0 |
-| FR-5.6 | Weekly loss circuit breaker — reduce position sizing by `weekly_loss_sizing_reduction` if weekly loss exceeds this % | `risk.weekly_loss_limit_pct` | `0.05` (5%) | P0 |
+| FR-5.5 | Daily loss circuit breaker — if daily realized loss exceeds this % of capital, stop NEW signal generation and discard pending pipeline orders. Exits, square-offs, and SL orders are still allowed. Resets automatically at next market open (9:15 AM). **AC:** On trigger: block new signals, allow exits/SLs, send Telegram alert within 10s. | `risk.daily_loss_limit_pct` | `0.03` (3%) | P0 |
+| FR-5.6 | Weekly loss circuit breaker — reduce position sizing by `weekly_loss_sizing_reduction` if weekly loss exceeds this %. Weekly period: Monday 9:15 AM → Friday 15:30 PM. Resets Monday 9:15 AM. Reset day configurable via `risk.weekly_reset_day`. **AC:** Weekly period status included in daily report. | `risk.weekly_loss_limit_pct` | `0.05` (5%) | P0 |
 | FR-5.6a | Position sizing reduction factor when weekly circuit breaker triggers | `risk.weekly_loss_sizing_reduction` | `0.50` (50%) | P0 |
 | FR-5.7 | Mandatory stop-loss on every trade (no exceptions). SL must be set at order time. Enable/disable enforcement. | `risk.mandatory_stop_loss` | `true` | P0 |
 | FR-5.8 | Trailing stop-loss: once trade profit exceeds `trailing_sl_trigger_multiple` × risk, trail SL to breakeven and continue trailing | `risk.trailing_sl_enabled` | `true` | P1 |
@@ -132,9 +132,9 @@ health-check → ingest-data → market-scan → generate-signals
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR-6.1 | Execute via Zerodha Kite Connect API: support Market, Limit, SL, and SL-M order types | P0 |
-| FR-6.2 | Paper trading mode by default — live trading requires explicit config flag | P0 |
-| FR-6.3 | Handle Kite daily re-authentication: generate `request_token` → `access_token` flow each morning (manual TOTP or automated via Selenium as fallback) | P0 |
-| FR-6.4 | Order lifecycle tracking: placed → open → filled/rejected/cancelled — with timestamps | P0 |
+| FR-6.2 | Paper trading mode by default — live trading requires explicit config flag. Paper trading fill model: fill at LTP with configurable simulated slippage via `execution.paper_slippage_pct` (default: `0.001` i.e. 0.1%). | P0 |
+| FR-6.3 | Handle Kite daily re-authentication: semi-automated — bot sends Telegram reminder at 9 AM, user pastes `request_token`, bot exchanges for `access_token`. ~30 seconds daily. | P0 |
+| FR-6.4 | Order lifecycle tracking: placed → open → partially_filled → filled/rejected/cancelled — with timestamps. Partial fill handling: if <100% filled within `execution.order_timeout_sec` (default: `30`), cancel remainder. SL set for filled quantity only. | P0 |
 | FR-6.5 | Reconcile local position state with broker state periodically (every heartbeat) | P0 |
 | FR-6.6 | Retry failed orders with exponential backoff. Max retries configurable via `execution.max_order_retries` (default: `3`), base delay via `execution.retry_base_delay_sec` (default: `2`) | P1 |
 | FR-6.7 | Slippage tracking: record expected vs actual fill price for every trade | P1 |
@@ -189,7 +189,7 @@ health-check → ingest-data → market-scan → generate-signals
 
 | Question | Decision |
 |----------|----------|
-| **Zerodha Auth** | Semi-automated — bot sends Telegram reminder at 9 AM, user pastes request_token. ~30 seconds daily. |
+| **Zerodha Auth** | Semi-automated — bot sends Telegram reminder at 9 AM, user pastes `request_token`, bot exchanges for `access_token`. ~30 seconds daily. No browser automation. |
 | **F&O Trading** | Equity (cash segment) only for now. Architecture designed to support F&O in future. |
 | **Starting Mode** | Paper trading for most strategies + tiny live trades (₹5-10K) to test real execution pipeline. |
 | **Hosting** | Decide later — Docker Compose makes it portable. Build first, deploy when ready. |
@@ -432,8 +432,6 @@ llm:
   provider: gemini
   model: gemini-2.5-pro           # or gemini-2.5-flash for lower latency
   api_key: ${GEMINI_API_KEY}
-  review_every_trade: true
-  fallback_to_rules: true         # if LLM unavailable, use rules-only
 
 market_data:
   daily_provider: jugaad          # jugaad | yfinance
@@ -538,7 +536,7 @@ notifications:
 ### Zerodha Kite Connect
 
 - **Tier**: Free personal API (Kite Connect Personal) — execution APIs only, no market data.
-- **Authentication**: OAuth-style login flow that generates a `request_token` daily. Bot needs daily re-auth (manual TOTP or automated).
+- **Authentication**: OAuth-style login flow that generates a `request_token` daily. Semi-automated — bot sends Telegram reminder, user pastes `request_token`.
 - **Order types**: Market, Limit, SL, SL-M supported.
 - **Rate limits**: 10 requests/second aggregate across all endpoints per API key.
 - **Paid upgrade (optional)**: ₹500/month adds real-time streaming (Kite Ticker WebSocket) + historical OHLCV via `kite.historical_data()`. Not needed for POC.
