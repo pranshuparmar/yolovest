@@ -46,6 +46,21 @@ health-check → ingest-data → market-scan → generate-signals
   → [per signal]: risk-check → llm-review → trade-execute → predict-track
   → position-monitor
 ```
+
+**Heartbeat error propagation policy:**
+
+| If this skill fails... | Then... | Rationale |
+|------------------------|---------|-----------|
+| `health-check` | **ABORT entire heartbeat.** Alert via Telegram. | System is unhealthy — no point running anything else. |
+| `ingest-data` | **SKIP `market-scan` and `generate-signals`.** Run `position-monitor` only. | Cannot scan/signal on stale data (FR-10.4). But must still monitor open positions. |
+| `market-scan` | **SKIP `generate-signals`.** Run `position-monitor` only. | No watchlist = no signals. Open positions still need monitoring. |
+| `generate-signals` | **SKIP signal chain.** Run `position-monitor` only. | No signals to process. |
+| `risk-check` (per signal) | **SKIP this signal only.** Continue to next signal. Log rejection. | One bad signal should not block others. |
+| `llm-review` (per signal) | **Auto-approve if `risk.llm_fallback_to_rules` is true.** Otherwise skip signal. | FR-5.12: never block trading on LLM availability. |
+| `trade-execute` (per signal) | **Log error, alert.** Continue to next signal. Retry on next heartbeat if order is retryable. | FR-6.6 handles retries internally. |
+| `position-monitor` | **Alert via Telegram as CRITICAL.** Open positions are unmonitored. | Most dangerous failure — trailing SLs not updating. |
+
+**Heartbeat mutex:** If a heartbeat is still running when the next interval fires, **skip the new heartbeat** and log a warning. If 3 consecutive heartbeats are skipped due to overrun, alert via Telegram as CRITICAL. Configurable via `heartbeat.max_consecutive_skips` (default: `3`).
 | FR-1.4 | Use OpenClaw's messaging integration for Telegram — trade alerts, daily summaries, error notifications | P0 |
 | FR-1.5 | OpenClaw Memory — persist agent state, trading context, conversation history, and reasoning across restarts using OpenClaw's Markdown-based memory system | P0 |
 | FR-1.6 | Implement graceful degradation — if OpenClaw agent crashes, positions are protected (no open orders left hanging), and agent auto-restarts | P0 |
@@ -266,10 +281,13 @@ All open questions have been resolved. No remaining blockers for implementation.
 ## 6. Implementation Phases (High-Level)
 
 ### Phase 0: Skill Infrastructure & Orchestration
+- Typed Pydantic data schemas (`models/schemas.py`): Signal, Trade, Position, PortfolioState, TradeContext, TradeReview, SentimentResult, OHLCVBar, Prediction — all inter-skill contracts
 - Set up OpenClaw as the orchestration layer: context object (`self.ctx`), skill registry, orchestrator, event bus
-- Heartbeat loop configuration
+- Heartbeat loop with error propagation policy and mutex (skip-on-overrun)
+- LLM abstraction (`LLMBase` ABC) with all 6 methods
 - Telegram messaging integration
 - `kill-switch`, `health-check`, `auth-broker` skill stubs
+- Config validation (Pydantic validators for all config sections)
 
 ### Phase 1: Foundation & Data Pipeline
 - Project scaffold, config system
@@ -365,11 +383,131 @@ Broker Abstraction:      LLM Abstraction:         Market Data Abstraction:
 
 ```python
 class LLMBase(ABC):
+    # Core trade pipeline
     @abstractmethod
     async def review_trade(self, context: TradeContext) -> TradeReview: ...
 
     @abstractmethod
     async def analyze_sentiment(self, symbol: str, headlines: list[str]) -> SentimentResult: ...
+
+    # Market intelligence
+    @abstractmethod
+    async def summarize_with_web_grounding(self, prompt: str) -> WebGroundingResult: ...
+
+    @abstractmethod
+    async def validate_watchlist(self, shortlist: list[dict], sector_analysis: dict,
+                                  premarket_context: dict) -> WatchlistValidation: ...
+
+    # Reporting & analysis
+    @abstractmethod
+    async def summarize_market_day(self) -> MarketDaySummary: ...
+
+    @abstractmethod
+    async def analyze_prediction_failures(self, failures: list[dict]) -> FailureAnalysis: ...
+```
+
+### Data Schema Contracts (Pydantic models in `models/schemas.py`)
+
+All inter-skill data exchange uses typed Pydantic models. No raw dicts between skills.
+
+```python
+# --- Core Trading ---
+class Signal(BaseModel):
+    symbol: str
+    signal_type: Literal["BUY", "SELL", "HOLD"]
+    entry_price: float
+    target_price: float
+    stop_loss_price: float
+    position_size: int
+    expected_holding_period: str          # e.g., "intraday", "3d", "1w"
+    confidence_score: float               # calibrated probability [0.0, 1.0]
+    model_version: str
+    features_snapshot: dict               # indicator values at signal time
+
+class Trade(BaseModel):
+    trade_id: str
+    symbol: str
+    signal_type: Literal["BUY", "SELL"]
+    entry_price: float
+    fill_price: float
+    quantity: int
+    stop_loss_price: float
+    target_price: float
+    order_id: str | None                  # None for paper trades
+    sl_order_id: str | None
+    product: Literal["MIS", "CNC"]
+    mode: Literal["paper", "live"]
+    status: Literal["placed", "open", "partially_filled", "filled", "rejected", "cancelled"]
+    slippage: float
+    pnl: float | None                    # None while open
+    exit_price: float | None
+    created_at: datetime
+    closed_at: datetime | None
+
+class Position(BaseModel):
+    position_id: str
+    trade: Trade
+    current_price: float
+    unrealized_pnl: float
+    trailing_sl_active: bool
+
+class PortfolioState(BaseModel):
+    total_capital: float                  # cash + unrealized (FR-5.1 definition)
+    available_cash: float
+    exposure_pct: float
+    open_positions: int
+    stock_exposures: dict[str, float]     # symbol → exposure %
+    sector_counts: dict[str, int]         # sector → position count
+    daily_pnl_pct: float
+    weekly_pnl_pct: float
+    trades_today: int
+    minutes_since_last_loss: float
+
+# --- LLM I/O ---
+class TradeContext(BaseModel):
+    signal: Signal
+    portfolio: PortfolioState
+    sentiment: SentimentResult | None
+    premarket: PremarketContext | None
+    sector_rotation: dict | None
+    todays_trades: list[Trade]
+
+class TradeReview(BaseModel):
+    decision: Literal["APPROVE", "REJECT", "RESIZE"]
+    reasoning: str
+    adjusted_size: int | None             # only if RESIZE
+
+class SentimentResult(BaseModel):
+    symbol: str
+    sentiment: Literal["bullish", "bearish", "neutral"]
+    confidence: float                     # [0.0, 1.0]
+    key_drivers: list[str]
+
+# --- Market Data ---
+class OHLCVBar(BaseModel):
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+
+class PremarketContext(BaseModel):
+    gift_nifty_change_pct: float | None
+    us_sp500_change_pct: float | None
+    market_bias: Literal["bullish", "bearish", "neutral"] | None
+    llm_summary: str | None
+
+# --- Prediction Tracking ---
+class Prediction(BaseModel):
+    prediction_id: str
+    signal: Signal
+    trade_id: str | None
+    prediction_end_time: datetime          # computed: created_at + holding_period
+    actual_price: float | None
+    direction_correct: bool | None
+    target_hit: bool | None
+    actual_pnl_pct: float | None
 ```
 
 ---
@@ -483,6 +621,7 @@ market_data:
 heartbeat:
   market_hours_interval_min: 15   # heartbeat frequency during market hours
   off_hours_interval_min: 60      # heartbeat frequency outside market hours
+  max_consecutive_skips: 3        # alert if N heartbeats skipped due to overrun
 
 scanning:
   seed_symbols: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]  # initial watchlist (scanner expands dynamically)
