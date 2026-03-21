@@ -585,3 +585,77 @@ python -m yolovest.main run
 # Start dashboard
 python -m yolovest.dashboard.app
 ```
+
+---
+
+## 13. Cross-Functional Review (CEO + PM + BA)
+
+**Review date:** 2026-03-21
+**Reviewers:** CEO (strategic), PM (execution), BA (quality)
+**Status:** Findings logged. To be addressed before Phase 1 implementation begins.
+
+### 13.1 CRITICAL Findings (Must Fix Before Build)
+
+| # | Finding | Source | Affected FRs |
+|---|---------|--------|-------------|
+| C1 | **No disaster recovery or backup plan.** SQLite corruption or VPS disk failure loses all trade history, models, predictions. No backup/restore procedure. | CEO, BA | NFR (new) |
+| C2 | **No broker API outage handling for open positions.** If Kite API goes down while positions are open and trailing SLs need updating, stale SLs on broker side could cause catastrophic loss. No fallback (e.g., bracket orders). | CEO | FR-5.8, FR-6 |
+| C3 | **No gap risk management.** Swing (CNC) positions can gap 2-5% at open, blowing through a 2% SL. No pre-market SL adjustment or overnight gap risk sizing. | CEO | FR-5.1, FR-5.7 |
+| C4 | **Daily circuit breaker (FR-5.5) may trap losing positions.** "Stop ALL trading" — does this prevent exits too? If yes, you're locked into losing positions. Must explicitly allow exits when breaker is active. | CEO | FR-5.5 |
+| C5 | **`ingest-data` is a mega-skill.** Covers 12 sub-requirements (OHLCV, news, fundamentals, sentiment, dedup). Too complex to test, debug, maintain. Should decompose into 4-5 smaller skills. | PM | FR-2.1-2.13 |
+| C6 | **No error propagation policy for heartbeat chain.** If `ingest-data` fails, should `market-scan` run on stale data or skip? No failure cascade rules defined. | PM, CEO | FR-1.3 |
+| C7 | **`kill-switch` has no implementation phase.** P0 requirement (FR-5.14-5.15) not covered in any of the 6 phases. | PM | FR-5.14 |
+| C8 | **11 of 14 skills have no verification items.** Only health-check, llm-review, and Telegram are covered. Risk-check, trade-execute, square-off, etc. have zero named tests. | PM | Section 7 |
+| C9 | **Auth flow is contradictory across 3 locations.** FR-6.3 says "Selenium fallback", Resolved Decisions says "user pastes token", Legal says Selenium "may violate ToS". | BA | FR-6.3 |
+| C10 | **Config conflict: `llm.review_every_trade` vs `risk.llm_review_enabled`.** Two different config paths claim to control the same LLM review behavior. | BA, PM | FR-5.11 |
+
+### 13.2 HIGH Findings (Fix During Phase 1)
+
+| # | Finding | Source | Affected FRs |
+|---|---------|--------|-------------|
+| H1 | **No transaction cost modeling.** Brokerage, STT, GST, stamp duty not in position sizing, backtesting, or P&L. At 10 trades/day, costs are material. | CEO | FR-4.6, FR-5.1 |
+| H2 | **Sector correlation (FR-5.13) is P2 but should be P0.** With 3 max positions and ₹1L capital, 2/3 in one sector during a sector crash is realistic. | CEO | FR-5.13 |
+| H3 | **No staleness check for market data.** If jugaad-data returns cached yesterday's data or yfinance has 15min delay, ML models trade on stale prices. No freshness validation. | CEO | FR-2.1, FR-2.9 |
+| H4 | **No partial fill handling.** Limit orders can partially fill. SL quantity, position tracking, and exit logic are undefined for partial fills. | CEO | FR-6.4 |
+| H5 | **FR-5.1 "total capital" is undefined.** 2% of what — current capital? initial capital? minus unrealized losses? | CEO | FR-5.1 |
+| H6 | **Confidence score undefined.** Is it model probability? Calibrated? Arbitrary 0-1? Calibration matters for FR-5.16 threshold. | CEO | FR-4.2, FR-5.16 |
+| H7 | **No intraday-vs-swing decision logic.** FR-4.3 says "separate models" but nothing specifies how/when to use which model. | CEO | FR-4.3 |
+| H8 | **FR-4.7 (walk-forward) is P1 but FR-4.6 (backtest) is P0.** Backtest without walk-forward has guaranteed lookahead bias. | CEO | FR-4.6, FR-4.7 |
+| H9 | **Heartbeat can exceed 15min.** Full chain with Gemini calls for 25 stocks + per-signal reviews can overrun. No overlap/skip policy. | PM | FR-1.2 |
+| H10 | **FR-3.1 scans "NSE universe" (~2000 stocks).** Unrealistic on 15min heartbeat with rate-limited free data sources. Needs pre-filter stage. | CEO | FR-3.1 |
+| H11 | **10 missing test files in `tests/`.** Only 4 listed vs NFR-8 requiring "every component testable in isolation." | PM | NFR-8 |
+| H12 | **No market holiday / early close handling.** ~15 holidays/year. No holiday calendar, no early-close square-off adjustment. | BA | FR-5.9-5.10 |
+| H13 | **Paper trading realism undefined.** Does paper mode simulate fills at LTP? Simulate slippage? 100% fill assumption? | CEO | FR-6.2 |
+| H14 | **FR-2.8 "store all data" — no schema.** Does "all" mean raw HTML, parsed text, or just scores? Storage varies wildly. | CEO | FR-2.8 |
+| H15 | **Minimum training data size undefined.** Model retrain on 20 data points produces garbage. No minimum threshold. | CEO | FR-7.4 |
+
+### 13.3 MEDIUM Findings (Address in Relevant Phase)
+
+| # | Finding | Source |
+|---|---------|--------|
+| M1 | No log rotation / data retention policy. SQLite grows unbounded on 2GB VPS. | CEO, BA |
+| M2 | No observability stack (structured logging, metrics, monitoring beyond Telegram). | CEO, BA |
+| M3 | Loss cooldown (FR-5.18) is P2, should be at least P1 — prevents revenge trading. | CEO |
+| M4 | Slippage tracking (FR-6.7) is P1 but data isn't fed back into anything. | CEO |
+| M5 | No partial exit / scale-out capability. Binary full-entry / full-exit only. | CEO |
+| M6 | No market regime detection (trending vs range-bound vs crash). Same params used always. | CEO |
+| M7 | FR-3.2 weights must sum to 1.0 but no validation rule specified. | CEO, BA |
+| M8 | F&O ban list data source not specified in FR-2, but FR-3.3 requires it. Implicit dependency. | CEO |
+| M9 | `predict-track` dual trigger (EVENT + HEARTBEAT) could cause duplicate logging. | PM |
+| M10 | Saturday CRON conflict: `model-retrain` (6AM) + `report-generate` (10AM) on 2GB VPS. | PM |
+| M11 | Gemini API quota exhaustion mid-day not handled (distinct from "API down"). | CEO |
+| M12 | `risk-check` vs `llm-review` boundary blurry — both can veto, both evaluate same context. | PM |
+| M13 | No external health-check endpoint. If Telegram is down, no alert pathway. | BA |
+| M14 | No glossary — terms like MIS, CNC, SL-M, WAL, GIFT Nifty, F&O ban, Bhavcopy, TOTP undefined. | BA |
+| M15 | First-time setup / onboarding flow not documented. Section 12 lists commands but not prereqs. | BA |
+
+### 13.4 Summary Scorecard
+
+| Area | Score | Notes |
+|------|-------|-------|
+| **Strategic completeness** | 7/10 | Strong core. Missing disaster recovery, gap risk, cost modeling. |
+| **Implementation readiness** | 6/10 | Skills well-designed but `ingest-data` needs decomposition. Error propagation undefined. Phases don't cover all skills. |
+| **Requirement quality** | 6/10 | Good structure. Many FRs lack acceptance criteria. Config traceability gaps. Auth flow contradictory. |
+| **Test coverage** | 4/10 | Only 3 of 14 skills have verification items. 10 missing test files. No integration tests for critical path. |
+| **Risk management** | 8/10 | FR-5 is comprehensive and configurable. But gap risk, circuit breaker exit logic, and partial fills are blind spots. |
+| **Overall** | **6.2/10** | **Solid foundation with critical gaps. Address C1-C10 before writing code.** |
