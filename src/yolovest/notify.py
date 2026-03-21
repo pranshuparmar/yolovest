@@ -1,0 +1,79 @@
+"""Notification system for YoloVest.
+
+Supports console backend (always available) and Telegram (optional).
+Respects enabled/disabled toggle from config.
+"""
+
+import logging
+from abc import ABC, abstractmethod
+
+from yolovest.config import AppConfig
+
+logger = logging.getLogger(__name__)
+
+
+class NotifierBase(ABC):
+    """Abstract notifier interface."""
+
+    @abstractmethod
+    async def send(self, message: str) -> None:
+        """Send a notification message."""
+        ...
+
+
+class ConsoleNotifier(NotifierBase):
+    """Development notifier that prints to console/log."""
+
+    def __init__(self, *, enabled: bool = True) -> None:
+        self._enabled = enabled
+
+    async def send(self, message: str) -> None:
+        if not self._enabled:
+            return
+        logger.info("[NOTIFY] %s", message)
+
+
+class Notifier:
+    """Full notifier with config-based routing and message tracking."""
+
+    def __init__(self, config: AppConfig) -> None:
+        self._config = config
+        self._enabled = True
+        self._sent_messages: list[str] = []
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        self._enabled = value
+
+    async def send(self, message: str) -> bool:
+        """Send a notification message.
+
+        Returns True if the message was delivered to at least one backend.
+        """
+        if not self._enabled:
+            return False
+
+        delivered = False
+
+        # Console backend (always available)
+        self._sent_messages.append(message)
+        delivered = True
+
+        # Telegram backend (if enabled)
+        if self._config.notifications.telegram.enabled:
+            delivered = await self._send_telegram(message) or delivered
+
+        return delivered
+
+    async def _send_telegram(self, message: str) -> bool:
+        """Send via Telegram bot. Stub — implementation in Phase 1."""
+        return False
+
+    @property
+    def sent_messages(self) -> list[str]:
+        """Messages sent via console backend (useful for testing)."""
+        return list(self._sent_messages)
