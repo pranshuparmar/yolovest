@@ -609,7 +609,19 @@ python -m yolovest.dashboard.app
 | C9 | **Auth flow is contradictory across 3 locations.** FR-6.3 says "Selenium fallback", Resolved Decisions says "user pastes token", Legal says Selenium "may violate ToS". | BA | FR-6.3 |
 | C10 | **Config conflict: `llm.review_every_trade` vs `risk.llm_review_enabled`.** Two different config paths claim to control the same LLM review behavior. | BA, PM | FR-5.11 |
 
-### 13.2 HIGH Findings (Fix During Phase 1)
+### 13.2 CRITICAL Findings from PM Deep Dive (Architecture Blockers)
+
+| # | Finding | Affected FRs |
+|---|---------|-------------|
+| C11 | **No shared context object (`self.ctx`) design.** Every skill depends on `self.ctx.broker`, `self.ctx.db`, `self.ctx.llm`, `self.ctx.market_data`, etc. — but the context, orchestrator, and event bus don't exist yet and aren't in any phase. **Must be Phase 0.** | FR-1.1, FR-1.3 |
+| C12 | **No data schemas (`schemas.py`).** All inter-skill data contracts are implicit dict-key assumptions. `Signal`, `Trade`, `Position`, `PortfolioState`, `Prediction`, `Sentiment`, `TradeContext`, `TradeReview` — none are typed. Prerequisite for any skill implementation. | FR-4.5, FR-6.4, FR-7.1 |
+| C13 | **No SQLite schema design.** 12+ tables implied across skills (`ohlcv`, `signals`, `trades`, `positions`, `predictions`, `sentiment`, `watchlist`, `reports`, `llm_reviews`, `system_state`, etc.) — none defined. No indexes, no migration strategy. | FR-2.8, NFR-3 |
+| C14 | **Phase 5 (OpenClaw) must move to Phase 1.** Skills reference `self.ctx.*` everywhere. Without the orchestrator skeleton, Phases 1-4 can't be integration-tested. Phase 5 says "implement Skills" but all skill files already exist. | Section 6 |
+| C15 | **`square-off` has no retry on failure.** If square-off fails and 5-min extension expires, MIS positions are left open for Zerodha to auto-square at penalties. No escalation path. | FR-5.10, FR-6.6 |
+| C16 | **NFR-2 (2-sec latency) is infeasible.** LLM review alone takes 3-5 seconds per Gemini call. The signal→risk→order pipeline cannot meet 2 seconds with LLM in the path. Must redefine or make LLM async. | NFR-2, FR-4.4 |
+| C17 | **`LLMBase` ABC only defines 2 methods but skills call 6.** `summarize_with_web_grounding()`, `validate_watchlist()`, `summarize_market_day()`, `analyze_prediction_failures()` are all missing from the interface. | Section 8 |
+
+### 13.3 HIGH Findings (Fix During Phase 1)
 
 | # | Finding | Source | Affected FRs |
 |---|---------|--------|-------------|
@@ -628,6 +640,11 @@ python -m yolovest.dashboard.app
 | H13 | **Paper trading realism undefined.** Does paper mode simulate fills at LTP? Simulate slippage? 100% fill assumption? | CEO | FR-6.2 |
 | H14 | **FR-2.8 "store all data" — no schema.** Does "all" mean raw HTML, parsed text, or just scores? Storage varies wildly. | CEO | FR-2.8 |
 | H15 | **Minimum training data size undefined.** Model retrain on 20 data points produces garbage. No minimum threshold. | CEO | FR-7.4 |
+| H16 | **`position-monitor` vs `square-off` race condition at 15:15.** Both can try to close the same position simultaneously. No mutex or exclusion window. | PM | FR-5.10, FR-6.5 |
+| H17 | **`auth-broker` "waiting" state has no timeout.** Skill returns `success=False` while awaiting user token. Appears as failed in every health check. No pending/callback mechanism in `SkillResult`. | PM | FR-6.3 |
+| H18 | **`predict-track` never sets `prediction_end_time`.** Logging stores `expected_holding_period` but scoring reads `prediction_end_time` which is never computed. | PM | FR-7.1, FR-7.2 |
+| H19 | **News scraping targets (MoneyControl, ET, LiveMint) actively block scraping.** No anti-scraping mitigation, no proxy strategy, no API alternatives. FR-2.3 will fail in production. | CEO | FR-2.3 |
+| H20 | **FR-2.7 (P0) depends on FR-2.3 (P1).** Gemini sentiment analysis needs news as input, but news fetching is lower priority. Priority mismatch. | CEO | FR-2.3, FR-2.7 |
 
 ### 13.3 MEDIUM Findings (Address in Relevant Phase)
 
@@ -649,13 +666,25 @@ python -m yolovest.dashboard.app
 | M14 | No glossary — terms like MIS, CNC, SL-M, WAL, GIFT Nifty, F&O ban, Bhavcopy, TOTP undefined. | BA |
 | M15 | First-time setup / onboarding flow not documented. Section 12 lists commands but not prereqs. | BA |
 
-### 13.4 Summary Scorecard
+### 13.5 PM: Missing Config Validations
+
+| Validation | Documented? |
+|------------|-------------|
+| `scanning.weights` must sum to 1.0 | Yes (FR-3.2) |
+| `risk.*_pct` values must be 0 < x < 1 | No |
+| `market_hours.order_start` < `market_hours.order_end` | No |
+| `market_hours.square_off` between `order_end` and `close` | No |
+| `mode` must be "paper" or "live" | No |
+| `execution.max_pipeline_latency_sec` referenced in NFR-2 but never enforced in code | No |
+
+### 13.6 Summary Scorecard
 
 | Area | Score | Notes |
 |------|-------|-------|
 | **Strategic completeness** | 7/10 | Strong core. Missing disaster recovery, gap risk, cost modeling. |
-| **Implementation readiness** | 6/10 | Skills well-designed but `ingest-data` needs decomposition. Error propagation undefined. Phases don't cover all skills. |
+| **Implementation readiness** | 5/10 | No context object, no schemas, no DB design, no orchestrator. Phase 5 must become Phase 0. |
 | **Requirement quality** | 6/10 | Good structure. Many FRs lack acceptance criteria. Config traceability gaps. Auth flow contradictory. |
 | **Test coverage** | 4/10 | Only 3 of 14 skills have verification items. 10 missing test files. No integration tests for critical path. |
 | **Risk management** | 8/10 | FR-5 is comprehensive and configurable. But gap risk, circuit breaker exit logic, and partial fills are blind spots. |
-| **Overall** | **6.2/10** | **Solid foundation with critical gaps. Address C1-C10 before writing code.** |
+| **Architecture readiness** | 4/10 | LLMBase has 2 of 6 needed methods. No typed schemas. No DB schema. Skill triggers need rework (dual-trigger, pending state). |
+| **Overall** | **5.7/10** | **Solid requirements + skill design, but architecture prerequisites (context, schemas, DB, orchestrator) are completely missing. Cannot write production code until C11-C17 are resolved.** |
