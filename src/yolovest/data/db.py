@@ -876,3 +876,283 @@ class Database:
             (exit_price, pnl, now_ist, str(position_id)),
         )
         await self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Predictions (Phase 4, FR-7.1)
+    # ------------------------------------------------------------------
+
+    async def insert_prediction(self, prediction: dict) -> str:
+        """Insert a new prediction and return its ID."""
+        import uuid
+
+        pred_id = prediction.get("prediction_id") or f"P-{uuid.uuid4().hex[:8]}"
+        now_ist = datetime.now(IST).isoformat()
+
+        # Compute prediction end time from holding period
+        from yolovest.models.schemas import _parse_holding_period
+
+        holding = prediction.get("expected_holding_period", "intraday")
+        end_time = datetime.now(IST) + _parse_holding_period(holding)
+
+        await self.conn.execute(
+            "INSERT INTO predictions (prediction_id, trade_id, created_at, "
+            "prediction_end_time, actual_price, direction_correct, target_hit, "
+            "actual_pnl_pct) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+            (pred_id, prediction.get("trade_id"), now_ist, end_time.isoformat()),
+        )
+
+        # Also store prediction details in audit for traceability
+        await self.log_audit(
+            action_type="prediction_logged",
+            skill_name="predict-track",
+            input_summary={
+                "prediction_id": pred_id,
+                "symbol": prediction.get("symbol"),
+                "direction": prediction.get("predicted_direction"),
+                "confidence": prediction.get("confidence"),
+                "target": prediction.get("predicted_target"),
+                "model_version": prediction.get("model_version"),
+            },
+            auto_commit=False,
+        )
+        await self.conn.commit()
+        return pred_id
+
+    async def get_unscored_predictions(self) -> list[dict]:
+        """Get predictions whose holding period has elapsed but haven't been scored."""
+        now_ist = datetime.now(IST).isoformat()
+        cursor = await self.conn.execute(
+            "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
+            "p.prediction_end_time, "
+            "s.symbol, s.signal_type as predicted_direction, "
+            "s.entry_price, s.target_price as predicted_target, "
+            "s.stop_loss_price as predicted_stop_loss, "
+            "s.confidence_score as confidence, "
+            "s.model_version "
+            "FROM predictions p "
+            "LEFT JOIN signals s ON p.signal_id = s.id "
+            "WHERE p.actual_price IS NULL "
+            "AND p.prediction_end_time <= ? "
+            "ORDER BY p.created_at",
+            (now_ist,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def score_prediction(
+        self,
+        prediction_id: str,
+        actual_price: float,
+        direction_correct: bool,
+        target_hit: bool,
+        actual_pnl_pct: float,
+    ) -> None:
+        """Update a prediction with actual outcome."""
+        await self.conn.execute(
+            "UPDATE predictions SET actual_price = ?, direction_correct = ?, "
+            "target_hit = ?, actual_pnl_pct = ? WHERE prediction_id = ?",
+            (
+                actual_price,
+                1 if direction_correct else 0,
+                1 if target_hit else 0,
+                actual_pnl_pct,
+                prediction_id,
+            ),
+        )
+        await self.conn.commit()
+
+    async def refresh_prediction_scoreboard(self) -> None:
+        """Rebuild the prediction scoreboard (FR-7.3).
+
+        Aggregates prediction accuracy by symbol, model version, timeframe, and overall.
+        """
+        scored_predictions = await self._get_all_scored_predictions()
+        if not scored_predictions:
+            return
+
+        groups: dict[tuple[str, str], list[dict]] = {}
+
+        for pred in scored_predictions:
+            # Overall
+            key_overall = ("overall", "overall")
+            groups.setdefault(key_overall, []).append(pred)
+
+            # By symbol
+            symbol = pred.get("symbol")
+            if symbol:
+                key_sym = (f"symbol:{symbol}", "symbol")
+                groups.setdefault(key_sym, []).append(pred)
+
+            # By model version
+            model = pred.get("model_version")
+            if model:
+                key_model = (f"model:{model}", "model")
+                groups.setdefault(key_model, []).append(pred)
+
+        for (group_key, group_type), preds in groups.items():
+            total = len(preds)
+            correct = sum(1 for p in preds if p.get("direction_correct"))
+            accuracy = correct / total if total > 0 else 0
+            avg_conf = (
+                sum(p.get("confidence", 0) for p in preds) / total if total > 0 else 0
+            )
+            target_hits = sum(1 for p in preds if p.get("target_hit"))
+            target_rate = target_hits / total if total > 0 else 0
+            avg_pnl = (
+                sum(p.get("actual_pnl_pct", 0) for p in preds) / total
+                if total > 0
+                else 0
+            )
+
+            await self.conn.execute(
+                "INSERT INTO prediction_scoreboard "
+                "(group_key, group_type, total_predictions, correct_predictions, "
+                "accuracy, avg_confidence, target_hit_rate, avg_pnl_pct, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+                "ON CONFLICT(group_key, group_type) DO UPDATE SET "
+                "total_predictions=excluded.total_predictions, "
+                "correct_predictions=excluded.correct_predictions, "
+                "accuracy=excluded.accuracy, avg_confidence=excluded.avg_confidence, "
+                "target_hit_rate=excluded.target_hit_rate, avg_pnl_pct=excluded.avg_pnl_pct, "
+                "updated_at=excluded.updated_at",
+                (group_key, group_type, total, correct, accuracy, avg_conf, target_rate, avg_pnl),
+            )
+        await self.conn.commit()
+
+    async def _get_all_scored_predictions(self) -> list[dict]:
+        """Get all predictions with outcomes for scoreboard computation."""
+        cursor = await self.conn.execute(
+            "SELECT p.prediction_id, p.direction_correct, p.target_hit, "
+            "p.actual_pnl_pct, s.symbol, s.confidence_score as confidence, "
+            "s.model_version "
+            "FROM predictions p "
+            "LEFT JOIN signals s ON p.signal_id = s.id "
+            "WHERE p.actual_price IS NOT NULL"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_prediction_scoreboard(self, group_type: str | None = None) -> list[dict]:
+        """Get prediction scoreboard entries, optionally filtered by group type."""
+        if group_type:
+            cursor = await self.conn.execute(
+                "SELECT * FROM prediction_scoreboard WHERE group_type = ? "
+                "ORDER BY total_predictions DESC",
+                (group_type,),
+            )
+        else:
+            cursor = await self.conn.execute(
+                "SELECT * FROM prediction_scoreboard ORDER BY group_type, total_predictions DESC"
+            )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_todays_predictions(self) -> list[dict]:
+        """Get predictions created today."""
+        today_start = datetime.now(IST).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
+        cursor = await self.conn.execute(
+            "SELECT p.*, s.symbol, s.signal_type, s.confidence_score "
+            "FROM predictions p "
+            "LEFT JOIN signals s ON p.signal_id = s.id "
+            "WHERE p.created_at >= ? ORDER BY p.created_at",
+            (today_start,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Weekly Data (Phase 4, FR-8.5)
+    # ------------------------------------------------------------------
+
+    async def get_weekly_trades(self) -> list[dict]:
+        """Get trades for the current week (Monday-Friday)."""
+        from datetime import timedelta
+
+        now = datetime.now(IST)
+        days_since_monday = now.weekday()
+        monday = (now - timedelta(days=days_since_monday)).replace(
+            hour=9, minute=15, second=0, microsecond=0
+        )
+        cursor = await self.conn.execute(
+            "SELECT * FROM trades WHERE created_at >= ? ORDER BY created_at",
+            (monday.isoformat(),),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_weekly_predictions(self) -> list[dict]:
+        """Get predictions for the current week."""
+        from datetime import timedelta
+
+        now = datetime.now(IST)
+        days_since_monday = now.weekday()
+        monday = (now - timedelta(days=days_since_monday)).replace(
+            hour=9, minute=15, second=0, microsecond=0
+        )
+        cursor = await self.conn.execute(
+            "SELECT p.*, s.symbol, s.signal_type, s.confidence_score "
+            "FROM predictions p "
+            "LEFT JOIN signals s ON p.signal_id = s.id "
+            "WHERE p.created_at >= ? ORDER BY p.created_at",
+            (monday.isoformat(),),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_weekly_llm_reviews(self) -> list[dict]:
+        """Get LLM reviews for the current week with linked trade PnL."""
+        from datetime import timedelta
+
+        now = datetime.now(IST)
+        days_since_monday = now.weekday()
+        monday = (now - timedelta(days=days_since_monday)).replace(
+            hour=9, minute=15, second=0, microsecond=0
+        )
+        cursor = await self.conn.execute(
+            "SELECT lr.*, t.pnl as trade_pnl "
+            "FROM llm_reviews lr "
+            "LEFT JOIN trades t ON lr.trade_id = t.trade_id "
+            "WHERE lr.created_at >= ? ORDER BY lr.created_at",
+            (monday.isoformat(),),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Reports (Phase 4, FR-8.4/8.5)
+    # ------------------------------------------------------------------
+
+    async def store_report(self, report: dict) -> None:
+        """Store a report in the reports archive."""
+        from datetime import date
+
+        report_date = report.get("date") or date.today().isoformat()
+        await self.conn.execute(
+            "INSERT INTO reports (report_type, report_date, content) VALUES (?, ?, ?)",
+            (report.get("type", "daily"), report_date, json.dumps(report)),
+        )
+        await self.conn.commit()
+
+    async def retire_model(self, model_type: str, version: str) -> None:
+        """Retire a model version (e.g. shadow that underperformed)."""
+        await self.conn.execute(
+            "UPDATE model_versions SET status = 'retired' "
+            "WHERE model_type = ? AND version = ?",
+            (model_type, version),
+        )
+        await self.conn.commit()
+
+    async def get_shadow_models_ready(self, shadow_mode_days: int) -> list[dict]:
+        """Get shadow models that have completed their trial period."""
+        from datetime import timedelta
+
+        cutoff = (datetime.now(IST) - timedelta(days=shadow_mode_days)).isoformat()
+        cursor = await self.conn.execute(
+            "SELECT * FROM model_versions "
+            "WHERE status = 'shadow' AND shadow_start_date <= ?",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]

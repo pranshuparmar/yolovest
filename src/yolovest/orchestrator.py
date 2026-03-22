@@ -225,8 +225,14 @@ class HeartbeatOrchestrator:
             # Continue to next signal (don't run predict-track for failed trade)
             return results
 
-        # predict-track
-        predict_result = await self._run_skill("predict-track", signal=signal)
+        # predict-track — log the prediction with trade linkage
+        trade_id = None
+        if trade_result.success and trade_result.data:
+            trade = trade_result.data.get("trade", {})
+            trade_id = trade.get("trade_id") or trade.get("order_id")
+        predict_result = await self._run_skill(
+            "predict-track", signal=signal, mode="log", trade_id=trade_id
+        )
         results[f"{prefix}/predict-track"] = predict_result
 
         return results

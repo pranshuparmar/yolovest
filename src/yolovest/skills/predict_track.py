@@ -19,9 +19,16 @@ Phase B — Scoring (HEARTBEAT trigger):
 6. Feed results back to model-retrain for continuous improvement
 """
 
+import logging
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class PredictTrackSkill(SkillBase):
@@ -46,12 +53,13 @@ class PredictTrackSkill(SkillBase):
         prediction = {
             "symbol": signal["symbol"],
             "predicted_direction": signal["signal_type"],
-            "confidence": signal["confidence_score"],
+            "confidence": signal.get("confidence_score", signal.get("confidence", 0)),
             "predicted_target": signal["target_price"],
             "predicted_stop_loss": signal["stop_loss_price"],
-            "expected_holding_period": signal["expected_holding_period"],
+            "expected_holding_period": signal.get("expected_holding_period", "intraday"),
             "model_version": signal.get("model_version"),
             "trade_id": trade_id,
+            "entry_price": signal.get("entry_price"),
         }
         pred_id = await self.ctx.db.insert_prediction(prediction)
 
@@ -68,40 +76,57 @@ class PredictTrackSkill(SkillBase):
         correct = 0
 
         for pred in pending:
-            # Check if holding period has elapsed
-            if not self._is_elapsed(pred):
-                continue
+            try:
+                symbol = pred.get("symbol")
+                if not symbol:
+                    continue
 
-            # Fetch actual price at prediction end
-            actual_price = await self.ctx.market_data.get_price_at(
-                pred["symbol"], pred["prediction_end_time"]
-            )
+                # Fetch current price (for elapsed predictions, current price is the outcome)
+                try:
+                    actual_price = await self.ctx.market_data.get_ltp(symbol)
+                except Exception:
+                    # Fall back to latest OHLCV close
+                    bars = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=1)
+                    if bars:
+                        actual_price = bars[-1].close
+                    else:
+                        logger.warning("Cannot get price for %s, skipping", symbol)
+                        continue
 
-            # Score: direction correct?
-            entry = pred.get("entry_price", pred["predicted_target"])
-            if pred["predicted_direction"] == "BUY":
-                direction_correct = actual_price > entry
-                actual_pnl_pct = (actual_price - entry) / entry
-            else:
-                direction_correct = actual_price < entry
-                actual_pnl_pct = (entry - actual_price) / entry
+                entry = pred.get("entry_price", 0)
+                if not entry or entry <= 0:
+                    continue
 
-            # Target hit?
-            target_hit = (
-                (pred["predicted_direction"] == "BUY" and actual_price >= pred["predicted_target"])
-                or (pred["predicted_direction"] == "SELL" and actual_price <= pred["predicted_target"])
-            )
+                direction = pred.get("predicted_direction", "BUY")
 
-            await self.ctx.db.score_prediction(
-                pred["id"],
-                actual_price=actual_price,
-                direction_correct=direction_correct,
-                target_hit=target_hit,
-                actual_pnl_pct=actual_pnl_pct,
-            )
-            scored += 1
-            if direction_correct:
-                correct += 1
+                # Score: direction correct?
+                if direction == "BUY":
+                    direction_correct = actual_price > entry
+                    actual_pnl_pct = (actual_price - entry) / entry
+                else:
+                    direction_correct = actual_price < entry
+                    actual_pnl_pct = (entry - actual_price) / entry
+
+                # Target hit?
+                target = pred.get("predicted_target", 0)
+                target_hit = (
+                    (direction == "BUY" and actual_price >= target)
+                    or (direction == "SELL" and actual_price <= target)
+                )
+
+                await self.ctx.db.score_prediction(
+                    pred["id"],
+                    actual_price=actual_price,
+                    direction_correct=direction_correct,
+                    target_hit=target_hit,
+                    actual_pnl_pct=actual_pnl_pct,
+                )
+                scored += 1
+                if direction_correct:
+                    correct += 1
+
+            except Exception as e:
+                logger.warning("Failed to score prediction %s: %s", pred.get("id"), e)
 
         # FR-7.3: Update scoreboard
         if scored > 0:
@@ -117,7 +142,3 @@ class PredictTrackSkill(SkillBase):
                 "accuracy": correct / scored if scored > 0 else None,
             },
         )
-
-    def _is_elapsed(self, prediction: dict) -> bool:
-        """Check if prediction's expected holding period has passed."""
-        raise NotImplementedError

@@ -120,7 +120,59 @@ class ModelRetrainSkill(SkillBase):
         )
 
     async def _check_shadow_promotions(self) -> list[dict]:
-        """Check if shadow models have completed trial period. FR-7.5."""
-        # In production, query model_versions for shadow models past shadow_mode_days
-        # and compare their live performance vs production. For now, return empty.
-        return []
+        """Check if shadow models have completed trial period. FR-7.5.
+
+        Shadow models that have run for >= shadow_mode_days are evaluated:
+        - If shadow metrics (Sharpe, win_rate) >= production metrics: promote
+        - Otherwise: retire the shadow model (rollback)
+        """
+        cfg = self.ctx.config.retraining
+        shadow_models = await self.ctx.db.get_shadow_models_ready(cfg.shadow_mode_days)
+        promotions = []
+
+        for shadow in shadow_models:
+            model_type = shadow["model_type"]
+            current = await self.ctx.db.get_production_model(model_type)
+
+            # Compare: shadow must beat current production on Sharpe ratio
+            shadow_sharpe = shadow.get("sharpe_ratio", 0) or 0
+            current_sharpe = (current.get("sharpe_ratio", 0) or 0) if current else 0
+
+            if shadow_sharpe >= current_sharpe:
+                # Promote shadow to production
+                await self.ctx.db.promote_model(model_type, shadow["version"])
+                if self.ctx.ml:
+                    try:
+                        await self.ctx.ml.load_model(model_type, shadow["version"])
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to load promoted model %s/%s: %s",
+                            model_type, shadow["version"], e,
+                        )
+                promotions.append({
+                    "model_type": model_type,
+                    "version": shadow["version"],
+                    "action": "promoted",
+                    "shadow_sharpe": shadow_sharpe,
+                    "previous_sharpe": current_sharpe,
+                })
+                logger.info(
+                    "Promoted shadow model %s/%s (Sharpe: %.2f > %.2f)",
+                    model_type, shadow["version"], shadow_sharpe, current_sharpe,
+                )
+            else:
+                # Retire underperforming shadow
+                await self.ctx.db.retire_model(model_type, shadow["version"])
+                promotions.append({
+                    "model_type": model_type,
+                    "version": shadow["version"],
+                    "action": "retired",
+                    "shadow_sharpe": shadow_sharpe,
+                    "production_sharpe": current_sharpe,
+                })
+                logger.info(
+                    "Retired shadow model %s/%s (Sharpe: %.2f < %.2f)",
+                    model_type, shadow["version"], shadow_sharpe, current_sharpe,
+                )
+
+        return promotions

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses OpenClaw for agent orchestration, Google Gemini for LLM reasoning, XGBoost/LightGBM for ML signals, and Zerodha Kite Connect (free tier) for execution. Market data comes from free providers (jugaad-data, yfinance, tvDatafeed).
 
-**Current state:** Phases 0–3 complete. Phase 4 (Self-Learning) is next. See `plan.md` for implementation plans and `docs/` for review reports.
+**Current state:** Phases 0–4 complete. Phase 5 (Dashboard & Reporting UI) is next. See `plan.md` for implementation plans and `docs/` for review reports.
 
 ## What's Built
 
@@ -58,6 +58,16 @@ YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses 
 - **MarketDataIngester** — Added `get_ltp()` for last traded price via quote fallback chain
 - **ZerodhaBroker** — Added `modify_sl_order()` for trailing SL updates (paper + live)
 - **Tests** — 393 passing (67 new: risk-check, llm-review, trade-execute, position-monitor, square-off, DB Phase 3 methods)
+
+### Phase 4 — Self-Learning & Reporting (Complete)
+
+- **Predict-track** (`skills/predict_track.py`) — Dual-mode skill: "log" mode records predictions with trade linkage (FR-7.1), "score" mode evaluates elapsed predictions against actual prices (FR-7.2). Graceful fallback from LTP to OHLCV close for price lookups
+- **Prediction scoreboard** — Aggregated accuracy stats by symbol, model version, and overall (FR-7.3). Auto-refreshed after scoring. Stored in `prediction_scoreboard` table
+- **Shadow model promotion** (`skills/model_retrain.py`) — Full A/B testing lifecycle (FR-7.5): shadow models that complete trial period are compared on Sharpe ratio, promoted if improved, retired if not. Auto-loads promoted model
+- **Report generation** (`skills/report_generate.py`) — Daily reports (FR-8.4): trades, PnL, win rate, slippage, prediction accuracy, Gemini market summary. Weekly reports (FR-8.5): cumulative PnL, best/worst trades, LLM review accuracy (FR-7.8), prediction trends
+- **Database** — Migration 003: prediction_scoreboard and reports tables. 12 new methods: `insert_prediction`, `get_unscored_predictions`, `score_prediction`, `refresh_prediction_scoreboard`, `get_prediction_scoreboard`, `get_todays_predictions`, `get_weekly_trades/predictions/llm_reviews`, `store_report`, `get_shadow_models_ready`, `retire_model`
+- **Orchestrator** — Fixed predict-track invocation to pass `mode="log"` and `trade_id` linkage
+- **Tests** — 432 passing (39 new: predict-track, report-generate, model-retrain shadow promotion, DB Phase 4 methods)
 
 ## Architecture
 
@@ -118,8 +128,8 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 - **Phase 1** (complete): Database + migrations, market data providers with fallback chain, feature engineering, Zerodha broker, Gemini LLM
 - **Phase 2** (complete): Intelligence — news aggregation + dedup, sentiment analysis, dynamic scanner with weighted scoring, ML signal models (XGBoost), backtesting engine, model retraining with shadow mode
 - **Phase 3** (complete): Risk & execution — risk manager (all FR-5 rules), LLM trade review gate, order executor (paper + live), position monitor with trailing SL, square-off
-- Phase 4 (next): Self-learning — prediction tracking outcome scoring, model retraining loop, A/B testing
-- Phase 5: Dashboard & reporting
+- **Phase 4** (complete): Self-learning & reporting — prediction tracking + scoring, prediction scoreboard, shadow model promotion/retirement, daily/weekly report generation with LLM review accuracy tracking
+- Phase 5 (next): Dashboard & reporting UI — FastAPI web dashboard, WebSocket live updates, trade detail view, Telegram integration
 
 ## Domain Context
 
