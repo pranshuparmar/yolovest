@@ -124,9 +124,13 @@ class CronScheduler:
         )
         return result
 
+    def _now(self) -> datetime:
+        """Return the current time.  Extracted for easy patching in tests."""
+        return datetime.now()
+
     async def _check_and_fire(self) -> None:
         """One iteration: check every CRON skill and fire those that are due."""
-        now = datetime.now()
+        now = self._now()
 
         # Skip holidays entirely
         if self._ctx.market_hours.is_holiday(now.date()):
