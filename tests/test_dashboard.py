@@ -1,14 +1,11 @@
 """Tests for FastAPI dashboard (Phase 5, FR-8)."""
 
 import base64
-import json
-
-import pytest
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
-from yolovest.config import AppConfig
 from yolovest.context import AppContext, MarketHoursChecker
 from yolovest.dashboard.app import create_app
 from yolovest.events import EventBus

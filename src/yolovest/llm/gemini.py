@@ -48,7 +48,7 @@ class GeminiLLM(LLMBase):
     def _get_client(self) -> Any:
         """Lazy-init Gemini client."""
         if self._client is None:
-            from google import genai  # type: ignore[import-untyped]
+            from google import genai
 
             self._client = genai.Client(api_key=self._api_key)
         return self._client
@@ -73,7 +73,7 @@ class GeminiLLM(LLMBase):
                     contents=prompt,
                     config=config if config else None,
                 )
-                return response.text
+                return str(response.text)
             except Exception as e:
                 last_error = e
                 delay = self._retry_base_delay * (2 ** attempt)
@@ -93,7 +93,8 @@ class GeminiLLM(LLMBase):
         for attempt in range(self._max_retries):
             try:
                 text = await self._generate(prompt, model=model, json_mode=True)
-                return json.loads(text)
+                result: dict[str, Any] = json.loads(text)
+                return result
             except json.JSONDecodeError as e:
                 last_error = e
                 logger.warning(
@@ -132,13 +133,15 @@ class GeminiLLM(LLMBase):
         """Review a trade signal with full context (Pro model)."""
         prompt = (
             "You are a professional Indian stock market trader and risk manager.\n"
-            "Review the following trade signal and decide whether to APPROVE, REJECT, or RESIZE.\n\n"
+            "Review the following trade signal and decide whether to "
+            "APPROVE, REJECT, or RESIZE.\n\n"
             f"Signal: {context.signal.model_dump_json()}\n"
             f"Portfolio: {context.portfolio.model_dump_json()}\n"
             f"Sentiment: {context.sentiment.model_dump_json() if context.sentiment else 'N/A'}\n"
             f"Today's trades: {len(context.todays_trades)}\n\n"
             "Respond with JSON matching this schema:\n"
-            '{"decision": "APPROVE"|"REJECT"|"RESIZE", "reasoning": "...", "adjusted_size": null|int}\n'
+            '{"decision": "APPROVE"|"REJECT"|"RESIZE", '
+            '"reasoning": "...", "adjusted_size": null|int}\n'
             "If RESIZE, provide adjusted_size. Otherwise set it to null."
         )
         data = await self._generate_json(prompt, model=self._model)
@@ -205,7 +208,8 @@ class GeminiLLM(LLMBase):
             "Provide a concise end-of-day summary for today's Indian stock market.\n\n"
             "Respond with JSON:\n"
             '{"date": "YYYY-MM-DD", "market_sentiment": "bullish"|"bearish"|"neutral", '
-            '"key_events": ["event1"], "sector_highlights": {"sector": "summary"}, "outlook": "..."}'
+            '"key_events": ["event1"], "sector_highlights": '
+            '{"sector": "summary"}, "outlook": "..."}'
         )
         data = await self._generate_json(prompt, model=self._model)
         if "date" not in data:

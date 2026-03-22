@@ -109,7 +109,10 @@ class TestVWAP:
         assert compute_vwap([]) is None
 
     def test_vwap_zero_volume(self):
-        bars = [OHLCVBar(timestamp=datetime.now(), open=100, high=105, low=95, close=100, volume=0)]
+        bars = [OHLCVBar(
+            timestamp=datetime.now(),
+            open=100, high=105, low=95, close=100, volume=0,
+        )]
         assert compute_vwap(bars) is None
 
 

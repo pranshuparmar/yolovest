@@ -20,7 +20,6 @@ Phase B — Scoring (HEARTBEAT trigger):
 """
 
 import logging
-from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -48,7 +47,7 @@ class PredictTrackSkill(SkillBase):
         else:
             return await self._score_elapsed_predictions()
 
-    async def _log_prediction(self, signal: dict, trade_id: str | None) -> SkillResult:
+    async def _log_prediction(self, signal: dict[str, Any], trade_id: str | None) -> SkillResult:
         """FR-7.1: Log a new prediction."""
         prediction = {
             "symbol": signal["symbol"],

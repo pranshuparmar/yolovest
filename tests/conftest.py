@@ -28,11 +28,20 @@ def sample_config() -> AppConfig:
         broker={"name": "zerodha", "api_key": "test_key", "api_secret": "test_secret"},
         llm={"provider": "gemini", "model": "gemini-2.5-flash", "api_key": "test_key"},
         market_data={"daily_provider": "jugaad", "stale_threshold_minutes": 30},
-        heartbeat={"market_hours_interval_min": 15, "off_hours_interval_min": 60, "max_consecutive_skips": 3},
+        heartbeat={
+            "market_hours_interval_min": 15,
+            "off_hours_interval_min": 60,
+            "max_consecutive_skips": 3,
+        },
         scanning={
             "seed_symbols": ["RELIANCE", "TCS"],
             "shortlist_size": 10,
-            "weights": {"technical": 0.40, "volume_momentum": 0.25, "news_sentiment": 0.20, "fundamental": 0.15},
+            "weights": {
+                "technical": 0.40,
+                "volume_momentum": 0.25,
+                "news_sentiment": 0.20,
+                "fundamental": 0.15,
+            },
         },
         risk={
             "max_risk_per_trade_pct": 0.02,
@@ -137,7 +146,12 @@ def mock_llm() -> AsyncMock:
     llm.ping = AsyncMock(return_value=True)
     llm.review_trade = AsyncMock(return_value={"decision": "APPROVE", "reasoning": "Looks good"})
     llm.analyze_sentiment = AsyncMock(
-        return_value={"symbol": "RELIANCE", "sentiment": "bullish", "confidence": 0.8, "key_drivers": ["strong earnings"]}
+        return_value={
+            "symbol": "RELIANCE",
+            "sentiment": "bullish",
+            "confidence": 0.8,
+            "key_drivers": ["strong earnings"],
+        }
     )
     llm.summarize_with_web_grounding = AsyncMock(return_value={"summary": "Market is bullish"})
     llm.validate_watchlist = AsyncMock(return_value={"adjusted_shortlist": []})

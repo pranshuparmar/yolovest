@@ -124,7 +124,7 @@ class TrendlyneScraper:
             return None
 
     @staticmethod
-    def _parse_api_response(data: dict, symbol: str) -> dict[str, Any] | None:
+    def _parse_api_response(data: dict[str, Any], symbol: str) -> dict[str, Any] | None:
         """Parse Trendlyne API JSON response."""
         result: dict[str, Any] = {}
 

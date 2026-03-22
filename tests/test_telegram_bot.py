@@ -1,7 +1,6 @@
 """Tests for Telegram bot and notifier integration."""
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from yolovest.notify import Notifier, _format_trade_alert
 from yolovest.telegram_bot import TelegramBot
@@ -136,7 +135,6 @@ class TestKillSwitchCommands:
         app_context.db.set_system_state.assert_awaited_with("kill_switch", "active")
 
     async def test_resume_clears_system_state(self, app_context):
-        from unittest.mock import patch
 
         from yolovest.skills.kill_switch import KillSwitchSkill
 

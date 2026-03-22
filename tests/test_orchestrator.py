@@ -9,11 +9,9 @@ so we mock the registry skills via monkeypatch.
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from yolovest.config import AppConfig
 from yolovest.context import AppContext, MarketHoursChecker
 from yolovest.events import EventBus
 from yolovest.orchestrator import HeartbeatOrchestrator
@@ -50,7 +48,9 @@ def _make_stub(ctx: Any, name: str, succeed: bool = True, data: dict | None = No
 
 
 @pytest.fixture
-def orchestrator_context(sample_config, mock_broker, mock_llm, mock_db, mock_market_data, mock_notify):
+def orchestrator_context(
+    sample_config, mock_broker, mock_llm, mock_db, mock_market_data, mock_notify,
+):
     market_hours = MarketHoursChecker(sample_config)
     return AppContext(
         config=sample_config,
@@ -64,7 +64,9 @@ def orchestrator_context(sample_config, mock_broker, mock_llm, mock_db, mock_mar
     )
 
 
-def _build_orchestrator(ctx: AppContext, overrides: dict[str, StubSkill] | None = None) -> HeartbeatOrchestrator:
+def _build_orchestrator(
+    ctx: AppContext, overrides: dict[str, StubSkill] | None = None,
+) -> HeartbeatOrchestrator:
     """Build an orchestrator and replace its internal skills with stubs."""
     orch = HeartbeatOrchestrator(ctx)
 

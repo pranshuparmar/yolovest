@@ -19,7 +19,8 @@ def _parse_rss(url: str) -> dict[str, Any]:
     """Parse RSS feed using feedparser (blocking call)."""
     import feedparser
 
-    return feedparser.parse(url)
+    result: dict[str, Any] = feedparser.parse(url)
+    return result
 
 
 class LiveMintSource(NewsSource):
@@ -62,7 +63,7 @@ class LiveMintSource(NewsSource):
         return articles
 
     @staticmethod
-    def _parse_date(entry: dict) -> datetime | None:
+    def _parse_date(entry: dict[str, Any]) -> datetime | None:
         """Extract published date from feedparser entry."""
         parsed = entry.get("published_parsed")
         if parsed:

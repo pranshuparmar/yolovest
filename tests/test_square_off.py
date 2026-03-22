@@ -1,7 +1,8 @@
 """Tests for square-off skill (Phase 3, FR-5.9, FR-5.10)."""
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
 
 from yolovest.skills.square_off import SquareOffSkill
 

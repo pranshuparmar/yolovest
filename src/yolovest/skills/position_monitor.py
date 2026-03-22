@@ -11,7 +11,7 @@ Flow:
    a. Check if target hit → emit exit signal
    b. Check if SL hit → record loss
    c. Check trailing SL logic (FR-5.8):
-      - If profit >= trailing_sl_trigger_multiple × risk → move SL to breakeven
+      - If profit >= trailing_sl_trigger_multiple x risk -> move SL to breakeven
       - Continue trailing SL upward in trailing_sl_step_pct increments
    d. Modify SL order on broker if trail triggered
 4. Track unrealized PnL for portfolio state
@@ -31,7 +31,7 @@ class PositionMonitorSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        return self.ctx.market_hours.is_market_hours()
+        return bool(self.ctx.market_hours.is_market_hours())
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         cfg = self.ctx.config.risk
@@ -72,7 +72,10 @@ class PositionMonitorSkill(SkillBase):
 
             # Trailing SL (FR-5.8)
             if cfg.trailing_sl_enabled and risk_per_share > 0:
-                profit = (current_price - entry) if pos["signal_type"] == "BUY" else (entry - current_price)
+                if pos["signal_type"] == "BUY":
+                    profit = current_price - entry
+                else:
+                    profit = entry - current_price
                 profit_multiple = profit / risk_per_share
 
                 if profit_multiple >= cfg.trailing_sl_trigger_multiple:
@@ -103,12 +106,12 @@ class PositionMonitorSkill(SkillBase):
             },
         )
 
-    def _reconcile(self, local: list[dict], broker: list[dict]) -> list[str]:
+    def _reconcile(self, local: list[dict[str, Any]], broker: list[dict[str, Any]]) -> list[str]:
         """Compare local DB positions with broker positions. FR-6.5."""
         discrepancies = []
 
         # Build lookup by symbol for broker positions
-        broker_by_symbol: dict[str, dict] = {}
+        broker_by_symbol: dict[str, dict[str, Any]] = {}
         for bp in broker:
             sym = bp.get("tradingsymbol") or bp.get("symbol", "")
             broker_by_symbol[sym] = bp

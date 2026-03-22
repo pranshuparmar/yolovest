@@ -4,9 +4,8 @@ Tests publish/subscribe, multiple subscribers, unsubscribe,
 and async handler support.
 """
 
-import pytest
 
-from yolovest.events import Event, EventBus
+from yolovest.events import Event
 
 
 class TestEventBusSubscribe:

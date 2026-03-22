@@ -1,7 +1,8 @@
 """Tests for position-monitor skill (Phase 3, FR-5.8, FR-6.5)."""
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
 
 from yolovest.skills.position_monitor import PositionMonitorSkill
 

@@ -41,8 +41,6 @@ class RiskCheckSkill(SkillBase):
     async def execute(self, **kwargs: Any) -> SkillResult:
         signal = kwargs["signal"]
         cfg = self.ctx.config.risk
-        rejections: list[str] = []
-
         portfolio = await self.ctx.db.get_portfolio_state()
 
         # FR-5.14/5.15: Kill switch
@@ -72,7 +70,10 @@ class RiskCheckSkill(SkillBase):
 
         # FR-5.2: Max portfolio exposure
         if portfolio["exposure_pct"] >= cfg.max_portfolio_exposure_pct:
-            return self._reject(signal, f"Portfolio exposure limit ({cfg.max_portfolio_exposure_pct:.0%})")
+            return self._reject(
+                signal,
+                f"Portfolio exposure limit ({cfg.max_portfolio_exposure_pct:.0%})",
+            )
 
         # FR-5.4: Max single stock exposure
         stock_exposure = portfolio["stock_exposures"].get(signal["symbol"], 0)
@@ -83,7 +84,10 @@ class RiskCheckSkill(SkillBase):
         stock_sector = await self.ctx.db.get_stock_sector(signal["symbol"])
         sector_count = portfolio["sector_counts"].get(stock_sector, 0)
         if sector_count >= cfg.max_same_sector_positions:
-            return self._reject(signal, f"Sector limit ({stock_sector}: {cfg.max_same_sector_positions})")
+            return self._reject(
+                signal,
+                f"Sector limit ({stock_sector}: {cfg.max_same_sector_positions})",
+            )
 
         # FR-5.7: Mandatory stop-loss
         if cfg.mandatory_stop_loss and not signal.get("stop_loss_price"):
@@ -96,7 +100,8 @@ class RiskCheckSkill(SkillBase):
         if available_cash < min_trade_value:
             return self._reject(
                 signal,
-                f"Capital exhaustion: cash ₹{available_cash:,.0f} < min trade ₹{min_trade_value:,.0f}",
+                "Capital exhaustion: "
+                f"cash ₹{available_cash:,.0f} < min trade ₹{min_trade_value:,.0f}",
             )
 
         # FR-5.1: Position sizing based on max risk per trade
@@ -135,7 +140,7 @@ class RiskCheckSkill(SkillBase):
             },
         )
 
-    def _reject(self, signal: dict, reason: str) -> SkillResult:
+    def _reject(self, signal: dict[str, Any], reason: str) -> SkillResult:
         return SkillResult(
             success=True,  # skill ran fine, trade was rejected by design
             skill_name=self.name,

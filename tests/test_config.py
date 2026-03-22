@@ -49,14 +49,14 @@ class TestScanningWeightsValidation:
         assert w.technical == 0.30
 
     def test_weights_not_summing_to_one_raises(self):
-        with pytest.raises(ValidationError, match="[Ww]eights.*sum to 1.0"):
+        with pytest.raises(ValidationError, match=r"[Ww]eights.*sum to 1.0"):
             ScanningWeights(
                 technical=0.50, volume_momentum=0.30,
                 news_sentiment=0.20, fundamental=0.20,
             )
 
     def test_weights_below_one_raises(self):
-        with pytest.raises(ValidationError, match="[Ww]eights.*sum to 1.0"):
+        with pytest.raises(ValidationError, match=r"[Ww]eights.*sum to 1.0"):
             ScanningWeights(
                 technical=0.10, volume_momentum=0.10,
                 news_sentiment=0.10, fundamental=0.10,
@@ -110,7 +110,7 @@ class TestMarketHoursValidation:
         assert mh.order_start == "09:15"
 
     def test_order_start_before_market_open_raises(self):
-        with pytest.raises(ValidationError, match="order_start.*before.*open"):
+        with pytest.raises(ValidationError, match=r"order_start.*before.*open"):
             MarketHoursConfig(
                 open="09:15",
                 close="15:30",
@@ -119,7 +119,7 @@ class TestMarketHoursValidation:
             )
 
     def test_order_end_after_market_close_raises(self):
-        with pytest.raises(ValidationError, match="order_end.*after.*close"):
+        with pytest.raises(ValidationError, match=r"order_end.*after.*close"):
             MarketHoursConfig(
                 open="09:15",
                 close="15:30",
@@ -128,7 +128,7 @@ class TestMarketHoursValidation:
             )
 
     def test_square_off_after_close_raises(self):
-        with pytest.raises(ValidationError, match="square_off.*after.*close"):
+        with pytest.raises(ValidationError, match=r"square_off.*after.*close"):
             MarketHoursConfig(
                 open="09:15",
                 close="15:30",

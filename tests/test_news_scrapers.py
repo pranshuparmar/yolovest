@@ -5,7 +5,7 @@ All HTTP/RSS calls are mocked — no real network access.
 
 import time
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -16,7 +16,6 @@ from yolovest.news.et_markets import ETMarketsSource
 from yolovest.news.livemint import LiveMintSource
 from yolovest.news.moneycontrol import MoneyControlSource
 from yolovest.news.nse_official import NSEOfficialSource
-
 
 # ---------------------------------------------------------------------------
 # Helpers

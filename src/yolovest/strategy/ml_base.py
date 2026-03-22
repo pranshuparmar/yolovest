@@ -14,22 +14,24 @@ class MLBase(ABC):
     """Abstract ML model interface for trading signal generation."""
 
     @abstractmethod
-    async def predict_intraday(self, symbol: str, features: dict) -> MLPrediction:
+    async def predict_intraday(self, symbol: str, features: dict[str, Any]) -> MLPrediction:
         """Generate an intraday trading signal for a symbol."""
         ...
 
     @abstractmethod
-    async def predict_swing(self, symbol: str, features: dict) -> MLPrediction:
+    async def predict_swing(self, symbol: str, features: dict[str, Any]) -> MLPrediction:
         """Generate a swing trading signal for a symbol."""
         ...
 
     @abstractmethod
-    async def train(self, model_type: str, X: Any, y: Any, params: dict) -> dict:
+    async def train(
+        self, model_type: str, X: Any, y: Any, params: dict[str, Any]  # noqa: N803
+    ) -> dict[str, Any]:
         """Train a model and return metrics dict."""
         ...
 
     @abstractmethod
-    async def save_model(self, model_type: str, metrics: dict) -> str:
+    async def save_model(self, model_type: str, metrics: dict[str, Any]) -> str:
         """Serialize trained model to disk. Returns version string."""
         ...
 
@@ -39,7 +41,7 @@ class MLBase(ABC):
         ...
 
     @abstractmethod
-    async def get_production_metrics(self, model_type: str) -> dict:
+    async def get_production_metrics(self, model_type: str) -> dict[str, Any]:
         """Retrieve production performance metrics from DB."""
         ...
 

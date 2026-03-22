@@ -164,7 +164,7 @@ class ReportGenerateSkill(SkillBase):
         return SkillResult(success=True, skill_name=self.name, data=report)
 
     @staticmethod
-    def _format_daily_report(report: dict) -> str:
+    def _format_daily_report(report: dict[str, Any]) -> str:
         """Format daily report for Telegram/console."""
         pnl = report.get("total_pnl", 0)
         pnl_emoji = "+" if pnl >= 0 else ""
@@ -184,7 +184,7 @@ class ReportGenerateSkill(SkillBase):
         return "\n".join(lines)
 
     @staticmethod
-    def _format_weekly_report(report: dict) -> str:
+    def _format_weekly_report(report: dict[str, Any]) -> str:
         """Format weekly report for Telegram/console."""
         pnl = report.get("total_pnl", 0)
         pnl_sign = "+" if pnl >= 0 else ""

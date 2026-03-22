@@ -1,7 +1,8 @@
 """Tests for trade-execute skill (Phase 3, FR-6)."""
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
 
 from yolovest.skills.trade_execute import TradeExecuteSkill
 

@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
+from typing import Any
+
 from yolovest.models.schemas import EconomicEvent, NewsArticle, OHLCVBar, SentimentResult
 
 logger = logging.getLogger(__name__)
@@ -226,7 +228,7 @@ class Database:
     # Watchlist
     # ------------------------------------------------------------------
 
-    async def upsert_watchlist(self, stocks: list[dict]) -> None:
+    async def upsert_watchlist(self, stocks: list[dict[str, Any]]) -> None:
         """Replace watchlist with new scored stocks (atomic)."""
         await self.conn.execute("BEGIN")
         try:
@@ -251,7 +253,7 @@ class Database:
             await self.conn.rollback()
             raise
 
-    async def get_watchlist(self) -> list[dict]:
+    async def get_watchlist(self) -> list[dict[str, Any]]:
         """Get current watchlist ordered by composite score."""
         cursor = await self.conn.execute(
             "SELECT symbol, composite_score, technical_score, volume_momentum_score, "
@@ -259,19 +261,19 @@ class Database:
             "FROM watchlist ORDER BY composite_score DESC"
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
     # Positions (read from trades table)
     # ------------------------------------------------------------------
 
-    async def get_open_positions(self) -> list[dict]:
+    async def get_open_positions(self) -> list[dict[str, Any]]:
         """Get trades with status 'open' or 'partially_filled'."""
         cursor = await self.conn.execute(
             "SELECT * FROM trades WHERE status IN ('open', 'partially_filled')"
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
     # Audit Log (NFR-5)
@@ -281,8 +283,8 @@ class Database:
         self,
         action_type: str,
         skill_name: str | None = None,
-        input_summary: dict | None = None,
-        output_summary: dict | None = None,
+        input_summary: dict[str, Any] | None = None,
+        output_summary: dict[str, Any] | None = None,
         duration_ms: float | None = None,
         *,
         auto_commit: bool = True,
@@ -316,7 +318,7 @@ class Database:
     # Pre-market Data (Phase 2, FR-2.10)
     # ------------------------------------------------------------------
 
-    async def upsert_premarket(self, data: dict) -> None:
+    async def upsert_premarket(self, data: dict[str, Any]) -> None:
         """Insert or update today's pre-market context."""
         from datetime import date
 
@@ -327,7 +329,7 @@ class Database:
         # Extract bias from LLM summary if it's a WebGroundingResult-like object
         bias = None
         summary_text = None
-        if hasattr(llm, "summary"):
+        if llm is not None and hasattr(llm, "summary"):
             summary_text = llm.summary
         elif isinstance(llm, dict):
             summary_text = llm.get("summary")
@@ -351,13 +353,13 @@ class Database:
         )
         await self.conn.commit()
 
-    async def get_latest_premarket(self) -> dict:
+    async def get_latest_premarket(self) -> dict[str, Any]:
         """Get the most recent pre-market context."""
         cursor = await self.conn.execute(
             "SELECT * FROM premarket ORDER BY date DESC LIMIT 1"
         )
         row = await cursor.fetchone()
-        return dict(row) if row else {}
+        return dict[str, Any](row) if row else {}
 
     # ------------------------------------------------------------------
     # Sentiment (Phase 2, FR-2.7)
@@ -429,7 +431,7 @@ class Database:
     # Economic Calendar (FR-2.6)
     # ------------------------------------------------------------------
 
-    async def upsert_economic_events(self, events: list[dict]) -> int:
+    async def upsert_economic_events(self, events: list[dict[str, Any]]) -> int:
         """Insert economic calendar events, skipping duplicates. Returns count inserted."""
         inserted = 0
         for event in events:
@@ -457,7 +459,7 @@ class Database:
 
     async def get_upcoming_economic_events(
         self, days: int = 7, country: str | None = None, event_type: str | None = None
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Get economic events within the next N days, optionally filtered."""
         from datetime import timedelta
 
@@ -481,9 +483,9 @@ class Database:
 
         cursor = await self.conn.execute(query, params)
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
-    async def get_earnings_events(self, symbol: str | None = None, days: int = 30) -> list[dict]:
+    async def get_earnings_events(self, symbol: str | None = None, days: int = 30) -> list[dict[str, Any]]:
         """Get upcoming earnings/board meeting dates, optionally for a specific symbol."""
         from datetime import timedelta
 
@@ -505,13 +507,13 @@ class Database:
 
         cursor = await self.conn.execute(query, params)
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
     # Signals (Phase 2, FR-4.5)
     # ------------------------------------------------------------------
 
-    async def insert_signal(self, signal: dict) -> None:
+    async def insert_signal(self, signal: dict[str, Any]) -> None:
         """Persist a generated signal."""
         await self.conn.execute(
             "INSERT INTO signals (symbol, signal_type, entry_price, target_price, "
@@ -535,7 +537,7 @@ class Database:
     # Fundamentals (Phase 2, FR-2.4)
     # ------------------------------------------------------------------
 
-    async def upsert_fundamentals(self, symbol: str, data: dict) -> None:
+    async def upsert_fundamentals(self, symbol: str, data: dict[str, Any]) -> None:
         """Insert or update fundamental data for a symbol."""
         await self.conn.execute(
             "INSERT INTO fundamentals (symbol, pe_ratio, pb_ratio, debt_to_equity, "
@@ -561,7 +563,7 @@ class Database:
     # NSE Universe (Phase 2, FR-3.1)
     # ------------------------------------------------------------------
 
-    async def get_nse_universe(self) -> list[dict]:
+    async def get_nse_universe(self) -> list[dict[str, Any]]:
         """Get all symbols with OHLCV data, enriched with sentiment and fundamentals.
 
         Returns dicts with sub-scores for market-scan scoring.
@@ -580,14 +582,14 @@ class Database:
             "GROUP BY o.symbol"
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
     # Model Versions (Phase 2, FR-7.7)
     # ------------------------------------------------------------------
 
     async def save_model_version(
-        self, model_type: str, version: str, file_path: str, metrics: dict
+        self, model_type: str, version: str, file_path: str, metrics: dict[str, Any]
     ) -> None:
         """Save a new model version record."""
         await self.conn.execute(
@@ -606,7 +608,7 @@ class Database:
         )
         await self.conn.commit()
 
-    async def get_production_model(self, model_type: str) -> dict | None:
+    async def get_production_model(self, model_type: str) -> dict[str, Any] | None:
         """Get the current production model for a model type."""
         cursor = await self.conn.execute(
             "SELECT * FROM model_versions "
@@ -615,7 +617,7 @@ class Database:
             (model_type,),
         )
         row = await cursor.fetchone()
-        return dict(row) if row else None
+        return dict[str, Any](row) if row else None
 
     async def promote_model(self, model_type: str, version: str) -> None:
         """Promote a shadow model to production, retire the current production."""
@@ -643,22 +645,22 @@ class Database:
     # Training Data (Phase 2, FR-7.4)
     # ------------------------------------------------------------------
 
-    async def get_training_dataset(self) -> dict:
+    async def get_training_dataset(self) -> dict[str, Any]:
         """Load OHLCV data for model training."""
         cursor = await self.conn.execute(
             "SELECT symbol, timestamp, open, high, low, close, volume "
             "FROM ohlcv WHERE interval = 'daily' ORDER BY symbol, timestamp"
         )
         rows = await cursor.fetchall()
-        return {"bars": [dict(row) for row in rows]}
+        return {"bars": [dict[str, Any](row) for row in rows]}
 
-    async def get_prediction_outcomes(self) -> list[dict]:
+    async def get_prediction_outcomes(self) -> list[dict[str, Any]]:
         """Load predictions with actual outcomes for retraining analysis."""
         cursor = await self.conn.execute(
             "SELECT * FROM predictions WHERE actual_price IS NOT NULL"
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
     # Failure Analysis (Phase 2, FR-7.6)
@@ -687,8 +689,8 @@ class Database:
     # Portfolio State (Phase 3, FR-5.1)
     # ------------------------------------------------------------------
 
-    async def get_portfolio_state(self) -> dict:
-        """Build portfolio state dict for risk checks.
+    async def get_portfolio_state(self) -> dict[str, Any]:
+        """Build portfolio state dict[str, Any] for risk checks.
 
         Computes total capital, exposure, per-stock/sector counts,
         daily/weekly PnL, trades today, and time since last loss.
@@ -823,7 +825,7 @@ class Database:
 
     async def log_llm_review(
         self,
-        signal: dict,
+        signal: dict[str, Any],
         decision: str,
         reasoning: str,
         adjusted_size: int | None = None,
@@ -845,7 +847,7 @@ class Database:
     # Sector Rotation (Phase 3, FR-3.5)
     # ------------------------------------------------------------------
 
-    async def get_sector_rotation(self) -> dict:
+    async def get_sector_rotation(self) -> dict[str, Any]:
         """Get sector rotation data from watchlist scores."""
         cursor = await self.conn.execute(
             "SELECT sector, AVG(composite_score) as avg_score, COUNT(*) as count "
@@ -873,7 +875,7 @@ class Database:
     # Today's Trades (Phase 3, FR-5)
     # ------------------------------------------------------------------
 
-    async def get_todays_trades(self) -> list[dict]:
+    async def get_todays_trades(self) -> list[dict[str, Any]]:
         """Get all trades created today."""
         today_start = datetime.now(IST).replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -883,10 +885,10 @@ class Database:
             (today_start,),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
-    async def get_latest_sentiment(self, symbol: str) -> dict | None:
-        """Get latest sentiment for a symbol as dict (for LLM review context)."""
+    async def get_latest_sentiment(self, symbol: str) -> dict[str, Any] | None:
+        """Get latest sentiment for a symbol as dict[str, Any] (for LLM review context)."""
         result = await self.get_sentiment(symbol)
         if result is None:
             return None
@@ -901,7 +903,7 @@ class Database:
     # Trade Management (Phase 3, FR-6)
     # ------------------------------------------------------------------
 
-    async def insert_trade(self, trade: dict) -> None:
+    async def insert_trade(self, trade: dict[str, Any]) -> None:
         """Insert a new trade record."""
         import uuid
 
@@ -970,7 +972,7 @@ class Database:
     # Predictions (Phase 4, FR-7.1)
     # ------------------------------------------------------------------
 
-    async def insert_prediction(self, prediction: dict) -> str:
+    async def insert_prediction(self, prediction: dict[str, Any]) -> str:
         """Insert a new prediction and return its ID."""
         import uuid
 
@@ -1019,7 +1021,7 @@ class Database:
         await self.conn.commit()
         return pred_id
 
-    async def get_unscored_predictions(self) -> list[dict]:
+    async def get_unscored_predictions(self) -> list[dict[str, Any]]:
         """Get predictions whose holding period has elapsed but haven't been scored."""
         now_ist = datetime.now(IST).isoformat()
         cursor = await self.conn.execute(
@@ -1038,7 +1040,7 @@ class Database:
             (now_ist,),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
     async def score_prediction(
         self,
@@ -1071,7 +1073,7 @@ class Database:
         if not scored_predictions:
             return
 
-        groups: dict[tuple[str, str], list[dict]] = {}
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
         for pred in scored_predictions:
             # Overall
@@ -1120,7 +1122,7 @@ class Database:
             )
         await self.conn.commit()
 
-    async def _get_all_scored_predictions(self) -> list[dict]:
+    async def _get_all_scored_predictions(self) -> list[dict[str, Any]]:
         """Get all predictions with outcomes for scoreboard computation."""
         cursor = await self.conn.execute(
             "SELECT p.prediction_id, p.direction_correct, p.target_hit, "
@@ -1131,9 +1133,9 @@ class Database:
             "WHERE p.actual_price IS NOT NULL"
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
-    async def get_prediction_scoreboard(self, group_type: str | None = None) -> list[dict]:
+    async def get_prediction_scoreboard(self, group_type: str | None = None) -> list[dict[str, Any]]:
         """Get prediction scoreboard entries, optionally filtered by group type."""
         if group_type:
             cursor = await self.conn.execute(
@@ -1146,9 +1148,9 @@ class Database:
                 "SELECT * FROM prediction_scoreboard ORDER BY group_type, total_predictions DESC"
             )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
-    async def get_todays_predictions(self) -> list[dict]:
+    async def get_todays_predictions(self) -> list[dict[str, Any]]:
         """Get predictions created today."""
         today_start = datetime.now(IST).replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -1161,13 +1163,13 @@ class Database:
             (today_start,),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
     # Weekly Data (Phase 4, FR-8.5)
     # ------------------------------------------------------------------
 
-    async def get_weekly_trades(self) -> list[dict]:
+    async def get_weekly_trades(self) -> list[dict[str, Any]]:
         """Get trades for the current week (Monday-Friday)."""
         from datetime import timedelta
 
@@ -1181,9 +1183,9 @@ class Database:
             (monday.isoformat(),),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
-    async def get_weekly_predictions(self) -> list[dict]:
+    async def get_weekly_predictions(self) -> list[dict[str, Any]]:
         """Get predictions for the current week."""
         from datetime import timedelta
 
@@ -1200,9 +1202,9 @@ class Database:
             (monday.isoformat(),),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
-    async def get_weekly_llm_reviews(self) -> list[dict]:
+    async def get_weekly_llm_reviews(self) -> list[dict[str, Any]]:
         """Get LLM reviews for the current week with linked trade PnL."""
         from datetime import timedelta
 
@@ -1219,13 +1221,13 @@ class Database:
             (monday.isoformat(),),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
     # Reports (Phase 4, FR-8.4/8.5)
     # ------------------------------------------------------------------
 
-    async def store_report(self, report: dict) -> None:
+    async def store_report(self, report: dict[str, Any]) -> None:
         """Store a report in the reports archive."""
         from datetime import date
 
@@ -1245,7 +1247,7 @@ class Database:
         )
         await self.conn.commit()
 
-    async def get_shadow_models_ready(self, shadow_mode_days: int) -> list[dict]:
+    async def get_shadow_models_ready(self, shadow_mode_days: int) -> list[dict[str, Any]]:
         """Get shadow models that have completed their trial period."""
         from datetime import timedelta
 
@@ -1256,7 +1258,7 @@ class Database:
             (cutoff,),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
     # Dashboard Queries (Phase 5, FR-8)
@@ -1268,10 +1270,10 @@ class Database:
         end_date: str | None = None,
         symbol: str | None = None,
         limit: int = 100,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Get trade history with optional filters (FR-8.7)."""
         query = "SELECT * FROM trades WHERE 1=1"
-        params: list = []
+        params: list[Any] = []
 
         if start_date:
             query += " AND created_at >= ?"
@@ -1288,9 +1290,9 @@ class Database:
 
         cursor = await self.conn.execute(query, params)
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]
 
-    async def get_equity_curve(self, days: int = 30) -> list[dict]:
+    async def get_equity_curve(self, days: int = 30) -> list[dict[str, Any]]:
         """Compute daily equity curve from closed trades (FR-8.1).
 
         Returns a list of {date, cumulative_pnl, trade_count} entries.
@@ -1322,7 +1324,7 @@ class Database:
             })
         return curve
 
-    async def get_trade_detail(self, trade_id: str) -> dict | None:
+    async def get_trade_detail(self, trade_id: str) -> dict[str, Any] | None:
         """Get full trade detail with reasoning chain (FR-8.3).
 
         Returns trade + linked signal, LLM review, prediction, and audit entries.
@@ -1335,7 +1337,7 @@ class Database:
         if not trade_row:
             return None
 
-        trade = dict(trade_row)
+        trade = dict[str, Any](trade_row)
 
         # Linked LLM review
         cursor = await self.conn.execute(
@@ -1343,7 +1345,7 @@ class Database:
             (trade_id,),
         )
         review_row = await cursor.fetchone()
-        trade["llm_review"] = dict(review_row) if review_row else None
+        trade["llm_review"] = dict[str, Any](review_row) if review_row else None
 
         # Linked prediction
         cursor = await self.conn.execute(
@@ -1351,7 +1353,7 @@ class Database:
             (trade_id,),
         )
         pred_row = await cursor.fetchone()
-        trade["prediction"] = dict(pred_row) if pred_row else None
+        trade["prediction"] = dict[str, Any](pred_row) if pred_row else None
 
         # Linked signal (via prediction → signal_id, or by matching symbol+time)
         if pred_row and pred_row["signal_id"]:
@@ -1359,7 +1361,7 @@ class Database:
                 "SELECT * FROM signals WHERE id = ?", (pred_row["signal_id"],)
             )
             sig_row = await cursor.fetchone()
-            trade["signal"] = dict(sig_row) if sig_row else None
+            trade["signal"] = dict[str, Any](sig_row) if sig_row else None
         else:
             trade["signal"] = None
 
@@ -1371,7 +1373,7 @@ class Database:
             (f"%{trade_id}%", f"%{trade_id}%"),
         )
         audit_rows = await cursor.fetchall()
-        trade["audit_trail"] = [dict(r) for r in audit_rows]
+        trade["audit_trail"] = [dict[str, Any](r) for r in audit_rows]
 
         return trade
 
@@ -1381,10 +1383,10 @@ class Database:
         start_date: str | None = None,
         end_date: str | None = None,
         limit: int = 30,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Get historical reports with optional filters (FR-8.7)."""
         query = "SELECT * FROM reports WHERE 1=1"
-        params: list = []
+        params: list[Any] = []
 
         if report_type:
             query += " AND report_type = ?"
@@ -1404,8 +1406,8 @@ class Database:
 
         result = []
         for row in rows:
-            entry = dict(row)
-            # Parse JSON content back to dict
+            entry = dict[str, Any](row)
+            # Parse JSON content back to dict[str, Any]
             if entry.get("content"):
                 try:
                     entry["content"] = json.loads(entry["content"])
@@ -1433,7 +1435,7 @@ class Database:
 
     async def run_retention_cleanup(
         self, ohlcv_days: int = 730, audit_days: int = 365, predictions_days: int = 365
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Delete data older than retention periods (FR-10.3)."""
         from datetime import timedelta
 
@@ -1467,7 +1469,7 @@ class Database:
 
     async def get_audit_log(
         self, limit: int = 50, action_type: str | None = None
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Get recent audit log entries (FR-8.8)."""
         if action_type:
             cursor = await self.conn.execute(
@@ -1481,4 +1483,4 @@ class Database:
                 (limit,),
             )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict[str, Any](row) for row in rows]

@@ -1,7 +1,7 @@
 """Tests for GeminiLLM — all 7 methods with mocked API."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

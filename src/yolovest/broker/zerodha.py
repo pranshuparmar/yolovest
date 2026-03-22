@@ -6,7 +6,6 @@ See REQUIREMENTS.md FR-6.1, FR-6.2, FR-6.3, FR-6.8.
 
 import asyncio
 import logging
-import random
 from typing import Any
 
 from yolovest.broker.base import BrokerBase
@@ -41,7 +40,7 @@ class ZerodhaBroker(BrokerBase):
         # Rate limiter: 8 concurrent to stay under Kite's 10 req/s (FR-6.8)
         self._rate_limiter = asyncio.Semaphore(8)
         # Paper mode state
-        self._paper_orders: dict[str, dict] = {}
+        self._paper_orders: dict[str, dict[str, Any]] = {}
         self._paper_order_counter = 0
 
     def get_login_url(self) -> str:
@@ -72,7 +71,7 @@ class ZerodhaBroker(BrokerBase):
 
     def _create_kite_session(self, request_token: str) -> Any:
         """Synchronous Kite session creation (runs in thread)."""
-        from kiteconnect import KiteConnect  # type: ignore[import-untyped]
+        from kiteconnect import KiteConnect
 
         kite = KiteConnect(api_key=self._api_key)
         data = kite.generate_session(request_token, api_secret=self._api_secret)
@@ -148,7 +147,10 @@ class ZerodhaBroker(BrokerBase):
             "status": "filled" if order_type == "MARKET" else "open",
         }
 
-        logger.info("Paper order placed: %s %s %s x%d @ %s", side, symbol, order_type, quantity, fill_price)
+        logger.info(
+            "Paper order placed: %s %s %s x%d @ %s",
+            side, symbol, order_type, quantity, fill_price,
+        )
         return order_id
 
     async def _live_place_order(
@@ -179,9 +181,9 @@ class ZerodhaBroker(BrokerBase):
         if trigger_price is not None:
             params["trigger_price"] = trigger_price
 
-        return await self._retry_api_call(
+        return str(await self._retry_api_call(
             lambda: self._kite.place_order(variety="regular", **params)
-        )
+        ))
 
     # ------------------------------------------------------------------
     # Order Management
@@ -212,7 +214,7 @@ class ZerodhaBroker(BrokerBase):
             orders = await asyncio.to_thread(self._kite.orders)
         for order in orders:
             if order.get("order_id") == order_id:
-                return order
+                return dict[str, Any](order)
         return {"status": "unknown"}
 
     async def get_positions(self) -> list[dict[str, Any]]:
@@ -224,7 +226,7 @@ class ZerodhaBroker(BrokerBase):
 
         async with self._rate_limiter:
             positions = await asyncio.to_thread(self._kite.positions)
-        return positions.get("net", [])
+        return list(positions.get("net", []))
 
     async def get_pending_orders(self) -> list[dict[str, Any]]:
         if self._mode == "paper":

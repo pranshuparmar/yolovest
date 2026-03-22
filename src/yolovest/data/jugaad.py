@@ -63,7 +63,7 @@ class JugaadDataProvider(MarketDataBase):
         symbol: str, start_date: date, end_date: date
     ) -> list[OHLCVBar]:
         """Synchronous fetch using jugaad-data (runs in thread)."""
-        from jugaad_data.nse import stock_df  # type: ignore[import-untyped]
+        from jugaad_data.nse import stock_df
 
         df = stock_df(
             symbol=symbol,

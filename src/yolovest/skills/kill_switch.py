@@ -28,6 +28,7 @@ Flow:
    c. Send Telegram confirmation
 """
 
+import contextlib
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
@@ -40,7 +41,7 @@ class KillSwitchSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        return self.ctx.config.risk.kill_switch_enabled
+        return bool(self.ctx.config.risk.kill_switch_enabled)
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         command = kwargs.get("command", "stop")
@@ -94,10 +95,8 @@ class KillSwitchSkill(SkillBase):
         # Cancel all pending orders
         pending_orders = await self.ctx.broker.get_pending_orders()
         for order in pending_orders:
-            try:
+            with contextlib.suppress(Exception):
                 await self.ctx.broker.cancel_order(order["order_id"])
-            except Exception:
-                pass
 
         # Square off ALL positions (force=True bypasses MIS filter)
         from yolovest.skills.square_off import SquareOffSkill

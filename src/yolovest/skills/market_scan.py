@@ -34,7 +34,7 @@ class MarketScanSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        return self.ctx.market_hours.is_market_hours()  # FR-11.3
+        return bool(self.ctx.market_hours.is_market_hours())  # FR-11.3
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         cfg = self.ctx.config.scanning
@@ -105,13 +105,13 @@ class MarketScanSkill(SkillBase):
             },
         )
 
-    def _apply_exclusion_filters(self, stocks: list[dict]) -> list[dict]:
+    def _apply_exclusion_filters(self, stocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Remove F&O banned stocks, pending corporate actions, etc. (FR-3.3)"""
         # F&O ban list and corp actions would be fetched from NSE in production.
         # For now, pass through — the volume filter already removes illiquid stocks.
         return stocks
 
-    def _compute_sub_scores(self, stock: dict) -> dict:
+    def _compute_sub_scores(self, stock: dict[str, Any]) -> dict[str, Any]:
         """Compute normalized [0, 1] sub-scores from raw data (PM G7)."""
         # Technical score: use sentiment confidence as proxy until we compute from indicators
         tech = 0.5  # default neutral
@@ -147,7 +147,7 @@ class MarketScanSkill(SkillBase):
             "fundamental_score": round(min(fund_score, 1.0), 4),
         }
 
-    def _analyze_sector_rotation(self, scored_stocks: list[dict]) -> dict:
+    def _analyze_sector_rotation(self, scored_stocks: list[dict[str, Any]]) -> dict[str, Any]:
         """Group by sector, compute avg scores, identify rotation. FR-3.5."""
         sectors: dict[str, list[float]] = {}
         for stock in scored_stocks:

@@ -1,7 +1,8 @@
 """Tests for predict-track skill (Phase 4, FR-7.1 to FR-7.3)."""
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
 
 from yolovest.skills.predict_track import PredictTrackSkill
 
@@ -123,7 +124,7 @@ class TestScorePredictions:
         predict_skill.ctx.db.get_unscored_predictions = AsyncMock(return_value=pending)
         predict_skill.ctx.market_data.get_ltp = AsyncMock(return_value=3380.0)
 
-        result = await predict_skill.execute(mode="score")
+        await predict_skill.execute(mode="score")
 
         call_args = predict_skill.ctx.db.score_prediction.call_args
         assert call_args[1]["direction_correct"] is True
@@ -145,8 +146,9 @@ class TestScorePredictions:
         predict_skill.ctx.db.refresh_prediction_scoreboard.assert_awaited_once()
 
     async def test_score_handles_price_error_gracefully(self, predict_skill):
-        from yolovest.models.schemas import OHLCVBar
         from datetime import datetime
+
+        from yolovest.models.schemas import OHLCVBar
 
         pending = [{
             "id": "P-005",
@@ -158,7 +160,10 @@ class TestScorePredictions:
         predict_skill.ctx.db.get_unscored_predictions = AsyncMock(return_value=pending)
         predict_skill.ctx.market_data.get_ltp = AsyncMock(side_effect=Exception("no LTP"))
         predict_skill.ctx.market_data.get_ohlcv = AsyncMock(return_value=[
-            OHLCVBar(timestamp=datetime.now(), open=2500, high=2530, low=2490, close=2520, volume=1000)
+            OHLCVBar(
+                timestamp=datetime.now(),
+                open=2500, high=2530, low=2490, close=2520, volume=1000,
+            )
         ])
 
         result = await predict_skill.execute(mode="score")

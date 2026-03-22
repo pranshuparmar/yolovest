@@ -35,7 +35,7 @@ class TVDatafeedProvider(MarketDataBase):
     def _get_client(self) -> Any:
         """Lazy-init tvDatafeed client."""
         if self._tv is None:
-            from tvDatafeed import TvDatafeed  # type: ignore[import-untyped]
+            from tvDatafeed import TvDatafeed
 
             if self._username and self._password:
                 self._tv = TvDatafeed(username=self._username, password=self._password)
@@ -87,7 +87,7 @@ class TVDatafeedProvider(MarketDataBase):
         self, symbol: str, tv_interval_str: str, n_bars: int
     ) -> list[OHLCVBar]:
         """Synchronous fetch using tvDatafeed (runs in thread)."""
-        from tvDatafeed import Interval  # type: ignore[import-untyped]
+        from tvDatafeed import Interval
 
         tv = self._get_client()
         tv_interval = getattr(Interval, tv_interval_str)

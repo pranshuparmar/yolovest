@@ -5,7 +5,6 @@ Tests console backend, enabled/disabled toggle, and message tracking.
 
 import pytest
 
-from yolovest.config import AppConfig
 from yolovest.notify import Notifier
 
 

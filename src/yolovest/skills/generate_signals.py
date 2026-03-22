@@ -33,7 +33,7 @@ class GenerateSignalsSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        return self.ctx.market_hours.is_market_hours()
+        return bool(self.ctx.market_hours.is_market_hours())
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         watchlist = await self.ctx.db.get_watchlist()
@@ -53,7 +53,12 @@ class GenerateSignalsSkill(SkillBase):
             return SkillResult(
                 success=True,
                 skill_name=self.name,
-                data={"watchlist_size": len(watchlist), "signals_generated": 0, "signals": [], "reason": "no_ml"},
+                data={
+                    "watchlist_size": len(watchlist),
+                    "signals_generated": 0,
+                    "signals": [],
+                    "reason": "no_ml",
+                },
             )
 
         use_intraday = self._should_use_intraday_model()

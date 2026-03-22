@@ -8,7 +8,7 @@ import os
 import re
 from datetime import time as dt_time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -274,7 +274,7 @@ class AppConfig(BaseModel):
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "AppConfig":
+    def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
         """Create config from dict, expanding environment variables."""
         expanded = _expand_env_vars(data)
         return cls.model_validate(expanded)

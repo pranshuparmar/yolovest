@@ -72,7 +72,7 @@ class YFinanceProvider(MarketDataBase):
         self, symbol: str, yf_interval: str, days: int
     ) -> list[OHLCVBar]:
         """Synchronous fetch using yfinance (runs in thread)."""
-        import yfinance as yf  # type: ignore[import-untyped]
+        import yfinance as yf
 
         ticker = yf.Ticker(self._nse_symbol(symbol))
         period = f"{days}d" if days <= 730 else "max"
@@ -103,7 +103,7 @@ class YFinanceProvider(MarketDataBase):
 
     def _fetch_quote(self, symbol: str) -> dict[str, Any]:
         """Synchronous quote fetch (runs in thread)."""
-        import yfinance as yf  # type: ignore[import-untyped]
+        import yfinance as yf
 
         ticker = yf.Ticker(self._nse_symbol(symbol))
         info = ticker.fast_info

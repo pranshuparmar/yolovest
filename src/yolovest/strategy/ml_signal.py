@@ -9,8 +9,7 @@ XGBoost and sklearn are lazily imported so tests can run without them.
 
 import asyncio
 import logging
-import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +50,7 @@ class XGBoostSignalModel(MLBase):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_feature_vector(features: dict) -> list[list[float]]:
+    def _build_feature_vector(features: dict[str, Any]) -> list[list[float]]:
         """Build a 2D feature array from a dict, sorted by key for consistency."""
         sorted_keys = sorted(features.keys())
         values = [float(features[k]) for k in sorted_keys]
@@ -99,16 +98,16 @@ class XGBoostSignalModel(MLBase):
     # Prediction
     # ------------------------------------------------------------------
 
-    async def predict_intraday(self, symbol: str, features: dict) -> MLPrediction:
+    async def predict_intraday(self, symbol: str, features: dict[str, Any]) -> MLPrediction:
         """Generate intraday signal using the intraday model slot."""
         return await self._predict(symbol, features, "intraday")
 
-    async def predict_swing(self, symbol: str, features: dict) -> MLPrediction:
+    async def predict_swing(self, symbol: str, features: dict[str, Any]) -> MLPrediction:
         """Generate swing signal using the swing model slot."""
         return await self._predict(symbol, features, "swing")
 
     async def _predict(
-        self, symbol: str, features: dict, model_type: str
+        self, symbol: str, features: dict[str, Any], model_type: str
     ) -> MLPrediction:
         model = self._get_model(model_type)
         if model is None:
@@ -121,7 +120,7 @@ class XGBoostSignalModel(MLBase):
         def _run_inference() -> tuple[int, float]:
             import numpy as np
 
-            X = np.array(feature_vector)
+            X = np.array(feature_vector)  # noqa: N806
             pred_label = int(model.predict(X)[0])
             # Get probability for the predicted class
             probas = model.predict_proba(X)[0]
@@ -137,22 +136,22 @@ class XGBoostSignalModel(MLBase):
             def _calibrate() -> float:
                 import numpy as np
 
-                X = np.array(feature_vector)
+                X = np.array(feature_vector)  # noqa: N806
                 cal_probas = calibrator.predict_proba(X)[0]
                 return float(cal_probas[pred_label])
 
             confidence = await asyncio.to_thread(_calibrate)
 
-        signal_type = _LABEL_MAP.get(pred_label, "HOLD")
+        signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
 
         # Use ATR from features for target/SL computation
         entry_price = features.get("close", features.get("ltp", 100.0))
         atr = features.get("atr", entry_price * 0.02)  # fallback: 2% of price
 
-        if signal_type == "BUY":
+        if signal_type_str == "BUY":
             target_price = entry_price + 2 * atr
             stop_loss_price = entry_price - 1 * atr
-        elif signal_type == "SELL":
+        elif signal_type_str == "SELL":
             target_price = entry_price - 2 * atr
             stop_loss_price = entry_price + 1 * atr
         else:
@@ -166,6 +165,10 @@ class XGBoostSignalModel(MLBase):
         entry_price = max(entry_price, 0.01)
 
         holding_period = "intraday" if model_type == "intraday" else "3d"
+
+        # Cast to Literal type expected by MLPrediction
+        from typing import Literal, cast
+        signal_type = cast(Literal["BUY", "SELL", "HOLD"], signal_type_str)
 
         return MLPrediction(
             signal_type=signal_type,
@@ -183,8 +186,8 @@ class XGBoostSignalModel(MLBase):
     # ------------------------------------------------------------------
 
     async def train(
-        self, model_type: str, X: Any, y: Any, params: dict
-    ) -> dict:
+        self, model_type: str, X: Any, y: Any, params: dict[str, Any]  # noqa: N803
+    ) -> dict[str, Any]:
         """Train an XGBoost classifier with walk-forward validation.
 
         Args:
@@ -209,7 +212,7 @@ class XGBoostSignalModel(MLBase):
                 f"(minimum {min_samples} required) — PM G5"
             )
 
-        def _train_blocking() -> tuple[Any, Any, dict]:
+        def _train_blocking() -> tuple[Any, Any, dict[str, Any]]:
             import numpy as np
 
             try:
@@ -229,7 +232,7 @@ class XGBoostSignalModel(MLBase):
                     "Install with: pip install scikit-learn"
                 ) from e
 
-            X_arr = np.asarray(X)
+            X_arr = np.asarray(X)  # noqa: N806
             y_arr = np.asarray(y)
 
             # Walk-forward split via TimeSeriesSplit
@@ -257,7 +260,7 @@ class XGBoostSignalModel(MLBase):
             gross_loss = 0.0
 
             for train_idx, test_idx in tscv.split(X_arr):
-                X_train, X_test = X_arr[train_idx], X_arr[test_idx]
+                X_train, X_test = X_arr[train_idx], X_arr[test_idx]  # noqa: N806
                 y_train, y_test = y_arr[train_idx], y_arr[test_idx]
 
                 fold_model = xgb.XGBClassifier(**xgb_params)
@@ -265,7 +268,7 @@ class XGBoostSignalModel(MLBase):
 
                 preds = fold_model.predict(X_test)
                 # Simulated returns: correct direction = +1%, wrong = -0.5%
-                for pred, actual in zip(preds, y_test):
+                for pred, actual in zip(preds, y_test, strict=False):
                     if pred == actual and pred != 1:  # non-HOLD correct
                         ret = 0.01
                         wins += 1
@@ -323,7 +326,7 @@ class XGBoostSignalModel(MLBase):
         self._set_model(model_type, model)
         self._set_calibrator(model_type, calibrator)
 
-        version = f"xgb_{model_type}_v{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        version = f"xgb_{model_type}_v{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
         self._set_version(model_type, version)
 
         logger.info(
@@ -341,14 +344,13 @@ class XGBoostSignalModel(MLBase):
     # Persistence
     # ------------------------------------------------------------------
 
-    async def save_model(self, model_type: str, metrics: dict) -> str:
+    async def save_model(self, model_type: str, metrics: dict[str, Any]) -> str:
         """Serialize model + calibrator to disk with joblib."""
         model = self._get_model(model_type)
         if model is None:
             raise RuntimeError(f"No {model_type} model to save.")
 
-        version = self._get_version(model_type)
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         version_str = f"{model_type}_v{timestamp}"
         filename = f"{version_str}.pkl"
         filepath = self.model_dir / filename
@@ -361,7 +363,7 @@ class XGBoostSignalModel(MLBase):
                 "calibrator": self._get_calibrator(model_type),
                 "version": version_str,
                 "metrics": metrics,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "saved_at": datetime.now(UTC).isoformat(),
             }
             joblib.dump(artifact, filepath)
 
@@ -378,7 +380,7 @@ class XGBoostSignalModel(MLBase):
         If version is None, load the latest file matching the model_type pattern.
         """
 
-        def _load() -> dict:
+        def _load() -> dict[str, Any]:
             import joblib
 
             if version:
@@ -393,7 +395,7 @@ class XGBoostSignalModel(MLBase):
                     )
                 filepath = matches[-1]
 
-            return joblib.load(filepath)
+            return dict[str, Any](joblib.load(filepath))
 
         artifact = await asyncio.to_thread(_load)
 
@@ -409,7 +411,7 @@ class XGBoostSignalModel(MLBase):
     # Production metrics & shadow deployment
     # ------------------------------------------------------------------
 
-    async def get_production_metrics(self, model_type: str) -> dict:
+    async def get_production_metrics(self, model_type: str) -> dict[str, Any]:
         """Read production metrics from DB model_versions table."""
         if self.db is None:
             return {}
@@ -441,7 +443,7 @@ class XGBoostSignalModel(MLBase):
                 "INSERT OR REPLACE INTO model_versions "
                 "(model_type, version, status, shadow_days, created_at) "
                 "VALUES (?, ?, 'shadow', ?, ?)",
-                (model_type, version, days, datetime.now(timezone.utc).isoformat()),
+                (model_type, version, days, datetime.now(UTC).isoformat()),
             )
             logger.info(
                 "Deployed %s version %s in shadow mode for %d days",

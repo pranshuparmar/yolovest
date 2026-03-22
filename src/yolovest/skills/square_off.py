@@ -43,7 +43,7 @@ class SquareOffSkill(SkillBase):
     schedule = None  # dynamically set from market_hours.square_off config
 
     def should_run(self) -> bool:
-        return self.ctx.market_hours.is_square_off_window()
+        return bool(self.ctx.market_hours.is_square_off_window())
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         force = kwargs.get("force", False)  # True when called from kill-switch

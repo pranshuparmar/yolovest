@@ -1,7 +1,8 @@
 """Tests for report-generate skill (Phase 4, FR-8.4, FR-8.5)."""
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
 
 from yolovest.skills.report_generate import ReportGenerateSkill
 

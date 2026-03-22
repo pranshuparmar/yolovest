@@ -6,6 +6,7 @@ or an unofficial API wrapper. For now all methods are stubbed.
 """
 
 import logging
+from typing import Any
 
 from yolovest.models.schemas import NewsArticle
 from yolovest.news.base import NewsSource
@@ -33,7 +34,7 @@ class NSEOfficialSource(NewsSource):
         """
         return False
 
-    async def fetch_corp_actions(self, symbol: str) -> list[dict]:
+    async def fetch_corp_actions(self, symbol: str) -> list[dict[str, Any]]:
         """Fetch corporate actions (dividends, splits, bonuses) for a symbol.
 
         TODO: Implement using NSE corporate actions API.
@@ -49,7 +50,7 @@ class NSEOfficialSource(NewsSource):
         """
         raise NotImplementedError("NSE corp actions not yet implemented")
 
-    async def fetch_bulk_deals(self) -> list[dict]:
+    async def fetch_bulk_deals(self) -> list[dict[str, Any]]:
         """Fetch today's bulk/block deals from NSE.
 
         TODO: Implement using NSE bulk deals page.
@@ -62,7 +63,7 @@ class NSEOfficialSource(NewsSource):
         """
         raise NotImplementedError("NSE bulk deals not yet implemented")
 
-    async def fetch_fii_dii(self) -> dict:
+    async def fetch_fii_dii(self) -> dict[str, Any]:
         """Fetch FII/DII activity data for the day.
 
         TODO: Implement using NSE FII/DII activity page.

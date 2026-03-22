@@ -7,8 +7,7 @@ from datetime import date, datetime
 
 import pytest
 
-from yolovest.config import AppConfig
-from yolovest.context import AppContext, MarketHoursChecker
+from yolovest.context import MarketHoursChecker
 
 
 @pytest.fixture

@@ -6,6 +6,7 @@ Respects enabled/disabled toggle and per-alert-type config from config.
 
 import logging
 from abc import ABC, abstractmethod
+from typing import Any
 
 from yolovest.config import AppConfig
 
@@ -32,7 +33,7 @@ class ConsoleNotifier(NotifierBase):
             return
         logger.info("[NOTIFY] %s", message)
 
-    async def send_trade_alert(self, trade: dict) -> None:
+    async def send_trade_alert(self, trade: dict[str, Any]) -> None:
         """Send a trade entry/exit alert."""
         msg = _format_trade_alert(trade)
         await self.send(msg)
@@ -80,14 +81,14 @@ class Notifier:
         # Telegram backend (if enabled and bot is set)
         if self._config.notifications.telegram.enabled and self._telegram_bot:
             try:
-                result = await self._telegram_bot.send_message(message)
+                result = await self._telegram_bot.send_message(message)  # type: ignore[attr-defined]
                 delivered = result or delivered
             except Exception as e:
                 logger.warning("Telegram send failed: %s", e)
 
         return delivered
 
-    async def send_trade_alert(self, trade: dict) -> None:
+    async def send_trade_alert(self, trade: dict[str, Any]) -> None:
         """Send a trade entry/exit alert via all configured backends."""
         alerts_cfg = self._config.notifications.telegram.alerts
         msg = _format_trade_alert(trade)
@@ -108,7 +109,7 @@ class Notifier:
         return list(self._sent_messages)
 
 
-def _format_trade_alert(trade: dict) -> str:
+def _format_trade_alert(trade: dict[str, Any]) -> str:
     """Format a trade dict into a human-readable alert message."""
     symbol = trade.get("symbol", "?")
     signal_type = trade.get("signal_type", "?")

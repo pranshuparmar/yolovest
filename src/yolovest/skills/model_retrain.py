@@ -119,7 +119,7 @@ class ModelRetrainSkill(SkillBase):
             },
         )
 
-    async def _check_shadow_promotions(self) -> list[dict]:
+    async def _check_shadow_promotions(self) -> list[dict[str, Any]]:
         """Check if shadow models have completed trial period. FR-7.5.
 
         Shadow models that have run for >= shadow_mode_days are evaluated:

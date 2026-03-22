@@ -14,14 +14,13 @@ from yolovest.models.schemas import (
     PortfolioState,
     Position,
     Prediction,
+    PremarketContext,
+    SentimentResult,
     Signal,
     Trade,
     TradeContext,
     TradeReview,
-    SentimentResult,
-    PremarketContext,
 )
-
 
 # ── Signal ──────────────────────────────────────────────────────────
 

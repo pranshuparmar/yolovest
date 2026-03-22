@@ -9,7 +9,6 @@ import pytest
 from yolovest.data.ingester import MarketDataIngester
 from yolovest.models.schemas import OHLCVBar
 
-
 IST = ZoneInfo("Asia/Kolkata")
 
 

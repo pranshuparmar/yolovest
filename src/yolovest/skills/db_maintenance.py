@@ -4,9 +4,8 @@ Trigger: CRON — daily at configured time (default 18:00 IST).
 Runs backup first, then retention cleanup, then prunes old backups.
 """
 
+import contextlib
 import logging
-import os
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -29,7 +28,7 @@ class DatabaseMaintenanceSkill(SkillBase):
         self.schedule = self.ctx.config.database.backup_cron
 
     def should_run(self) -> bool:
-        return self.ctx.config.database.backup_enabled
+        return bool(self.ctx.config.database.backup_enabled)
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         results: dict[str, Any] = {}
@@ -43,10 +42,8 @@ class DatabaseMaintenanceSkill(SkillBase):
             logger.info("DB backup created: %s", backup_path)
 
             # Notify on success
-            try:
+            with contextlib.suppress(Exception):
                 await self.ctx.notify.send(f"DB backup created: {Path(backup_path).name}")
-            except Exception:
-                pass
 
             # Prune old backups (keep last 7)
             pruned = self._prune_old_backups(backup_dir, keep=7)
@@ -56,10 +53,8 @@ class DatabaseMaintenanceSkill(SkillBase):
             results["backup_success"] = False
             results["backup_error"] = str(e)
             logger.error("DB backup failed: %s", e)
-            try:
+            with contextlib.suppress(Exception):
                 await self.ctx.notify.send(f"DB backup FAILED: {e}")
-            except Exception:
-                pass
 
         # --- Step 2: Retention Cleanup (FR-10.3) ---
         try:
@@ -74,21 +69,22 @@ class DatabaseMaintenanceSkill(SkillBase):
 
             total_deleted = sum(deleted.values())
             if total_deleted > 0:
-                logger.info("Retention cleanup: deleted %d rows total (%s)", total_deleted, deleted)
+                logger.info(
+                    "Retention cleanup: deleted %d rows total (%s)",
+                    total_deleted, deleted,
+                )
         except Exception as e:
             results["retention_success"] = False
             results["retention_error"] = str(e)
             logger.error("Retention cleanup failed: %s", e)
 
         # --- Audit log ---
-        try:
+        with contextlib.suppress(Exception):
             await self.ctx.db.log_audit(
                 action_type="database_maintenance",
                 skill_name=self.name,
                 output_summary=results,
             )
-        except Exception:
-            pass
 
         success = results.get("backup_success", False) and results.get("retention_success", False)
         return SkillResult(success=success, skill_name=self.name, data=results)

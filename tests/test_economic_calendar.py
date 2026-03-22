@@ -1,9 +1,7 @@
 """Tests for the economic calendar module (FR-2.6)."""
 
-from datetime import date, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from datetime import date
+from unittest.mock import AsyncMock, MagicMock
 
 from yolovest.data.economic_calendar import EconomicCalendarSource
 

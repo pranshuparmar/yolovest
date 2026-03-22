@@ -4,9 +4,9 @@ Simulates trading on historical data with transaction costs (FR-9.2, PM G4).
 Uses a rolling train/test window approach for realistic performance estimation.
 """
 
-import asyncio
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
@@ -36,8 +36,8 @@ class Backtester:
         self,
         model: Any,
         bars: list[OHLCVBar],
-        features_fn: Callable[[list[OHLCVBar]], dict],
-        config: dict | None = None,
+        features_fn: Callable[[list[OHLCVBar]], dict[str, Any]],
+        config: dict[str, Any] | None = None,
     ) -> BacktestResult:
         """Run walk-forward backtest.
 

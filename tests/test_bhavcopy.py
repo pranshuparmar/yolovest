@@ -90,7 +90,8 @@ class TestBhavcopyImporterParseCSV:
     def test_new_format_columns(self, tmp_path):
         csv_file = tmp_path / "bhavcopy_new.csv"
         self._write_csv(csv_file, [
-            "TckrSymb", "SctySrs", "OpnPric", "HghPric", "LwPric", "ClsPric", "TtlTradgVol", "TradDt"
+            "TckrSymb", "SctySrs", "OpnPric", "HghPric",
+            "LwPric", "ClsPric", "TtlTradgVol", "TradDt",
         ], [
             ["INFY", "EQ", "1500", "1550", "1480", "1520", "2000000", "2024-03-20"],
         ])
@@ -138,9 +139,18 @@ class TestBhavcopyImporterImport:
         csv_file = tmp_path / "test.csv"
         with open(csv_file, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["SYMBOL", "SERIES", "OPEN", "HIGH", "LOW", "CLOSE", "TOTTRDQTY", "TIMESTAMP"])
-            writer.writerow(["RELIANCE", "EQ", "2500", "2550", "2480", "2530", "1000000", "20-Mar-2024"])
-            writer.writerow(["TCS", "EQ", "3800", "3850", "3780", "3820", "500000", "20-Mar-2024"])
+            writer.writerow([
+                "SYMBOL", "SERIES", "OPEN", "HIGH",
+                "LOW", "CLOSE", "TOTTRDQTY", "TIMESTAMP",
+            ])
+            writer.writerow([
+                "RELIANCE", "EQ", "2500", "2550",
+                "2480", "2530", "1000000", "20-Mar-2024",
+            ])
+            writer.writerow([
+                "TCS", "EQ", "3800", "3850",
+                "3780", "3820", "500000", "20-Mar-2024",
+            ])
 
         mock_db = MagicMock()
         mock_db.upsert_ohlcv = AsyncMock(return_value=1)
@@ -160,8 +170,14 @@ class TestBhavcopyImporterImport:
             csv_file = tmp_path / f"bhavcopy_{i}.csv"
             with open(csv_file, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["SYMBOL", "SERIES", "OPEN", "HIGH", "LOW", "CLOSE", "TOTTRDQTY", "TIMESTAMP"])
-                writer.writerow(["RELIANCE", "EQ", "2500", "2550", "2480", "2530", "1000000", f"2{i}-Mar-2024"])
+                writer.writerow([
+                    "SYMBOL", "SERIES", "OPEN", "HIGH",
+                    "LOW", "CLOSE", "TOTTRDQTY", "TIMESTAMP",
+                ])
+                writer.writerow([
+                    "RELIANCE", "EQ", "2500", "2550",
+                    "2480", "2530", "1000000", f"2{i}-Mar-2024",
+                ])
 
         mock_db = MagicMock()
         mock_db.upsert_ohlcv = AsyncMock(return_value=1)
@@ -191,8 +207,14 @@ class TestBhavcopyImporterImport:
         good = tmp_path / "good.csv"
         with open(good, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["SYMBOL", "SERIES", "OPEN", "HIGH", "LOW", "CLOSE", "TOTTRDQTY", "TIMESTAMP"])
-            writer.writerow(["RELIANCE", "EQ", "2500", "2550", "2480", "2530", "1000000", "20-Mar-2024"])
+            writer.writerow([
+                "SYMBOL", "SERIES", "OPEN", "HIGH",
+                "LOW", "CLOSE", "TOTTRDQTY", "TIMESTAMP",
+            ])
+            writer.writerow([
+                "RELIANCE", "EQ", "2500", "2550",
+                "2480", "2530", "1000000", "20-Mar-2024",
+            ])
 
         bad = tmp_path / "bad.csv"
         with open(bad, "w") as f:

@@ -4,9 +4,8 @@ Tests ML prediction, feature vector construction, backtesting metrics,
 and training guards. XGBoost is mocked — not required to be installed.
 """
 
-import asyncio
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
@@ -14,7 +13,6 @@ import pytest
 from yolovest.models.schemas import BacktestResult, MLPrediction, OHLCVBar
 from yolovest.strategy.backtest import Backtester
 from yolovest.strategy.ml_signal import XGBoostSignalModel
-
 
 # ---------------------------------------------------------------------------
 # Feature vector construction
@@ -155,7 +153,7 @@ class TestTrainingGuard:
 
     async def test_insufficient_samples_raises(self, tmp_path):
         sm = XGBoostSignalModel(model_dir=str(tmp_path))
-        X = [[1, 2, 3]] * 50  # only 50 samples
+        X = [[1, 2, 3]] * 50  # only 50 samples  # noqa: N806
         y = [0] * 50
 
         with pytest.raises(ValueError, match="Insufficient training data"):
@@ -163,7 +161,7 @@ class TestTrainingGuard:
 
     async def test_custom_min_samples(self, tmp_path):
         sm = XGBoostSignalModel(model_dir=str(tmp_path))
-        X = [[1, 2, 3]] * 90
+        X = [[1, 2, 3]] * 90  # noqa: N806
         y = [0] * 90
 
         with pytest.raises(ValueError, match="Insufficient training data: 90"):
@@ -173,7 +171,7 @@ class TestTrainingGuard:
         """200 samples exactly should not raise (trains with xgboost)."""
         # This test would need real xgboost, so we just verify the guard
         sm = XGBoostSignalModel(model_dir=str(tmp_path))
-        X = [[1, 2, 3]] * 199
+        X = [[1, 2, 3]] * 199  # noqa: N806
         y = [0] * 199
 
         with pytest.raises(ValueError, match="Insufficient training data: 199"):

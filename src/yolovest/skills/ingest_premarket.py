@@ -29,7 +29,7 @@ class IngestPremarketSkill(SkillBase):
     schedule = "30 8 * * 1-5"  # 8:30 AM IST, weekdays
 
     def should_run(self) -> bool:
-        return self.ctx.market_hours.is_premarket_window()
+        return bool(self.ctx.market_hours.is_premarket_window())
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         premarket: dict[str, Any] = {}
@@ -45,7 +45,9 @@ class IngestPremarketSkill(SkillBase):
         )
 
         for key, result in zip(
-            ["gift_nifty", "us_markets", "asian_markets", "commodities"], results
+            ["gift_nifty", "us_markets", "asian_markets", "commodities"],
+            results,
+            strict=False,
         ):
             if isinstance(result, Exception):
                 logger.warning("Failed to fetch %s: %s", key, result)
@@ -57,8 +59,10 @@ class IngestPremarketSkill(SkillBase):
         # Gemini web grounding summary (FR-2.11)
         try:
             premarket["llm_summary"] = await self.ctx.llm.summarize_with_web_grounding(
-                "Summarize key overnight market developments affecting Indian stock markets today. "
-                "Include: US market close, Asian market opens, GIFT Nifty, crude oil, any major "
+                "Summarize key overnight market developments affecting "
+                "Indian stock markets today. "
+                "Include: US market close, Asian market opens, "
+                "GIFT Nifty, crude oil, any major "
                 "global news that could impact Nifty/Sensex direction."
             )
         except Exception as e:
@@ -78,11 +82,11 @@ class IngestPremarketSkill(SkillBase):
             },
         )
 
-    async def _fetch_gift_nifty(self) -> dict:
+    async def _fetch_gift_nifty(self) -> dict[str, Any]:
         """Fetch GIFT Nifty / Nifty futures for market direction."""
         return await asyncio.to_thread(self._yf_change, "^NSEI")
 
-    async def _fetch_us_markets(self) -> dict:
+    async def _fetch_us_markets(self) -> dict[str, Any]:
         """Fetch overnight US market closes."""
         sp500, nasdaq, dow = await asyncio.gather(
             asyncio.to_thread(self._yf_change, "^GSPC"),
@@ -95,7 +99,7 @@ class IngestPremarketSkill(SkillBase):
             "dow_change_pct": dow.get("change_pct"),
         }
 
-    async def _fetch_asian_markets(self) -> dict:
+    async def _fetch_asian_markets(self) -> dict[str, Any]:
         """Fetch Asian market opens."""
         nikkei, hsi, shanghai = await asyncio.gather(
             asyncio.to_thread(self._yf_change, "^N225"),
@@ -108,7 +112,7 @@ class IngestPremarketSkill(SkillBase):
             "shanghai_change_pct": shanghai.get("change_pct"),
         }
 
-    async def _fetch_commodities(self) -> dict:
+    async def _fetch_commodities(self) -> dict[str, Any]:
         """Fetch commodity prices relevant to Indian markets."""
         crude, gold, usdinr = await asyncio.gather(
             asyncio.to_thread(self._yf_change, "CL=F"),
@@ -123,10 +127,10 @@ class IngestPremarketSkill(SkillBase):
         }
 
     @staticmethod
-    def _yf_change(ticker_symbol: str) -> dict:
+    def _yf_change(ticker_symbol: str) -> dict[str, Any]:
         """Fetch price and % change for a yfinance ticker (blocking, run in thread)."""
         try:
-            import yfinance as yf  # type: ignore[import-untyped]
+            import yfinance as yf
 
             ticker = yf.Ticker(ticker_symbol)
             info = ticker.fast_info

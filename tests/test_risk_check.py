@@ -1,7 +1,8 @@
 """Tests for risk-check skill (Phase 3, FR-5.1 to FR-5.18)."""
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
 
 from yolovest.skills.risk_check import RiskCheckSkill
 
@@ -53,7 +54,9 @@ class TestRiskCheckApproval:
         assert result.data["approved"]
         assert result.data["adjusted_size"] > 0
 
-    async def test_position_size_computed_from_risk(self, risk_skill, base_signal, healthy_portfolio):
+    async def test_position_size_computed_from_risk(
+        self, risk_skill, base_signal, healthy_portfolio,
+    ):
         risk_skill.ctx.db.get_portfolio_state = AsyncMock(return_value=healthy_portfolio)
         risk_skill.ctx.market_hours.is_order_window = lambda: True
 

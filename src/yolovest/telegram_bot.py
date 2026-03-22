@@ -10,7 +10,6 @@ Uses python-telegram-bot async API. Runs as a background task
 alongside the heartbeat orchestrator.
 """
 
-import asyncio
 import logging
 from typing import Any
 
@@ -39,12 +38,9 @@ class TelegramBot:
             return
 
         try:
-            from telegram import Update
             from telegram.ext import (
                 ApplicationBuilder,
                 CommandHandler,
-                MessageHandler,
-                filters,
             )
         except ImportError:
             logger.warning("python-telegram-bot not installed, Telegram bot disabled")

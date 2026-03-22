@@ -122,13 +122,13 @@ class IngestDataSkill(SkillBase):
             data=results,
         )
 
-    async def _fetch_nse_data(self) -> dict:
+    async def _fetch_nse_data(self) -> dict[str, Any]:
         """Fetch corp announcements, bulk/block deals, FII/DII, delivery data."""
         # NSE official scraper will be wired here when available
         # For now, return empty — NSE scraper is P0 but built in news/nse_official.py
         return {}
 
-    async def _fetch_all_news(self, symbols: list[str]) -> list:
+    async def _fetch_all_news(self, symbols: list[str]) -> list[Any]:
         """Aggregate news from all configured sources."""
         from yolovest.models.schemas import NewsArticle
 
@@ -144,8 +144,8 @@ class IngestDataSkill(SkillBase):
             # Fallback: try individual scrapers
             try:
                 from yolovest.news.aggregator import NewsAggregator
-                from yolovest.news.moneycontrol import MoneyControlSource
                 from yolovest.news.et_markets import ETMarketsSource
+                from yolovest.news.moneycontrol import MoneyControlSource
 
                 sources = [MoneyControlSource(), ETMarketsSource()]
                 aggregator = NewsAggregator(sources)
@@ -155,12 +155,12 @@ class IngestDataSkill(SkillBase):
 
         return all_articles
 
-    def _deduplicate_news(self, articles: list) -> list:
+    def _deduplicate_news(self, articles: list[Any]) -> list[Any]:
         """Merge duplicate news across sources. FR-2.13."""
         if not articles:
             return []
 
-        seen: dict[str, object] = {}
+        seen: dict[str, Any] = {}
         for article in articles:
             h = article.content_hash
             if h not in seen:
@@ -173,7 +173,7 @@ class IngestDataSkill(SkillBase):
                         existing.symbols.append(sym)
         return list(seen.values())
 
-    async def _fetch_economic_calendar(self) -> list[dict]:
+    async def _fetch_economic_calendar(self) -> list[dict[str, Any]]:
         """Fetch economic calendar events (FR-2.6): RBI, Fed, earnings."""
         from yolovest.data.economic_calendar import EconomicCalendarSource
 

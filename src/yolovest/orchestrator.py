@@ -7,7 +7,7 @@ heartbeat mutex (skip-on-overrun), and consecutive skip alerting.
 import asyncio
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from yolovest.context import AppContext
 from yolovest.skills import SKILL_REGISTRY
@@ -36,14 +36,14 @@ class HeartbeatOrchestrator:
         After max_consecutive_skips, alert via Telegram as CRITICAL.
     """
 
-    PIPELINE_SKILLS = [
+    PIPELINE_SKILLS: ClassVar[list[str]] = [
         "health-check",
         "ingest-data",
         "market-scan",
         "generate-signals",
     ]
 
-    SIGNAL_CHAIN_SKILLS = [
+    SIGNAL_CHAIN_SKILLS: ClassVar[list[str]] = [
         "risk-check",
         "llm-review",
         "trade-execute",
@@ -60,10 +60,8 @@ class HeartbeatOrchestrator:
         self._consecutive_skips = 0
         self._max_consecutive_skips = ctx.config.heartbeat.max_consecutive_skips
         self._running = False
-        if skills is not None:
-            self._skills = skills
-        else:
-            self._skills: dict[str, SkillBase] = {}
+        self._skills: dict[str, SkillBase] = skills if skills is not None else {}
+        if skills is None:
             self._init_skills()
 
     def _init_skills(self) -> None:
@@ -105,9 +103,9 @@ class HeartbeatOrchestrator:
             self._consecutive_skips = 0
             return await self._execute_pipeline()
 
-    async def _execute_pipeline(self) -> dict[str, SkillResult]:
+    async def _execute_pipeline(self) -> dict[str, Any]:
         """Execute the full heartbeat pipeline with error propagation."""
-        results: dict[str, SkillResult] = {}
+        results: dict[str, Any] = {}
 
         # --- Step 1: health-check (ABORT on failure) ---
         health_result = await self._run_skill("health-check")
@@ -174,12 +172,13 @@ class HeartbeatOrchestrator:
 
     async def _execute_signal_chain(
         self, signal: object, index: int
-    ) -> dict[str, SkillResult]:
-        """Execute the per-signal chain: risk-check -> llm-review -> trade-execute -> predict-track.
+    ) -> dict[str, Any]:
+        """Execute the per-signal chain.
 
+        Chain: risk-check -> llm-review -> trade-execute -> predict-track.
         Per-signal failures skip that signal only and continue to the next.
         """
-        results: dict[str, SkillResult] = {}
+        results: dict[str, Any] = {}
         prefix = f"signal-{index}"
         # Include signal metadata
         if isinstance(signal, dict):
@@ -196,7 +195,10 @@ class HeartbeatOrchestrator:
 
         # Check risk approval and use adjusted signal
         if risk_result.data and not risk_result.data.get("approved", True):
-            logger.info("risk-check rejected signal %d: %s", index, risk_result.data.get("rejection_reason"))
+            logger.info(
+                "risk-check rejected signal %d: %s",
+                index, risk_result.data.get("rejection_reason"),
+            )
             return results
         if risk_result.data and risk_result.data.get("signal"):
             signal = risk_result.data["signal"]  # use risk-adjusted signal (position size)

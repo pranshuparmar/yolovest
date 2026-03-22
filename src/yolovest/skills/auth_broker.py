@@ -49,7 +49,7 @@ class AuthBrokerSkill(SkillBase):
             )
 
         # Step 3: Exchange for access_token
-        access_token = await self.ctx.broker.authenticate(request_token)
+        await self.ctx.broker.authenticate(request_token)
 
         # Step 4: Verify connectivity
         margins = await self.ctx.broker.get_margins()

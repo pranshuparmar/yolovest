@@ -1,12 +1,9 @@
 """Tests for database-maintenance skill (FR-10.2, FR-10.3)."""
 
-import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
-
-import pytest
 
 from yolovest.skills.db_maintenance import DatabaseMaintenanceSkill
 
@@ -23,7 +20,9 @@ def _make_ctx(backup_enabled=True, backup_cron="0 18 * * *", backup_dir="./backu
     ctx.config.database.retention.audit_log_days = 365
     ctx.config.database.retention.predictions_days = 365
     ctx.db.backup = AsyncMock(return_value="/backups/yolovest_20260322_180000.db")
-    ctx.db.run_retention_cleanup = AsyncMock(return_value={"ohlcv": 5, "audit_log": 2, "predictions": 1})
+    ctx.db.run_retention_cleanup = AsyncMock(
+        return_value={"ohlcv": 5, "audit_log": 2, "predictions": 1}
+    )
     ctx.db.log_audit = AsyncMock()
     ctx.notify.send = AsyncMock()
     return ctx

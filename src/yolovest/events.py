@@ -4,12 +4,12 @@ Publish/subscribe pattern for inter-skill communication.
 No external dependencies — pure asyncio.
 """
 
-import asyncio
 import logging
 from collections import defaultdict
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 logger = logging.getLogger(__name__)
 

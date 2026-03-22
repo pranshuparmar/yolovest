@@ -1,7 +1,8 @@
 """Tests for model-retrain shadow promotion (Phase 4, FR-7.5)."""
 
+from unittest.mock import AsyncMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock
 
 from yolovest.skills.model_retrain import ModelRetrainSkill
 

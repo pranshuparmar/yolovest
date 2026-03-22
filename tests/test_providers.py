@@ -1,11 +1,9 @@
 """Tests for individual market data providers with mocked HTTP/data."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from yolovest.models.schemas import OHLCVBar
 
 pd = pytest.importorskip("pandas", reason="pandas required for provider tests")
 

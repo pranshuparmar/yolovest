@@ -9,6 +9,7 @@ import asyncio
 import logging
 import signal
 import sys
+from typing import Any
 
 from yolovest.broker.zerodha import ZerodhaBroker
 from yolovest.config import AppConfig, load_config
@@ -178,7 +179,9 @@ def _build_llm(config: AppConfig) -> GeminiLLM | _StubLLM:
 
 def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketData:
     """Build market data ingester with provider fallback chain."""
-    daily_providers = []
+    from yolovest.data.base import MarketDataBase
+
+    daily_providers: list[MarketDataBase] = []
 
     if config.market_data.daily_provider == "jugaad":
         daily_providers.append(JugaadDataProvider())
@@ -204,13 +207,23 @@ def build_context(config: AppConfig) -> AppContext:
 
     Falls back to stubs when API keys or providers are not configured.
     """
+    from typing import cast
+
+    from yolovest.context import (
+        BrokerProtocol,
+        DatabaseProtocol,
+        LLMProtocol,
+        MarketDataProtocol,
+        NotifierProtocol,
+    )
+
     return AppContext(
         config=config,
-        db=_build_db(config),
-        broker=_build_broker(config),
-        llm=_build_llm(config),
-        market_data=_build_market_data(config),
-        notify=ConsoleNotifier(enabled=True),
+        db=cast(DatabaseProtocol, _build_db(config)),
+        broker=cast(BrokerProtocol, _build_broker(config)),
+        llm=cast(LLMProtocol, _build_llm(config)),
+        market_data=cast(MarketDataProtocol, _build_market_data(config)),
+        notify=cast(NotifierProtocol, ConsoleNotifier(enabled=True)),
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
     )
@@ -295,7 +308,7 @@ async def async_main(args: argparse.Namespace) -> None:
     logger.info("YoloVest shutdown complete")
 
 
-async def _start_telegram(bot: object) -> None:
+async def _start_telegram(bot: Any) -> None:
     """Start the Telegram bot in background."""
     try:
         await bot.start()

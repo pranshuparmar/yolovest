@@ -2,11 +2,8 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from yolovest.data.screener import ScreenerScraper
 from yolovest.data.trendlyne import TrendlyneScraper
-
 
 # -----------------------------------------------------------------------
 # Screener.in Tests
@@ -251,7 +248,7 @@ class TestFundamentalsDB:
             await db.upsert_fundamentals("RELIANCE", data)
 
             # Query via NSE universe
-            universe = await db.get_nse_universe()
+            await db.get_nse_universe()
             # May not have OHLCV data, so check fundamentals table directly
             cursor = await db.conn.execute(
                 "SELECT * FROM fundamentals WHERE symbol = ?", ("RELIANCE",)

@@ -33,7 +33,7 @@ class LLMReviewSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        return self.ctx.config.risk.llm_review_enabled
+        return bool(self.ctx.config.risk.llm_review_enabled)
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         signal = kwargs["signal"]
@@ -99,7 +99,7 @@ class LLMReviewSkill(SkillBase):
                 return self._auto_approve(signal, "LLM unavailable, fallback to rules-only")
             raise
 
-    async def _build_review_context(self, signal: dict) -> dict:
+    async def _build_review_context(self, signal: dict[str, Any]) -> dict[str, Any]:
         """Assemble full context for Gemini review."""
         symbol = signal["symbol"]
         return {
@@ -111,7 +111,7 @@ class LLMReviewSkill(SkillBase):
             "todays_trades": await self.ctx.db.get_todays_trades(),
         }
 
-    def _auto_approve(self, signal: dict, reason: str) -> SkillResult:
+    def _auto_approve(self, signal: dict[str, Any], reason: str) -> SkillResult:
         return SkillResult(
             success=True,
             skill_name=self.name,

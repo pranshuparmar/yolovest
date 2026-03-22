@@ -47,7 +47,7 @@ class TradeExecuteSkill(SkillBase):
         else:
             return await self._execute_live(signal)
 
-    async def _execute_paper(self, signal: dict) -> SkillResult:
+    async def _execute_paper(self, signal: dict[str, Any]) -> SkillResult:
         """Simulate order execution for paper trading (FR-6.2).
 
         Applies configurable simulated slippage from execution.paper_slippage_pct.
@@ -84,7 +84,7 @@ class TradeExecuteSkill(SkillBase):
             data={"trade": trade, "mode": "paper"},
         )
 
-    async def _execute_live(self, signal: dict) -> SkillResult:
+    async def _execute_live(self, signal: dict[str, Any]) -> SkillResult:
         """Place real orders via Kite Connect."""
         cfg = self.ctx.config.execution
         last_error = None

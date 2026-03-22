@@ -1,8 +1,6 @@
 """Tests for the database layer and migration system."""
 
-import tempfile
 from datetime import datetime
-from pathlib import Path
 
 import pytest
 
@@ -107,7 +105,7 @@ class TestMigrationAtomicity:
             "INVALID SQL THAT WILL FAIL"
         )
 
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             await database._run_migrations()
 
         # Version should still be 1 (rolled back)
