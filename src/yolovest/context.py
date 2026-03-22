@@ -22,6 +22,8 @@ from yolovest.models.schemas import OHLCVBar
 
 @runtime_checkable
 class BrokerProtocol(Protocol):
+    async def authenticate(self, request_token: str) -> bool: ...
+
     async def place_order(
         self,
         symbol: str,

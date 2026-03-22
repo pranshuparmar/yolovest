@@ -83,7 +83,7 @@ class JugaadDataProvider(MarketDataBase):
                     high=float(row["HIGH"]),
                     low=float(row["LOW"]),
                     close=float(row["CLOSE"]),
-                    volume=int(row["VOLUME"]) if "VOLUME" in row.index else int(row.get("NO OF TRADES", 0)),
+                    volume=int(row["VOLUME"]) if "VOLUME" in row.index else int(row.get("TOTTRDQTY", 0)),
                 )
             )
 

@@ -164,6 +164,53 @@ class TestAnalyzePredictionFailures:
         assert len(result.recommendations) >= 1
 
 
+class TestJSONParseFailure:
+    async def test_invalid_json_retries_and_succeeds(self, gemini):
+        """Test that invalid JSON triggers a retry with corrective prompt."""
+        mock_client = MagicMock()
+        # First call returns invalid JSON, second returns valid JSON
+        mock_client.models.generate_content.side_effect = [
+            _mock_response("This is not JSON at all"),
+            _mock_response('{"symbol": "RELIANCE", "sentiment": "bullish", '
+                          '"confidence": 0.8, "key_drivers": ["strong earnings"]}'),
+        ]
+        gemini._client = mock_client
+        gemini._retry_base_delay = 0.01
+
+        result = await gemini.analyze_sentiment("RELIANCE", ["Good Q3 results"])
+        assert result.sentiment == "bullish"
+        # _generate was called twice (once invalid, once valid)
+        assert mock_client.models.generate_content.call_count == 2
+
+    async def test_invalid_json_all_retries_exhausted(self, gemini):
+        """Test that persistent invalid JSON raises JSONDecodeError."""
+        mock_client = MagicMock()
+        # All calls return invalid JSON
+        mock_client.models.generate_content.return_value = _mock_response(
+            "I cannot provide JSON output"
+        )
+        gemini._client = mock_client
+        gemini._retry_base_delay = 0.01
+        gemini._max_retries = 2
+
+        with pytest.raises(json.JSONDecodeError):
+            await gemini.analyze_sentiment("RELIANCE", ["Bad news"])
+
+    async def test_partial_json_retries(self, gemini):
+        """Test handling of truncated/partial JSON."""
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = [
+            _mock_response('{"symbol": "RELIANCE", "sentiment": '),  # truncated
+            _mock_response('{"symbol": "RELIANCE", "sentiment": "neutral", '
+                          '"confidence": 0.5, "key_drivers": []}'),
+        ]
+        gemini._client = mock_client
+        gemini._retry_base_delay = 0.01
+
+        result = await gemini.analyze_sentiment("RELIANCE", ["Mixed signals"])
+        assert result.sentiment == "neutral"
+
+
 class TestRetryBehavior:
     async def test_retries_on_failure(self, gemini):
         mock_client = MagicMock()

@@ -85,6 +85,29 @@ class GeminiLLM(LLMBase):
 
         raise last_error  # type: ignore[misc]
 
+    async def _generate_json(
+        self, prompt: str, model: str | None = None
+    ) -> dict[str, Any]:
+        """Generate and parse JSON with retry on malformed responses."""
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries):
+            try:
+                text = await self._generate(prompt, model=model, json_mode=True)
+                return json.loads(text)
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning(
+                    "Gemini returned invalid JSON (attempt %d/%d): %s",
+                    attempt + 1, self._max_retries, e,
+                )
+                # Re-prompt asking for valid JSON on retry
+                prompt = (
+                    f"{prompt}\n\n"
+                    "IMPORTANT: Your previous response was not valid JSON. "
+                    "Please respond with ONLY valid JSON, no markdown or extra text."
+                )
+        raise last_error  # type: ignore[misc]
+
     # ------------------------------------------------------------------
     # Health
     # ------------------------------------------------------------------
@@ -118,8 +141,7 @@ class GeminiLLM(LLMBase):
             '{"decision": "APPROVE"|"REJECT"|"RESIZE", "reasoning": "...", "adjusted_size": null|int}\n'
             "If RESIZE, provide adjusted_size. Otherwise set it to null."
         )
-        text = await self._generate(prompt, model=self._model)
-        data = json.loads(text)
+        data = await self._generate_json(prompt, model=self._model)
         return TradeReview(**data)
 
     async def analyze_sentiment(
@@ -134,8 +156,7 @@ class GeminiLLM(LLMBase):
             '{"symbol": "...", "sentiment": "bullish"|"bearish"|"neutral", '
             '"confidence": 0.0-1.0, "key_drivers": ["driver1", "driver2"]}'
         )
-        text = await self._generate(prompt, model=self._flash_model)
-        data = json.loads(text)
+        data = await self._generate_json(prompt, model=self._flash_model)
         return SentimentResult(**data)
 
     # ------------------------------------------------------------------
@@ -150,8 +171,7 @@ class GeminiLLM(LLMBase):
             "Respond with JSON:\n"
             '{"query": "...", "summary": "...", "sources": ["url1", "url2"]}'
         )
-        text = await self._generate(full_prompt, model=self._model)
-        data = json.loads(text)
+        data = await self._generate_json(full_prompt, model=self._model)
         return WebGroundingResult(**data)
 
     async def validate_watchlist(
@@ -170,8 +190,7 @@ class GeminiLLM(LLMBase):
             '{"approved_symbols": [...], "rejected_symbols": [...], '
             '"reasoning": {"SYMBOL": "reason"}, "market_narrative": "..."}'
         )
-        text = await self._generate(prompt, model=self._model)
-        data = json.loads(text)
+        data = await self._generate_json(prompt, model=self._model)
         return WatchlistValidation(**data)
 
     # ------------------------------------------------------------------
@@ -188,8 +207,7 @@ class GeminiLLM(LLMBase):
             '{"date": "YYYY-MM-DD", "market_sentiment": "bullish"|"bearish"|"neutral", '
             '"key_events": ["event1"], "sector_highlights": {"sector": "summary"}, "outlook": "..."}'
         )
-        text = await self._generate(prompt, model=self._model)
-        data = json.loads(text)
+        data = await self._generate_json(prompt, model=self._model)
         if "date" not in data:
             data["date"] = date.today().isoformat()
         return MarketDaySummary(**data)
@@ -206,6 +224,5 @@ class GeminiLLM(LLMBase):
             '{"patterns_identified": [...], "common_failure_modes": [...], '
             '"recommendations": [...], "summary": "..."}'
         )
-        text = await self._generate(prompt, model=self._model)
-        data = json.loads(text)
+        data = await self._generate_json(prompt, model=self._model)
         return FailureAnalysis(**data)

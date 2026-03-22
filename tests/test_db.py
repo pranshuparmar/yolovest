@@ -84,6 +84,55 @@ class TestMigrationSystem:
         await database.close()
 
 
+class TestMigrationAtomicity:
+    async def test_failed_migration_rolls_back(self, tmp_path):
+        """Test that a partially failing migration is rolled back entirely."""
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+
+        # First migration succeeds
+        (migrations_dir / "001_initial.sql").write_text(
+            "CREATE TABLE test_one (id INTEGER PRIMARY KEY)"
+        )
+
+        db_path = str(tmp_path / "test.db")
+        database = Database(db_path, migrations_dir=migrations_dir)
+        await database.initialize()
+
+        assert await database.get_schema_version() == 1
+
+        # Second migration: first statement valid, second invalid
+        (migrations_dir / "002_bad.sql").write_text(
+            "CREATE TABLE test_two (id INTEGER PRIMARY KEY);\n"
+            "INVALID SQL THAT WILL FAIL"
+        )
+
+        with pytest.raises(Exception):
+            await database._run_migrations()
+
+        # Version should still be 1 (rolled back)
+        assert await database.get_schema_version() == 1
+
+        # test_two should NOT exist (rolled back)
+        cursor = await database.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='test_two'"
+        )
+        rows = await cursor.fetchall()
+        assert len(rows) == 0
+
+        await database.close()
+
+    async def test_missing_migrations_dir_skips(self, tmp_path):
+        """Test that a missing migrations dir logs warning and returns."""
+        db_path = str(tmp_path / "test.db")
+        nonexistent = tmp_path / "no_such_dir"
+        database = Database(db_path, migrations_dir=nonexistent)
+        await database.initialize()
+        # Should initialize without error, version 0 (no migrations applied)
+        assert await database.get_schema_version() == 0
+        await database.close()
+
+
 class TestHealthCheck:
     async def test_health_check_returns_true(self, db):
         assert await db.health_check() is True
@@ -236,3 +285,14 @@ class TestAuditLog:
         rows = await cursor.fetchall()
         assert len(rows) == 1
         assert rows[0]["skill_name"] is None
+
+    async def test_log_audit_batch_mode(self, db):
+        """Test that auto_commit=False defers commits until flush_audit."""
+        await db.log_audit(action_type="batch1", auto_commit=False)
+        await db.log_audit(action_type="batch2", auto_commit=False)
+        await db.log_audit(action_type="batch3", auto_commit=False)
+        await db.flush_audit()
+
+        cursor = await db.conn.execute("SELECT * FROM audit_log")
+        rows = await cursor.fetchall()
+        assert len(rows) == 3

@@ -73,6 +73,9 @@ class _StubDB:
 class _StubBroker:
     """Minimal broker stub for Phase 0 (no real broker yet)."""
 
+    async def authenticate(self, request_token: str) -> bool:
+        return False
+
     async def place_order(self, *args: object, **kwargs: object) -> str:
         raise NotImplementedError("No broker configured")
 

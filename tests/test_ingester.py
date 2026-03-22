@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -9,9 +10,18 @@ from yolovest.data.ingester import MarketDataIngester
 from yolovest.models.schemas import OHLCVBar
 
 
+IST = ZoneInfo("Asia/Kolkata")
+
+
 def _make_bars(n: int = 3, age_days: int = 0) -> list[OHLCVBar]:
-    """Create test OHLCV bars. age_days=0 means today's data."""
-    base = datetime.now() - timedelta(days=age_days + n)
+    """Create test OHLCV bars. age_days=0 means today's data.
+
+    Uses naive timestamps in IST-equivalent time so staleness checks work
+    correctly with the IST-aware ingester.
+    """
+    # Use IST-aware now, then strip timezone (providers return naive IST)
+    now_ist = datetime.now(IST).replace(tzinfo=None)
+    base = now_ist - timedelta(days=age_days + n)
     return [
         OHLCVBar(
             timestamp=base + timedelta(days=i),
@@ -126,7 +136,8 @@ class TestDataQualityValidation:
 class TestIntradayRouting:
     async def test_intraday_uses_intraday_provider(self):
         # Intraday bars must be very recent (within stale_threshold_minutes)
-        now = datetime.now()
+        # Use IST-equivalent naive timestamps
+        now = datetime.now(IST).replace(tzinfo=None)
         bars = [
             OHLCVBar(
                 timestamp=now - timedelta(minutes=10 - i),

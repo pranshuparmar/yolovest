@@ -12,6 +12,7 @@ See REQUIREMENTS.md FR-2.1 for the fallback chain design.
 import logging
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from yolovest.data.base import MarketDataBase
 from yolovest.models.schemas import OHLCVBar
@@ -126,11 +127,19 @@ class MarketDataIngester(MarketDataBase):
         return providers
 
     def _is_stale(self, bars: list[OHLCVBar], interval: str) -> bool:
-        """Check if the most recent bar is too old (FR-10.4)."""
+        """Check if the most recent bar is too old (FR-10.4).
+
+        Uses IST-aware comparison. Naive timestamps from providers are
+        treated as IST (Indian market data convention).
+        """
         if not bars:
             return True
         latest = bars[-1].timestamp
-        now = datetime.now()
+        ist = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(ist)
+        # Normalize naive timestamps to IST for comparison
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=ist)
         # For daily data, stale means no data from today or yesterday
         if interval in ("daily", "1d"):
             threshold = timedelta(days=2)

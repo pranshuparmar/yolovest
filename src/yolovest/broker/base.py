@@ -16,6 +16,11 @@ class BrokerBase(ABC):
     """
 
     @abstractmethod
+    async def authenticate(self, request_token: str) -> bool:
+        """Exchange a request token for an authenticated session (daily re-auth)."""
+        ...
+
+    @abstractmethod
     async def place_order(
         self,
         symbol: str,

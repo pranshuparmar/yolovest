@@ -88,13 +88,26 @@ class Database:
 
             logger.info("Applying migration %s", mf.name)
             sql = mf.read_text()
-            await self.conn.executescript(sql)
-            await self.conn.execute(
-                "INSERT INTO schema_version (version, filename) VALUES (?, ?)",
-                (version, mf.name),
-            )
-            await self.conn.commit()
+            # Use explicit transaction for atomicity (M1 fix).
+            # executescript runs implicit commits which break atomicity.
+            await self.conn.execute("BEGIN")
+            try:
+                for stmt in self._split_sql(sql):
+                    await self.conn.execute(stmt)
+                await self.conn.execute(
+                    "INSERT INTO schema_version (version, filename) VALUES (?, ?)",
+                    (version, mf.name),
+                )
+                await self.conn.commit()
+            except Exception:
+                await self.conn.rollback()
+                raise
             logger.info("Migration %s applied", mf.name)
+
+    @staticmethod
+    def _split_sql(sql: str) -> list[str]:
+        """Split SQL text into individual statements, skipping empty ones."""
+        return [s.strip() for s in sql.split(";") if s.strip()]
 
     async def get_schema_version(self) -> int:
         """Return the highest applied migration version, or 0 if none."""
@@ -186,12 +199,15 @@ class Database:
         self, symbol: str, interval: str, days: int = 30
     ) -> list[OHLCVBar]:
         """Fetch OHLCV bars for a symbol, most recent `days` days."""
+        from datetime import timedelta
+
+        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
         cursor = await self.conn.execute(
             "SELECT timestamp, open, high, low, close, volume FROM ohlcv "
             "WHERE symbol = ? AND interval = ? "
-            "AND timestamp >= datetime('now', ? || ' days') "
+            "AND timestamp >= ? "
             "ORDER BY timestamp ASC",
-            (symbol, interval, str(-days)),
+            (symbol, interval, cutoff),
         )
         rows = await cursor.fetchall()
         return [
@@ -211,24 +227,29 @@ class Database:
     # ------------------------------------------------------------------
 
     async def upsert_watchlist(self, stocks: list[dict]) -> None:
-        """Replace watchlist with new scored stocks."""
-        await self.conn.execute("DELETE FROM watchlist")
-        for stock in stocks:
-            await self.conn.execute(
-                "INSERT INTO watchlist (symbol, composite_score, technical_score, "
-                "volume_momentum_score, news_sentiment_score, fundamental_score, sector) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    stock.get("symbol"),
-                    stock.get("composite_score"),
-                    stock.get("technical_score"),
-                    stock.get("volume_momentum_score"),
-                    stock.get("news_sentiment_score"),
-                    stock.get("fundamental_score"),
-                    stock.get("sector"),
-                ),
-            )
-        await self.conn.commit()
+        """Replace watchlist with new scored stocks (atomic)."""
+        await self.conn.execute("BEGIN")
+        try:
+            await self.conn.execute("DELETE FROM watchlist")
+            for stock in stocks:
+                await self.conn.execute(
+                    "INSERT INTO watchlist (symbol, composite_score, technical_score, "
+                    "volume_momentum_score, news_sentiment_score, fundamental_score, sector) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        stock.get("symbol"),
+                        stock.get("composite_score"),
+                        stock.get("technical_score"),
+                        stock.get("volume_momentum_score"),
+                        stock.get("news_sentiment_score"),
+                        stock.get("fundamental_score"),
+                        stock.get("sector"),
+                    ),
+                )
+            await self.conn.commit()
+        except Exception:
+            await self.conn.rollback()
+            raise
 
     async def get_watchlist(self) -> list[dict]:
         """Get current watchlist ordered by composite score."""
@@ -263,8 +284,14 @@ class Database:
         input_summary: dict | None = None,
         output_summary: dict | None = None,
         duration_ms: float | None = None,
+        *,
+        auto_commit: bool = True,
     ) -> None:
-        """Log an audit entry for decision traceability."""
+        """Log an audit entry for decision traceability.
+
+        Set auto_commit=False when batching multiple audit entries,
+        then call flush_audit() to commit them all at once.
+        """
         now_ist = datetime.now(IST).isoformat()
         await self.conn.execute(
             "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
@@ -278,4 +305,9 @@ class Database:
                 duration_ms,
             ),
         )
+        if auto_commit:
+            await self.conn.commit()
+
+    async def flush_audit(self) -> None:
+        """Commit any pending audit log entries."""
         await self.conn.commit()
