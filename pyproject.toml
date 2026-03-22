@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "yolovest"
 version = "0.1.0"
 description = "Fully autonomous AI-driven Indian stock trading platform"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 license = "MIT"
 readme = "README.md"
 
