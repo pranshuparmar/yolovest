@@ -219,6 +219,28 @@ def _parse_holding_period(period_str: str) -> timedelta:
 # ---------------------------------------------------------------------------
 
 
+class EconomicEvent(BaseModel):
+    """An economic calendar event (FR-2.6): RBI/Fed policy, earnings, GDP."""
+
+    event_date: str  # YYYY-MM-DD
+    event_type: str  # "monetary_policy", "earnings", "gdp", "trade_data"
+    title: str
+    country: str  # "IN", "US"
+    impact: Literal["high", "medium", "low"] = "medium"
+    source: str  # "rbi_schedule", "fed_schedule", "nse_announcements"
+    symbol: str | None = None  # stock symbol for earnings, None for macro events
+    content_hash: str = ""
+
+    @model_validator(mode="after")
+    def compute_hash(self) -> "EconomicEvent":
+        if not self.content_hash:
+            import hashlib
+
+            content = f"{self.event_date}:{self.event_type}:{self.title}:{self.country}"
+            self.content_hash = hashlib.sha256(content.lower().encode()).hexdigest()
+        return self
+
+
 class NewsArticle(BaseModel):
     """A single news article from any source, with dedup hash (FR-2.13)."""
 

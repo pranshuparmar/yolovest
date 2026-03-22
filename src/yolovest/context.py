@@ -235,6 +235,16 @@ class DatabaseProtocol(Protocol):
         self, limit: int = 50, action_type: str | None = None
     ) -> list[dict[str, Any]]: ...
 
+    async def upsert_economic_events(self, events: list[dict[str, Any]]) -> int: ...
+
+    async def get_upcoming_economic_events(
+        self, days: int = 7, country: str | None = None, event_type: str | None = None
+    ) -> list[dict[str, Any]]: ...
+
+    async def get_earnings_events(
+        self, symbol: str | None = None, days: int = 30
+    ) -> list[dict[str, Any]]: ...
+
 
 # ---------------------------------------------------------------------------
 # Market Hours Checker

@@ -1,6 +1,6 @@
 """Skill: ingest-data — Market data ingestion from all sources.
 
-Covers: FR-2.1 to FR-2.9, FR-2.12, FR-2.13
+Covers: FR-2.1 to FR-2.9, FR-2.12, FR-2.13, FR-2.6 (economic calendar)
 Trigger: HEARTBEAT — every heartbeat during market hours
 Pipeline position: Feeds into market-scan and generate-signals.
 
@@ -92,6 +92,16 @@ class IngestDataSkill(SkillBase):
         except Exception as e:
             logger.warning("NSE data fetch failed: %s", e)
 
+        # --- Economic Calendar (FR-2.6) ---
+        try:
+            econ_events = await self._fetch_economic_calendar()
+            if econ_events:
+                count = await self.ctx.db.upsert_economic_events(econ_events)
+                results["economic_events"] = count
+                logger.info("Ingested %d economic calendar events", count)
+        except Exception as e:
+            logger.warning("Economic calendar fetch failed: %s", e)
+
         # --- Fundamentals + Technicals (P1 — graceful stubs) ---
         try:
             await self._fetch_fundamentals(symbols)
@@ -163,6 +173,16 @@ class IngestDataSkill(SkillBase):
                     if sym not in existing.symbols:
                         existing.symbols.append(sym)
         return list(seen.values())
+
+    async def _fetch_economic_calendar(self) -> list[dict]:
+        """Fetch economic calendar events (FR-2.6): RBI, Fed, earnings."""
+        from yolovest.data.economic_calendar import EconomicCalendarSource
+
+        source = EconomicCalendarSource()
+        try:
+            return await source.fetch_all_events(lookback_days=7, lookahead_days=30)
+        finally:
+            await source.close()
 
     async def _fetch_fundamentals(self, symbols: list[str]) -> None:
         """Fetch from Screener.in. FR-2.4. P1 — stub for now."""

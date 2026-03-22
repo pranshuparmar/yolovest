@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
-from yolovest.models.schemas import NewsArticle, OHLCVBar, SentimentResult
+from yolovest.models.schemas import EconomicEvent, NewsArticle, OHLCVBar, SentimentResult
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +424,88 @@ class Database:
                 pass  # Skip duplicates silently
         await self.conn.commit()
         return inserted
+
+    # ------------------------------------------------------------------
+    # Economic Calendar (FR-2.6)
+    # ------------------------------------------------------------------
+
+    async def upsert_economic_events(self, events: list[dict]) -> int:
+        """Insert economic calendar events, skipping duplicates. Returns count inserted."""
+        inserted = 0
+        for event in events:
+            try:
+                await self.conn.execute(
+                    "INSERT OR IGNORE INTO economic_events "
+                    "(event_date, event_type, title, country, impact, source, symbol, content_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        event["event_date"],
+                        event["event_type"],
+                        event["title"],
+                        event["country"],
+                        event.get("impact", "medium"),
+                        event["source"],
+                        event.get("symbol"),
+                        event["content_hash"],
+                    ),
+                )
+                inserted += 1
+            except Exception:
+                pass  # Skip duplicates silently
+        await self.conn.commit()
+        return inserted
+
+    async def get_upcoming_economic_events(
+        self, days: int = 7, country: str | None = None, event_type: str | None = None
+    ) -> list[dict]:
+        """Get economic events within the next N days, optionally filtered."""
+        from datetime import timedelta
+
+        today = datetime.now(IST).date().isoformat()
+        end = (datetime.now(IST).date() + timedelta(days=days)).isoformat()
+
+        query = (
+            "SELECT event_date, event_type, title, country, impact, source, symbol "
+            "FROM economic_events WHERE event_date >= ? AND event_date <= ?"
+        )
+        params: list[str] = [today, end]
+
+        if country:
+            query += " AND country = ?"
+            params.append(country)
+        if event_type:
+            query += " AND event_type = ?"
+            params.append(event_type)
+
+        query += " ORDER BY event_date ASC"
+
+        cursor = await self.conn.execute(query, params)
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_earnings_events(self, symbol: str | None = None, days: int = 30) -> list[dict]:
+        """Get upcoming earnings/board meeting dates, optionally for a specific symbol."""
+        from datetime import timedelta
+
+        today = datetime.now(IST).date().isoformat()
+        end = (datetime.now(IST).date() + timedelta(days=days)).isoformat()
+
+        query = (
+            "SELECT event_date, title, symbol, impact, source "
+            "FROM economic_events WHERE event_type = 'earnings' "
+            "AND event_date >= ? AND event_date <= ?"
+        )
+        params: list[str] = [today, end]
+
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+
+        query += " ORDER BY event_date ASC"
+
+        cursor = await self.conn.execute(query, params)
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
     # ------------------------------------------------------------------
     # Signals (Phase 2, FR-4.5)
