@@ -83,6 +83,15 @@ YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses 
 - **Dependencies** — Added `fastapi`, `uvicorn`, `websockets` to pyproject.toml
 - **Tests** — 459 passing (27 new: dashboard API endpoints with auth, DB Phase 5 methods)
 
+### Telegram Bot & Docker Deployment
+
+- **Telegram bot** (`telegram_bot.py`) — Full bot with python-telegram-bot: `/start`, `/status`, `/pnl`, `/positions`, `/stop`, `/kill`, `/resume` (FR-5.14), `/auth <token>` (FR-6.3). Runs as background long-polling task
+- **Notifier integration** — `Notifier.set_telegram_bot()` wires bot for real message delivery. Per-alert-type toggle (FR-8.6). Graceful failure handling
+- **Kill switch fix** — Updated to use `set_system_state("kill_switch", ...)` matching actual DB API
+- **Broker login URL** — Added `get_login_url()` to `BrokerBase` and `ZerodhaBroker` for auth flow
+- **Docker** — Multi-stage `Dockerfile` with non-root user, health check, volume mounts. `docker-compose.yml` with env var passthrough, named volumes for data/backups/models/logs, IST timezone
+- **Tests** — 472 passing (13 new: Telegram bot, notifier integration, kill switch, broker login URL)
+
 ## Architecture
 
 ### Three Abstraction Layers (ABCs)

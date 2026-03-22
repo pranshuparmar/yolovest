@@ -70,3 +70,7 @@ class BrokerBase(ABC):
     ) -> bool:
         """Modify the trigger price of an existing stop-loss order."""
         ...
+
+    def get_login_url(self) -> str:
+        """Get the broker login URL for daily re-authentication."""
+        return ""

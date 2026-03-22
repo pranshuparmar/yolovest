@@ -61,7 +61,7 @@ class KillSwitchSkill(SkillBase):
     async def _execute_stop(self) -> SkillResult:
         """Pause trading, cancel pending orders, keep positions."""
         # Persist kill switch state (FR-5.15)
-        await self.ctx.db.set_kill_switch(active=True)
+        await self.ctx.db.set_system_state("kill_switch", "active")
 
         # Cancel all pending orders
         pending_orders = await self.ctx.broker.get_pending_orders()
@@ -89,7 +89,7 @@ class KillSwitchSkill(SkillBase):
 
     async def _execute_kill(self) -> SkillResult:
         """Nuclear option: square off everything + pause."""
-        await self.ctx.db.set_kill_switch(active=True)
+        await self.ctx.db.set_system_state("kill_switch", "active")
 
         # Cancel all pending orders
         pending_orders = await self.ctx.broker.get_pending_orders()
@@ -126,7 +126,7 @@ class KillSwitchSkill(SkillBase):
 
     async def _execute_resume(self) -> SkillResult:
         """Resume trading after stop/kill."""
-        await self.ctx.db.set_kill_switch(active=False)
+        await self.ctx.db.set_system_state("kill_switch", "inactive")
 
         # Run health check before resuming
         from yolovest.skills.health_check import HealthCheckSkill

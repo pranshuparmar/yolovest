@@ -44,6 +44,10 @@ class ZerodhaBroker(BrokerBase):
         self._paper_orders: dict[str, dict] = {}
         self._paper_order_counter = 0
 
+    def get_login_url(self) -> str:
+        """Get the Kite Connect login URL for daily re-authentication."""
+        return f"https://kite.zerodha.com/connect/login?v=3&api_key={self._api_key}"
+
     # ------------------------------------------------------------------
     # Authentication (FR-6.3)
     # ------------------------------------------------------------------

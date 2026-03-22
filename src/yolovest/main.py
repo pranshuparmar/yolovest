@@ -105,6 +105,9 @@ class _StubBroker:
     async def modify_sl_order(self, order_id: str, new_trigger_price: float) -> bool:
         raise NotImplementedError("No broker configured")
 
+    def get_login_url(self) -> str:
+        return ""
+
 
 class _StubLLM:
     """Minimal LLM stub for Phase 0 (no real LLM yet)."""
@@ -251,6 +254,18 @@ async def async_main(args: argparse.Namespace) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, shutdown_handler)
 
+    # Start Telegram bot if enabled
+    telegram_task = None
+    telegram_bot = None
+    if ctx.config.notifications.telegram.enabled:
+        from yolovest.telegram_bot import TelegramBot
+
+        telegram_bot = TelegramBot(ctx)
+        # Wire bot into notifier for message sending
+        if hasattr(ctx.notify, "set_telegram_bot"):
+            ctx.notify.set_telegram_bot(telegram_bot)
+        telegram_task = asyncio.create_task(_start_telegram(telegram_bot))
+
     # Start dashboard if enabled
     dashboard_task = None
     if not args.no_dashboard:
@@ -268,12 +283,24 @@ async def async_main(args: argparse.Namespace) -> None:
     try:
         await orchestrator.start()
     finally:
+        if telegram_bot:
+            await telegram_bot.stop()
+        if telegram_task:
+            telegram_task.cancel()
         if dashboard_task:
             dashboard_task.cancel()
         if isinstance(ctx.db, Database):
             await ctx.db.close()
 
     logger.info("YoloVest shutdown complete")
+
+
+async def _start_telegram(bot: object) -> None:
+    """Start the Telegram bot in background."""
+    try:
+        await bot.start()
+    except Exception:
+        logger.exception("Telegram bot failed to start")
 
 
 async def _start_dashboard(ctx: AppContext) -> None:
