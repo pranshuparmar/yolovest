@@ -175,7 +175,7 @@ class XGBoostSignalModel(MLBase):
             entry_price=round(entry_price, 2),
             target_price=round(target_price, 2),
             stop_loss_price=round(stop_loss_price, 2),
-            position_size=1,  # placeholder, risk manager decides in Phase 3
+            position_size=1,  # risk-check skill determines actual sizing
             holding_period=holding_period,
             confidence=round(confidence, 4),
             model_version=self._get_version(model_type),
