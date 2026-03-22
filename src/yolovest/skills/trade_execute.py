@@ -75,7 +75,8 @@ class TradeExecuteSkill(SkillBase):
             "slippage": round(slippage, 2),
         }
 
-        await self.ctx.db.insert_trade(trade)
+        trade_id = await self.ctx.db.insert_trade(trade)
+        trade["trade_id"] = trade_id
         await self.ctx.notify.send_trade_alert(trade)
 
         return SkillResult(
@@ -164,7 +165,8 @@ class TradeExecuteSkill(SkillBase):
                     "slippage": slippage,
                 }
 
-                await self.ctx.db.insert_trade(trade)
+                trade_id = await self.ctx.db.insert_trade(trade)
+                trade["trade_id"] = trade_id
                 await self.ctx.notify.send_trade_alert(trade)
 
                 return SkillResult(

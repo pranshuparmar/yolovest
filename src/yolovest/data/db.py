@@ -903,8 +903,8 @@ class Database:
     # Trade Management (Phase 3, FR-6)
     # ------------------------------------------------------------------
 
-    async def insert_trade(self, trade: dict[str, Any]) -> None:
-        """Insert a new trade record."""
+    async def insert_trade(self, trade: dict[str, Any]) -> str:
+        """Insert a new trade record. Returns the generated trade_id."""
         import uuid
 
         trade_id = trade.get("trade_id") or f"T-{uuid.uuid4().hex[:8]}"
@@ -934,6 +934,7 @@ class Database:
             ),
         )
         await self.conn.commit()
+        return trade_id
 
     async def update_position_sl(self, position_id: int | str, new_sl: float) -> None:
         """Update stop-loss price for an open position."""

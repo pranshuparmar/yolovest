@@ -132,14 +132,7 @@ class GenerateSignalsSkill(SkillBase):
             data={
                 "watchlist_size": len(watchlist),
                 "signals_generated": len(signals_generated),
-                "signals": [
-                    {
-                        "symbol": s["symbol"],
-                        "type": s["signal_type"],
-                        "confidence": s["confidence_score"],
-                    }
-                    for s in signals_generated
-                ],
+                "signals": signals_generated,  # full signal dicts for downstream skills
             },
         )
 

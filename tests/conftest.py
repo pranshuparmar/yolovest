@@ -193,7 +193,7 @@ def mock_db() -> AsyncMock:
     db.get_sector_rotation = AsyncMock(return_value={"strong": [], "weak": [], "sectors": {}})
     db.get_todays_trades = AsyncMock(return_value=[])
     db.get_latest_sentiment = AsyncMock(return_value=None)
-    db.insert_trade = AsyncMock()
+    db.insert_trade = AsyncMock(return_value="T-test001")
     db.close_position = AsyncMock()
     db.insert_prediction = AsyncMock(return_value="P-test001")
     db.get_unscored_predictions = AsyncMock(return_value=[])
