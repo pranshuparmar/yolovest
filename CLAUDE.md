@@ -20,7 +20,7 @@ YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses 
 
 ### Skill System
 
-15 skills extend `SkillBase` (in `src/yolovest/skills/base.py`). Each skill has:
+16 skills extend `SkillBase` (in `src/yolovest/skills/base.py`). Each skill has:
 - `async execute(**kwargs) -> SkillResult`
 - `should_run() -> bool`
 - A trigger type: `HEARTBEAT`, `CRON`, `EVENT`, or `MANUAL`
@@ -82,6 +82,7 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 - **FastAPI dashboard**: 14 REST endpoints + WebSocket. Basic auth. Endpoints include `/api/slippage`, `/api/llm-accuracy`.
 - **Telegram bot**: `/start`, `/status`, `/pnl`, `/positions`, `/stop`, `/kill`, `/resume`, `/auth`
 - **Agent memory**: Cross-restart state persistence via `agent_memory` DB table with TTL support
+- **Database maintenance**: CRON skill for daily backups, data retention cleanup (OHLCV, audit logs, predictions), old backup pruning
 - **Docker**: Multi-stage Dockerfile, docker-compose with volume mounts, IST timezone
 
 ## Key Files

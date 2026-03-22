@@ -6,13 +6,13 @@ Fully autonomous AI-driven Indian stock trading platform. Uses Google Gemini for
 
 ## Features
 
-- **15-skill heartbeat pipeline** — health check, data ingestion, market scanning, signal generation, risk checks, LLM trade review, execution, position monitoring, square-off, prediction tracking, model retraining, and reporting
+- **16-skill heartbeat pipeline** — health check, data ingestion, market scanning, signal generation, risk checks, LLM trade review, execution, position monitoring, square-off, prediction tracking, model retraining, reporting, and database maintenance
 - **ML signal models** — XGBoost with Platt scaling, walk-forward backtesting, shadow mode promotion
 - **Gemini LLM integration** — sentiment analysis, trade review gate, watchlist validation, market summaries
 - **Full risk management** — position sizing, exposure caps, daily/weekly circuit breakers, trailing stop-loss, kill switch
 - **Multi-source market data** — jugaad-data (primary) → yfinance (fallback) → tvDatafeed (intraday), with automatic failover
 - **Zerodha Kite Connect** — paper mode with simulated slippage, live mode with SL orders and retry logic
-- **Web dashboard** — FastAPI REST API (12 endpoints) + WebSocket live updates, trade reasoning chain, equity curve
+- **Web dashboard** — FastAPI REST API (14 endpoints) + WebSocket live updates, trade reasoning chain, equity curve
 - **Telegram bot** — real-time alerts, portfolio status, kill switch control
 - **Self-learning** — prediction tracking/scoring, automated model retraining with A/B shadow testing
 
@@ -204,7 +204,7 @@ src/yolovest/
 ├── telegram_bot.py  # Telegram bot commands
 └── main.py          # Entry point
 migrations/          # Numbered SQL migration scripts
-tests/               # pytest-asyncio test suite (472 tests)
+tests/               # pytest-asyncio test suite (671+ tests)
 ```
 
 ## Sample Deployment Plan (₹25k, 1 Month)
