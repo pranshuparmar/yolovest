@@ -238,6 +238,36 @@ class ZerodhaBroker(BrokerBase):
             return await asyncio.to_thread(self._kite.margins)
 
     # ------------------------------------------------------------------
+    # Modify SL Order (FR-5.8)
+    # ------------------------------------------------------------------
+
+    async def modify_sl_order(
+        self, order_id: str, new_trigger_price: float
+    ) -> bool:
+        """Modify the trigger price of a stop-loss order."""
+        if self._mode == "paper":
+            logger.info(
+                "[PAPER] Modify SL order %s → trigger=%.2f",
+                order_id, new_trigger_price,
+            )
+            if order_id in self._paper_orders:
+                self._paper_orders[order_id]["trigger_price"] = new_trigger_price
+            return True
+
+        if not self._kite:
+            raise RuntimeError("Not authenticated")
+
+        def _modify() -> None:
+            self._kite.modify_order(
+                variety="regular",
+                order_id=order_id,
+                trigger_price=new_trigger_price,
+            )
+
+        await self._retry_api_call(_modify)
+        return True
+
+    # ------------------------------------------------------------------
     # Retry Helper (FR-6.6)
     # ------------------------------------------------------------------
 

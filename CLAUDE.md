@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses OpenClaw for agent orchestration, Google Gemini for LLM reasoning, XGBoost/LightGBM for ML signals, and Zerodha Kite Connect (free tier) for execution. Market data comes from free providers (jugaad-data, yfinance, tvDatafeed).
 
-**Current state:** Phase 0 and Phase 1 complete. Phase 2 (Intelligence Layer) is next. See `plan.md` for implementation plans and `docs/` for review reports.
+**Current state:** Phases 0–3 complete. Phase 4 (Self-Learning) is next. See `plan.md` for implementation plans and `docs/` for review reports.
 
 ## What's Built
 
@@ -18,7 +18,7 @@ YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses 
 - **Orchestrator** (`orchestrator.py`) — Full heartbeat pipeline with FR-1.3 error propagation, mutex (skip-on-overrun), consecutive skip alerting
 - **Event bus** (`events.py`) — Async pub/sub for inter-skill communication
 - **Notifier** (`notify.py`) — Console backend + Telegram-ready interface
-- **ABCs** — `BrokerBase` (7 methods), `LLMBase` (7 methods), `MarketDataBase` (3 methods)
+- **ABCs** — `BrokerBase` (8 methods incl. `modify_sl_order`), `LLMBase` (7 methods), `MarketDataBase` (3 methods + `get_ltp`)
 - **Skill stubs** — All 15 skills registered in `SKILL_REGISTRY` with documented flows
 
 ### Phase 1 — Foundation & Data Pipeline (Complete)
@@ -43,6 +43,21 @@ YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses 
 - **SuperTrend** — Upgraded from simplified single-bar to full multi-bar with band carryover
 - **Context** — Added `MLProtocol` to `AppContext`
 - **Tests** — 322 passing (67 new: news scrapers, strategy/backtester, DB Phase 2 methods)
+
+### Phase 3 — Risk & Execution (Complete)
+
+- **Risk check** (`skills/risk_check.py`) — Full FR-5.1 to FR-5.18: kill switch, market hours enforcement, daily/weekly circuit breakers with sizing reduction, max positions, portfolio/single-stock exposure caps, sector correlation limits, mandatory stop-loss validation, ATR-based position sizing
+- **LLM review** (`skills/llm_review.py`) — Gemini trade approval gate (FR-4.4, FR-5.11). Full context assembly (signal + sentiment + portfolio + premarket + sector rotation). APPROVE/REJECT/RESIZE decisions. Fallback to rules-only when LLM unavailable (FR-5.12)
+- **Trade execution** (`skills/trade_execute.py`) — Paper mode with configurable simulated slippage (FR-6.2). Live mode with primary + SL order placement, retry with exponential backoff (FR-6.6), slippage tracking (FR-6.7)
+- **Position monitor** (`skills/position_monitor.py`) — Broker-local position reconciliation (FR-6.5). Target/SL hit detection. Trailing stop-loss with configurable trigger multiple and step size (FR-5.8). Unrealized PnL tracking
+- **Square-off** (`skills/square_off.py`) — Auto close MIS positions at EOD (FR-5.10). Force mode for kill switch. SL order cancellation before exit. PnL computation and Telegram notification
+- **Database** — 10 new methods: `get_portfolio_state`, `get_stock_sector`, `log_llm_review`, `get_sector_rotation`, `get_todays_trades`, `get_latest_sentiment`, `insert_trade`, `update_position_sl`, `update_unrealized_pnl`, `close_position`
+- **Protocols** — Extended `DatabaseProtocol` (10 new methods), `BrokerProtocol` (`modify_sl_order`), `MarketDataProtocol` (`get_ltp`), `NotifierProtocol` (`send_trade_alert`)
+- **MarketHoursChecker** — Added `is_square_off_window()` with extension support
+- **Notifier** — Added `send_trade_alert()` for trade entry/exit alerts
+- **MarketDataIngester** — Added `get_ltp()` for last traded price via quote fallback chain
+- **ZerodhaBroker** — Added `modify_sl_order()` for trailing SL updates (paper + live)
+- **Tests** — 393 passing (67 new: risk-check, llm-review, trade-execute, position-monitor, square-off, DB Phase 3 methods)
 
 ## Architecture
 
@@ -102,8 +117,8 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 - **Phase 0** (complete): Skill infrastructure — context, schemas, orchestrator, event bus, heartbeat, config, ABCs, Telegram
 - **Phase 1** (complete): Database + migrations, market data providers with fallback chain, feature engineering, Zerodha broker, Gemini LLM
 - **Phase 2** (complete): Intelligence — news aggregation + dedup, sentiment analysis, dynamic scanner with weighted scoring, ML signal models (XGBoost), backtesting engine, model retraining with shadow mode
-- Phase 3 (next): Risk & execution — risk manager, LLM trade review gate, order executor, position tracking
-- Phase 4: Self-learning — prediction tracking, model retraining, A/B testing
+- **Phase 3** (complete): Risk & execution — risk manager (all FR-5 rules), LLM trade review gate, order executor (paper + live), position monitor with trailing SL, square-off
+- Phase 4 (next): Self-learning — prediction tracking outcome scoring, model retraining loop, A/B testing
 - Phase 5: Dashboard & reporting
 
 ## Domain Context

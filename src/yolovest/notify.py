@@ -32,6 +32,21 @@ class ConsoleNotifier(NotifierBase):
             return
         logger.info("[NOTIFY] %s", message)
 
+    async def send_trade_alert(self, trade: dict) -> None:
+        """Send a trade entry/exit alert."""
+        symbol = trade.get("symbol", "?")
+        signal_type = trade.get("signal_type", "?")
+        qty = trade.get("quantity", 0)
+        fill = trade.get("fill_price", trade.get("entry_price", 0))
+        sl = trade.get("stop_loss_price", 0)
+        target = trade.get("target_price", 0)
+        mode = trade.get("mode", "paper")
+        msg = (
+            f"Trade Alert [{mode.upper()}]: {signal_type} {symbol} "
+            f"qty={qty} @ {fill:.2f} SL={sl:.2f} T={target:.2f}"
+        )
+        await self.send(msg)
+
 
 class Notifier:
     """Full notifier with config-based routing and message tracking."""
@@ -72,6 +87,21 @@ class Notifier:
     async def _send_telegram(self, message: str) -> bool:
         """Send via Telegram bot. Stub — implementation in Phase 1."""
         return False
+
+    async def send_trade_alert(self, trade: dict) -> None:
+        """Send a trade entry/exit alert via all configured backends."""
+        symbol = trade.get("symbol", "?")
+        signal_type = trade.get("signal_type", "?")
+        qty = trade.get("quantity", 0)
+        fill = trade.get("fill_price", trade.get("entry_price", 0))
+        sl = trade.get("stop_loss_price", 0)
+        target = trade.get("target_price", 0)
+        mode = trade.get("mode", "paper")
+        msg = (
+            f"Trade Alert [{mode.upper()}]: {signal_type} {symbol} "
+            f"qty={qty} @ {fill:.2f} SL={sl:.2f} T={target:.2f}"
+        )
+        await self.send(msg)
 
     @property
     def sent_messages(self) -> list[str]:

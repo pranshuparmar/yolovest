@@ -47,6 +47,8 @@ class BrokerProtocol(Protocol):
 
     async def get_margins(self) -> dict[str, Any]: ...
 
+    async def modify_sl_order(self, order_id: str, new_trigger_price: float) -> bool: ...
+
 
 @runtime_checkable
 class LLMProtocol(Protocol):
@@ -80,6 +82,8 @@ class MarketDataProtocol(Protocol):
 
     async def get_quote(self, symbol: str) -> dict[str, Any]: ...
 
+    async def get_ltp(self, symbol: str) -> float: ...
+
     async def health_check(self) -> bool: ...
 
 
@@ -110,6 +114,8 @@ class MLProtocol(Protocol):
 class NotifierProtocol(Protocol):
     async def send(self, message: str) -> None: ...
 
+    async def send_trade_alert(self, trade: dict[str, Any]) -> None: ...
+
 
 @runtime_checkable
 class DatabaseProtocol(Protocol):
@@ -138,6 +144,38 @@ class DatabaseProtocol(Protocol):
         input_summary: dict | None = None,
         output_summary: dict | None = None,
         duration_ms: float | None = None,
+    ) -> None: ...
+
+    async def get_portfolio_state(self) -> dict[str, Any]: ...
+
+    async def get_stock_sector(self, symbol: str) -> str | None: ...
+
+    async def log_llm_review(
+        self,
+        signal: dict,
+        decision: str,
+        reasoning: str,
+        adjusted_size: int | None = None,
+    ) -> None: ...
+
+    async def get_sector_rotation(self) -> dict[str, Any]: ...
+
+    async def get_todays_trades(self) -> list[dict[str, Any]]: ...
+
+    async def get_latest_sentiment(self, symbol: str) -> dict[str, Any] | None: ...
+
+    async def insert_trade(self, trade: dict) -> None: ...
+
+    async def update_position_sl(
+        self, position_id: int | str, new_sl: float
+    ) -> None: ...
+
+    async def update_unrealized_pnl(
+        self, position_id: int | str, current_price: float
+    ) -> None: ...
+
+    async def close_position(
+        self, position_id: int | str, exit_price: float, pnl: float
     ) -> None: ...
 
 
@@ -224,6 +262,36 @@ class MarketHoursChecker:
         order_end = self._parse_time(self._mh.order_end)
 
         return order_start <= current_time <= order_end
+
+    def is_square_off_window(self, now: datetime | None = None) -> bool:
+        """Check if now is within the square-off window (FR-5.9a).
+
+        Square-off window: from square_off time to square_off + extension.
+        """
+        if now is None:
+            now = self._now()
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=self._tz)
+
+        if now.weekday() >= 5:
+            return False
+        if self.is_holiday(now.date()):
+            return False
+
+        current_time = now.time()
+        sq_time = self.get_square_off_time(now.date())
+
+        # Parse extension (HH:MM format)
+        ext_parts = self._mh.square_off_extension.split(":")
+        ext_minutes = int(ext_parts[0]) * 60 + int(ext_parts[1])
+
+        from datetime import timedelta
+
+        sq_dt = datetime.combine(now.date(), sq_time)
+        sq_end_dt = sq_dt + timedelta(minutes=ext_minutes)
+        sq_end_time = sq_end_dt.time()
+
+        return sq_time <= current_time <= sq_end_time
 
 
 # ---------------------------------------------------------------------------

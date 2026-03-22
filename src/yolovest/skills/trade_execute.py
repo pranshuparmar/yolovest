@@ -20,6 +20,7 @@ Flow:
 7. Send Telegram alert (trade_entry)
 """
 
+import asyncio
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
@@ -44,18 +45,31 @@ class TradeExecuteSkill(SkillBase):
             return await self._execute_live(signal)
 
     async def _execute_paper(self, signal: dict) -> SkillResult:
-        """Simulate order execution for paper trading."""
+        """Simulate order execution for paper trading (FR-6.2).
+
+        Applies configurable simulated slippage from execution.paper_slippage_pct.
+        """
+        entry = signal["entry_price"]
+        slippage_pct = self.ctx.config.execution.paper_slippage_pct
+        # BUY fills slightly higher, SELL fills slightly lower
+        if signal["signal_type"] == "BUY":
+            fill_price = entry * (1 + slippage_pct)
+        else:
+            fill_price = entry * (1 - slippage_pct)
+        slippage = abs(fill_price - entry)
+
         trade = {
             "symbol": signal["symbol"],
             "signal_type": signal["signal_type"],
-            "entry_price": signal["entry_price"],
-            "fill_price": signal["entry_price"],  # no slippage in paper
+            "entry_price": entry,
+            "fill_price": round(fill_price, 2),
             "quantity": signal["position_size"],
             "stop_loss_price": signal["stop_loss_price"],
             "target_price": signal["target_price"],
+            "product": signal.get("product", "MIS"),
             "status": "filled",
             "mode": "paper",
-            "slippage": 0.0,
+            "slippage": round(slippage, 2),
         }
 
         await self.ctx.db.insert_trade(trade)
@@ -71,29 +85,28 @@ class TradeExecuteSkill(SkillBase):
         """Place real orders via Kite Connect."""
         cfg = self.ctx.config.execution
         last_error = None
+        product = signal.get("product", "MIS")
 
         for attempt in range(cfg.max_order_retries + 1):
             try:
                 # Place primary order
                 order_id = await self.ctx.broker.place_order(
                     symbol=signal["symbol"],
-                    exchange=self.ctx.config.strategy.exchange,
-                    transaction_type="BUY" if signal["signal_type"] == "BUY" else "SELL",
+                    side="BUY" if signal["signal_type"] == "BUY" else "SELL",
                     quantity=signal["position_size"],
                     order_type="LIMIT",
                     price=signal["entry_price"],
-                    product="MIS",  # intraday; use CNC for swing
+                    product=product,
                 )
 
                 # Place stop-loss order
                 sl_order_id = await self.ctx.broker.place_order(
                     symbol=signal["symbol"],
-                    exchange=self.ctx.config.strategy.exchange,
-                    transaction_type="SELL" if signal["signal_type"] == "BUY" else "BUY",
+                    side="SELL" if signal["signal_type"] == "BUY" else "BUY",
                     quantity=signal["position_size"],
                     order_type="SL",
                     trigger_price=signal["stop_loss_price"],
-                    product="MIS",
+                    product=product,
                 )
 
                 # Track order status
@@ -113,6 +126,7 @@ class TradeExecuteSkill(SkillBase):
                     "target_price": signal["target_price"],
                     "order_id": order_id,
                     "sl_order_id": sl_order_id,
+                    "product": product,
                     "status": order_status.get("status"),
                     "mode": "live",
                     "slippage": slippage,
@@ -131,7 +145,7 @@ class TradeExecuteSkill(SkillBase):
                 last_error = e
                 if attempt < cfg.max_order_retries:
                     delay = cfg.retry_base_delay_sec * (2**attempt)
-                    await self.ctx.sleep(delay)
+                    await asyncio.sleep(delay)
 
         return SkillResult(
             success=False,

@@ -600,3 +600,279 @@ class Database:
             (json.dumps(patterns), json.dumps(recommendations), summary),
         )
         await self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Portfolio State (Phase 3, FR-5.1)
+    # ------------------------------------------------------------------
+
+    async def get_portfolio_state(self) -> dict:
+        """Build portfolio state dict for risk checks.
+
+        Computes total capital, exposure, per-stock/sector counts,
+        daily/weekly PnL, trades today, and time since last loss.
+        """
+        from datetime import timedelta
+
+        now = datetime.now(IST)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+        # Get initial capital from system_state or fallback
+        initial_capital = 100_000.0
+        cap_row = await self.get_system_state("initial_capital")
+        if cap_row:
+            try:
+                initial_capital = float(cap_row)
+            except (ValueError, TypeError):
+                pass
+
+        # Open positions
+        positions = await self.get_open_positions()
+        open_count = len(positions)
+
+        # Stock exposures and sector counts
+        stock_exposures: dict[str, float] = {}
+        sector_counts: dict[str, int] = {}
+        total_position_value = 0.0
+
+        for pos in positions:
+            symbol = pos.get("symbol", "")
+            qty = pos.get("quantity", 0)
+            entry = pos.get("entry_price", 0)
+            value = qty * entry
+            total_position_value += value
+
+            sector = pos.get("sector") or await self.get_stock_sector(symbol)
+            if sector:
+                sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
+        total_capital = initial_capital  # simplified: cash + positions
+        if total_capital > 0:
+            for pos in positions:
+                symbol = pos.get("symbol", "")
+                qty = pos.get("quantity", 0)
+                entry = pos.get("entry_price", 0)
+                stock_exposures[symbol] = (qty * entry) / total_capital
+
+        exposure_pct = total_position_value / total_capital if total_capital > 0 else 0
+        available_cash = total_capital - total_position_value
+
+        # Today's trades count
+        cursor = await self.conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE created_at >= ?",
+            (today_start,),
+        )
+        row = await cursor.fetchone()
+        trades_today = row[0] if row else 0
+
+        # Daily realized PnL
+        cursor = await self.conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) FROM trades "
+            "WHERE closed_at >= ? AND pnl IS NOT NULL",
+            (today_start,),
+        )
+        row = await cursor.fetchone()
+        daily_pnl = row[0] if row else 0
+        daily_pnl_pct = daily_pnl / total_capital if total_capital > 0 else 0
+
+        # Weekly realized PnL (since Monday 9:15 AM)
+        days_since_monday = now.weekday()  # 0=Monday
+        monday = (now - timedelta(days=days_since_monday)).replace(
+            hour=9, minute=15, second=0, microsecond=0
+        )
+        cursor = await self.conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) FROM trades "
+            "WHERE closed_at >= ? AND pnl IS NOT NULL",
+            (monday.isoformat(),),
+        )
+        row = await cursor.fetchone()
+        weekly_pnl = row[0] if row else 0
+        weekly_pnl_pct = weekly_pnl / total_capital if total_capital > 0 else 0
+
+        # Minutes since last loss
+        cursor = await self.conn.execute(
+            "SELECT closed_at FROM trades "
+            "WHERE pnl IS NOT NULL AND pnl < 0 "
+            "ORDER BY closed_at DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        if row and row[0]:
+            last_loss_time = datetime.fromisoformat(row[0])
+            if last_loss_time.tzinfo is None:
+                last_loss_time = last_loss_time.replace(tzinfo=IST)
+            minutes_since_last_loss = (now - last_loss_time).total_seconds() / 60
+        else:
+            minutes_since_last_loss = 999.0  # no losses yet
+
+        return {
+            "total_capital": total_capital,
+            "available_cash": available_cash,
+            "exposure_pct": exposure_pct,
+            "open_positions": open_count,
+            "stock_exposures": stock_exposures,
+            "sector_counts": sector_counts,
+            "daily_pnl_pct": daily_pnl_pct,
+            "weekly_pnl_pct": weekly_pnl_pct,
+            "trades_today": trades_today,
+            "minutes_since_last_loss": minutes_since_last_loss,
+        }
+
+    # ------------------------------------------------------------------
+    # Stock Sector (Phase 3, FR-5.13)
+    # ------------------------------------------------------------------
+
+    async def get_stock_sector(self, symbol: str) -> str | None:
+        """Get sector for a symbol from watchlist."""
+        cursor = await self.conn.execute(
+            "SELECT sector FROM watchlist WHERE symbol = ?", (symbol,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row and row[0] else None
+
+    # ------------------------------------------------------------------
+    # LLM Review Log (Phase 3, FR-5.11)
+    # ------------------------------------------------------------------
+
+    async def log_llm_review(
+        self,
+        signal: dict,
+        decision: str,
+        reasoning: str,
+        adjusted_size: int | None = None,
+    ) -> None:
+        """Log an LLM trade review for audit trail (FR-8.8)."""
+        await self.conn.execute(
+            "INSERT INTO llm_reviews (trade_id, decision, reasoning, adjusted_size) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                signal.get("trade_id") or signal.get("symbol", ""),
+                decision,
+                reasoning,
+                adjusted_size,
+            ),
+        )
+        await self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Sector Rotation (Phase 3, FR-3.5)
+    # ------------------------------------------------------------------
+
+    async def get_sector_rotation(self) -> dict:
+        """Get sector rotation data from watchlist scores."""
+        cursor = await self.conn.execute(
+            "SELECT sector, AVG(composite_score) as avg_score, COUNT(*) as count "
+            "FROM watchlist WHERE sector IS NOT NULL "
+            "GROUP BY sector ORDER BY avg_score DESC"
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return {"strong": [], "weak": [], "sectors": {}}
+
+        sectors = {row["sector"]: {"avg_score": row["avg_score"], "count": row["count"]} for row in rows}
+        scores = [row["avg_score"] for row in rows if row["avg_score"] is not None]
+
+        if scores:
+            p75 = sorted(scores)[int(len(scores) * 0.75)] if len(scores) > 1 else scores[0]
+            p25 = sorted(scores)[int(len(scores) * 0.25)] if len(scores) > 1 else scores[0]
+            strong = [row["sector"] for row in rows if row["avg_score"] and row["avg_score"] >= p75]
+            weak = [row["sector"] for row in rows if row["avg_score"] and row["avg_score"] <= p25]
+        else:
+            strong, weak = [], []
+
+        return {"strong": strong, "weak": weak, "sectors": sectors}
+
+    # ------------------------------------------------------------------
+    # Today's Trades (Phase 3, FR-5)
+    # ------------------------------------------------------------------
+
+    async def get_todays_trades(self) -> list[dict]:
+        """Get all trades created today."""
+        today_start = datetime.now(IST).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
+        cursor = await self.conn.execute(
+            "SELECT * FROM trades WHERE created_at >= ? ORDER BY created_at",
+            (today_start,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_latest_sentiment(self, symbol: str) -> dict | None:
+        """Get latest sentiment for a symbol as dict (for LLM review context)."""
+        result = await self.get_sentiment(symbol)
+        if result is None:
+            return None
+        return {
+            "symbol": result.symbol,
+            "sentiment": result.sentiment,
+            "confidence": result.confidence,
+            "key_drivers": result.key_drivers,
+        }
+
+    # ------------------------------------------------------------------
+    # Trade Management (Phase 3, FR-6)
+    # ------------------------------------------------------------------
+
+    async def insert_trade(self, trade: dict) -> None:
+        """Insert a new trade record."""
+        import uuid
+
+        trade_id = trade.get("trade_id") or f"T-{uuid.uuid4().hex[:8]}"
+        now_ist = datetime.now(IST).isoformat()
+
+        await self.conn.execute(
+            "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
+            "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
+            "mode, status, slippage, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                trade_id,
+                trade["symbol"],
+                trade["signal_type"],
+                trade["entry_price"],
+                trade.get("fill_price", trade["entry_price"]),
+                trade["quantity"],
+                trade["stop_loss_price"],
+                trade["target_price"],
+                trade.get("order_id"),
+                trade.get("sl_order_id"),
+                trade.get("product", "MIS"),
+                trade.get("mode", "paper"),
+                trade.get("status", "open"),
+                trade.get("slippage", 0.0),
+                now_ist,
+            ),
+        )
+        await self.conn.commit()
+
+    async def update_position_sl(self, position_id: int | str, new_sl: float) -> None:
+        """Update stop-loss price for an open position."""
+        await self.conn.execute(
+            "UPDATE trades SET stop_loss_price = ? WHERE trade_id = ?",
+            (new_sl, str(position_id)),
+        )
+        await self.conn.commit()
+
+    async def update_unrealized_pnl(self, position_id: int | str, current_price: float) -> None:
+        """Update unrealized PnL for an open position based on current price.
+
+        Note: PnL is stored as NULL while position is open; this updates
+        a computed field or can be used for tracking in audit_log.
+        """
+        now_ist = datetime.now(IST).isoformat()
+        # Log unrealized PnL as audit entry for tracking
+        await self.log_audit(
+            action_type="unrealized_pnl_update",
+            input_summary={"position_id": str(position_id), "current_price": current_price},
+        )
+
+    async def close_position(
+        self, position_id: int | str, exit_price: float, pnl: float
+    ) -> None:
+        """Close a position with exit price and realized PnL."""
+        now_ist = datetime.now(IST).isoformat()
+        await self.conn.execute(
+            "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, closed_at = ? "
+            "WHERE trade_id = ?",
+            (exit_price, pnl, now_ist, str(position_id)),
+        )
+        await self.conn.commit()

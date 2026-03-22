@@ -105,7 +105,45 @@ class PositionMonitorSkill(SkillBase):
 
     def _reconcile(self, local: list[dict], broker: list[dict]) -> list[str]:
         """Compare local DB positions with broker positions. FR-6.5."""
-        raise NotImplementedError
+        discrepancies = []
+
+        # Build lookup by symbol for broker positions
+        broker_by_symbol: dict[str, dict] = {}
+        for bp in broker:
+            sym = bp.get("tradingsymbol") or bp.get("symbol", "")
+            broker_by_symbol[sym] = bp
+
+        # Check each local position against broker
+        local_symbols = set()
+        for pos in local:
+            symbol = pos.get("symbol", "")
+            local_symbols.add(symbol)
+
+            if symbol not in broker_by_symbol:
+                # Paper mode positions won't be on broker
+                if pos.get("mode") != "paper":
+                    discrepancies.append(
+                        f"{symbol}: in local DB but not on broker"
+                    )
+                continue
+
+            bp = broker_by_symbol[symbol]
+            broker_qty = bp.get("quantity", bp.get("net_quantity", 0))
+            local_qty = pos.get("quantity", 0)
+            if broker_qty != local_qty:
+                discrepancies.append(
+                    f"{symbol}: qty mismatch (local={local_qty}, broker={broker_qty})"
+                )
+
+        # Check for broker positions not in local DB
+        for sym, bp in broker_by_symbol.items():
+            qty = bp.get("quantity", bp.get("net_quantity", 0))
+            if sym not in local_symbols and qty != 0:
+                discrepancies.append(
+                    f"{sym}: on broker (qty={qty}) but not in local DB"
+                )
+
+        return discrepancies
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:
         """Check if new SL is tighter (more protective) than current."""

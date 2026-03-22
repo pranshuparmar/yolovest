@@ -97,6 +97,17 @@ class MarketDataIngester(MarketDataBase):
             raise last_error
         raise ValueError(f"No providers returned quote for {symbol}")
 
+    async def get_ltp(self, symbol: str) -> float:
+        """Get last traded price for a symbol.
+
+        Fetches quote and extracts LTP. Falls back through providers.
+        """
+        quote = await self.get_quote(symbol)
+        ltp = quote.get("ltp") or quote.get("last_price") or quote.get("close")
+        if ltp is None:
+            raise ValueError(f"No LTP available for {symbol}")
+        return float(ltp)
+
     async def health_check(self) -> bool:
         """Return True if at least one provider is up."""
         for provider in self._all_providers():

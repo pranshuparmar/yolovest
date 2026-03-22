@@ -126,6 +126,7 @@ def mock_broker() -> AsyncMock:
     broker.get_order_status = AsyncMock(return_value={"status": "filled"})
     broker.get_pending_orders = AsyncMock(return_value=[])
     broker.get_margins = AsyncMock(return_value={})
+    broker.modify_sl_order = AsyncMock(return_value=True)
     return broker
 
 
@@ -174,6 +175,12 @@ def mock_db() -> AsyncMock:
     db.update_position_sl = AsyncMock()
     db.update_unrealized_pnl = AsyncMock()
     db.upsert_market_data = AsyncMock()
+    db.log_llm_review = AsyncMock()
+    db.get_sector_rotation = AsyncMock(return_value={"strong": [], "weak": [], "sectors": {}})
+    db.get_todays_trades = AsyncMock(return_value=[])
+    db.get_latest_sentiment = AsyncMock(return_value=None)
+    db.insert_trade = AsyncMock()
+    db.close_position = AsyncMock()
     return db
 
 
@@ -184,6 +191,7 @@ def mock_market_data() -> AsyncMock:
     md.health_check = AsyncMock(return_value=True)
     md.get_ohlcv = AsyncMock(return_value=[])
     md.get_quote = AsyncMock(return_value={"ltp": 2500.0})
+    md.get_ltp = AsyncMock(return_value=2500.0)
     return md
 
 
@@ -192,6 +200,7 @@ def mock_notify() -> AsyncMock:
     """AsyncMock with send() for notifications."""
     notify = AsyncMock()
     notify.send = AsyncMock(return_value=None)
+    notify.send_trade_alert = AsyncMock(return_value=None)
     return notify
 
 

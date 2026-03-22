@@ -97,6 +97,9 @@ class _StubBroker:
     async def get_margins(self) -> dict[str, object]:
         return {}
 
+    async def modify_sl_order(self, order_id: str, new_trigger_price: float) -> bool:
+        raise NotImplementedError("No broker configured")
+
 
 class _StubLLM:
     """Minimal LLM stub for Phase 0 (no real LLM yet)."""
@@ -130,6 +133,9 @@ class _StubMarketData:
         return []
 
     async def get_quote(self, symbol: str) -> dict[str, object]:
+        raise NotImplementedError("No market data configured")
+
+    async def get_ltp(self, symbol: str) -> float:
         raise NotImplementedError("No market data configured")
 
     async def health_check(self) -> bool:

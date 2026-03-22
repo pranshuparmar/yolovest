@@ -63,3 +63,10 @@ class BrokerBase(ABC):
     async def get_margins(self) -> dict[str, Any]:
         """Get available margins/funds from the broker."""
         ...
+
+    @abstractmethod
+    async def modify_sl_order(
+        self, order_id: str, new_trigger_price: float
+    ) -> bool:
+        """Modify the trigger price of an existing stop-loss order."""
+        ...
