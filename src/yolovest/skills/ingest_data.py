@@ -102,18 +102,17 @@ class IngestDataSkill(SkillBase):
         except Exception as e:
             logger.warning("Economic calendar fetch failed: %s", e)
 
-        # --- Fundamentals + Technicals (P1 — graceful stubs) ---
+        # --- Fundamentals from Screener.in (FR-2.4) ---
         try:
-            await self._fetch_fundamentals(symbols)
-        except NotImplementedError:
-            pass  # P1 — not yet implemented
+            fundamentals_count = await self._fetch_fundamentals(symbols)
+            results["fundamentals_updated"] = fundamentals_count
         except Exception as e:
             logger.warning("Fundamentals fetch failed: %s", e)
 
+        # --- Technicals from Trendlyne (FR-2.5) ---
         try:
-            await self._fetch_technicals(symbols)
-        except NotImplementedError:
-            pass  # P1 — not yet implemented
+            technicals_count = await self._fetch_technicals(symbols)
+            results["technicals_updated"] = technicals_count
         except Exception as e:
             logger.warning("Technicals fetch failed: %s", e)
 
@@ -184,10 +183,38 @@ class IngestDataSkill(SkillBase):
         finally:
             await source.close()
 
-    async def _fetch_fundamentals(self, symbols: list[str]) -> None:
-        """Fetch from Screener.in. FR-2.4. P1 — stub for now."""
-        raise NotImplementedError
+    async def _fetch_fundamentals(self, symbols: list[str]) -> int:
+        """Fetch fundamental data from Screener.in (FR-2.4)."""
+        from yolovest.data.screener import ScreenerScraper
 
-    async def _fetch_technicals(self, symbols: list[str]) -> None:
-        """Fetch from Trendlyne. FR-2.5. P1 — stub for now."""
-        raise NotImplementedError
+        scraper = ScreenerScraper()
+        count = 0
+        try:
+            batch = await scraper.fetch_batch(symbols)
+            for symbol, data in batch.items():
+                await self.ctx.db.upsert_fundamentals(symbol, data)
+                count += 1
+            if count:
+                logger.info("Fundamentals updated for %d symbols via Screener.in", count)
+        finally:
+            await scraper.close()
+        return count
+
+    async def _fetch_technicals(self, symbols: list[str]) -> int:
+        """Fetch technical screener data from Trendlyne (FR-2.5)."""
+        from yolovest.data.trendlyne import TrendlyneScraper
+
+        scraper = TrendlyneScraper()
+        count = 0
+        try:
+            batch = await scraper.fetch_batch(symbols)
+            for symbol, data in batch.items():
+                # Store technical signals alongside fundamentals
+                # Trendlyne data enriches the fundamentals table
+                await self.ctx.db.upsert_fundamentals(symbol, data)
+                count += 1
+            if count:
+                logger.info("Technicals updated for %d symbols via Trendlyne", count)
+        finally:
+            await scraper.close()
+        return count

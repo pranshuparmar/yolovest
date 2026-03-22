@@ -245,6 +245,14 @@ class DatabaseProtocol(Protocol):
         self, symbol: str | None = None, days: int = 30
     ) -> list[dict[str, Any]]: ...
 
+    async def upsert_fundamentals(self, symbol: str, data: dict[str, Any]) -> None: ...
+
+    async def backup(self, backup_dir: str) -> str: ...
+
+    async def run_retention_cleanup(
+        self, ohlcv_days: int = 730, audit_days: int = 365, predictions_days: int = 365
+    ) -> dict[str, Any]: ...
+
 
 # ---------------------------------------------------------------------------
 # Market Hours Checker
