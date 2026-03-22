@@ -14,6 +14,7 @@ from typing import Any
 from yolovest.broker.zerodha import ZerodhaBroker
 from yolovest.config import AppConfig, load_config
 from yolovest.context import AppContext, MarketHoursChecker
+from yolovest.cron_scheduler import CronScheduler
 from yolovest.data.db import Database
 from yolovest.data.ingester import MarketDataIngester
 from yolovest.data.jugaad import JugaadDataProvider
@@ -254,8 +255,11 @@ async def async_main(args: argparse.Namespace) -> None:
     if isinstance(ctx.db, Database):
         await ctx.db.initialize()
 
-    # Build orchestrator
+    # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
+
+    # Build CRON scheduler sharing the same skill instances
+    cron_scheduler = CronScheduler(ctx, orchestrator._skills)
 
     # Handle graceful shutdown
     loop = asyncio.get_running_loop()
@@ -263,6 +267,7 @@ async def async_main(args: argparse.Namespace) -> None:
     def shutdown_handler() -> None:
         logger.info("Shutdown signal received")
         orchestrator.stop()
+        cron_scheduler.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, shutdown_handler)
@@ -284,6 +289,9 @@ async def async_main(args: argparse.Namespace) -> None:
     if not args.no_dashboard:
         dashboard_task = asyncio.create_task(_start_dashboard(ctx))
 
+    # Start CRON scheduler as background task
+    cron_task = asyncio.create_task(_start_cron_scheduler(cron_scheduler))
+
     # Start
     await ctx.notify.send(
         f"YoloVest started in {config.mode} mode. "
@@ -296,6 +304,8 @@ async def async_main(args: argparse.Namespace) -> None:
     try:
         await orchestrator.start()
     finally:
+        cron_scheduler.stop()
+        cron_task.cancel()
         if telegram_bot:
             await telegram_bot.stop()
         if telegram_task:
@@ -314,6 +324,14 @@ async def _start_telegram(bot: Any) -> None:
         await bot.start()
     except Exception:
         logger.exception("Telegram bot failed to start")
+
+
+async def _start_cron_scheduler(scheduler: CronScheduler) -> None:
+    """Start the CRON scheduler in background."""
+    try:
+        await scheduler.start()
+    except Exception:
+        logger.exception("CRON scheduler failed")
 
 
 async def _start_dashboard(ctx: AppContext) -> None:

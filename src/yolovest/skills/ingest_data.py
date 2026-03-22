@@ -123,10 +123,55 @@ class IngestDataSkill(SkillBase):
         )
 
     async def _fetch_nse_data(self) -> dict[str, Any]:
-        """Fetch corp announcements, bulk/block deals, FII/DII, delivery data."""
-        # NSE official scraper will be wired here when available
-        # For now, return empty — NSE scraper is P0 but built in news/nse_official.py
-        return {}
+        """Fetch corp announcements, bulk/block deals, FII/DII, delivery data.
+
+        Uses NSEOfficialSource for all NSE API interactions (FR-2.2).
+        Failures are caught per-category so partial data is still returned.
+        """
+        from yolovest.news.nse_official import NSEOfficialSource
+
+        nse = NSEOfficialSource()
+        result: dict[str, Any] = {}
+
+        try:
+            # Bulk/block deals
+            try:
+                deals = await nse.fetch_bulk_deals()
+                if deals:
+                    result["bulk_deals"] = deals
+                    logger.info("NSE: fetched %d bulk/block deals", len(deals))
+            except Exception as e:
+                logger.warning("NSE bulk deals fetch failed: %s", e)
+
+            # FII/DII activity
+            try:
+                fii_dii = await nse.fetch_fii_dii()
+                if fii_dii:
+                    result["fii_dii"] = fii_dii
+                    logger.info("NSE: fetched FII/DII data")
+            except Exception as e:
+                logger.warning("NSE FII/DII fetch failed: %s", e)
+
+            # Corporate actions + delivery data per symbol
+            symbols = self.ctx.config.scanning.seed_symbols
+            for symbol in symbols:
+                try:
+                    actions = await nse.fetch_corp_actions(symbol)
+                    if actions:
+                        result.setdefault("corp_actions", {})[symbol] = actions
+                except Exception as e:
+                    logger.debug("NSE corp actions for %s failed: %s", symbol, e)
+
+                try:
+                    delivery = await nse.fetch_delivery_data(symbol)
+                    if delivery is not None:
+                        result.setdefault("delivery_data", {})[symbol] = delivery
+                except Exception as e:
+                    logger.debug("NSE delivery data for %s failed: %s", symbol, e)
+        finally:
+            await nse.close()
+
+        return result
 
     async def _fetch_all_news(self, symbols: list[str]) -> list[Any]:
         """Aggregate news from all configured sources."""
