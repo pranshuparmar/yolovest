@@ -1,395 +1,469 @@
-# Phase 1: Foundation & Data Pipeline — Implementation Plan
+# Phase 2: Intelligence Layer — Implementation Plan
 
-**v2 — Updated after PM review (docs/pm_phase1_review.md)**
+**v1 — Initial plan**
 
-## Scope (from REQUIREMENTS.md Section 6, Phase 1)
-1. Database schema design + migration system (FR-10.1)
-2. Market data abstraction — concrete providers (jugaad-data, yfinance, tvDatafeed) with fallback chain
-3. Feature engineering (technical indicators)
-4. Broker abstraction — Zerodha Kite Connect implementation (FR-6.1, FR-6.3, FR-6.8)
-5. LLM abstraction — Gemini implementation (all 7 methods)
-6. Config fixes (DatabaseConfig.path, requires-python)
+## Scope (from REQUIREMENTS.md)
 
-**Deferred to Phase 2:** News scraping (FR-2.3-2.5), sentiment analysis invocation (FR-2.7), premarket ingestion (FR-2.10-2.11), NSE/BSE official data (FR-2.2). These are intelligence layer, not data pipeline. H19 (scraping fragility) and H20 (FR-2.7/FR-2.3 dependency) are noted for Phase 2 planning.
+Phase 2 implements the intelligence pipeline that feeds signals into the trading engine:
+1. Pre-market data ingestion — GIFT Nifty, US/Asian markets, commodities (FR-2.10, FR-2.11)
+2. News aggregation + deduplication — MoneyControl, ET Markets, LiveMint, NSE official (FR-2.2–2.5, FR-2.12–2.13)
+3. Dynamic stock scanning + ranking — weighted scoring, sector rotation, LLM cross-validation (FR-3.1–3.6)
+4. ML signal generation — XGBoost/LightGBM models for intraday + swing (FR-4.1–4.5)
+5. Backtesting engine — walk-forward validation, Sharpe/drawdown metrics (FR-4.6–4.8)
+6. Model retraining — versioning, shadow mode, A/B testing, LLM failure analysis (FR-7.4–7.7)
 
-**Pre-filter strategy (H10):** The data pipeline targets Nifty 500 (not full NSE ~2000), configurable via `scanning.universe` config. This is feasible within free API rate limits on a 15-minute heartbeat.
+**Deferred to Phase 3:** Risk management (FR-5), order execution (FR-6), position monitoring. These consume signals produced by Phase 2.
 
----
+**Deferred to Phase 4:** Prediction tracking outcome scoring (FR-7.2–7.3), full self-learning loop.
 
-## Step 1: Database Layer (`data/db.py`) + Migration System
+## TL Phase 1 Review Items Addressed First
 
-SQLite with WAL mode, aiosqlite. Implements `DatabaseProtocol` from context.py.
-
-### Migration System (FR-10.1)
-
-Sequential numbered SQL files in `migrations/` directory:
-```
-migrations/
-  001_initial.sql      -- Phase 1 tables
-  002_add_audit.sql    -- audit_log table (future migrations follow this pattern)
-```
-
-Migration runner:
-- `async run_migrations(db_path)` — reads `schema_version` table, applies unapplied `.sql` files in order
-- Each migration is atomic (wrapped in transaction)
-- `schema_version` table tracks which migrations have been applied
-- `initialize()` calls `run_migrations()` then enables WAL mode
-
-### Tables — Migration 001 (Phase 1 core):
-```sql
--- Schema version tracking (created before migrations run)
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER PRIMARY KEY,
-    filename TEXT NOT NULL,
-    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- OHLCV candle data (daily + intraday)
-CREATE TABLE ohlcv (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    interval TEXT NOT NULL,       -- 'daily', '5minute', '15minute'
-    timestamp TEXT NOT NULL,      -- ISO 8601
-    open REAL NOT NULL,
-    high REAL NOT NULL,
-    low REAL NOT NULL,
-    close REAL NOT NULL,
-    volume INTEGER NOT NULL,
-    source TEXT NOT NULL,         -- 'jugaad', 'yfinance', 'tvdatafeed'
-    ingested_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(symbol, interval, timestamp)
-);
-CREATE INDEX idx_ohlcv_symbol_interval ON ohlcv(symbol, interval, timestamp DESC);
-
--- Dynamic watchlist from market-scan
-CREATE TABLE watchlist (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    composite_score REAL,
-    technical_score REAL,
-    volume_momentum_score REAL,
-    news_sentiment_score REAL,
-    fundamental_score REAL,
-    sector TEXT,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE UNIQUE INDEX idx_watchlist_symbol ON watchlist(symbol);
-
--- Trades (full lifecycle)
-CREATE TABLE trades (
-    trade_id TEXT PRIMARY KEY,
-    symbol TEXT NOT NULL,
-    signal_type TEXT NOT NULL,
-    entry_price REAL NOT NULL,
-    fill_price REAL NOT NULL DEFAULT 0,
-    quantity INTEGER NOT NULL,
-    stop_loss_price REAL NOT NULL,
-    target_price REAL NOT NULL,
-    order_id TEXT,
-    sl_order_id TEXT,
-    product TEXT NOT NULL,
-    mode TEXT NOT NULL,
-    status TEXT NOT NULL,
-    slippage REAL DEFAULT 0,
-    pnl REAL,
-    exit_price REAL,
-    created_at TEXT NOT NULL,
-    closed_at TEXT
-);
-
--- Signals
-CREATE TABLE signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    signal_type TEXT NOT NULL,
-    entry_price REAL NOT NULL,
-    target_price REAL NOT NULL,
-    stop_loss_price REAL NOT NULL,
-    position_size INTEGER NOT NULL,
-    confidence_score REAL NOT NULL,
-    model_version TEXT NOT NULL,
-    features_snapshot TEXT,       -- JSON
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- Predictions for self-learning
-CREATE TABLE predictions (
-    prediction_id TEXT PRIMARY KEY,
-    signal_id INTEGER REFERENCES signals(id),
-    trade_id TEXT REFERENCES trades(trade_id),
-    created_at TEXT NOT NULL,
-    prediction_end_time TEXT,
-    actual_price REAL,
-    direction_correct INTEGER,   -- 0/1/NULL
-    target_hit INTEGER,
-    actual_pnl_pct REAL
-);
-
--- Sentiment analysis results
-CREATE TABLE sentiment (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    sentiment TEXT NOT NULL,      -- 'bullish', 'bearish', 'neutral'
-    confidence REAL NOT NULL,
-    key_drivers TEXT,             -- JSON array
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX idx_sentiment_symbol ON sentiment(symbol, created_at DESC);
-
--- Pre-market context
-CREATE TABLE premarket (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL UNIQUE,
-    gift_nifty_change_pct REAL,
-    us_sp500_change_pct REAL,
-    market_bias TEXT,
-    llm_summary TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- System state (kill switch, etc.)
-CREATE TABLE system_state (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- LLM review log
-CREATE TABLE llm_reviews (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    trade_id TEXT,
-    decision TEXT NOT NULL,
-    reasoning TEXT NOT NULL,
-    adjusted_size INTEGER,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- Audit log (NFR-5: every decision point must be logged)
-CREATE TABLE audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp_ist TEXT NOT NULL,
-    action_type TEXT NOT NULL,     -- 'skill_run', 'order_placed', 'signal_generated', etc.
-    skill_name TEXT,
-    input_summary TEXT,            -- JSON: abbreviated input context
-    output_summary TEXT,           -- JSON: abbreviated output/result
-    duration_ms REAL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp_ist DESC);
-CREATE INDEX idx_audit_log_action ON audit_log(action_type, timestamp_ist DESC);
-```
-
-Note: All tables are created in migration 001 (forward-compatible). Phase 2+ tables will be added via new migration files. DB methods for Phase 2+ tables (upsert_sentiment, upsert_premarket, get_latest_premarket) are deferred until their consuming skills are built.
-
-### Database class methods (Phase 1 only):
-- `async initialize()` — run migrations, enable WAL mode
-- `async close()` — close connection
-- `async health_check() -> bool`
-- `async is_kill_switch_active() -> bool`
-- `async set_system_state(key, value)` / `async get_system_state(key) -> str | None`
-- `async get_open_positions() -> list[dict]`
-- `async upsert_ohlcv(symbol, interval, bars: list[OHLCVBar], source: str)`
-- `async get_ohlcv(symbol, interval, days) -> list[OHLCVBar]`
-- `async upsert_watchlist(stocks: list[dict])`
-- `async get_watchlist() -> list[dict]`
-- `async log_audit(action_type, skill_name, input_summary, output_summary, duration_ms)`
-
-### Config change:
-Add `path: str = "./data/yolovest.db"` to `DatabaseConfig` (TL review C2).
-
----
-
-## Step 2: Market Data Providers
-
-### 2a: Fallback chain orchestrator (`data/ingester.py`)
-
-`MarketDataIngester` wraps multiple providers with automatic fallback:
-- Implements `MarketDataProtocol` (so it can be passed as `ctx.market_data`)
-- `get_ohlcv()` tries providers in order: primary → fallback → error
-- `get_quote()` same pattern
-- `health_check()` returns True if at least one provider is up
-- Data staleness validation (FR-10.4): reject data older than `stale_threshold_minutes`
-- Data quality validation: `high >= low`, `close` within `[low, high]` range
-- Per-provider rate limiting via `asyncio.Semaphore` (configurable)
-
-### 2b: JugaadDataProvider (`data/jugaad.py`)
-- Primary for daily/EOD data
-- `get_ohlcv(symbol, "daily", days)` → fetch via jugaad-data NSE scraper
-- `get_quote(symbol)` → latest price from jugaad-data
-- `health_check()` → try fetching Nifty 50 LTP
-- Rate limiting: built-in caching + respect NSE limits
-
-### 2c: YFinanceProvider (`data/yfinance_provider.py`)
-- Fallback for daily/EOD data
-- Append `.NS` suffix for NSE symbols
-- `get_ohlcv()` → yfinance download
-- `get_quote()` → yfinance fast_info
-- `health_check()` → try small download
-- Rate limiting: `asyncio.Semaphore(2)` — max 2 concurrent requests, 0.5s delay between
-
-### 2d: TVDatafeedProvider (`data/tvfeed.py`)
-- Intraday data (5min, 15min candles)
-- `get_ohlcv(symbol, "5minute"|"15minute", days)` → tvDatafeed API
-- Free tier: 5min bars, last 15 days
-- `health_check()` → try fetching NIFTY intraday
-- Rate limiting: `asyncio.Semaphore(1)` — sequential requests
-
----
-
-## Step 3: Feature Engineering (`data/features.py`)
-
-Technical indicator computation using the OHLCV data. All indicators from FR-4.1 config:
-- RSI (14-period default)
-- MACD (12, 26, 9)
-- Bollinger Bands (20, 2σ)
-- VWAP (intraday)
-- ATR (14-period)
-- Volume Profile (relative volume)
-- OBV
-- SuperTrend (10, 3)
-- EMA (configurable periods: 9, 21, 50, 200)
-
-Input: `list[OHLCVBar]` → Output: `dict[str, float]` features snapshot.
-
-Implement as pure functions (no DB or network calls) — easy to test.
-
-Each indicator is toggleable via `strategy.indicators.*` config.
-
----
-
-## Step 4: Zerodha Broker (`broker/zerodha.py`)
-
-Concrete implementation of `BrokerBase` ABC using Kite Connect API.
-
-### Methods:
-- `__init__(api_key, api_secret)` — initialize Kite client
-- `async authenticate(request_token)` — exchange request_token for access_token (FR-6.3)
-- `async is_authenticated() -> bool` — check if access_token is valid
-- `async place_order(symbol, side, quantity, order_type, product, price, trigger_price) -> str` — place order via Kite API (FR-6.1)
-- `async cancel_order(order_id) -> bool`
-- `async get_order_status(order_id) -> dict`
-- `async get_positions() -> list[dict]`
-- `async get_pending_orders() -> list[dict]`
-- `async get_margins() -> dict`
-
-### Key design:
-- Rate limiter: `asyncio.Semaphore(8)` — stay under Kite's 10 req/s limit (FR-6.8)
-- All API calls wrapped with exponential backoff retry (FR-6.6: max 3 retries, base 2s)
-- Paper mode: if `config.mode == "paper"`, skip actual API calls, simulate fills at LTP + slippage (FR-6.2)
-- Kite Connect SDK (`kiteconnect`) as dependency
-
-### Dependencies:
-- `kiteconnect>=5.0,<6` added to pyproject.toml
-
----
-
-## Step 5: Gemini LLM (`llm/gemini.py`)
-
-Concrete implementation of `LLMBase` ABC using Google Gemini API.
-
-### All 7 methods:
-- `__init__(api_key, model)` — initialize Gemini client
-- `async ping() -> bool` — small test request
-- `async review_trade(context: TradeContext) -> TradeReview` — structured prompt → JSON parse → TradeReview
-- `async analyze_sentiment(symbol, headlines) -> SentimentResult` — headlines → sentiment classification
-- `async summarize_with_web_grounding(prompt) -> WebGroundingResult` — Gemini search grounding
-- `async validate_watchlist(shortlist, sector_analysis, premarket_context) -> WatchlistValidation`
-- `async summarize_market_day() -> MarketDaySummary`
-- `async analyze_prediction_failures(failures) -> FailureAnalysis`
-
-### Key design:
-- Use `google-genai` SDK (official Python client)
-- Structured output via Gemini's JSON mode — prompt includes Pydantic schema, response parsed into schema
-- Exponential backoff on rate limit errors
-- Model configurable via `llm.model` config (default: `gemini-2.5-pro`)
-- NFR-6: Use Flash model for routine checks (ping, sentiment), Pro for complex analysis (trade review, failure analysis)
-
-### Dependencies:
-- `google-genai>=1.0,<2` added to pyproject.toml
-
----
-
-## Step 6: Update Protocols + Wiring
-
-### DatabaseProtocol expansion (context.py):
-Keep protocol minimal — only methods used across multiple skills:
-- `health_check()`, `is_kill_switch_active()`, `get_open_positions()`
-- `upsert_ohlcv()`, `get_ohlcv()`
-- `set_system_state()`, `get_system_state()`
-- `log_audit()`
-
-Skills needing specialized DB methods (e.g., `upsert_sentiment`) will access the `Database` class directly via `ctx.db` with type narrowing where needed.
-
-### main.py wiring:
-- Replace `_StubDB` with `Database` instance
-- Replace `_StubMarketData` with `MarketDataIngester` instance
-- Replace `_StubBroker` with `ZerodhaBroker` instance (falls back to paper mode)
-- Replace `_StubLLM` with `GeminiLLM` instance
-- Stubs remain as fallbacks when API keys are not configured
-
----
-
-## Step 7: Tests
-
-- `tests/test_db.py` — Database init, WAL mode, CRUD for ohlcv/watchlist, upsert idempotency, migration runner (apply v1, verify tables, apply v2, verify upgrade)
-- `tests/test_ingester.py` — Fallback chain (mock providers), staleness rejection, data quality validation, rate limiting. Include one integration test: primary fails → fallback → DB write → read back.
-- `tests/test_features.py` — Each indicator against known computed values
-- `tests/test_jugaad.py` / `test_yfinance.py` / `test_tvfeed.py` — Unit tests with mocked HTTP (no real API calls)
-- `tests/test_zerodha.py` — Mocked Kite API: auth flow, place_order, rate limiting, paper mode simulation
-- `tests/test_gemini.py` — Mocked Gemini API: all 7 methods, JSON parsing, error handling, retry on rate limit
-
----
-
-## Step 8: Config + pyproject.toml updates
-
-- Add `database.path` to `DatabaseConfig`
-- Fix Q2: `requires-python = ">=3.12"` in pyproject.toml
-- Add dependencies (with version ranges):
-  - `jugaad-data>=0.3,<1`
-  - `yfinance>=0.2,<1`
-  - `tvdatafeed>=2.1,<3`
-  - `pandas>=2.0,<3` (required by ta/yfinance)
-  - `ta>=0.11,<1` (technical analysis library)
-  - `kiteconnect>=5.0,<6`
-  - `google-genai>=1.0,<2`
-
----
-
-## Deliverables (files to create/modify)
-
-### New files:
-1. `src/yolovest/data/db.py` — SQLite database layer + migration runner
-2. `src/yolovest/data/ingester.py` — Fallback chain orchestrator
-3. `src/yolovest/data/jugaad.py` — jugaad-data provider
-4. `src/yolovest/data/yfinance_provider.py` — yfinance provider
-5. `src/yolovest/data/tvfeed.py` — tvDatafeed provider
-6. `src/yolovest/data/features.py` — Feature engineering
-7. `src/yolovest/broker/zerodha.py` — Zerodha Kite Connect broker
-8. `src/yolovest/llm/gemini.py` — Google Gemini LLM
-9. `migrations/001_initial.sql` — Initial database schema
-10. `tests/test_db.py` — Database + migration tests
-11. `tests/test_ingester.py` — Ingester/fallback tests
-12. `tests/test_features.py` — Feature engineering tests
-13. `tests/test_zerodha.py` — Broker tests
-14. `tests/test_gemini.py` — LLM tests
-
-### Modified files:
-1. `src/yolovest/config.py` — Add `database.path`
-2. `src/yolovest/context.py` — Expand `DatabaseProtocol`
-3. `src/yolovest/main.py` — Wire up all concrete implementations
-4. `pyproject.toml` — Fix python version, add deps
-5. `src/yolovest/data/__init__.py` — Public exports
+All TL Phase 1 review issues (M1, M2, m1–m6) have been resolved. Phase 2 benefits from:
+- Atomic migrations (M1 fix) — safe for Phase 2's new migration files
+- JSON error handling in GeminiLLM (m6 fix) — robust for heavy LLM use in sentiment/scanning
+- IST-aware timestamps (m1, m5 fixes) — consistent across all providers
+- Correct volume data (m4 fix) — accurate volume-based indicators
 
 ---
 
 ## Implementation Order
 
-1. `pyproject.toml` + `config.py` changes (deps, DatabaseConfig.path)
-2. `migrations/001_initial.sql` + `data/db.py` (migration runner + Database class) + `test_db.py`
-3. `data/jugaad.py` + `data/yfinance_provider.py` + `data/tvfeed.py` (providers)
-4. `data/ingester.py` (fallback chain + rate limiting) + `test_ingester.py`
-5. `data/features.py` (indicators) + `test_features.py`
-6. `broker/zerodha.py` + `test_zerodha.py`
-7. `llm/gemini.py` + `test_gemini.py`
-8. `context.py` (expand protocols) + `main.py` (wiring) + `data/__init__.py`
-9. Run all tests, commit, push
+### Step 1: News & Data Source Abstractions
+
+**New module: `src/yolovest/news/`**
+
+#### 1a. News scraper base class (`news/base.py`)
+
+```python
+class NewsSource(ABC):
+    """Base class for all news/data scrapers."""
+
+    @abstractmethod
+    async def fetch_headlines(self, symbols: list[str]) -> list[NewsArticle]: ...
+
+    @abstractmethod
+    async def health_check(self) -> bool: ...
+```
+
+**Data contract — add to `models/schemas.py`:**
+```python
+class NewsArticle(BaseModel):
+    headline: str
+    source: str                    # "moneycontrol", "et_markets", "livemint"
+    url: str | None = None
+    symbols: list[str] = []        # stocks mentioned
+    published_at: datetime | None = None
+    content_hash: str              # SHA256 of headline for dedup (FR-2.13)
+```
+
+#### 1b. Concrete scrapers
+
+| File | Source | Data | Priority |
+|------|--------|------|----------|
+| `news/moneycontrol.py` | MoneyControl RSS/web | Stock news, analyst ratings | P0 |
+| `news/et_markets.py` | Economic Times | Market headlines, bulk deals | P0 |
+| `news/livemint.py` | LiveMint | Stock news, market commentary | P1 |
+| `news/nse_official.py` | NSE website | Corp announcements, bulk/block deals, FII/DII, delivery % | P0 |
+| `news/google_finance.py` | Google Finance | Global cues, broader sentiment | P1 |
+
+Each scraper:
+- Uses `aiohttp` or `asyncio.to_thread(requests.get, ...)` with rate limiting
+- Returns `list[NewsArticle]`
+- Handles failures gracefully (log + return empty)
+- Has a semaphore for concurrent request limiting
+
+#### 1c. News aggregator (`news/aggregator.py`)
+
+```python
+class NewsAggregator:
+    """Fetches from all configured sources, deduplicates, returns merged list."""
+
+    def __init__(self, sources: list[NewsSource]): ...
+    async def fetch_all(self, symbols: list[str]) -> list[NewsArticle]: ...
+    def deduplicate(self, articles: list[NewsArticle]) -> list[NewsArticle]: ...
+```
+
+Dedup strategy (FR-2.13): hash headlines → merge by `content_hash` → keep earliest, track all sources.
+
+**Tests:** `tests/test_news_scrapers.py` — mocked HTTP responses per scraper, dedup logic.
+
+**Dependencies:** `aiohttp`, `beautifulsoup4`, `feedparser`
+
+---
+
+### Step 2: Pre-Market Ingestion (`ingest-premarket` skill)
+
+Implement the 4 stubbed helper methods in `skills/ingest_premarket.py`:
+
+#### 2a. `_fetch_gift_nifty()`
+- Use yfinance: `^NSEI` or Singapore Nifty futures
+- Return: `{"value": float, "change_pct": float, "previous_close": float}`
+
+#### 2b. `_fetch_us_markets()`
+- Use yfinance: `^GSPC` (S&P 500), `^IXIC` (NASDAQ), `^DJI` (Dow)
+- Return: `{"sp500_change_pct": float, "nasdaq_change_pct": float, "dow_change_pct": float}`
+
+#### 2c. `_fetch_asian_markets()`
+- Use yfinance: `^N225` (Nikkei), `^HSI` (Hang Seng), `000001.SS` (Shanghai)
+- Return: `{"nikkei_change_pct": float, "hang_seng_change_pct": float, "shanghai_change_pct": float}`
+
+#### 2d. `_fetch_commodities()`
+- Use yfinance: `CL=F` (crude oil), `GC=F` (gold), `USDINR=X` (rupee)
+- Return: `{"crude_oil_usd": float, "gold_usd": float, "usdinr": float}`
+
+All fetchers: `asyncio.to_thread(yfinance.Ticker(...).fast_info)`, with error handling.
+
+#### 2e. Fix `execute()` wiring
+- The skill calls `self.ctx.llm.summarize_with_web_grounding(...)` — this already works.
+- Need `db.upsert_premarket()` method (see Step 5).
+
+**Tests:** `tests/test_ingest_premarket.py` — mocked yfinance, mocked LLM, verify DB persistence.
+
+---
+
+### Step 3: Data Ingestion Skill (`ingest-data` skill)
+
+Implement the 5 stubbed methods in `skills/ingest_data.py`:
+
+#### 3a. `_fetch_nse_data()`
+- Use `news/nse_official.py` scraper for corp announcements, bulk/block deals
+- Fetch FII/DII daily activity from NSE website
+- Fetch delivery % per symbol
+- Return: `{"corp_actions": [...], "bulk_deals": [...], "fii_dii": {...}, "delivery": {symbol: pct}}`
+
+#### 3b. `_fetch_all_news(symbols)`
+- Use `NewsAggregator` (from Step 1c) to fetch from all configured sources
+- Return: `list[NewsArticle]`
+
+#### 3c. `_deduplicate_news(articles)`
+- Delegate to `NewsAggregator.deduplicate()`
+- Group by `content_hash`, merge sources
+
+#### 3d. `_fetch_fundamentals(symbols)`
+- P1 priority — can start with empty/stub and backfill
+- Eventually: scrape Screener.in for PE, PB, debt ratio, promoter holding
+- Persist to DB for use by market-scan scoring
+
+#### 3e. `_fetch_technicals(symbols)`
+- P1 priority — can start with empty/stub and backfill
+- Eventually: Trendlyne momentum scores, volume breakout alerts
+- Persist to DB
+
+#### 3f. Fix `execute()` wiring
+- Replace `self.ctx.market_data.fetch_daily/fetch_intraday` with actual `MarketDataProtocol.get_ohlcv()` calls
+- Wire news aggregator via AppContext
+
+**Tests:** `tests/test_ingest_data.py` — mocked providers, mocked news, verify DB round-trip.
+
+---
+
+### Step 4: Market Scanner (`market-scan` skill)
+
+Implement the 2 stubbed methods + refine scoring:
+
+#### 4a. `_apply_exclusion_filters(stocks)`
+- Filter stocks in F&O ban list (fetch from NSE, cache daily)
+- Filter stocks with pending corporate actions (from NSE data ingested in Step 3)
+- Filter stocks below minimum price threshold (penny stock filter)
+- Return filtered list
+
+#### 4b. `_analyze_sector_rotation(scored_stocks)`
+- Group stocks by `sector` field
+- Compute per-sector: avg composite score, count of stocks, top stock
+- Classify sectors as "strong" (avg score > P75) or "weak" (avg score < P25)
+- Return: `{"strong": ["IT", "Banks"], "weak": ["Metals"], "rotation": {...}}`
+
+#### 4c. Scoring refinement
+- The scoring formula in `execute()` already works: `technical * 0.4 + volume_momentum * 0.25 + news_sentiment * 0.20 + fundamental * 0.15`
+- Need: individual sub-score computation from raw data
+- Technical score: compute from RSI, MACD signal, EMA alignment, SuperTrend direction
+- Volume score: relative volume vs 20-day avg, delivery % trend
+- Sentiment score: map `SentimentResult.sentiment` → 0.8 (bullish), 0.5 (neutral), 0.2 (bearish), weight by confidence
+- Fundamental score: inverse PE rank, low debt, high promoter holding
+
+#### 4d. DB method: `get_nse_universe()`
+- Query OHLCV + sentiment + watchlist tables
+- Return list of dicts with all sub-scores pre-computed
+- Must have: symbol, sector, avg_daily_volume, technical_score, volume_momentum_score, news_sentiment_score, fundamental_score
+
+**Tests:** `tests/test_market_scan.py` — scoring logic, sector rotation, exclusion filters, LLM cross-validation.
+
+---
+
+### Step 5: Database Extensions
+
+**New migration: `migrations/002_phase2_extensions.sql`**
+
+```sql
+-- News articles table for dedup tracking
+CREATE TABLE IF NOT EXISTS news_articles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content_hash TEXT NOT NULL,
+    headline TEXT NOT NULL,
+    source TEXT NOT NULL,
+    url TEXT,
+    symbols TEXT,  -- JSON array
+    published_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(content_hash, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_news_symbols ON news_articles(symbols);
+CREATE INDEX IF NOT EXISTS idx_news_created ON news_articles(created_at);
+
+-- Fundamental data cache
+CREATE TABLE IF NOT EXISTS fundamentals (
+    symbol TEXT NOT NULL,
+    pe_ratio REAL,
+    pb_ratio REAL,
+    debt_to_equity REAL,
+    promoter_holding_pct REAL,
+    quarterly_revenue_growth_pct REAL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (symbol)
+);
+
+-- Model versions tracking
+CREATE TABLE IF NOT EXISTS model_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_type TEXT NOT NULL,  -- 'intraday' or 'swing'
+    version TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    sharpe_ratio REAL,
+    max_drawdown_pct REAL,
+    win_rate REAL,
+    profit_factor REAL,
+    status TEXT NOT NULL DEFAULT 'shadow',  -- 'shadow', 'production', 'retired'
+    shadow_start_date TEXT,
+    promoted_date TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_type_status ON model_versions(model_type, status);
+
+-- Failure analysis from LLM
+CREATE TABLE IF NOT EXISTS failure_analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_type TEXT,
+    patterns TEXT,       -- JSON
+    recommendations TEXT, -- JSON
+    summary TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Add index on trades.status for get_open_positions (TL nit n1)
+CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+```
+
+**New DB methods in `data/db.py`:**
+- `upsert_premarket(data: dict) -> None`
+- `get_latest_premarket() -> dict`
+- `upsert_sentiment(symbol: str, result: SentimentResult) -> None`
+- `get_sentiment(symbol: str) -> SentimentResult | None`
+- `upsert_news_articles(articles: list[NewsArticle]) -> int`
+- `get_nse_universe() -> list[dict]`
+- `insert_signal(signal: dict) -> None`
+- `upsert_fundamentals(symbol: str, data: dict) -> None`
+- `get_training_dataset() -> dict`
+- `get_prediction_outcomes() -> list[dict]`
+- `store_failure_analysis(analysis) -> None`
+- `save_model_version(model_type, version, path, metrics) -> None`
+- `get_production_model(model_type) -> dict | None`
+- `promote_model(model_type, version) -> None`
+
+---
+
+### Step 6: ML Protocol & Model System
+
+**New module: `src/yolovest/ml/`**
+
+#### 6a. ML base class (`ml/base.py`)
+
+```python
+class MLBase(ABC):
+    """Abstract ML model interface for signal generation."""
+
+    @abstractmethod
+    async def predict_intraday(self, symbol: str, features: dict) -> MLPrediction: ...
+
+    @abstractmethod
+    async def predict_swing(self, symbol: str, features: dict) -> MLPrediction: ...
+
+    @abstractmethod
+    async def train(self, model_type: str, X, y, params: dict) -> dict: ...
+
+    @abstractmethod
+    async def save_model(self, model_type: str, metrics: dict) -> str: ...
+
+    @abstractmethod
+    async def load_model(self, model_type: str, version: str | None = None) -> None: ...
+
+    @abstractmethod
+    async def get_production_metrics(self, model_type: str) -> dict: ...
+
+    @abstractmethod
+    async def deploy_shadow(self, model_type: str, version: str, days: int) -> None: ...
+```
+
+**Data contract — add to `models/schemas.py`:**
+```python
+class MLPrediction(BaseModel):
+    signal_type: Literal["BUY", "SELL", "HOLD"]
+    entry_price: float
+    target_price: float
+    stop_loss_price: float
+    position_size: int
+    holding_period: str
+    confidence: float  # 0.0 to 1.0
+    model_version: str
+```
+
+#### 6b. XGBoost/LightGBM implementation (`ml/xgboost_model.py`)
+
+- Load/save models via joblib
+- Feature vector construction from `features.py` output
+- Separate intraday vs swing models
+- Walk-forward train/test split for validation
+- ATR-based target/SL computation
+
+#### 6c. Backtesting engine (`ml/backtester.py`)
+
+```python
+class Backtester:
+    """Walk-forward backtesting with simulated execution."""
+
+    def run(self, model, data, config) -> BacktestResult: ...
+```
+
+**BacktestResult schema:**
+```python
+class BacktestResult(BaseModel):
+    sharpe_ratio: float
+    max_drawdown_pct: float
+    win_rate: float
+    profit_factor: float
+    total_trades: int
+    total_return_pct: float
+    trade_log: list[dict] = []
+```
+
+Validation gates (FR-4.6): only deploy if `sharpe >= config.strategy.backtest_min_sharpe` and `drawdown <= config.strategy.backtest_max_drawdown_pct`.
+
+#### 6d. Add `MLProtocol` to `context.py` and wire in `main.py`
+
+**Tests:** `tests/test_ml_model.py`, `tests/test_backtester.py`
+
+---
+
+### Step 7: Signal Generation Skill (`generate-signals`)
+
+#### 7a. Implement `_should_use_intraday_model()`
+- Before 14:00 IST → intraday model (MIS trades need time to play out)
+- After 14:00 IST or `config.strategy.default_trade_type == "swing"` → swing model
+- Return bool
+
+#### 7b. Fix `execute()` wiring
+- Replace `self.ctx.features.compute(...)` with actual feature computation using `data/features.py`
+- Replace `self.ctx.ml.predict_intraday/predict_swing` with `MLProtocol` calls
+- Replace `self.ctx.db.insert_signal(...)` with actual DB method
+
+#### 7c. Add `FeaturesProtocol` to context (or use features directly)
+- Wrap `data/features.py` pure functions into a service class
+- Load OHLCV from DB, compute indicators, return feature dict
+
+**Tests:** `tests/test_generate_signals.py` — mocked model, verify confidence filtering, signal schema.
+
+---
+
+### Step 8: Model Retraining Skill (`model-retrain`)
+
+#### 8a. Implement `_retrain_model(model_type, data)`
+- Split data with walk-forward validation
+- Train XGBoost on train set, evaluate on test set
+- Compute metrics: Sharpe, drawdown, win rate, profit factor
+- Return metrics dict
+
+#### 8b. Implement `_check_shadow_promotions()`
+- Query `model_versions` table for shadow models past `shadow_mode_days`
+- Compare shadow period performance vs production
+- Promote if better, retire if worse
+- Return list of promotion/rollback actions
+
+**Tests:** `tests/test_model_retrain.py` — mocked models, versioning, shadow promotion logic.
+
+---
+
+### Step 9: SuperTrend Full Implementation (TL rec #6)
+
+Upgrade `data/features.py` `compute_supertrend()` from simplified single-bar to full multi-bar implementation with band carryover across the bar series.
+
+**Tests:** Update existing SuperTrend tests in `tests/test_features.py`.
+
+---
+
+## New Dependencies
+
+Add to `pyproject.toml`:
+```toml
+dependencies = [
+    # ... existing ...
+    "xgboost>=2.0",
+    "scikit-learn>=1.4",
+    "aiohttp>=3.9",
+    "beautifulsoup4>=4.12",
+    "feedparser>=6.0",
+    "joblib>=1.3",
+]
+```
+
+## File Summary
+
+**New files (16):**
+- `src/yolovest/news/__init__.py`
+- `src/yolovest/news/base.py` — NewsSource ABC
+- `src/yolovest/news/aggregator.py` — dedup + merge
+- `src/yolovest/news/moneycontrol.py`
+- `src/yolovest/news/et_markets.py`
+- `src/yolovest/news/livemint.py`
+- `src/yolovest/news/nse_official.py`
+- `src/yolovest/ml/__init__.py`
+- `src/yolovest/ml/base.py` — MLBase ABC
+- `src/yolovest/ml/xgboost_model.py` — XGBoost/LightGBM impl
+- `src/yolovest/ml/backtester.py` — walk-forward backtesting
+- `migrations/002_phase2_extensions.sql`
+- `tests/test_news_scrapers.py`
+- `tests/test_ingest_premarket.py`
+- `tests/test_ml_model.py`
+- `tests/test_backtester.py`
+
+**Modified files (10):**
+- `src/yolovest/models/schemas.py` — add NewsArticle, MLPrediction, BacktestResult
+- `src/yolovest/context.py` — add MLProtocol, FeaturesProtocol
+- `src/yolovest/config.py` — add MLConfig, NewsSourcesConfig
+- `src/yolovest/data/db.py` — add Phase 2 DB methods
+- `src/yolovest/data/features.py` — full SuperTrend
+- `src/yolovest/main.py` — wire ML provider, news aggregator
+- `src/yolovest/skills/ingest_data.py` — implement stubbed methods
+- `src/yolovest/skills/ingest_premarket.py` — implement stubbed methods
+- `src/yolovest/skills/market_scan.py` — implement stubbed methods
+- `src/yolovest/skills/generate_signals.py` — implement stubbed methods
+- `src/yolovest/skills/model_retrain.py` — implement stubbed methods
+- `pyproject.toml` — new dependencies
+
+## Implementation Priority
+
+**Phase 2a (P0 — minimum for first signal):**
+Steps 1a-1c, 2, 5 (migration + DB methods), 6a-6b, 7, 9
+
+**Phase 2b (P0 — full scanning):**
+Steps 3, 4
+
+**Phase 2c (P1 — backtesting + retraining):**
+Steps 6c, 8
+
+**Phase 2d (P1 — additional data sources):**
+Steps 3d, 3e (fundamentals, technicals scrapers)
+
+## Test Target
+
+Each step includes tests. Target: 80+ new tests covering all Phase 2 components. All existing 255 tests must continue passing.
