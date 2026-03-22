@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "yolovest"
 version = "0.1.0"
 description = "Fully autonomous AI-driven Indian stock trading platform"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "MIT"
 readme = "README.md"
 
@@ -16,6 +16,13 @@ dependencies = [
     "aiosqlite>=0.20,<1",
     "aiohttp>=3.9,<4",
     "python-telegram-bot>=21.0,<22",
+    "jugaad-data>=0.3,<1",
+    "yfinance>=0.2,<1",
+    "tvdatafeed>=2.1,<3",
+    "pandas>=2.0,<3",
+    "ta>=0.11,<1",
+    "kiteconnect>=5.0,<6",
+    "google-genai>=1.0,<2",
 ]
 
 [project.optional-dependencies]

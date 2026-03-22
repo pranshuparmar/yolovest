@@ -203,6 +203,7 @@ class RetentionConfig(BaseModel):
 
 
 class DatabaseConfig(BaseModel):
+    path: str = "./data/yolovest.db"
     backup_enabled: bool = True
     backup_cron: str = "0 18 * * *"
     backup_dir: str = "./backups"

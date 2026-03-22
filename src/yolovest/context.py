@@ -94,6 +94,27 @@ class DatabaseProtocol(Protocol):
 
     async def get_open_positions(self) -> list[Any]: ...
 
+    async def upsert_ohlcv(
+        self, symbol: str, interval: str, bars: list[OHLCVBar], source: str
+    ) -> int: ...
+
+    async def get_ohlcv(
+        self, symbol: str, interval: str, days: int = 30
+    ) -> list[OHLCVBar]: ...
+
+    async def set_system_state(self, key: str, value: str) -> None: ...
+
+    async def get_system_state(self, key: str) -> str | None: ...
+
+    async def log_audit(
+        self,
+        action_type: str,
+        skill_name: str | None = None,
+        input_summary: dict | None = None,
+        output_summary: dict | None = None,
+        duration_ms: float | None = None,
+    ) -> None: ...
+
 
 # ---------------------------------------------------------------------------
 # Market Hours Checker

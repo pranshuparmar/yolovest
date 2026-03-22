@@ -10,9 +10,16 @@ import logging
 import signal
 import sys
 
+from yolovest.broker.zerodha import ZerodhaBroker
 from yolovest.config import AppConfig, load_config
 from yolovest.context import AppContext, MarketHoursChecker
+from yolovest.data.db import Database
+from yolovest.data.ingester import MarketDataIngester
+from yolovest.data.jugaad import JugaadDataProvider
+from yolovest.data.tvfeed import TVDatafeedProvider
+from yolovest.data.yfinance_provider import YFinanceProvider
 from yolovest.events import EventBus
+from yolovest.llm.gemini import GeminiLLM
 from yolovest.notify import ConsoleNotifier
 from yolovest.orchestrator import HeartbeatOrchestrator
 
@@ -126,18 +133,66 @@ class _StubMarketData:
         return False
 
 
-def build_context(config: AppConfig) -> AppContext:
-    """Build the application context with stubs for unimplemented backends.
+def _build_db(config: AppConfig) -> Database | _StubDB:
+    """Build database — real if path configured, stub otherwise."""
+    return Database(config.database.path)
 
-    In Phase 0, all backends are stubs. As concrete implementations are built
-    (Phase 1+), they replace these stubs.
+
+def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
+    """Build broker — real if API keys set, stub otherwise."""
+    if config.broker.api_key and config.broker.api_key != "${KITE_API_KEY}":
+        return ZerodhaBroker(
+            api_key=config.broker.api_key,
+            api_secret=config.broker.api_secret,
+            mode=config.mode,
+            paper_slippage_pct=config.execution.paper_slippage_pct,
+            max_retries=config.execution.max_order_retries,
+            retry_base_delay=float(config.execution.retry_base_delay_sec),
+        )
+    return _StubBroker()
+
+
+def _build_llm(config: AppConfig) -> GeminiLLM | _StubLLM:
+    """Build LLM — real if API key set, stub otherwise."""
+    if config.llm.api_key and config.llm.api_key != "${GEMINI_API_KEY}":
+        return GeminiLLM(api_key=config.llm.api_key, model=config.llm.model)
+    return _StubLLM()
+
+
+def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketData:
+    """Build market data ingester with provider fallback chain."""
+    daily_providers = []
+
+    if config.market_data.daily_provider == "jugaad":
+        daily_providers.append(JugaadDataProvider())
+    if config.market_data.daily_fallback == "yfinance":
+        daily_providers.append(YFinanceProvider())
+
+    if not daily_providers:
+        return _StubMarketData()
+
+    intraday = None
+    if config.market_data.intraday_provider == "tvdatafeed":
+        intraday = TVDatafeedProvider()
+
+    return MarketDataIngester(
+        daily_providers=daily_providers,
+        intraday_provider=intraday,
+        stale_threshold_minutes=config.market_data.stale_threshold_minutes,
+    )
+
+
+def build_context(config: AppConfig) -> AppContext:
+    """Build the application context with real implementations where configured.
+
+    Falls back to stubs when API keys or providers are not configured.
     """
     return AppContext(
         config=config,
-        db=_StubDB(),
-        broker=_StubBroker(),
-        llm=_StubLLM(),
-        market_data=_StubMarketData(),
+        db=_build_db(config),
+        broker=_build_broker(config),
+        llm=_build_llm(config),
+        market_data=_build_market_data(config),
         notify=ConsoleNotifier(enabled=True),
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
@@ -165,6 +220,10 @@ async def async_main(args: argparse.Namespace) -> None:
     # Build context
     ctx = build_context(config)
 
+    # Initialize database if real (not stub)
+    if isinstance(ctx.db, Database):
+        await ctx.db.initialize()
+
     # Build orchestrator
     orchestrator = HeartbeatOrchestrator(ctx)
 
@@ -185,7 +244,11 @@ async def async_main(args: argparse.Namespace) -> None:
         f"{config.heartbeat.off_hours_interval_min}min (off hours)."
     )
 
-    await orchestrator.start()
+    try:
+        await orchestrator.start()
+    finally:
+        if isinstance(ctx.db, Database):
+            await ctx.db.close()
 
     logger.info("YoloVest shutdown complete")
 
