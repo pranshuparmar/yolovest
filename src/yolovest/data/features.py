@@ -244,25 +244,77 @@ def compute_supertrend(
     period: int = 10,
     multiplier: float = 3.0,
 ) -> dict[str, float]:
-    """SuperTrend indicator."""
+    """SuperTrend indicator — full implementation with band carryover.
+
+    Tracks upper/lower bands across the entire bar series, carrying
+    forward band values based on trend direction (not single-bar).
+    """
     result: dict[str, float] = {}
-    if len(highs) < period + 1:
+    n = len(highs)
+    if n < period + 1:
         return result
 
-    atr = compute_atr(highs, lows, closes, period)
-    if atr is None:
+    # Compute ATR series using Wilder's smoothing
+    true_ranges = []
+    for i in range(1, n):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        true_ranges.append(tr)
+
+    if len(true_ranges) < period:
         return result
 
-    hl2 = (highs[-1] + lows[-1]) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
+    # ATR series (Wilder smoothing)
+    atr_series = [sum(true_ranges[:period]) / period]
+    for i in range(period, len(true_ranges)):
+        atr_series.append((atr_series[-1] * (period - 1) + true_ranges[i]) / period)
 
-    # Simplified: trend = bullish if close > lower_band
-    trend = 1 if closes[-1] > lower_band else -1
+    # Compute SuperTrend with band carryover
+    # Start index in original data: period (since we skip first bar for TR)
+    start = period
+    upper_bands = [0.0] * (n - start)
+    lower_bands = [0.0] * (n - start)
+    trends = [1] * (n - start)  # 1 = bullish, -1 = bearish
 
-    result["supertrend_upper"] = upper_band
-    result["supertrend_lower"] = lower_band
-    result["supertrend_trend"] = float(trend)
+    for j in range(n - start):
+        idx = start + j
+        atr_val = atr_series[j]
+        hl2 = (highs[idx] + lows[idx]) / 2
+        basic_upper = hl2 + multiplier * atr_val
+        basic_lower = hl2 - multiplier * atr_val
+
+        if j == 0:
+            upper_bands[j] = basic_upper
+            lower_bands[j] = basic_lower
+            trends[j] = 1 if closes[idx] > basic_upper else -1
+        else:
+            # Upper band: carry forward (lower value) if previous close was below it
+            prev_upper = upper_bands[j - 1]
+            upper_bands[j] = (
+                min(basic_upper, prev_upper) if closes[idx - 1] <= prev_upper else basic_upper
+            )
+
+            # Lower band: carry forward (higher value) if previous close was above it
+            prev_lower = lower_bands[j - 1]
+            lower_bands[j] = (
+                max(basic_lower, prev_lower) if closes[idx - 1] >= prev_lower else basic_lower
+            )
+
+            # Determine trend
+            prev_trend = trends[j - 1]
+            if prev_trend == 1:
+                # Was bullish: stay bullish unless close drops below lower band
+                trends[j] = -1 if closes[idx] < lower_bands[j] else 1
+            else:
+                # Was bearish: stay bearish unless close rises above upper band
+                trends[j] = 1 if closes[idx] > upper_bands[j] else -1
+
+    result["supertrend_upper"] = upper_bands[-1]
+    result["supertrend_lower"] = lower_bands[-1]
+    result["supertrend_trend"] = float(trends[-1])
     return result
 
 

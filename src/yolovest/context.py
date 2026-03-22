@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from yolovest.config import AppConfig
 from yolovest.events import EventBus
-from yolovest.models.schemas import OHLCVBar
+from yolovest.models.schemas import MLPrediction, OHLCVBar
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +81,29 @@ class MarketDataProtocol(Protocol):
     async def get_quote(self, symbol: str) -> dict[str, Any]: ...
 
     async def health_check(self) -> bool: ...
+
+
+@runtime_checkable
+class MLProtocol(Protocol):
+    async def predict_intraday(self, symbol: str, features: dict) -> MLPrediction: ...
+
+    async def predict_swing(self, symbol: str, features: dict) -> MLPrediction: ...
+
+    async def train(
+        self, model_type: str, X: Any, y: Any, params: dict
+    ) -> dict: ...
+
+    async def save_model(self, model_type: str, metrics: dict) -> str: ...
+
+    async def load_model(
+        self, model_type: str, version: str | None = None
+    ) -> None: ...
+
+    async def get_production_metrics(self, model_type: str) -> dict: ...
+
+    async def deploy_shadow(
+        self, model_type: str, version: str, days: int
+    ) -> None: ...
 
 
 @runtime_checkable
@@ -224,3 +247,4 @@ class AppContext:
     notify: NotifierProtocol
     market_hours: MarketHoursChecker
     event_bus: EventBus = field(default_factory=EventBus)
+    ml: MLProtocol | None = None

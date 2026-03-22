@@ -214,6 +214,61 @@ def _parse_holding_period(period_str: str) -> timedelta:
         return timedelta(days=1)
 
 
+# ---------------------------------------------------------------------------
+# News & Intelligence (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+class NewsArticle(BaseModel):
+    """A single news article from any source, with dedup hash (FR-2.13)."""
+
+    headline: str
+    source: str  # "moneycontrol", "et_markets", "livemint", "nse", "google"
+    url: str | None = None
+    symbols: list[str] = Field(default_factory=list)
+    published_at: datetime | None = None
+    content_hash: str = ""  # SHA256 of normalized headline
+
+    @model_validator(mode="after")
+    def compute_hash(self) -> "NewsArticle":
+        if not self.content_hash:
+            import hashlib
+
+            normalized = self.headline.strip().lower()
+            self.content_hash = hashlib.sha256(normalized.encode()).hexdigest()
+        return self
+
+
+class MLPrediction(BaseModel):
+    """Output from ML model inference."""
+
+    signal_type: Literal["BUY", "SELL", "HOLD"]
+    entry_price: float = Field(gt=0)
+    target_price: float = Field(gt=0)
+    stop_loss_price: float = Field(gt=0)
+    position_size: int = Field(gt=0)
+    holding_period: str  # "intraday", "3d", "1w"
+    confidence: float = Field(ge=0.0, le=1.0)
+    model_version: str
+
+
+class BacktestResult(BaseModel):
+    """Results from walk-forward backtesting (FR-4.6)."""
+
+    sharpe_ratio: float
+    max_drawdown_pct: float
+    win_rate: float
+    profit_factor: float
+    total_trades: int
+    total_return_pct: float
+    trade_log: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Prediction Tracking
+# ---------------------------------------------------------------------------
+
+
 class Prediction(BaseModel):
     """Logged prediction for self-learning scoreboard."""
 

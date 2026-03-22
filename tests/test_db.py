@@ -23,14 +23,14 @@ async def db(tmp_path):
 class TestMigrationSystem:
     async def test_schema_version_created(self, db):
         version = await db.get_schema_version()
-        assert version == 1
+        assert version >= 1
 
     async def test_migration_is_idempotent(self, db):
         """Running initialize() twice should not fail or re-apply migrations."""
-        # Already initialized in fixture; initialize again
+        version_before = await db.get_schema_version()
         await db._run_migrations()
-        version = await db.get_schema_version()
-        assert version == 1
+        version_after = await db.get_schema_version()
+        assert version_after == version_before
 
     async def test_tables_created(self, db):
         cursor = await db.conn.execute(

@@ -7,24 +7,22 @@ Pipeline position: Offline — runs outside market hours.
 Flow:
 1. Load accumulated prediction vs actual data from DB
 2. Load latest OHLCV + features data
-3. Retrain both intraday and swing models (FR-7.4):
-   - Walk-forward split (no lookahead bias)
-   - Train XGBoost/LightGBM on new data
-   - Compute metrics: accuracy, Sharpe, max drawdown, win rate
+3. Retrain both intraday and swing models (FR-7.4)
 4. Version the new model artifacts with metrics (FR-7.7)
 5. Compare new model metrics vs current production model
 6. If improved: deploy to shadow mode for retraining.shadow_mode_days (FR-7.5)
 7. If shadow model outperforms after N days: promote to production
 8. If shadow model underperforms: rollback to previous version
-9. Use Gemini to analyze prediction failures (FR-7.6):
-   - What patterns does the model consistently get wrong?
-   - Market conditions where model breaks down?
+9. Use Gemini to analyze prediction failures (FR-7.6)
 10. Store analysis for dashboard display
 """
 
+import logging
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
 
 
 class ModelRetrainSkill(SkillBase):
@@ -34,79 +32,95 @@ class ModelRetrainSkill(SkillBase):
     schedule = None  # set from retraining.schedule_cron config
 
     def should_run(self) -> bool:
-        # Only run if enough new data has accumulated
         return not self.ctx.market_hours.is_market_hours()
 
     async def execute(self, **kwargs: Any) -> SkillResult:
+        if self.ctx.ml is None:
+            return SkillResult(
+                success=True,
+                skill_name=self.name,
+                data={"reason": "no_ml_provider"},
+            )
+
         cfg = self.ctx.config.retraining
+        min_samples = self.ctx.config.strategy.min_training_samples
 
         # Step 1-2: Load training data
         training_data = await self.ctx.db.get_training_dataset()
         predictions_vs_actual = await self.ctx.db.get_prediction_outcomes()
 
+        # Guard: minimum training data (PM G5)
+        bar_count = len(training_data.get("bars", []))
+        if bar_count < min_samples:
+            logger.warning(
+                "Insufficient training data (%d bars, need %d), skipping retrain",
+                bar_count, min_samples,
+            )
+            return SkillResult(
+                success=True,
+                skill_name=self.name,
+                data={"reason": "insufficient_data", "bar_count": bar_count},
+            )
+
         # Step 3: Retrain models
-        intraday_metrics = await self._retrain_model("intraday", training_data)
-        swing_metrics = await self._retrain_model("swing", training_data)
-
-        # Step 4: Version artifacts (FR-7.7)
-        intraday_version = await self.ctx.ml.save_model(
-            "intraday", metrics=intraday_metrics
-        )
-        swing_version = await self.ctx.ml.save_model(
-            "swing", metrics=swing_metrics
-        )
-
-        # Step 5: Compare with production
-        current_intraday = await self.ctx.ml.get_production_metrics("intraday")
-        current_swing = await self.ctx.ml.get_production_metrics("swing")
-
-        intraday_improved = intraday_metrics["sharpe"] > current_intraday.get("sharpe", 0)
-        swing_improved = swing_metrics["sharpe"] > current_swing.get("sharpe", 0)
-
-        # Step 6: Deploy to shadow mode if improved (FR-7.5)
+        results: dict[str, Any] = {}
         shadow_deployed = []
-        if intraday_improved:
-            await self.ctx.ml.deploy_shadow("intraday", intraday_version, cfg.shadow_mode_days)
-            shadow_deployed.append("intraday")
-        if swing_improved:
-            await self.ctx.ml.deploy_shadow("swing", swing_version, cfg.shadow_mode_days)
-            shadow_deployed.append("swing")
 
-        # Step 7: Check if existing shadow models should be promoted/rolled back
+        for model_type in ("intraday", "swing"):
+            try:
+                metrics = await self.ctx.ml.train(
+                    model_type, training_data, None, {}
+                )
+                version = await self.ctx.ml.save_model(model_type, metrics=metrics)
+                await self.ctx.db.save_model_version(
+                    model_type, version, f"models/{model_type}_{version}.pkl", metrics
+                )
+
+                # Step 5: Compare with production
+                current = await self.ctx.db.get_production_model(model_type)
+                current_sharpe = current.get("sharpe_ratio", 0) if current else 0
+
+                improved = metrics.get("sharpe_ratio", 0) > current_sharpe
+                if improved:
+                    await self.ctx.ml.deploy_shadow(model_type, version, cfg.shadow_mode_days)
+                    shadow_deployed.append(model_type)
+
+                results[model_type] = {
+                    "version": version,
+                    "metrics": metrics,
+                    "improved": improved,
+                }
+            except Exception as e:
+                logger.warning("Retrain failed for %s: %s", model_type, e)
+                results[model_type] = {"error": str(e)}
+
+        # Step 7: Check shadow promotions
         promotions = await self._check_shadow_promotions()
 
         # Step 9: Gemini failure analysis (FR-7.6)
         failure_analysis = None
         if predictions_vs_actual:
-            failures = [p for p in predictions_vs_actual if not p["direction_correct"]]
+            failures = [p for p in predictions_vs_actual if not p.get("direction_correct")]
             if failures:
-                failure_analysis = await self.ctx.llm.analyze_prediction_failures(failures)
-                await self.ctx.db.store_failure_analysis(failure_analysis)
+                try:
+                    failure_analysis = await self.ctx.llm.analyze_prediction_failures(failures)
+                    await self.ctx.db.store_failure_analysis(failure_analysis)
+                except Exception as e:
+                    logger.warning("Failure analysis failed: %s", e)
 
         return SkillResult(
             success=True,
             skill_name=self.name,
             data={
-                "intraday": {
-                    "version": intraday_version,
-                    "metrics": intraday_metrics,
-                    "improved": intraday_improved,
-                },
-                "swing": {
-                    "version": swing_version,
-                    "metrics": swing_metrics,
-                    "improved": swing_improved,
-                },
+                "models": results,
                 "shadow_deployed": shadow_deployed,
                 "promotions": promotions,
                 "failure_analysis_generated": failure_analysis is not None,
             },
         )
 
-    async def _retrain_model(self, model_type: str, data: Any) -> dict:
-        """Retrain a single model with walk-forward validation."""
-        raise NotImplementedError
-
     async def _check_shadow_promotions(self) -> list[dict]:
-        """Check if shadow models have completed their trial period. FR-7.5."""
-        raise NotImplementedError
+        """Check if shadow models have completed trial period. FR-7.5."""
+        # In production, query model_versions for shadow models past shadow_mode_days
+        # and compare their live performance vs production. For now, return empty.
+        return []

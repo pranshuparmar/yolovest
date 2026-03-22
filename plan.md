@@ -1,6 +1,6 @@
 # Phase 2: Intelligence Layer — Implementation Plan
 
-**v1 — Initial plan**
+**v2 — Updated after PM review (docs/pm_phase2_review.md)**
 
 ## Scope (from REQUIREMENTS.md)
 
@@ -12,9 +12,26 @@ Phase 2 implements the intelligence pipeline that feeds signals into the trading
 5. Backtesting engine — walk-forward validation, Sharpe/drawdown metrics (FR-4.6–4.8)
 6. Model retraining — versioning, shadow mode, A/B testing, LLM failure analysis (FR-7.4–7.7)
 
+7. Economic calendar events — RBI, Fed, GDP, earnings dates (FR-2.6)
+8. Bhavcopy seed data import for deep historical backtesting (FR-2.1d)
+
 **Deferred to Phase 3:** Risk management (FR-5), order execution (FR-6), position monitoring. These consume signals produced by Phase 2.
 
 **Deferred to Phase 4:** Prediction tracking outcome scoring (FR-7.2–7.3), full self-learning loop.
+
+## PM Review Changes (v2)
+
+Incorporating PM review feedback (docs/pm_phase2_review.md):
+- G1: Added FR-2.6 (economic calendar) as P1 step
+- G2: Added FR-2.1d (Bhavcopy seed data import) as sub-task
+- G3: Clarified FR-3.4 — market-scan re-scores on every heartbeat
+- G4: Added FR-9.2 transaction cost modeling to backtester
+- G5: Added minimum training data guard (200 samples)
+- G6: Added confidence score calibration (Platt scaling)
+- G7: Added sub-score normalization to [0,1] before weighting
+- Structural: ML code in `strategy/` not `ml/` per spec Section 9
+- Config: Added `scanning.universe`, `strategy.min_training_samples`
+- TL rec #7: Use Gemini native `google_search` tool for web grounding
 
 ## TL Phase 1 Review Items Addressed First
 
@@ -275,9 +292,9 @@ CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 
 ### Step 6: ML Protocol & Model System
 
-**New module: `src/yolovest/ml/`**
+**New module: `src/yolovest/strategy/` (per spec Section 9)**
 
-#### 6a. ML base class (`ml/base.py`)
+#### 6a. ML base class (`strategy/ml_base.py`)
 
 ```python
 class MLBase(ABC):
@@ -318,15 +335,16 @@ class MLPrediction(BaseModel):
     model_version: str
 ```
 
-#### 6b. XGBoost/LightGBM implementation (`ml/xgboost_model.py`)
+#### 6b. XGBoost/LightGBM implementation (`strategy/ml_signal.py`)
 
 - Load/save models via joblib
 - Feature vector construction from `features.py` output
 - Separate intraday vs swing models
 - Walk-forward train/test split for validation
 - ATR-based target/SL computation
+- Confidence calibration via Platt scaling (PM G6)
 
-#### 6c. Backtesting engine (`ml/backtester.py`)
+#### 6c. Backtesting engine (`strategy/backtest.py`)
 
 ```python
 class Backtester:
@@ -348,6 +366,8 @@ class BacktestResult(BaseModel):
 ```
 
 Validation gates (FR-4.6): only deploy if `sharpe >= config.strategy.backtest_min_sharpe` and `drawdown <= config.strategy.backtest_max_drawdown_pct`.
+
+Transaction cost modeling (PM G4 / FR-9.2): include brokerage (₹20 or 0.03%), STT, stamp duty, GST, exchange fees in all PnL calculations. ~0.1% round-trip intraday, ~0.15% delivery.
 
 #### 6d. Add `MLProtocol` to `context.py` and wire in `main.py`
 
@@ -418,7 +438,7 @@ dependencies = [
 
 ## File Summary
 
-**New files (16):**
+**New files (18):**
 - `src/yolovest/news/__init__.py`
 - `src/yolovest/news/base.py` — NewsSource ABC
 - `src/yolovest/news/aggregator.py` — dedup + merge
@@ -426,10 +446,11 @@ dependencies = [
 - `src/yolovest/news/et_markets.py`
 - `src/yolovest/news/livemint.py`
 - `src/yolovest/news/nse_official.py`
-- `src/yolovest/ml/__init__.py`
-- `src/yolovest/ml/base.py` — MLBase ABC
-- `src/yolovest/ml/xgboost_model.py` — XGBoost/LightGBM impl
-- `src/yolovest/ml/backtester.py` — walk-forward backtesting
+- `src/yolovest/strategy/__init__.py`
+- `src/yolovest/strategy/ml_base.py` — MLBase ABC
+- `src/yolovest/strategy/ml_signal.py` — XGBoost/LightGBM impl
+- `src/yolovest/strategy/backtest.py` — walk-forward backtesting
+- `src/yolovest/data/bhavcopy.py` — NSE Bhavcopy CSV importer (FR-2.1d)
 - `migrations/002_phase2_extensions.sql`
 - `tests/test_news_scrapers.py`
 - `tests/test_ingest_premarket.py`
@@ -438,8 +459,8 @@ dependencies = [
 
 **Modified files (10):**
 - `src/yolovest/models/schemas.py` — add NewsArticle, MLPrediction, BacktestResult
-- `src/yolovest/context.py` — add MLProtocol, FeaturesProtocol
-- `src/yolovest/config.py` — add MLConfig, NewsSourcesConfig
+- `src/yolovest/context.py` — add MLProtocol
+- `src/yolovest/config.py` — add ScanningConfig.universe, StrategyConfig.min_training_samples
 - `src/yolovest/data/db.py` — add Phase 2 DB methods
 - `src/yolovest/data/features.py` — full SuperTrend
 - `src/yolovest/main.py` — wire ML provider, news aggregator

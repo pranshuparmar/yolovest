@@ -96,6 +96,7 @@ class ScanningWeights(BaseModel):
 
 
 class ScanningConfig(BaseModel):
+    universe: str = "nifty500"  # "nifty500", "nifty50", "all"
     seed_symbols: list[str] = Field(
         default_factory=lambda: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
     )
@@ -123,6 +124,7 @@ class StrategyConfig(BaseModel):
     default_trade_type: Literal["intraday", "swing"] = "intraday"
     backtest_min_sharpe: float = 1.0
     backtest_max_drawdown_pct: float = 0.20
+    min_training_samples: int = 200  # PM G5: guard against garbage models
 
 
 class RiskConfig(BaseModel):

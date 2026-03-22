@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
-from yolovest.models.schemas import OHLCVBar
+from yolovest.models.schemas import NewsArticle, OHLCVBar, SentimentResult
 
 logger = logging.getLogger(__name__)
 
@@ -310,4 +310,293 @@ class Database:
 
     async def flush_audit(self) -> None:
         """Commit any pending audit log entries."""
+        await self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Pre-market Data (Phase 2, FR-2.10)
+    # ------------------------------------------------------------------
+
+    async def upsert_premarket(self, data: dict) -> None:
+        """Insert or update today's pre-market context."""
+        from datetime import date
+
+        today = date.today().isoformat()
+        gift = data.get("gift_nifty", {})
+        us = data.get("us_markets", {})
+        llm = data.get("llm_summary")
+        # Extract bias from LLM summary if it's a WebGroundingResult-like object
+        bias = None
+        summary_text = None
+        if hasattr(llm, "summary"):
+            summary_text = llm.summary
+        elif isinstance(llm, dict):
+            summary_text = llm.get("summary")
+            bias = llm.get("bias")
+        elif isinstance(llm, str):
+            summary_text = llm
+
+        await self.conn.execute(
+            "INSERT INTO premarket (date, gift_nifty_change_pct, us_sp500_change_pct, "
+            "market_bias, llm_summary, created_at) VALUES (?, ?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(date) DO UPDATE SET gift_nifty_change_pct=excluded.gift_nifty_change_pct, "
+            "us_sp500_change_pct=excluded.us_sp500_change_pct, market_bias=excluded.market_bias, "
+            "llm_summary=excluded.llm_summary",
+            (
+                today,
+                gift.get("change_pct"),
+                us.get("sp500_change_pct"),
+                bias,
+                summary_text,
+            ),
+        )
+        await self.conn.commit()
+
+    async def get_latest_premarket(self) -> dict:
+        """Get the most recent pre-market context."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM premarket ORDER BY date DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else {}
+
+    # ------------------------------------------------------------------
+    # Sentiment (Phase 2, FR-2.7)
+    # ------------------------------------------------------------------
+
+    async def upsert_sentiment(self, symbol: str, result: SentimentResult) -> None:
+        """Insert or update sentiment for a symbol."""
+        await self.conn.execute(
+            "INSERT INTO sentiment (symbol, sentiment, confidence, key_drivers, created_at) "
+            "VALUES (?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(symbol) DO UPDATE SET sentiment=excluded.sentiment, "
+            "confidence=excluded.confidence, key_drivers=excluded.key_drivers, "
+            "created_at=excluded.created_at",
+            (
+                symbol,
+                result.sentiment,
+                result.confidence,
+                json.dumps(result.key_drivers),
+            ),
+        )
+        await self.conn.commit()
+
+    async def get_sentiment(self, symbol: str) -> SentimentResult | None:
+        """Get latest sentiment for a symbol."""
+        cursor = await self.conn.execute(
+            "SELECT symbol, sentiment, confidence, key_drivers FROM sentiment WHERE symbol = ?",
+            (symbol,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        drivers = json.loads(row["key_drivers"]) if row["key_drivers"] else []
+        return SentimentResult(
+            symbol=row["symbol"],
+            sentiment=row["sentiment"],
+            confidence=row["confidence"],
+            key_drivers=drivers,
+        )
+
+    # ------------------------------------------------------------------
+    # News Articles (Phase 2, FR-2.13)
+    # ------------------------------------------------------------------
+
+    async def upsert_news_articles(self, articles: list[NewsArticle]) -> int:
+        """Insert news articles, skipping duplicates. Returns count inserted."""
+        inserted = 0
+        for article in articles:
+            try:
+                await self.conn.execute(
+                    "INSERT OR IGNORE INTO news_articles "
+                    "(content_hash, headline, source, url, symbols, published_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        article.content_hash,
+                        article.headline,
+                        article.source,
+                        article.url,
+                        json.dumps(article.symbols),
+                        article.published_at.isoformat() if article.published_at else None,
+                    ),
+                )
+                inserted += 1
+            except Exception:
+                pass  # Skip duplicates silently
+        await self.conn.commit()
+        return inserted
+
+    # ------------------------------------------------------------------
+    # Signals (Phase 2, FR-4.5)
+    # ------------------------------------------------------------------
+
+    async def insert_signal(self, signal: dict) -> None:
+        """Persist a generated signal."""
+        await self.conn.execute(
+            "INSERT INTO signals (symbol, signal_type, entry_price, target_price, "
+            "stop_loss_price, position_size, confidence_score, model_version, "
+            "features_snapshot, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            (
+                signal["symbol"],
+                signal["signal_type"],
+                signal["entry_price"],
+                signal["target_price"],
+                signal["stop_loss_price"],
+                signal["position_size"],
+                signal["confidence_score"],
+                signal.get("model_version", ""),
+                json.dumps(signal.get("features_snapshot", {})),
+            ),
+        )
+        await self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Fundamentals (Phase 2, FR-2.4)
+    # ------------------------------------------------------------------
+
+    async def upsert_fundamentals(self, symbol: str, data: dict) -> None:
+        """Insert or update fundamental data for a symbol."""
+        await self.conn.execute(
+            "INSERT INTO fundamentals (symbol, pe_ratio, pb_ratio, debt_to_equity, "
+            "promoter_holding_pct, quarterly_revenue_growth_pct, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(symbol) DO UPDATE SET pe_ratio=excluded.pe_ratio, "
+            "pb_ratio=excluded.pb_ratio, debt_to_equity=excluded.debt_to_equity, "
+            "promoter_holding_pct=excluded.promoter_holding_pct, "
+            "quarterly_revenue_growth_pct=excluded.quarterly_revenue_growth_pct, "
+            "updated_at=excluded.updated_at",
+            (
+                symbol,
+                data.get("pe_ratio"),
+                data.get("pb_ratio"),
+                data.get("debt_to_equity"),
+                data.get("promoter_holding_pct"),
+                data.get("quarterly_revenue_growth_pct"),
+            ),
+        )
+        await self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # NSE Universe (Phase 2, FR-3.1)
+    # ------------------------------------------------------------------
+
+    async def get_nse_universe(self) -> list[dict]:
+        """Get all symbols with OHLCV data, enriched with sentiment and fundamentals.
+
+        Returns dicts with sub-scores for market-scan scoring.
+        """
+        cursor = await self.conn.execute(
+            "SELECT o.symbol, "
+            "  AVG(o.volume) as avg_daily_volume, "
+            "  s.sentiment, s.confidence as sentiment_confidence, "
+            "  f.pe_ratio, f.debt_to_equity, f.promoter_holding_pct, "
+            "  w.sector "
+            "FROM ohlcv o "
+            "LEFT JOIN sentiment s ON o.symbol = s.symbol "
+            "LEFT JOIN fundamentals f ON o.symbol = f.symbol "
+            "LEFT JOIN watchlist w ON o.symbol = w.symbol "
+            "WHERE o.interval = 'daily' "
+            "GROUP BY o.symbol"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Model Versions (Phase 2, FR-7.7)
+    # ------------------------------------------------------------------
+
+    async def save_model_version(
+        self, model_type: str, version: str, file_path: str, metrics: dict
+    ) -> None:
+        """Save a new model version record."""
+        await self.conn.execute(
+            "INSERT INTO model_versions (model_type, version, file_path, "
+            "sharpe_ratio, max_drawdown_pct, win_rate, profit_factor, "
+            "status, shadow_start_date) VALUES (?, ?, ?, ?, ?, ?, ?, 'shadow', datetime('now'))",
+            (
+                model_type,
+                version,
+                file_path,
+                metrics.get("sharpe_ratio"),
+                metrics.get("max_drawdown_pct"),
+                metrics.get("win_rate"),
+                metrics.get("profit_factor"),
+            ),
+        )
+        await self.conn.commit()
+
+    async def get_production_model(self, model_type: str) -> dict | None:
+        """Get the current production model for a model type."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM model_versions "
+            "WHERE model_type = ? AND status = 'production' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (model_type,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def promote_model(self, model_type: str, version: str) -> None:
+        """Promote a shadow model to production, retire the current production."""
+        await self.conn.execute("BEGIN")
+        try:
+            # Retire current production
+            await self.conn.execute(
+                "UPDATE model_versions SET status = 'retired' "
+                "WHERE model_type = ? AND status = 'production'",
+                (model_type,),
+            )
+            # Promote new model
+            await self.conn.execute(
+                "UPDATE model_versions SET status = 'production', "
+                "promoted_date = datetime('now') "
+                "WHERE model_type = ? AND version = ?",
+                (model_type, version),
+            )
+            await self.conn.commit()
+        except Exception:
+            await self.conn.rollback()
+            raise
+
+    # ------------------------------------------------------------------
+    # Training Data (Phase 2, FR-7.4)
+    # ------------------------------------------------------------------
+
+    async def get_training_dataset(self) -> dict:
+        """Load OHLCV data for model training."""
+        cursor = await self.conn.execute(
+            "SELECT symbol, timestamp, open, high, low, close, volume "
+            "FROM ohlcv WHERE interval = 'daily' ORDER BY symbol, timestamp"
+        )
+        rows = await cursor.fetchall()
+        return {"bars": [dict(row) for row in rows]}
+
+    async def get_prediction_outcomes(self) -> list[dict]:
+        """Load predictions with actual outcomes for retraining analysis."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM predictions WHERE actual_price IS NOT NULL"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Failure Analysis (Phase 2, FR-7.6)
+    # ------------------------------------------------------------------
+
+    async def store_failure_analysis(self, analysis: object) -> None:
+        """Persist LLM failure analysis."""
+        patterns = []
+        recommendations = []
+        summary = ""
+        if hasattr(analysis, "patterns_identified"):
+            patterns = analysis.patterns_identified
+        if hasattr(analysis, "recommendations"):
+            recommendations = analysis.recommendations
+        if hasattr(analysis, "summary"):
+            summary = analysis.summary
+
+        await self.conn.execute(
+            "INSERT INTO failure_analyses (patterns, recommendations, summary) "
+            "VALUES (?, ?, ?)",
+            (json.dumps(patterns), json.dumps(recommendations), summary),
+        )
         await self.conn.commit()

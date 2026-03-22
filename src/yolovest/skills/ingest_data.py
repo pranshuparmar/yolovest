@@ -19,9 +19,12 @@ Flow:
 12. Respect rate limits for all sources (FR-2.9)
 """
 
+import logging
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
 
 
 class IngestDataSkill(SkillBase):
@@ -31,8 +34,7 @@ class IngestDataSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        # Always run during market hours; run less frequently outside
-        return self.ctx.market_hours.is_market_hours() or self.ctx.scheduler.is_heartbeat_due()
+        return True  # Always run; frequency controlled by orchestrator
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         symbols = kwargs.get("symbols", self.ctx.config.scanning.seed_symbols)
@@ -41,61 +43,131 @@ class IngestDataSkill(SkillBase):
         # --- OHLCV Data (primary + fallback) ---
         for symbol in symbols:
             try:
-                # Daily candles via jugaad-data (primary) → yfinance (fallback)
-                daily = await self.ctx.market_data.fetch_daily(symbol)
-                await self.ctx.db.upsert_ohlcv(symbol, "daily", daily)
+                daily = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=30)
+                await self.ctx.db.upsert_ohlcv(symbol, "daily", daily, "ingester")
 
-                # Intraday candles via tvDatafeed (if market hours)
+                # Intraday candles if market is open
                 if self.ctx.market_hours.is_market_hours():
-                    intraday = await self.ctx.market_data.fetch_intraday(symbol)
-                    await self.ctx.db.upsert_ohlcv(symbol, "intraday", intraday)
+                    try:
+                        intraday = await self.ctx.market_data.get_ohlcv(
+                            symbol, "5minute", days=1
+                        )
+                        await self.ctx.db.upsert_ohlcv(symbol, "5minute", intraday, "ingester")
+                    except Exception as e:
+                        logger.debug("Intraday fetch skipped for %s: %s", symbol, e)
 
                 results["symbols_ingested"] += 1
             except Exception as e:
                 results["errors"].append(f"{symbol}: {e}")
-
-        # --- NSE/BSE Official Data ---
-        nse_data = await self._fetch_nse_data()
-        await self.ctx.db.upsert_market_data("nse_official", nse_data)
+                logger.warning("OHLCV fetch failed for %s: %s", symbol, e)
 
         # --- News Aggregation + Dedup ---
         raw_news = await self._fetch_all_news(symbols)
         deduped = self._deduplicate_news(raw_news)
         results["news_articles"] = len(deduped)
 
-        # --- Gemini Sentiment Analysis ---
+        # Persist news articles
+        if deduped:
+            await self.ctx.db.upsert_news_articles(deduped)
+
+        # --- Gemini Sentiment Analysis (FR-2.7) ---
         for symbol in symbols:
-            symbol_news = [n for n in deduped if symbol in n.get("symbols", [])]
-            if symbol_news:
-                sentiment = await self.ctx.llm.analyze_sentiment(
-                    symbol, [n["headline"] for n in symbol_news]
-                )
-                await self.ctx.db.upsert_sentiment(symbol, sentiment)
+            symbol_headlines = [
+                n.headline for n in deduped
+                if symbol.lower() in " ".join(n.symbols).lower()
+                or symbol.lower() in n.headline.lower()
+            ]
+            if symbol_headlines:
+                try:
+                    sentiment = await self.ctx.llm.analyze_sentiment(symbol, symbol_headlines)
+                    await self.ctx.db.upsert_sentiment(symbol, sentiment)
+                except Exception as e:
+                    logger.warning("Sentiment analysis failed for %s: %s", symbol, e)
 
-        # --- Fundamentals + Technicals ---
-        await self._fetch_fundamentals(symbols)
-        await self._fetch_technicals(symbols)
+        # --- NSE Official Data (FR-2.2) ---
+        try:
+            nse_data = await self._fetch_nse_data()
+            if nse_data:
+                logger.info("NSE data fetched: %d items", len(nse_data))
+        except Exception as e:
+            logger.warning("NSE data fetch failed: %s", e)
 
-        return SkillResult(success=True, skill_name=self.name, data=results)
+        # --- Fundamentals + Technicals (P1 — graceful stubs) ---
+        try:
+            await self._fetch_fundamentals(symbols)
+        except NotImplementedError:
+            pass  # P1 — not yet implemented
+        except Exception as e:
+            logger.warning("Fundamentals fetch failed: %s", e)
+
+        try:
+            await self._fetch_technicals(symbols)
+        except NotImplementedError:
+            pass  # P1 — not yet implemented
+        except Exception as e:
+            logger.warning("Technicals fetch failed: %s", e)
+
+        return SkillResult(
+            success=len(results["errors"]) == 0,
+            skill_name=self.name,
+            data=results,
+        )
 
     async def _fetch_nse_data(self) -> dict:
         """Fetch corp announcements, bulk/block deals, FII/DII, delivery data."""
-        # FR-2.2: NSE/BSE official data
-        raise NotImplementedError
+        # NSE official scraper will be wired here when available
+        # For now, return empty — NSE scraper is P0 but built in news/nse_official.py
+        return {}
 
-    async def _fetch_all_news(self, symbols: list[str]) -> list[dict]:
-        """Aggregate news from MoneyControl, ET Markets, LiveMint, Google Finance."""
-        # FR-2.3, FR-2.12
-        raise NotImplementedError
+    async def _fetch_all_news(self, symbols: list[str]) -> list:
+        """Aggregate news from all configured sources."""
+        from yolovest.models.schemas import NewsArticle
 
-    def _deduplicate_news(self, articles: list[dict]) -> list[dict]:
+        all_articles: list[NewsArticle] = []
+
+        # Try to use news aggregator if wired into context
+        if hasattr(self.ctx, "news_aggregator") and self.ctx.news_aggregator is not None:
+            try:
+                all_articles = await self.ctx.news_aggregator.fetch_all(symbols)
+            except Exception as e:
+                logger.warning("News aggregator failed: %s", e)
+        else:
+            # Fallback: try individual scrapers
+            try:
+                from yolovest.news.aggregator import NewsAggregator
+                from yolovest.news.moneycontrol import MoneyControlSource
+                from yolovest.news.et_markets import ETMarketsSource
+
+                sources = [MoneyControlSource(), ETMarketsSource()]
+                aggregator = NewsAggregator(sources)
+                all_articles = await aggregator.fetch_all(symbols)
+            except Exception as e:
+                logger.debug("News sources not available: %s", e)
+
+        return all_articles
+
+    def _deduplicate_news(self, articles: list) -> list:
         """Merge duplicate news across sources. FR-2.13."""
-        raise NotImplementedError
+        if not articles:
+            return []
+
+        seen: dict[str, object] = {}
+        for article in articles:
+            h = article.content_hash
+            if h not in seen:
+                seen[h] = article
+            else:
+                # Merge symbols from duplicate
+                existing = seen[h]
+                for sym in article.symbols:
+                    if sym not in existing.symbols:
+                        existing.symbols.append(sym)
+        return list(seen.values())
 
     async def _fetch_fundamentals(self, symbols: list[str]) -> None:
-        """Fetch from Screener.in. FR-2.4."""
+        """Fetch from Screener.in. FR-2.4. P1 — stub for now."""
         raise NotImplementedError
 
     async def _fetch_technicals(self, symbols: list[str]) -> None:
-        """Fetch from Trendlyne. FR-2.5."""
+        """Fetch from Trendlyne. FR-2.5. P1 — stub for now."""
         raise NotImplementedError

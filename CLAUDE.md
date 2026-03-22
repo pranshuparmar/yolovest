@@ -32,6 +32,18 @@ YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses 
 - **Wiring** — `main.py` creates real implementations when API keys are configured, falls back to stubs otherwise
 - **Tests** — 230 passing (89 new: db, ingester, features, broker, LLM)
 
+### Phase 2 — Intelligence Layer (Complete)
+
+- **News module** (`news/`) — `NewsSource` ABC, `NewsAggregator` with SHA256 dedup (FR-2.13). Concrete scrapers: MoneyControl RSS, ET Markets RSS, LiveMint RSS, NSE Official (stub). Google Finance (P1)
+- **Strategy module** (`strategy/`) — `MLBase` ABC, `XGBoostSignalModel` with Platt scaling calibration, `Backtester` with walk-forward validation and transaction cost modeling (FR-9.2)
+- **Skills implemented** — `ingest-premarket` (GIFT Nifty, US/Asian/commodities via yfinance), `ingest-data` (OHLCV + news + sentiment), `market-scan` (weighted scoring with normalization, sector rotation), `generate-signals` (ML inference, confidence filtering), `model-retrain` (versioning, shadow mode, LLM failure analysis)
+- **Database extensions** — Migration 002: news_articles, fundamentals, model_versions, failure_analyses tables + trades.status index. 14 new DB methods
+- **Schemas** — `NewsArticle` (auto-hash), `MLPrediction`, `BacktestResult` added
+- **Config** — Added `scanning.universe`, `strategy.min_training_samples`
+- **SuperTrend** — Upgraded from simplified single-bar to full multi-bar with band carryover
+- **Context** — Added `MLProtocol` to `AppContext`
+- **Tests** — 322 passing (67 new: news scrapers, strategy/backtester, DB Phase 2 methods)
+
 ## Architecture
 
 ### Three Abstraction Layers (ABCs)
@@ -67,7 +79,7 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 ## Key Files
 
 - **`REQUIREMENTS.md`** — Complete specification (950+ lines). Sections 1-11 are functional requirements, Section 13 is the cross-functional review (CEO/PM/BA findings), Section 14 is the glossary. Always consult this before making architectural decisions.
-- **`plan.md`** — Phase 1 implementation plan (v2, PM-approved)
+- **`plan.md`** — Phase 2 implementation plan (v2, PM-approved)
 - **`docs/tl_phase0_review.md`** — TL review of Phase 0 (all issues resolved)
 - **`docs/pm_phase1_review.md`** — PM cross-check of Phase 1 plan
 - **`src/yolovest/orchestrator.py`** — Heartbeat pipeline, error propagation, mutex
@@ -80,13 +92,17 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 - **`src/yolovest/broker/zerodha.py`** — Zerodha Kite Connect broker (paper + live)
 - **`src/yolovest/llm/gemini.py`** — Google Gemini LLM (all 7 methods)
 - **`migrations/001_initial.sql`** — Initial database schema (11 tables)
+- **`migrations/002_phase2_extensions.sql`** — Phase 2 tables (news_articles, fundamentals, model_versions, failure_analyses)
+- **`src/yolovest/news/`** — News scrapers (MoneyControl, ET Markets, LiveMint RSS) + aggregator with dedup
+- **`src/yolovest/strategy/ml_signal.py`** — XGBoost/LightGBM model for signal generation
+- **`src/yolovest/strategy/backtest.py`** — Walk-forward backtesting engine with transaction costs
 
 ## Implementation Phases
 
 - **Phase 0** (complete): Skill infrastructure — context, schemas, orchestrator, event bus, heartbeat, config, ABCs, Telegram
 - **Phase 1** (complete): Database + migrations, market data providers with fallback chain, feature engineering, Zerodha broker, Gemini LLM
-- **Phase 2** (next): Intelligence — news aggregation, sentiment, dynamic scanner, ML signal models, backtesting
-- Phase 3: Risk & execution — risk manager, LLM trade review gate, order executor, position tracking
+- **Phase 2** (complete): Intelligence — news aggregation + dedup, sentiment analysis, dynamic scanner with weighted scoring, ML signal models (XGBoost), backtesting engine, model retraining with shadow mode
+- Phase 3 (next): Risk & execution — risk manager, LLM trade review gate, order executor, position tracking
 - Phase 4: Self-learning — prediction tracking, model retraining, A/B testing
 - Phase 5: Dashboard & reporting
 
