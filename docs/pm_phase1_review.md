@@ -107,7 +107,7 @@ Step 5 lists `test_db.py` covering "CRUD for all tables, upsert idempotency" but
 
 **12. pyproject.toml `requires-python` fix is good but incomplete**
 
-The plan correctly identifies fixing `requires-python` from `>=3.11` to `>=3.12` (Q2 from TL review). However, it does not add the `aiosqlite` dependency — already present in pyproject.toml but worth confirming. The new dependencies (`jugaad-data`, `yfinance`, `tvdatafeed`, `ta`) should be pinned with version ranges for reproducibility.
+The Python version has been standardized to `>=3.11` across all config, tooling, Dockerfile, and documentation (Q2 from TL review — resolved). The new dependencies (`jugaad-data`, `yfinance`, `tvdatafeed`, `ta`) should be pinned with version ranges for reproducibility.
 
 ### LOW
 

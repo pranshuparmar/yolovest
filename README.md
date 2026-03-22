@@ -18,7 +18,7 @@ Fully autonomous AI-driven Indian stock trading platform. Uses Google Gemini for
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.11+
 - SQLite (bundled with Python)
 - API keys (optional, falls back to stubs if not set):
   - [Zerodha Kite Connect](https://kite.trade/) — for live/paper brokerage

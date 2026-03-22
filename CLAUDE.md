@@ -165,7 +165,7 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 
 ## Conventions
 
-- Python 3.12+, async throughout
+- Python 3.11+, async throughout
 - All skills follow the same pattern: extend `SkillBase`, implement `execute()` and `should_run()`
 - Config via YAML + Pydantic validation. Secrets via environment variables (never in config files).
 - SQLite with WAL mode. Schema versioned via numbered migration scripts in `migrations/`.

@@ -154,7 +154,7 @@ succeeded = sum(1 for r in results.values() if r.success)
 
 This is the most critical bug in the codebase. It will prevent the orchestrator from completing its first full run.
 
-**Issue Q2 (Significant):** `pyproject.toml` declares `requires-python = ">=3.11"` (line 9) but `[tool.ruff] target-version = "py312"` (line 34) and `[tool.mypy] python_version = "3.12"` (line 42). The project uses `datetime.now()` and `X | Y` union syntax which requires 3.10+, and all type hints are 3.10+ compatible. However, the mismatch means the project claims 3.11 support but is linted/checked against 3.12 semantics. Should align to `>=3.12` to match the stated intent in CLAUDE.md ("Python 3.12+").
+**Issue Q2 (Resolved):** `pyproject.toml` previously had a mismatch between `requires-python = ">=3.11"` and ruff/mypy targeting 3.12. All references have been aligned to Python 3.11+ — `requires-python`, ruff `target-version`, mypy `python_version`, Dockerfile base image, and all documentation.
 
 **File:Line:** `pyproject.toml:9`
 

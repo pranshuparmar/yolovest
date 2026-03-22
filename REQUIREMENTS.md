@@ -263,7 +263,7 @@ All open questions have been resolved. No remaining blockers for implementation.
 | Component | Choice |
 |-----------|--------|
 | Agent Orchestration | OpenClaw (model-agnostic, heartbeat, skills, Telegram integration) |
-| Language | Python 3.12+ |
+| Language | Python 3.11+ |
 | Broker (execution) | Zerodha Kite Connect API (free personal tier — execution only) |
 | Market Data | jugaad-data (primary) + yfinance (fallback) + tvDatafeed (intraday) |
 | LLM (runtime) | Gemini API via Google AI Pro (trade review, sentiment, analysis) |
