@@ -203,6 +203,21 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
     )
 
 
+def _build_news_aggregator() -> Any:
+    """Build news aggregator with all available news sources."""
+    try:
+        from yolovest.news.aggregator import NewsAggregator
+        from yolovest.news.et_markets import ETMarketsSource
+        from yolovest.news.livemint import LiveMintSource
+        from yolovest.news.moneycontrol import MoneyControlSource
+
+        sources = [MoneyControlSource(), ETMarketsSource(), LiveMintSource()]
+        return NewsAggregator(sources)
+    except Exception:
+        logger.warning("Failed to build news aggregator, news will be unavailable")
+        return None
+
+
 def build_context(config: AppConfig) -> AppContext:
     """Build the application context with real implementations where configured.
 
@@ -227,6 +242,7 @@ def build_context(config: AppConfig) -> AppContext:
         notify=cast(NotifierProtocol, ConsoleNotifier(enabled=True)),
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
+        news_aggregator=_build_news_aggregator(),
     )
 
 

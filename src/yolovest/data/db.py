@@ -1467,6 +1467,137 @@ class Database:
         logger.info("Retention cleanup: %s", deleted)
         return deleted
 
+    # ------------------------------------------------------------------
+    # Slippage Stats (FR-6.7)
+    # ------------------------------------------------------------------
+
+    async def get_slippage_stats(
+        self, symbol: str | None = None, days: int = 30
+    ) -> dict[str, Any]:
+        """Aggregate slippage statistics for feedback into signal generation.
+
+        Returns avg/max/total slippage, per-symbol breakdown, and slippage trend.
+        """
+        from datetime import timedelta
+
+        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+
+        if symbol:
+            cursor = await self.conn.execute(
+                "SELECT symbol, slippage, entry_price, fill_price, signal_type, created_at "
+                "FROM trades WHERE symbol = ? AND created_at >= ? AND slippage IS NOT NULL",
+                (symbol, cutoff),
+            )
+        else:
+            cursor = await self.conn.execute(
+                "SELECT symbol, slippage, entry_price, fill_price, signal_type, created_at "
+                "FROM trades WHERE created_at >= ? AND slippage IS NOT NULL",
+                (cutoff,),
+            )
+        rows = await cursor.fetchall()
+        trades = [dict[str, Any](row) for row in rows]
+
+        if not trades:
+            return {
+                "total_trades": 0,
+                "avg_slippage": 0,
+                "max_slippage": 0,
+                "avg_slippage_pct": 0,
+                "by_symbol": {},
+            }
+
+        slippages = [t["slippage"] for t in trades]
+        slippage_pcts = [
+            t["slippage"] / t["entry_price"] if t["entry_price"] > 0 else 0
+            for t in trades
+        ]
+
+        # Per-symbol breakdown
+        by_symbol: dict[str, dict[str, Any]] = {}
+        for t in trades:
+            sym = t["symbol"]
+            if sym not in by_symbol:
+                by_symbol[sym] = {"slippages": [], "count": 0}
+            by_symbol[sym]["slippages"].append(t["slippage"])
+            by_symbol[sym]["count"] += 1
+
+        symbol_stats = {}
+        for sym, data in by_symbol.items():
+            s_list = data["slippages"]
+            symbol_stats[sym] = {
+                "count": data["count"],
+                "avg_slippage": sum(s_list) / len(s_list),
+                "max_slippage": max(s_list),
+            }
+
+        return {
+            "total_trades": len(trades),
+            "avg_slippage": sum(slippages) / len(slippages),
+            "max_slippage": max(slippages),
+            "avg_slippage_pct": sum(slippage_pcts) / len(slippage_pcts),
+            "by_symbol": symbol_stats,
+        }
+
+    # ------------------------------------------------------------------
+    # LLM Review Accuracy (FR-7.8)
+    # ------------------------------------------------------------------
+
+    async def get_llm_review_accuracy(
+        self, days: int = 30
+    ) -> dict[str, Any]:
+        """Compare LLM APPROVE/REJECT decisions vs actual trade outcomes.
+
+        Joins llm_reviews with trades to compute:
+        - Approval accuracy: % of approved trades that were profitable
+        - Rejection value: avg PnL of trades that were rejected (counterfactual)
+        - Decision breakdown: approve/reject counts and outcomes
+        """
+        from datetime import timedelta
+
+        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+
+        # Get reviews with matching trade outcomes
+        cursor = await self.conn.execute(
+            "SELECT r.decision, r.reasoning, r.trade_id, r.created_at, "
+            "t.pnl, t.slippage, t.symbol, t.status "
+            "FROM llm_reviews r "
+            "LEFT JOIN trades t ON r.trade_id = t.symbol "
+            "WHERE r.created_at >= ?",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        reviews = [dict[str, Any](row) for row in rows]
+
+        approved = [r for r in reviews if r.get("decision") == "APPROVE"]
+        rejected = [r for r in reviews if r.get("decision") == "REJECT"]
+
+        # Approved trades with PnL data
+        approved_with_pnl = [r for r in approved if r.get("pnl") is not None]
+        profitable_approvals = [r for r in approved_with_pnl if (r.get("pnl") or 0) > 0]
+        losing_approvals = [r for r in approved_with_pnl if (r.get("pnl") or 0) <= 0]
+
+        approval_accuracy = (
+            len(profitable_approvals) / len(approved_with_pnl)
+            if approved_with_pnl
+            else None
+        )
+        approved_total_pnl = sum(r.get("pnl", 0) for r in approved_with_pnl)
+        approved_avg_pnl = (
+            approved_total_pnl / len(approved_with_pnl) if approved_with_pnl else 0
+        )
+
+        return {
+            "total_reviews": len(reviews),
+            "approved_count": len(approved),
+            "rejected_count": len(rejected),
+            "approved_with_outcomes": len(approved_with_pnl),
+            "profitable_approvals": len(profitable_approvals),
+            "losing_approvals": len(losing_approvals),
+            "approval_accuracy": approval_accuracy,
+            "approved_total_pnl": approved_total_pnl,
+            "approved_avg_pnl": approved_avg_pnl,
+        }
+
     async def get_audit_log(
         self, limit: int = 50, action_type: str | None = None
     ) -> list[dict[str, Any]]:

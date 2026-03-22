@@ -24,9 +24,12 @@ Flow:
 All thresholds read from config.risk.* — zero hardcoded values.
 """
 
+import logging
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
 
 
 class RiskCheckSkill(SkillBase):
@@ -123,6 +126,15 @@ class RiskCheckSkill(SkillBase):
         max_by_exposure = int((cfg.max_single_stock_pct * capital) / entry)
         position_size = min(position_size, max_by_exposure)
 
+        # FR-6.7: Slippage feedback — reduce sizing for high-slippage symbols
+        slippage_penalty = await self._get_slippage_penalty(signal["symbol"])
+        if slippage_penalty > 0:
+            position_size = int(position_size * (1 - slippage_penalty))
+            logger.info(
+                "Slippage penalty for %s: %.1f%% size reduction",
+                signal["symbol"], slippage_penalty * 100,
+            )
+
         if position_size <= 0:
             return self._reject(signal, "Computed position size is 0")
 
@@ -136,9 +148,34 @@ class RiskCheckSkill(SkillBase):
                 "adjusted_size": position_size,
                 "risk_amount": risk_amount,
                 "weekly_breaker_active": portfolio["weekly_pnl_pct"] <= -cfg.weekly_loss_limit_pct,
+                "slippage_penalty": slippage_penalty,
                 "signal": {**signal, "position_size": position_size},
             },
         )
+
+    async def _get_slippage_penalty(self, symbol: str) -> float:
+        """FR-6.7: Compute position sizing penalty based on historical slippage.
+
+        Returns a reduction factor (0.0 to 0.3). If avg slippage > 0.5% of entry,
+        reduce size proportionally, capped at 30%.
+        """
+        try:
+            stats = await self.ctx.db.get_slippage_stats(symbol=symbol, days=30)
+            if stats["total_trades"] < 3:
+                return 0.0
+
+            avg_slippage_pct = stats["avg_slippage_pct"]
+            # Threshold: start penalizing above 0.2% slippage
+            threshold = 0.002
+            if avg_slippage_pct <= threshold:
+                return 0.0
+
+            # Scale penalty: 0.2% -> 0%, 0.5% -> 10%, 1% -> 27%, cap at 30%
+            excess = avg_slippage_pct - threshold
+            penalty = min(excess * 10, 0.30)
+            return penalty
+        except Exception:
+            return 0.0
 
     def _reject(self, signal: dict[str, Any], reason: str) -> SkillResult:
         return SkillResult(

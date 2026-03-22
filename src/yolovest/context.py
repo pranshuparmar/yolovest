@@ -262,6 +262,18 @@ class DatabaseProtocol(Protocol):
         self, ohlcv_days: int = 730, audit_days: int = 365, predictions_days: int = 365
     ) -> dict[str, Any]: ...
 
+    async def get_prediction_outcomes(self) -> list[dict[str, Any]]: ...
+
+    async def store_failure_analysis(self, analysis: object) -> None: ...
+
+    async def get_slippage_stats(
+        self, symbol: str | None = None, days: int = 30
+    ) -> dict[str, Any]: ...
+
+    async def get_llm_review_accuracy(
+        self, days: int = 30
+    ) -> dict[str, Any]: ...
+
 
 # ---------------------------------------------------------------------------
 # Market Hours Checker
@@ -422,3 +434,4 @@ class AppContext:
     market_hours: MarketHoursChecker
     event_bus: EventBus = field(default_factory=EventBus)
     ml: MLProtocol | None = None
+    news_aggregator: Any = None

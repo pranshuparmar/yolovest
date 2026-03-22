@@ -133,6 +133,20 @@ class ReportGenerateSkill(SkillBase):
         # Prediction scoreboard snapshot
         scoreboard = await self.ctx.db.get_prediction_scoreboard("overall")
 
+        # FR-7.8: LLM review accuracy — compare decisions vs outcomes
+        llm_accuracy = None
+        try:
+            llm_accuracy = await self.ctx.db.get_llm_review_accuracy(days=7)
+        except Exception as e:
+            logger.warning("LLM review accuracy fetch failed: %s", e)
+
+        # FR-6.7: Slippage analysis for the week
+        slippage_stats = None
+        try:
+            slippage_stats = await self.ctx.db.get_slippage_stats(days=7)
+        except Exception as e:
+            logger.warning("Slippage stats fetch failed: %s", e)
+
         report = {
             "type": "weekly",
             "total_trades": len(trades),
@@ -149,9 +163,11 @@ class ReportGenerateSkill(SkillBase):
             "llm_approvals": len(llm_approved),
             "llm_rejections": len(llm_rejected),
             "llm_approved_pnl": llm_approve_pnl,
+            "llm_review_accuracy": llm_accuracy,
             "prediction_accuracy": pred_accuracy,
             "predictions_scored": len(scored),
             "scoreboard": scoreboard,
+            "slippage_stats": slippage_stats,
         }
 
         await self.ctx.db.store_report(report)
@@ -205,4 +221,18 @@ class ReportGenerateSkill(SkillBase):
             lines.append(f"Best Trade: {best['symbol']} +{best['pnl']:,.2f}")
         if worst:
             lines.append(f"Worst Trade: {worst['symbol']} {worst['pnl']:,.2f}")
+        # FR-7.8: LLM review accuracy
+        llm_acc = report.get("llm_review_accuracy")
+        if llm_acc and llm_acc.get("approval_accuracy") is not None:
+            lines.append(
+                f"LLM Approval Accuracy: {llm_acc['approval_accuracy']:.0%} "
+                f"({llm_acc['profitable_approvals']}/{llm_acc['approved_with_outcomes']})"
+            )
+        # FR-6.7: Slippage summary
+        slip = report.get("slippage_stats")
+        if slip and slip.get("total_trades", 0) > 0:
+            lines.append(
+                f"Avg Slippage: {slip['avg_slippage']:.2f} "
+                f"({slip['avg_slippage_pct']:.3%} of entry)"
+            )
         return "\n".join(lines)

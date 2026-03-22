@@ -212,6 +212,26 @@ def mock_db() -> AsyncMock:
     db.get_trade_detail = AsyncMock(return_value=None)
     db.get_reports_history = AsyncMock(return_value=[])
     db.get_audit_log = AsyncMock(return_value=[])
+    db.get_prediction_outcomes = AsyncMock(return_value=[])
+    db.store_failure_analysis = AsyncMock()
+    db.get_slippage_stats = AsyncMock(return_value={
+        "total_trades": 0,
+        "avg_slippage": 0,
+        "max_slippage": 0,
+        "avg_slippage_pct": 0,
+        "by_symbol": {},
+    })
+    db.get_llm_review_accuracy = AsyncMock(return_value={
+        "total_reviews": 0,
+        "approved_count": 0,
+        "rejected_count": 0,
+        "approved_with_outcomes": 0,
+        "profitable_approvals": 0,
+        "losing_approvals": 0,
+        "approval_accuracy": None,
+        "approved_total_pnl": 0,
+        "approved_avg_pnl": 0,
+    })
     return db
 
 

@@ -116,6 +116,26 @@ class IngestDataSkill(SkillBase):
         except Exception as e:
             logger.warning("Technicals fetch failed: %s", e)
 
+        # --- Google Finance (FR-2.12) ---
+        try:
+            gf_data = await self._fetch_google_finance(symbols)
+            if gf_data:
+                results["google_finance"] = {
+                    "indices": len(gf_data.get("indices", {})),
+                    "trending": len(gf_data.get("trending_tickers", [])),
+                    "news": len(gf_data.get("news", [])),
+                }
+                # Merge Google Finance news into the deduped articles
+                gf_news = gf_data.get("news", [])
+                if gf_news:
+                    gf_deduped = self._deduplicate_news(list(deduped) + gf_news)
+                    new_articles = [a for a in gf_deduped if a not in deduped]
+                    if new_articles:
+                        await self.ctx.db.upsert_news_articles(new_articles)
+                        results["news_articles"] += len(new_articles)
+        except Exception as e:
+            logger.warning("Google Finance fetch failed: %s", e)
+
         return SkillResult(
             success=len(results["errors"]) == 0,
             skill_name=self.name,
@@ -179,24 +199,13 @@ class IngestDataSkill(SkillBase):
 
         all_articles: list[NewsArticle] = []
 
-        # Try to use news aggregator if wired into context
-        if hasattr(self.ctx, "news_aggregator") and self.ctx.news_aggregator is not None:
+        if self.ctx.news_aggregator is not None:
             try:
                 all_articles = await self.ctx.news_aggregator.fetch_all(symbols)
             except Exception as e:
                 logger.warning("News aggregator failed: %s", e)
         else:
-            # Fallback: try individual scrapers
-            try:
-                from yolovest.news.aggregator import NewsAggregator
-                from yolovest.news.et_markets import ETMarketsSource
-                from yolovest.news.moneycontrol import MoneyControlSource
-
-                sources = [MoneyControlSource(), ETMarketsSource()]
-                aggregator = NewsAggregator(sources)
-                all_articles = await aggregator.fetch_all(symbols)
-            except Exception as e:
-                logger.debug("News sources not available: %s", e)
+            logger.debug("No news aggregator configured, skipping news fetch")
 
         return all_articles
 
@@ -217,6 +226,16 @@ class IngestDataSkill(SkillBase):
                     if sym not in existing.symbols:
                         existing.symbols.append(sym)
         return list(seen.values())
+
+    async def _fetch_google_finance(self, symbols: list[str]) -> dict[str, Any] | None:
+        """Fetch market data from Google Finance (FR-2.12)."""
+        from yolovest.data.google_finance import GoogleFinanceScraper
+
+        scraper = GoogleFinanceScraper()
+        try:
+            return await scraper.fetch_all(symbols)
+        finally:
+            await scraper.close()
 
     async def _fetch_economic_calendar(self) -> list[dict[str, Any]]:
         """Fetch economic calendar events (FR-2.6): RBI, Fed, earnings."""

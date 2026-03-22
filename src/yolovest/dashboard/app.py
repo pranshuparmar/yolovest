@@ -165,6 +165,23 @@ def create_app(ctx: AppContext) -> FastAPI:
             "mode": ctx.config.mode,
         }
 
+    @app.get("/api/slippage")
+    async def get_slippage_stats(
+        symbol: str | None = Query(None),
+        days: int = Query(30, ge=1, le=365),
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Slippage analysis (FR-6.7)."""
+        return await ctx.db.get_slippage_stats(symbol=symbol, days=days)
+
+    @app.get("/api/llm-accuracy")
+    async def get_llm_accuracy(
+        days: int = Query(30, ge=1, le=365),
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """LLM review accuracy vs actual trade outcomes (FR-7.8)."""
+        return await ctx.db.get_llm_review_accuracy(days=days)
+
     @app.get("/api/audit")
     async def get_audit_log(
         limit: int = Query(50, ge=1, le=500),
