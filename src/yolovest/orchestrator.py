@@ -194,6 +194,13 @@ class HeartbeatOrchestrator:
             logger.info("risk-check failed for signal %d — skipping", index)
             return results
 
+        # Check risk approval and use adjusted signal
+        if risk_result.data and not risk_result.data.get("approved", True):
+            logger.info("risk-check rejected signal %d: %s", index, risk_result.data.get("rejection_reason"))
+            return results
+        if risk_result.data and risk_result.data.get("signal"):
+            signal = risk_result.data["signal"]  # use risk-adjusted signal (position size)
+
         # llm-review
         llm_result = await self._run_skill("llm-review", signal=signal)
         results[f"{prefix}/llm-review"] = llm_result
@@ -209,10 +216,13 @@ class HeartbeatOrchestrator:
 
         # Check LLM decision (if it succeeded)
         if llm_result.success:
-            decision = llm_result.data.get("decision", "APPROVE")
-            if decision == "REJECT":
+            approved = llm_result.data.get("approved", True)
+            if not approved:
                 logger.info("LLM rejected signal %d", index)
                 return results
+            # Use updated signal from LLM (may have been resized)
+            if llm_result.data.get("signal"):
+                signal = llm_result.data["signal"]
 
         # trade-execute
         trade_result = await self._run_skill("trade-execute", signal=signal)

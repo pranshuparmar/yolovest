@@ -53,8 +53,10 @@ class TestSquareOff:
         assert result.success
         assert len(result.data["squared_off"]) == 1
         assert result.data["squared_off"][0]["symbol"] == "RELIANCE"
-        # PnL = (2520 - 2500) * 10 = 200
-        assert result.data["squared_off"][0]["pnl"] == 200.0
+        # Gross PnL = (2520 - 2500) * 10 = 200, minus transaction costs
+        pnl = result.data["squared_off"][0]["pnl"]
+        assert pnl < 200.0  # reduced by transaction costs
+        assert pnl > 150.0  # costs ~₹25 on ₹25k trade
 
     async def test_force_closes_all(self, square_off_skill, mis_position, cnc_position):
         square_off_skill.ctx.db.get_open_positions = AsyncMock(
@@ -100,8 +102,10 @@ class TestSquareOff:
 
         result = await square_off_skill.execute()
 
-        # PnL = (2500 - 2480) * 10 = 200 (profit on short)
-        assert result.data["squared_off"][0]["pnl"] == 200.0
+        # Gross PnL = (2500 - 2480) * 10 = 200, minus transaction costs (FR-9.2)
+        pnl = result.data["squared_off"][0]["pnl"]
+        assert pnl < 200.0
+        assert pnl > 150.0  # costs ~₹25 on ₹25k trade
 
     async def test_failure_handling(self, square_off_skill, mis_position):
         square_off_skill.ctx.db.get_open_positions = AsyncMock(

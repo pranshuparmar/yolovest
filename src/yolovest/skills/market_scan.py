@@ -34,7 +34,7 @@ class MarketScanSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        return True  # Runs every heartbeat; frequency controlled by orchestrator
+        return self.ctx.market_hours.is_market_hours()  # FR-11.3
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         cfg = self.ctx.config.scanning

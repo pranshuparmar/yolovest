@@ -21,6 +21,21 @@ from typing import Any
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 
+def compute_transaction_costs(entry_price: float, exit_price: float, quantity: int) -> float:
+    """Compute Zerodha transaction costs for a round-trip trade (FR-9.2).
+
+    Includes: brokerage (₹20 or 0.03% per leg), STT (0.025% sell side),
+    stamp duty, GST, exchange fees (~0.01% combined).
+    """
+    entry_value = entry_price * quantity
+    exit_value = exit_price * quantity
+    entry_brokerage = min(20, entry_value * 0.0003)
+    exit_brokerage = min(20, exit_value * 0.0003)
+    stt = exit_value * 0.00025  # STT on sell side
+    other = (entry_value + exit_value) * 0.0001  # stamp, GST, exchange
+    return entry_brokerage + exit_brokerage + stt + other
+
+
 class SquareOffSkill(SkillBase):
     name = "square-off"
     description = "Auto close all intraday positions at EOD"
@@ -61,11 +76,16 @@ class SquareOffSkill(SkillBase):
                 order_status = await self.ctx.broker.get_order_status(exit_order_id)
                 exit_price = order_status.get("average_price")
 
-                # Compute PnL
+                # Compute PnL with transaction costs (FR-9.2)
+                qty = pos["quantity"]
+                entry = pos["entry_price"]
                 if pos["signal_type"] == "BUY":
-                    pnl = (exit_price - pos["entry_price"]) * pos["quantity"]
+                    gross_pnl = (exit_price - entry) * qty
                 else:
-                    pnl = (pos["entry_price"] - exit_price) * pos["quantity"]
+                    gross_pnl = (entry - exit_price) * qty
+
+                costs = compute_transaction_costs(entry, exit_price, qty)
+                pnl = gross_pnl - costs
 
                 await self.ctx.db.close_position(pos["id"], exit_price, pnl)
                 squared_off.append({"symbol": pos["symbol"], "pnl": pnl})
