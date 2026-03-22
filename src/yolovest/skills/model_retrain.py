@@ -29,7 +29,11 @@ class ModelRetrainSkill(SkillBase):
     name = "model-retrain"
     description = "Retrain ML models, version artifacts, A/B test"
     trigger = SkillTrigger.CRON
-    schedule = None  # set from retraining.schedule_cron config
+    schedule = None  # set from config in __init__
+
+    def __init__(self, context: Any) -> None:
+        super().__init__(context)
+        self.schedule = self.ctx.config.retraining.schedule_cron
 
     def should_run(self) -> bool:
         return not self.ctx.market_hours.is_market_hours()

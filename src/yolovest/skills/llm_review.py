@@ -99,17 +99,65 @@ class LLMReviewSkill(SkillBase):
                 return self._auto_approve(signal, "LLM unavailable, fallback to rules-only")
             raise
 
-    async def _build_review_context(self, signal: dict[str, Any]) -> dict[str, Any]:
-        """Assemble full context for Gemini review."""
+    async def _build_review_context(self, signal: dict[str, Any]) -> "TradeContext":
+        """Assemble full context for Gemini review as a proper TradeContext model."""
+        from yolovest.models.schemas import (
+            PortfolioState,
+            PremarketContext,
+            SentimentResult,
+            Signal,
+            Trade,
+            TradeContext,
+        )
+
         symbol = signal["symbol"]
-        return {
-            "signal": signal,
-            "sentiment": await self.ctx.db.get_latest_sentiment(symbol),
-            "portfolio": await self.ctx.db.get_portfolio_state(),
-            "premarket": await self.ctx.db.get_latest_premarket(),
-            "sector_rotation": await self.ctx.db.get_sector_rotation(),
-            "todays_trades": await self.ctx.db.get_todays_trades(),
-        }
+
+        # Build typed Signal from dict
+        signal_model = Signal(**{
+            k: signal[k] for k in Signal.model_fields if k in signal
+        })
+
+        # Build typed PortfolioState from DB dict
+        portfolio_dict = await self.ctx.db.get_portfolio_state()
+        portfolio_model = PortfolioState(**portfolio_dict)
+
+        # Build typed SentimentResult (may be None)
+        sentiment_model = None
+        sentiment_dict = await self.ctx.db.get_latest_sentiment(symbol)
+        if sentiment_dict:
+            try:
+                sentiment_model = SentimentResult(**sentiment_dict)
+            except Exception:
+                pass  # sentiment is optional
+
+        # Build typed PremarketContext (may be None)
+        premarket_model = None
+        premarket_dict = await self.ctx.db.get_latest_premarket()
+        if premarket_dict:
+            try:
+                premarket_model = PremarketContext(**premarket_dict)
+            except Exception:
+                pass  # premarket is optional
+
+        sector_rotation = await self.ctx.db.get_sector_rotation()
+        todays_trades_raw = await self.ctx.db.get_todays_trades()
+
+        # Build typed Trade list (best-effort, skip malformed entries)
+        todays_trades: list[Trade] = []
+        for t in todays_trades_raw:
+            try:
+                todays_trades.append(Trade(**t))
+            except Exception:
+                pass
+
+        return TradeContext(
+            signal=signal_model,
+            portfolio=portfolio_model,
+            sentiment=sentiment_model,
+            premarket=premarket_model,
+            sector_rotation=sector_rotation,
+            todays_trades=todays_trades,
+        )
 
     def _auto_approve(self, signal: dict[str, Any], reason: str) -> SkillResult:
         return SkillResult(

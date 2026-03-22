@@ -36,13 +36,29 @@ class ReportGenerateSkill(SkillBase):
     name = "report-generate"
     description = "Generate daily/weekly reports and deliver via Telegram"
     trigger = SkillTrigger.CRON
-    schedule = None  # set dynamically from reports.daily_report_time / weekly_report_cron
+    schedule = None  # set from config in __init__
+
+    def __init__(self, context: Any) -> None:
+        super().__init__(context)
+        # Daily report: convert HH:MM to cron (e.g. "16:00" -> "0 16 * * 1-5")
+        daily_time = self.ctx.config.reports.daily_report_time
+        h, m = daily_time.split(":")
+        self.schedule = f"{m} {h} * * 1-5"
 
     def should_run(self) -> bool:
         return not self.ctx.market_hours.is_market_hours()
 
     async def execute(self, **kwargs: Any) -> SkillResult:
-        report_type = kwargs.get("type", "daily")
+        report_type = kwargs.get("type")
+
+        if report_type is None:
+            # Auto-detect: run weekly on the configured weekly cron day (default Saturday)
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            today = datetime.now(ZoneInfo("Asia/Kolkata")).weekday()
+            # Saturday = 5; match against weekly_report_cron day
+            report_type = "weekly" if today == 5 else "daily"
 
         if report_type == "daily":
             return await self._generate_daily()

@@ -22,6 +22,9 @@ def base_signal():
         "stop_loss_price": 2450.0,
         "position_size": 10,
         "confidence_score": 0.85,
+        "expected_holding_period": "intraday",
+        "model_version": "v1",
+        "features_snapshot": {},
     }
 
 
@@ -101,14 +104,41 @@ class TestLLMReviewFallback:
 class TestLLMReviewContext:
     async def test_build_review_context(self, llm_skill, base_signal):
         llm_skill.ctx.db.get_latest_sentiment = AsyncMock(
-            return_value={"sentiment": "bullish", "confidence": 0.8}
+            return_value={
+                "symbol": "RELIANCE",
+                "sentiment": "bullish",
+                "confidence": 0.8,
+                "key_drivers": ["earnings beat"],
+            }
         )
         llm_skill.ctx.db.get_latest_premarket = AsyncMock(
-            return_value={"market_bias": "bullish"}
+            return_value={
+                "gift_nifty_change_pct": 0.5,
+                "us_sp500_change_pct": 0.3,
+                "market_bias": "bullish",
+            }
         )
+        llm_skill.ctx.db.get_portfolio_state = AsyncMock(
+            return_value={
+                "total_capital": 100000,
+                "available_cash": 80000,
+                "exposure_pct": 0.2,
+                "open_positions": 1,
+                "stock_exposures": {},
+                "sector_counts": {},
+                "daily_pnl_pct": 0.0,
+                "weekly_pnl_pct": 0.0,
+                "trades_today": 0,
+                "minutes_since_last_loss": 60,
+            }
+        )
+        llm_skill.ctx.db.get_sector_rotation = AsyncMock(return_value={})
+        llm_skill.ctx.db.get_todays_trades = AsyncMock(return_value=[])
 
         context = await llm_skill._build_review_context(base_signal)
 
-        assert context["signal"] == base_signal
-        assert context["sentiment"]["sentiment"] == "bullish"
-        assert context["premarket"]["market_bias"] == "bullish"
+        # Now returns a TradeContext model, not a dict
+        assert context.signal.symbol == "RELIANCE"
+        assert context.sentiment.sentiment == "bullish"
+        assert context.premarket.market_bias == "bullish"
+        assert context.portfolio.total_capital == 100000

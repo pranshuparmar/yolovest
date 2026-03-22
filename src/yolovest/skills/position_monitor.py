@@ -88,11 +88,11 @@ class PositionMonitorSkill(SkillBase):
 
                     if self._is_better_sl(pos["signal_type"], new_sl, sl):
                         await self.ctx.broker.modify_sl_order(pos["sl_order_id"], new_sl)
-                        await self.ctx.db.update_position_sl(pos["id"], new_sl)
+                        await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
                         trails_modified += 1
 
             # Update unrealized PnL
-            await self.ctx.db.update_unrealized_pnl(pos["id"], current_price)
+            await self.ctx.db.update_unrealized_pnl(pos["trade_id"], current_price)
 
         return SkillResult(
             success=True,

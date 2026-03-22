@@ -33,10 +33,9 @@ class TradeExecuteSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        # Note: is_authenticated() is async but should_run() is sync.
-        # In paper mode we always run; in live mode the orchestrator
-        # will handle auth checks before reaching trade-execute.
-        return self.ctx.config.mode == "paper" or True
+        # Always available — auth is checked by health-check at pipeline start.
+        # is_authenticated() is async and cannot be called from sync should_run().
+        return True
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         signal = kwargs["signal"]

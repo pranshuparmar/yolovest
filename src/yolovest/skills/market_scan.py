@@ -113,8 +113,8 @@ class MarketScanSkill(SkillBase):
 
     def _compute_sub_scores(self, stock: dict[str, Any]) -> dict[str, Any]:
         """Compute normalized [0, 1] sub-scores from raw data (PM G7)."""
-        # Technical score: use sentiment confidence as proxy until we compute from indicators
-        tech = 0.5  # default neutral
+        # Technical score: derive from available indicator data (RSI, MACD, SuperTrend)
+        tech = self._compute_technical_score(stock)
 
         # Volume/momentum score: normalize relative to volume threshold
         avg_vol = stock.get("avg_daily_volume") or 0
@@ -146,6 +146,49 @@ class MarketScanSkill(SkillBase):
             "news_sentiment_score": round(sent_score, 4),
             "fundamental_score": round(min(fund_score, 1.0), 4),
         }
+
+    @staticmethod
+    def _compute_technical_score(stock: dict[str, Any]) -> float:
+        """Compute a [0, 1] technical score from indicator data if available.
+
+        Uses RSI, MACD signal, and SuperTrend direction when present.
+        Falls back to 0.5 (neutral) if no indicator data exists.
+        """
+        signals: list[float] = []
+
+        # RSI: 30-70 band → map to score (oversold=bullish, overbought=bearish)
+        rsi = stock.get("rsi")
+        if rsi is not None:
+            if rsi < 30:
+                signals.append(0.8)   # oversold → bullish
+            elif rsi < 45:
+                signals.append(0.65)
+            elif rsi <= 55:
+                signals.append(0.5)   # neutral
+            elif rsi <= 70:
+                signals.append(0.35)
+            else:
+                signals.append(0.2)   # overbought → bearish
+
+        # MACD: positive histogram → bullish
+        macd_hist = stock.get("macd_histogram")
+        if macd_hist is not None:
+            signals.append(0.7 if macd_hist > 0 else 0.3)
+
+        # SuperTrend: direction flag
+        supertrend_dir = stock.get("supertrend_direction")
+        if supertrend_dir is not None:
+            signals.append(0.7 if supertrend_dir > 0 else 0.3)
+
+        # Trendlyne momentum score (0-100 from scraper)
+        momentum = stock.get("momentum_score")
+        if momentum is not None:
+            signals.append(min(momentum / 100.0, 1.0))
+
+        if not signals:
+            return 0.5  # no data → neutral
+
+        return round(sum(signals) / len(signals), 4)
 
     def _analyze_sector_rotation(self, scored_stocks: list[dict[str, Any]]) -> dict[str, Any]:
         """Group by sector, compute avg scores, identify rotation. FR-3.5."""

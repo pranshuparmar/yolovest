@@ -136,8 +136,10 @@ class IngestDataSkill(SkillBase):
         except Exception as e:
             logger.warning("Google Finance fetch failed: %s", e)
 
+        # Partial success: only fail if ALL symbols failed OHLCV
+        all_failed = results["symbols_ingested"] == 0 and len(results["errors"]) > 0
         return SkillResult(
-            success=len(results["errors"]) == 0,
+            success=not all_failed,
             skill_name=self.name,
             data=results,
         )

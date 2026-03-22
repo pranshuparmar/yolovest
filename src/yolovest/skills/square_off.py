@@ -87,7 +87,7 @@ class SquareOffSkill(SkillBase):
                 costs = compute_transaction_costs(entry, exit_price, qty)
                 pnl = gross_pnl - costs
 
-                await self.ctx.db.close_position(pos["id"], exit_price, pnl)
+                await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)
                 squared_off.append({"symbol": pos["symbol"], "pnl": pnl})
 
             except Exception as e:
