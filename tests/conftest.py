@@ -193,6 +193,11 @@ def mock_db() -> AsyncMock:
     db.store_report = AsyncMock()
     db.get_shadow_models_ready = AsyncMock(return_value=[])
     db.retire_model = AsyncMock()
+    db.get_trades_history = AsyncMock(return_value=[])
+    db.get_equity_curve = AsyncMock(return_value=[])
+    db.get_trade_detail = AsyncMock(return_value=None)
+    db.get_reports_history = AsyncMock(return_value=[])
+    db.get_audit_log = AsyncMock(return_value=[])
     return db
 
 

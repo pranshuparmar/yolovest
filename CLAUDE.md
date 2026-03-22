@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses OpenClaw for agent orchestration, Google Gemini for LLM reasoning, XGBoost/LightGBM for ML signals, and Zerodha Kite Connect (free tier) for execution. Market data comes from free providers (jugaad-data, yfinance, tvDatafeed).
 
-**Current state:** Phases 0–4 complete. Phase 5 (Dashboard & Reporting UI) is next. See `plan.md` for implementation plans and `docs/` for review reports.
+**Current state:** All 6 phases (0–5) complete. The platform is fully implemented. See `plan.md` for implementation plans and `docs/` for review reports.
 
 ## What's Built
 
@@ -69,6 +69,20 @@ YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses 
 - **Orchestrator** — Fixed predict-track invocation to pass `mode="log"` and `trade_id` linkage
 - **Tests** — 432 passing (39 new: predict-track, report-generate, model-retrain shadow promotion, DB Phase 4 methods)
 
+### Phase 5 — Dashboard & Reporting UI (Complete)
+
+- **FastAPI dashboard** (`dashboard/app.py`) — Full REST API with basic password auth (FR-8.9). Endpoints: portfolio overview, open positions, today's trades, trade history with filters, equity curve, trade detail with reasoning chain, prediction scoreboard, historical reports, watchlist, sector rotation, audit log, health check
+- **Trade detail view** (FR-8.3) — Full reasoning chain: signal → LLM review → prediction → audit trail, all linked by trade_id
+- **WebSocket** (FR-8.2) — Real-time event broadcasting via `/ws` endpoint with connection manager
+- **Historical reports** (FR-8.7) — Query reports by type, date range with parsed JSON content
+- **Equity curve** (FR-8.1) — Daily cumulative PnL chart data computed from closed trades
+- **Audit log API** (FR-8.8) — Filterable audit log access with action type filter
+- **Database** — 5 new methods: `get_trades_history`, `get_equity_curve`, `get_trade_detail`, `get_reports_history`, `get_audit_log`
+- **Config** — Added `dashboard.password` for basic auth
+- **Wiring** — Dashboard starts as background task in `main.py`, disabled with `--no-dashboard`
+- **Dependencies** — Added `fastapi`, `uvicorn`, `websockets` to pyproject.toml
+- **Tests** — 459 passing (27 new: dashboard API endpoints with auth, DB Phase 5 methods)
+
 ## Architecture
 
 ### Three Abstraction Layers (ABCs)
@@ -121,6 +135,7 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 - **`src/yolovest/news/`** — News scrapers (MoneyControl, ET Markets, LiveMint RSS) + aggregator with dedup
 - **`src/yolovest/strategy/ml_signal.py`** — XGBoost/LightGBM model for signal generation
 - **`src/yolovest/strategy/backtest.py`** — Walk-forward backtesting engine with transaction costs
+- **`src/yolovest/dashboard/app.py`** — FastAPI dashboard with 12 REST endpoints + WebSocket
 
 ## Implementation Phases
 
@@ -129,7 +144,7 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 - **Phase 2** (complete): Intelligence — news aggregation + dedup, sentiment analysis, dynamic scanner with weighted scoring, ML signal models (XGBoost), backtesting engine, model retraining with shadow mode
 - **Phase 3** (complete): Risk & execution — risk manager (all FR-5 rules), LLM trade review gate, order executor (paper + live), position monitor with trailing SL, square-off
 - **Phase 4** (complete): Self-learning & reporting — prediction tracking + scoring, prediction scoreboard, shadow model promotion/retirement, daily/weekly report generation with LLM review accuracy tracking
-- Phase 5 (next): Dashboard & reporting UI — FastAPI web dashboard, WebSocket live updates, trade detail view, Telegram integration
+- **Phase 5** (complete): Dashboard & reporting UI — FastAPI web dashboard with basic auth, REST API (12 endpoints), WebSocket live updates, trade detail with reasoning chain, equity curve, historical reports, audit log
 
 ## Domain Context
 

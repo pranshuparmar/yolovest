@@ -225,6 +225,7 @@ class ReportsConfig(BaseModel):
 class DashboardConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8080
+    password: str = "yolovest"  # FR-8.9: basic password auth
 
 
 class TelegramAlertsConfig(BaseModel):

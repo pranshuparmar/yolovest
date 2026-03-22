@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Trading mode override (default: from config file)",
     )
+    parser.add_argument(
+        "--no-dashboard",
+        action="store_true",
+        help="Disable the web dashboard",
+    )
     return parser.parse_args()
 
 
@@ -246,20 +251,46 @@ async def async_main(args: argparse.Namespace) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, shutdown_handler)
 
+    # Start dashboard if enabled
+    dashboard_task = None
+    if not args.no_dashboard:
+        dashboard_task = asyncio.create_task(_start_dashboard(ctx))
+
     # Start
     await ctx.notify.send(
         f"YoloVest started in {config.mode} mode. "
         f"Heartbeat interval: {config.heartbeat.market_hours_interval_min}min (market hours), "
         f"{config.heartbeat.off_hours_interval_min}min (off hours)."
+        + (f"\nDashboard: http://{config.dashboard.host}:{config.dashboard.port}"
+           if not args.no_dashboard else "")
     )
 
     try:
         await orchestrator.start()
     finally:
+        if dashboard_task:
+            dashboard_task.cancel()
         if isinstance(ctx.db, Database):
             await ctx.db.close()
 
     logger.info("YoloVest shutdown complete")
+
+
+async def _start_dashboard(ctx: AppContext) -> None:
+    """Start the FastAPI dashboard in background."""
+    import uvicorn
+
+    from yolovest.dashboard.app import create_app
+
+    app = create_app(ctx)
+    config = uvicorn.Config(
+        app,
+        host=ctx.config.dashboard.host,
+        port=ctx.config.dashboard.port,
+        log_level="warning",
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
 
 
 def main() -> None:

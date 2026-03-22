@@ -211,6 +211,30 @@ class DatabaseProtocol(Protocol):
 
     async def retire_model(self, model_type: str, version: str) -> None: ...
 
+    async def get_trades_history(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        symbol: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]: ...
+
+    async def get_equity_curve(self, days: int = 30) -> list[dict[str, Any]]: ...
+
+    async def get_trade_detail(self, trade_id: str) -> dict[str, Any] | None: ...
+
+    async def get_reports_history(
+        self,
+        report_type: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]: ...
+
+    async def get_audit_log(
+        self, limit: int = 50, action_type: str | None = None
+    ) -> list[dict[str, Any]]: ...
+
 
 # ---------------------------------------------------------------------------
 # Market Hours Checker

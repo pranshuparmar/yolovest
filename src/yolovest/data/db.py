@@ -1156,3 +1156,177 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Dashboard Queries (Phase 5, FR-8)
+    # ------------------------------------------------------------------
+
+    async def get_trades_history(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        symbol: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Get trade history with optional filters (FR-8.7)."""
+        query = "SELECT * FROM trades WHERE 1=1"
+        params: list = []
+
+        if start_date:
+            query += " AND created_at >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND created_at <= ?"
+            params.append(end_date + "T23:59:59")
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = await self.conn.execute(query, params)
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_equity_curve(self, days: int = 30) -> list[dict]:
+        """Compute daily equity curve from closed trades (FR-8.1).
+
+        Returns a list of {date, cumulative_pnl, trade_count} entries.
+        """
+        from datetime import timedelta
+
+        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+        cursor = await self.conn.execute(
+            "SELECT DATE(closed_at) as trade_date, "
+            "SUM(pnl) as daily_pnl, COUNT(*) as trade_count "
+            "FROM trades "
+            "WHERE closed_at >= ? AND pnl IS NOT NULL "
+            "GROUP BY DATE(closed_at) "
+            "ORDER BY trade_date",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+
+        # Build cumulative curve
+        cumulative = 0
+        curve = []
+        for row in rows:
+            cumulative += row["daily_pnl"] or 0
+            curve.append({
+                "date": row["trade_date"],
+                "daily_pnl": row["daily_pnl"],
+                "cumulative_pnl": cumulative,
+                "trade_count": row["trade_count"],
+            })
+        return curve
+
+    async def get_trade_detail(self, trade_id: str) -> dict | None:
+        """Get full trade detail with reasoning chain (FR-8.3).
+
+        Returns trade + linked signal, LLM review, prediction, and audit entries.
+        """
+        # Trade record
+        cursor = await self.conn.execute(
+            "SELECT * FROM trades WHERE trade_id = ?", (trade_id,)
+        )
+        trade_row = await cursor.fetchone()
+        if not trade_row:
+            return None
+
+        trade = dict(trade_row)
+
+        # Linked LLM review
+        cursor = await self.conn.execute(
+            "SELECT * FROM llm_reviews WHERE trade_id = ? ORDER BY created_at DESC LIMIT 1",
+            (trade_id,),
+        )
+        review_row = await cursor.fetchone()
+        trade["llm_review"] = dict(review_row) if review_row else None
+
+        # Linked prediction
+        cursor = await self.conn.execute(
+            "SELECT * FROM predictions WHERE trade_id = ? ORDER BY created_at DESC LIMIT 1",
+            (trade_id,),
+        )
+        pred_row = await cursor.fetchone()
+        trade["prediction"] = dict(pred_row) if pred_row else None
+
+        # Linked signal (via prediction → signal_id, or by matching symbol+time)
+        if pred_row and pred_row["signal_id"]:
+            cursor = await self.conn.execute(
+                "SELECT * FROM signals WHERE id = ?", (pred_row["signal_id"],)
+            )
+            sig_row = await cursor.fetchone()
+            trade["signal"] = dict(sig_row) if sig_row else None
+        else:
+            trade["signal"] = None
+
+        # Relevant audit entries
+        cursor = await self.conn.execute(
+            "SELECT * FROM audit_log "
+            "WHERE input_summary LIKE ? OR output_summary LIKE ? "
+            "ORDER BY timestamp_ist DESC LIMIT 20",
+            (f"%{trade_id}%", f"%{trade_id}%"),
+        )
+        audit_rows = await cursor.fetchall()
+        trade["audit_trail"] = [dict(r) for r in audit_rows]
+
+        return trade
+
+    async def get_reports_history(
+        self,
+        report_type: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 30,
+    ) -> list[dict]:
+        """Get historical reports with optional filters (FR-8.7)."""
+        query = "SELECT * FROM reports WHERE 1=1"
+        params: list = []
+
+        if report_type:
+            query += " AND report_type = ?"
+            params.append(report_type)
+        if start_date:
+            query += " AND report_date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND report_date <= ?"
+            params.append(end_date)
+
+        query += " ORDER BY report_date DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = await self.conn.execute(query, params)
+        rows = await cursor.fetchall()
+
+        result = []
+        for row in rows:
+            entry = dict(row)
+            # Parse JSON content back to dict
+            if entry.get("content"):
+                try:
+                    entry["content"] = json.loads(entry["content"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            result.append(entry)
+        return result
+
+    async def get_audit_log(
+        self, limit: int = 50, action_type: str | None = None
+    ) -> list[dict]:
+        """Get recent audit log entries (FR-8.8)."""
+        if action_type:
+            cursor = await self.conn.execute(
+                "SELECT * FROM audit_log WHERE action_type = ? "
+                "ORDER BY timestamp_ist DESC LIMIT ?",
+                (action_type, limit),
+            )
+        else:
+            cursor = await self.conn.execute(
+                "SELECT * FROM audit_log ORDER BY timestamp_ist DESC LIMIT ?",
+                (limit,),
+            )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
