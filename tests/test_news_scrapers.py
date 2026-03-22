@@ -345,39 +345,20 @@ class TestLiveMintParseFeed:
 
 
 # ---------------------------------------------------------------------------
-# NSE Official — stubs
+# NSE Official — basic smoke tests (full tests in test_nse_official.py)
 # ---------------------------------------------------------------------------
 
 
-class TestNSEOfficialStubs:
-    async def test_fetch_headlines_returns_empty(self):
+class TestNSEOfficialBasic:
+    def test_nse_source_is_news_source(self):
         source = NSEOfficialSource()
-        result = await source.fetch_headlines(["RELIANCE"])
-        assert result == []
+        assert isinstance(source, NewsSource)
 
-    async def test_health_check_returns_false(self):
+    def test_nse_source_default_session_is_none(self):
         source = NSEOfficialSource()
-        assert await source.health_check() is False
-
-    async def test_corp_actions_raises(self):
-        source = NSEOfficialSource()
-        with pytest.raises(NotImplementedError):
-            await source.fetch_corp_actions("RELIANCE")
-
-    async def test_bulk_deals_raises(self):
-        source = NSEOfficialSource()
-        with pytest.raises(NotImplementedError):
-            await source.fetch_bulk_deals()
-
-    async def test_fii_dii_raises(self):
-        source = NSEOfficialSource()
-        with pytest.raises(NotImplementedError):
-            await source.fetch_fii_dii()
-
-    async def test_delivery_data_raises(self):
-        source = NSEOfficialSource()
-        with pytest.raises(NotImplementedError):
-            await source.fetch_delivery_data("RELIANCE")
+        assert source._session is None
+        assert source._owns_session is True
+        assert source._cookies_initialized is False
 
 
 # ---------------------------------------------------------------------------
