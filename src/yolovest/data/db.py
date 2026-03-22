@@ -645,7 +645,14 @@ class Database:
             if sector:
                 sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
-        total_capital = initial_capital  # simplified: cash + positions
+        # FR-9.1: total_capital = initial + all realized PnL
+        cursor = await self.conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE pnl IS NOT NULL"
+        )
+        row = await cursor.fetchone()
+        all_time_pnl = row[0] if row else 0
+        total_capital = initial_capital + all_time_pnl
+
         if total_capital > 0:
             for pos in positions:
                 symbol = pos.get("symbol", "")
@@ -894,11 +901,23 @@ class Database:
         holding = prediction.get("expected_holding_period", "intraday")
         end_time = datetime.now(IST) + _parse_holding_period(holding)
 
+        # Try to find the matching signal_id from signals table
+        signal_id = prediction.get("signal_id")
+        if not signal_id and prediction.get("symbol"):
+            cursor = await self.conn.execute(
+                "SELECT id FROM signals WHERE symbol = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (prediction["symbol"],),
+            )
+            row = await cursor.fetchone()
+            if row:
+                signal_id = row[0]
+
         await self.conn.execute(
-            "INSERT INTO predictions (prediction_id, trade_id, created_at, "
+            "INSERT INTO predictions (prediction_id, signal_id, trade_id, created_at, "
             "prediction_end_time, actual_price, direction_correct, target_hit, "
-            "actual_pnl_pct) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL)",
-            (pred_id, prediction.get("trade_id"), now_ist, end_time.isoformat()),
+            "actual_pnl_pct) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+            (pred_id, signal_id, prediction.get("trade_id"), now_ist, end_time.isoformat()),
         )
 
         # Also store prediction details in audit for traceability
@@ -1312,6 +1331,57 @@ class Database:
                     pass
             result.append(entry)
         return result
+
+    # ------------------------------------------------------------------
+    # Backup & Retention (FR-10.2, FR-10.3)
+    # ------------------------------------------------------------------
+
+    async def backup(self, backup_dir: str) -> str:
+        """Create a timestamped backup of the database (FR-10.2)."""
+        import shutil
+
+        Path(backup_dir).mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+        backup_path = str(Path(backup_dir) / f"yolovest_{timestamp}.db")
+        # Use SQLite backup API via a checkpoint first
+        await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        shutil.copy2(self._db_path, backup_path)
+        logger.info("Database backup created: %s", backup_path)
+        return backup_path
+
+    async def run_retention_cleanup(
+        self, ohlcv_days: int = 730, audit_days: int = 365, predictions_days: int = 365
+    ) -> dict:
+        """Delete data older than retention periods (FR-10.3)."""
+        from datetime import timedelta
+
+        now = datetime.now(IST)
+        deleted = {}
+
+        # OHLCV retention
+        cutoff = (now - timedelta(days=ohlcv_days)).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM ohlcv WHERE timestamp < ?", (cutoff,)
+        )
+        deleted["ohlcv"] = cursor.rowcount
+
+        # Audit log retention
+        cutoff = (now - timedelta(days=audit_days)).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM audit_log WHERE timestamp_ist < ?", (cutoff,)
+        )
+        deleted["audit_log"] = cursor.rowcount
+
+        # Predictions retention
+        cutoff = (now - timedelta(days=predictions_days)).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM predictions WHERE created_at < ?", (cutoff,)
+        )
+        deleted["predictions"] = cursor.rowcount
+
+        await self.conn.commit()
+        logger.info("Retention cleanup: %s", deleted)
+        return deleted
 
     async def get_audit_log(
         self, limit: int = 50, action_type: str | None = None

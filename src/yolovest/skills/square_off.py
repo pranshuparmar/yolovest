@@ -51,11 +51,10 @@ class SquareOffSkill(SkillBase):
                 exit_type = "SELL" if pos["signal_type"] == "BUY" else "BUY"
                 exit_order_id = await self.ctx.broker.place_order(
                     symbol=pos["symbol"],
-                    exchange=self.ctx.config.strategy.exchange,
-                    transaction_type=exit_type,
+                    side=exit_type,
                     quantity=pos["quantity"],
                     order_type="MARKET",
-                    product=pos["product"],
+                    product=pos.get("product", "MIS"),
                 )
 
                 # Get fill price

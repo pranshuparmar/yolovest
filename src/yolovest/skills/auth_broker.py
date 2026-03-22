@@ -25,8 +25,10 @@ class AuthBrokerSkill(SkillBase):
     schedule = "0 9 * * 1-5"  # 9:00 AM IST, weekdays only
 
     def should_run(self) -> bool:
-        # Run if we don't have a valid access_token for today
-        return not self.ctx.broker.is_authenticated()
+        # Always run on schedule — the execute() method handles
+        # the actual auth check. is_authenticated() is async and
+        # cannot be called from sync should_run().
+        return True
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         # Step 1: Send Telegram reminder with login URL

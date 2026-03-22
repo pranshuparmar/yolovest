@@ -89,8 +89,17 @@ class RiskCheckSkill(SkillBase):
         if cfg.mandatory_stop_loss and not signal.get("stop_loss_price"):
             return self._reject(signal, "No stop-loss set (mandatory)")
 
-        # FR-5.1: Position sizing based on max risk per trade
+        # FR-9.3: Capital exhaustion — check if remaining cash can cover min trade
         capital = portfolio["total_capital"]
+        available_cash = portfolio.get("available_cash", capital)
+        min_trade_value = signal["entry_price"]  # at least 1 share
+        if available_cash < min_trade_value:
+            return self._reject(
+                signal,
+                f"Capital exhaustion: cash ₹{available_cash:,.0f} < min trade ₹{min_trade_value:,.0f}",
+            )
+
+        # FR-5.1: Position sizing based on max risk per trade
         risk_amount = capital * cfg.max_risk_per_trade_pct
         entry = signal["entry_price"]
         sl = signal["stop_loss_price"]

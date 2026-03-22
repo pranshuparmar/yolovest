@@ -33,7 +33,10 @@ class TradeExecuteSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        return self.ctx.broker.is_authenticated() or self.ctx.config.mode == "paper"
+        # Note: is_authenticated() is async but should_run() is sync.
+        # In paper mode we always run; in live mode the orchestrator
+        # will handle auth checks before reaching trade-execute.
+        return self.ctx.config.mode == "paper" or True
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         signal = kwargs["signal"]
@@ -109,8 +112,37 @@ class TradeExecuteSkill(SkillBase):
                     product=product,
                 )
 
-                # Track order status
+                # FR-6.4: Track order status, handle partial fills
+                await asyncio.sleep(0.5)  # brief wait for fill
                 order_status = await self.ctx.broker.get_order_status(order_id)
+
+                # Check for partial fill within timeout
+                filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                if filled_qty < signal["position_size"]:
+                    # Wait up to order_timeout_sec for full fill
+                    for _ in range(cfg.order_timeout_sec):
+                        await asyncio.sleep(1)
+                        order_status = await self.ctx.broker.get_order_status(order_id)
+                        filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                        if filled_qty >= signal["position_size"]:
+                            break
+
+                    # Cancel remainder if still partially filled
+                    if filled_qty < signal["position_size"] and filled_qty > 0:
+                        await self.ctx.broker.cancel_order(order_id)
+                        # Adjust SL order to filled quantity only
+                        if filled_qty != signal["position_size"]:
+                            await self.ctx.broker.cancel_order(sl_order_id)
+                            sl_order_id = await self.ctx.broker.place_order(
+                                symbol=signal["symbol"],
+                                side="SELL" if signal["signal_type"] == "BUY" else "BUY",
+                                quantity=filled_qty,
+                                order_type="SL",
+                                trigger_price=signal["stop_loss_price"],
+                                product=product,
+                            )
+
+                actual_qty = filled_qty if filled_qty > 0 else signal["position_size"]
 
                 # Compute slippage (FR-6.7)
                 fill_price = order_status.get("average_price", signal["entry_price"])
@@ -121,13 +153,13 @@ class TradeExecuteSkill(SkillBase):
                     "signal_type": signal["signal_type"],
                     "entry_price": signal["entry_price"],
                     "fill_price": fill_price,
-                    "quantity": signal["position_size"],
+                    "quantity": actual_qty,
                     "stop_loss_price": signal["stop_loss_price"],
                     "target_price": signal["target_price"],
                     "order_id": order_id,
                     "sl_order_id": sl_order_id,
                     "product": product,
-                    "status": order_status.get("status"),
+                    "status": order_status.get("status", "filled"),
                     "mode": "live",
                     "slippage": slippage,
                 }

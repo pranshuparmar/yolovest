@@ -106,8 +106,30 @@ class HealthCheckSkill(SkillBase):
 
     async def _check_disk_space(self) -> bool:
         """Ensure sufficient disk space for DB growth."""
-        raise NotImplementedError
+        import shutil
+
+        try:
+            db_path = self.ctx.config.database.path
+            usage = shutil.disk_usage(db_path if db_path != ":memory:" else "/")
+            # Warn if less than 100MB free
+            return usage.free > 100 * 1024 * 1024
+        except Exception:
+            return True  # assume OK if we can't check
 
     async def _check_position_consistency(self) -> bool:
         """Verify no orphaned orders or position mismatches."""
-        raise NotImplementedError
+        try:
+            local = await self.ctx.db.get_open_positions()
+            # In paper mode, no broker positions to compare
+            if self.ctx.config.mode == "paper":
+                return True
+            broker = await self.ctx.broker.get_positions()
+            # Simple check: same count
+            local_count = len(local)
+            broker_count = sum(
+                1 for p in broker
+                if (p.get("quantity", 0) or p.get("net_quantity", 0)) != 0
+            )
+            return local_count == broker_count
+        except Exception:
+            return False

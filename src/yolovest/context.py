@@ -112,7 +112,7 @@ class MLProtocol(Protocol):
 
 @runtime_checkable
 class NotifierProtocol(Protocol):
-    async def send(self, message: str) -> None: ...
+    async def send(self, message: str) -> bool | None: ...
 
     async def send_trade_alert(self, trade: dict[str, Any]) -> None: ...
 
@@ -319,6 +319,28 @@ class MarketHoursChecker:
         order_end = self._parse_time(self._mh.order_end)
 
         return order_start <= current_time <= order_end
+
+    def is_premarket_window(self, now: datetime | None = None) -> bool:
+        """Check if now is in the pre-market window (before market open).
+
+        Pre-market: 8:00 AM to market open (e.g. 9:15 AM).
+        Used by ingest-premarket skill.
+        """
+        if now is None:
+            now = self._now()
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=self._tz)
+
+        if now.weekday() >= 5:
+            return False
+        if self.is_holiday(now.date()):
+            return False
+
+        current_time = now.time()
+        premarket_start = time(8, 0)
+        market_open = self._parse_time(self._mh.open)
+
+        return premarket_start <= current_time < market_open
 
     def is_square_off_window(self, now: datetime | None = None) -> bool:
         """Check if now is within the square-off window (FR-5.9a).
