@@ -4,11 +4,11 @@ Covers: FR-2.10, FR-2.11
 Trigger: CRON — daily at 8:30 AM IST (before market scan)
 Pipeline position: Runs after auth-broker, before market-scan.
 
-Flow:
+Flow (India-first priority):
 1. Fetch GIFT Nifty / SGX Nifty futures for market direction signal
-2. Fetch overnight US market moves (S&P 500, NASDAQ, Dow)
-3. Fetch Asian market opens (Nikkei, Hang Seng, Shanghai)
-4. Fetch global commodity prices (crude, gold) that impact Indian markets
+2. Fetch Asian market opens (Nikkei, Hang Seng, Shanghai — regional context)
+3. Fetch global commodity prices (crude, gold, USD/INR) that impact Indian markets
+4. Fetch overnight US market moves (S&P 500, NASDAQ — global sentiment context)
 5. Use Gemini with web grounding to summarize overnight developments
 6. Store pre-market context for use by market-scan and generate-signals
 """
@@ -35,17 +35,17 @@ class IngestPremarketSkill(SkillBase):
         premarket: dict[str, Any] = {}
         errors: list[str] = []
 
-        # Fetch all global data concurrently
+        # Fetch all data concurrently (India-first priority order)
         results = await asyncio.gather(
             self._fetch_gift_nifty(),
-            self._fetch_us_markets(),
             self._fetch_asian_markets(),
             self._fetch_commodities(),
+            self._fetch_us_markets(),  # global sentiment context
             return_exceptions=True,
         )
 
         for key, result in zip(
-            ["gift_nifty", "us_markets", "asian_markets", "commodities"],
+            ["gift_nifty", "asian_markets", "commodities", "us_markets"],
             results,
             strict=False,
         ):
@@ -87,7 +87,7 @@ class IngestPremarketSkill(SkillBase):
         return await asyncio.to_thread(self._yf_change, "^NSEI")
 
     async def _fetch_us_markets(self) -> dict[str, Any]:
-        """Fetch overnight US market closes."""
+        """Fetch overnight US market closes (global sentiment context for FII flows)."""
         sp500, nasdaq, dow = await asyncio.gather(
             asyncio.to_thread(self._yf_change, "^GSPC"),
             asyncio.to_thread(self._yf_change, "^IXIC"),

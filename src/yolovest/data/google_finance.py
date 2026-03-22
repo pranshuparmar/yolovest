@@ -1,8 +1,8 @@
-"""Google Finance scraper for market sentiment and global cues (FR-2.12).
+"""Google Finance scraper for Indian market data and global cues (FR-2.12).
 
-Fetches trending stocks, market movers, and index performance from
-Google Finance. Uses httpx for async HTTP. All methods return empty
-results on failure — never crash the pipeline.
+Fetches trending NSE stocks, Indian index performance (Nifty/Sensex),
+and global index context from Google Finance. Uses httpx for async HTTP.
+All methods return empty results on failure — never crash the pipeline.
 """
 
 import asyncio
@@ -16,15 +16,20 @@ from yolovest.models.schemas import NewsArticle
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.google.com/finance"
-# Indices to track for global sentiment
-GLOBAL_INDICES = {
+
+# Primary: Indian market indices
+INDIAN_INDICES = {
     "NIFTY_50": ".NSEI",
     "SENSEX": ".BSESN",
-    "S&P_500": ".INX",
-    "NASDAQ": ".IXIC",
-    "DOW_JONES": ".DJI",
+}
+
+# Secondary: Global indices tracked for sentiment context only
+# (FII flows, global risk appetite — not direct trading signals)
+GLOBAL_CONTEXT_INDICES = {
     "HANG_SENG": ".HSI",
     "NIKKEI_225": ".N225",
+    "S&P_500": ".INX",
+    "NASDAQ": ".IXIC",
     "FTSE_100": "UKX",
 }
 
@@ -93,9 +98,9 @@ class GoogleFinanceScraper:
         if not html:
             return indices
 
-        # Parse index data from the markets page
-        # Google Finance embeds data in structured divs
-        for name, ticker in GLOBAL_INDICES.items():
+        # Parse index data — Indian indices first, then global context
+        all_indices = {**INDIAN_INDICES, **GLOBAL_CONTEXT_INDICES}
+        for name, ticker in all_indices.items():
             try:
                 data = self._extract_index_data(html, ticker, name)
                 if data:

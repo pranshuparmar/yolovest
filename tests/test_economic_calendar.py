@@ -57,7 +57,8 @@ class TestEconomicCalendarSource:
             assert len(events) > 0
             for e in events:
                 assert e["country"] == "US"
-                assert e["event_type"] == "monetary_policy"
+                assert e["event_type"] == "global_monetary_policy"
+                assert e["impact"] == "medium"
                 assert e["source"] == "fed_schedule"
         finally:
             await source.close()

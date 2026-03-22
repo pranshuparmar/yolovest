@@ -54,30 +54,41 @@ class TestDynamicEconomicCalendar:
         dates = _get_rbi_mpc_dates(2099)
         assert dates == []
 
-    async def test_fed_events_uses_dynamic_years(self):
+    async def test_fed_events_uses_static_tables(self):
         from yolovest.data.economic_calendar import EconomicCalendarSource
 
         source = EconomicCalendarSource()
-        # Patch to avoid actual HTTP calls
-        source._scrape_fomc_dates = AsyncMock(return_value=[])
-
         events = await source._fetch_fed_events(lookback_days=0, lookahead_days=365)
-        # Should find events for the current year
-        current_year = date.today().year
+
+        # FOMC events should be tagged as secondary context
         for e in events:
-            assert e["event_date"].startswith(str(current_year))
+            assert e["country"] == "US"
+            assert e["impact"] == "medium"  # medium for India, not high
+            assert e["event_type"] == "global_monetary_policy"
 
-        source._scrape_fomc_dates.assert_awaited_once()
-
-    async def test_fed_events_uses_scraped_dates_when_available(self):
+    async def test_fed_events_lower_impact_than_rbi(self):
         from yolovest.data.economic_calendar import EconomicCalendarSource
 
         source = EconomicCalendarSource()
-        tomorrow = (date.today() + timedelta(days=1)).isoformat()
-        source._scrape_fomc_dates = AsyncMock(return_value=[tomorrow])
+        # Mock RBI fetch to avoid HTTP calls
+        mock_session = MagicMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = 404
+        mock_session.get = MagicMock(return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_resp),
+            __aexit__=AsyncMock(),
+        ))
+        source._session = mock_session
+        source._owns_session = False
 
-        events = await source._fetch_fed_events(lookback_days=0, lookahead_days=30)
-        assert any(e["event_date"] == tomorrow for e in events)
+        rbi = await source._fetch_rbi_events(lookback_days=0, lookahead_days=365)
+        fed = await source._fetch_fed_events(lookback_days=0, lookahead_days=365)
+
+        # RBI should be "high" impact, Fed should be "medium"
+        for e in rbi:
+            assert e["impact"] == "high"
+        for e in fed:
+            assert e["impact"] == "medium"
 
     async def test_rbi_events_spans_year_boundary(self):
         from yolovest.data.economic_calendar import EconomicCalendarSource
@@ -98,26 +109,17 @@ class TestDynamicEconomicCalendar:
         # Should have RBI MPC dates
         assert all(e["country"] == "IN" for e in events)
 
-    def test_parse_fomc_calendar(self):
+    def test_rbi_is_primary_in_fetchers_order(self):
+        """RBI should be fetched before Fed in the source list."""
         from yolovest.data.economic_calendar import EconomicCalendarSource
 
-        html = """
-        <h4>2026</h4>
-        <p>January 27-28</p>
-        <p>March 17-18</p>
-        <p>April 28-29*</p>
-        """
-        dates = EconomicCalendarSource._parse_fomc_calendar(html)
-        assert "2026-01-27" in dates
-        assert "2026-01-28" in dates
-        assert "2026-03-17" in dates
-        assert "2026-04-28" in dates
-
-    def test_parse_fomc_calendar_empty(self):
-        from yolovest.data.economic_calendar import EconomicCalendarSource
-
-        dates = EconomicCalendarSource._parse_fomc_calendar("<html>nothing</html>")
-        assert dates == []
+        source = EconomicCalendarSource()
+        # Verify the fetch order in fetch_all_events
+        import inspect
+        src = inspect.getsource(source.fetch_all_events)
+        rbi_pos = src.find("rbi")
+        fed_pos = src.find("fed")
+        assert rbi_pos < fed_pos, "RBI should be fetched before Fed"
 
 
 # ---------------------------------------------------------------------------

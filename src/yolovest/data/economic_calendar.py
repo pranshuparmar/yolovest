@@ -1,9 +1,9 @@
-"""Economic calendar ingestion for RBI/Fed/earnings dates (FR-2.6).
+"""Economic calendar ingestion for Indian market events (FR-2.6).
 
-Ingests macroeconomic events (RBI policy, US Fed, GDP, earnings dates) from:
-1. RBI calendar — scraped from RBI website RSS/announcements
-2. US Fed — FOMC meeting dates (known schedule, updated yearly)
-3. Earnings dates — from NSE corporate filings / moneycontrol
+Ingests macroeconomic events relevant to Indian stock markets from:
+1. RBI MPC — scraped from RBI website RSS/announcements (primary)
+2. NSE corporate earnings — board meetings, results dates
+3. US Fed FOMC — secondary context only (impacts FII flows into India)
 
 Events are stored in the economic_events table and consumed by:
 - Pre-market skill (macro context)
@@ -11,7 +11,6 @@ Events are stored in the economic_events table and consumed by:
 - Risk check (reduce sizing around high-impact events)
 """
 
-import asyncio
 import hashlib
 import logging
 import re
@@ -187,110 +186,41 @@ class EconomicCalendarSource:
     async def _fetch_fed_events(
         self, lookback_days: int, lookahead_days: int
     ) -> list[dict[str, Any]]:
-        """Fetch US Federal Reserve FOMC meeting dates.
+        """Fetch US FOMC meeting dates as secondary context for Indian markets.
 
-        Tries scraping the Fed's calendar page first, falls back to
-        static schedule tables for known years.
+        FOMC decisions affect FII flows into India, so they are tracked as
+        medium-impact context events (not primary like RBI MPC).
+        Uses static schedule tables — no external US website scraping.
         """
         events: list[dict[str, Any]] = []
         today = date.today()
         window_start = today - timedelta(days=lookback_days)
         window_end = today + timedelta(days=lookahead_days)
 
-        # Try fetching dynamic FOMC dates from the Fed website
-        scraped_dates = await self._scrape_fomc_dates()
-        if scraped_dates:
-            fomc_dates = scraped_dates
-        else:
-            # Fall back to static schedules for years in the window
-            fomc_dates = []
-            years = {window_start.year, window_end.year}
-            for year in years:
-                year_dates = _get_fomc_dates(year)
-                if not year_dates:
-                    logger.info(
-                        "No FOMC schedule for %d — update _FOMC_SCHEDULES "
-                        "when the Fed publishes", year
-                    )
-                fomc_dates.extend(year_dates)
+        fomc_dates: list[str] = []
+        years = {window_start.year, window_end.year}
+        for year in years:
+            year_dates = _get_fomc_dates(year)
+            if not year_dates:
+                logger.info(
+                    "No FOMC schedule for %d — update _FOMC_SCHEDULES "
+                    "when published", year
+                )
+            fomc_dates.extend(year_dates)
 
         for date_str in fomc_dates:
             event_date = date.fromisoformat(date_str)
             if window_start <= event_date <= window_end:
                 events.append(self._make_event(
                     event_date=date_str,
-                    event_type="monetary_policy",
-                    title="US Fed FOMC Meeting",
+                    event_type="global_monetary_policy",
+                    title="US Fed FOMC Meeting (global context)",
                     country="US",
-                    impact="high",
+                    impact="medium",  # medium for India, not high
                     source="fed_schedule",
                 ))
 
         return events
-
-    async def _scrape_fomc_dates(self) -> list[str]:
-        """Try to scrape FOMC meeting dates from the Fed's website.
-
-        Returns list of ISO date strings, or empty list on failure.
-        """
-        try:
-            session = await self._get_session()
-            url = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
-            async with session.get(
-                url, headers={"User-Agent": "YoloVest/1.0"}
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                html = await resp.text()
-                return self._parse_fomc_calendar(html)
-        except Exception as e:
-            logger.debug("FOMC calendar scrape failed: %s", e)
-            return []
-
-    @staticmethod
-    def _parse_fomc_calendar(html: str) -> list[str]:
-        """Extract FOMC meeting dates from the Fed's calendar HTML.
-
-        The Fed calendar page lists meetings with month/day patterns.
-        """
-        dates: list[str] = []
-        # Pattern: dates in format "January 28-29" or "March 18-19*"
-        # followed by a year context
-        year_pattern = re.compile(r'<h4[^>]*>\s*(\d{4})\s*</h4>', re.IGNORECASE)
-        meeting_pattern = re.compile(
-            r'(January|February|March|April|May|June|July|August|'
-            r'September|October|November|December)\s+(\d{1,2})(?:-(\d{1,2}))?',
-            re.IGNORECASE,
-        )
-
-        current_year = date.today().year
-        # Find year headers
-        year_positions = [(m.start(), int(m.group(1))) for m in year_pattern.finditer(html)]
-
-        for match in meeting_pattern.finditer(html):
-            month_name = match.group(1)
-            day1 = int(match.group(2))
-            day2 = int(match.group(3)) if match.group(3) else day1
-
-            # Determine year from nearest preceding year header
-            pos = match.start()
-            year = current_year
-            for ypos, y in reversed(year_positions):
-                if ypos < pos:
-                    year = y
-                    break
-
-            try:
-                month = datetime.strptime(month_name, "%B").month
-                d1 = date(year, month, day1)
-                dates.append(d1.isoformat())
-                if day2 != day1:
-                    d2 = date(year, month, day2)
-                    dates.append(d2.isoformat())
-            except ValueError:
-                continue
-
-        return dates
 
     async def _fetch_earnings_dates(
         self, lookback_days: int, lookahead_days: int
