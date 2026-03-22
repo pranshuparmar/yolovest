@@ -68,6 +68,7 @@ class MarketDataConfig(BaseModel):
     daily_provider: str = "jugaad"
     daily_fallback: str = "yfinance"
     intraday_provider: str = "tvdatafeed"
+    kite_data_enabled: bool = False  # FR-2.1e: enable Kite Connect as data provider
     bhavcopy_dir: str = "./data/bhavcopy"
     cache_ttl_minutes: int = 15
     stale_threshold_minutes: int = 30

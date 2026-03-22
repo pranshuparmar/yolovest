@@ -14,6 +14,7 @@ Events are stored in the economic_events table and consumed by:
 import asyncio
 import hashlib
 import logging
+import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -21,26 +22,74 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Known FOMC meeting dates are published yearly. This is a static fallback.
-# Updated annually or fetched dynamically.
-_FOMC_2026 = [
-    "2026-01-27", "2026-01-28",
-    "2026-03-17", "2026-03-18",
-    "2026-04-28", "2026-04-29",
-    "2026-06-16", "2026-06-17",
-    "2026-07-28", "2026-07-29",
-    "2026-09-15", "2026-09-16",
-    "2026-10-27", "2026-10-28",
-    "2026-12-15", "2026-12-16",
-]
+# Static FOMC schedules by year. Used as fallback when web scraping fails.
+# Updated when new schedules are published by the Fed.
+_FOMC_SCHEDULES: dict[int, list[str]] = {
+    2025: [
+        "2025-01-28", "2025-01-29",
+        "2025-03-18", "2025-03-19",
+        "2025-05-06", "2025-05-07",
+        "2025-06-17", "2025-06-18",
+        "2025-07-29", "2025-07-30",
+        "2025-09-16", "2025-09-17",
+        "2025-10-28", "2025-10-29",
+        "2025-12-09", "2025-12-10",
+    ],
+    2026: [
+        "2026-01-27", "2026-01-28",
+        "2026-03-17", "2026-03-18",
+        "2026-04-28", "2026-04-29",
+        "2026-06-16", "2026-06-17",
+        "2026-07-28", "2026-07-29",
+        "2026-09-15", "2026-09-16",
+        "2026-10-27", "2026-10-28",
+        "2026-12-15", "2026-12-16",
+    ],
+}
+
+# Static RBI MPC schedules by year. Fallback when RBI website is unreachable.
+_RBI_MPC_SCHEDULES: dict[int, list[str]] = {
+    2025: [
+        "2025-02-05", "2025-02-07",
+        "2025-04-07", "2025-04-09",
+        "2025-06-04", "2025-06-06",
+        "2025-08-06", "2025-08-08",
+        "2025-09-29", "2025-10-01",
+        "2025-12-03", "2025-12-05",
+    ],
+    2026: [
+        "2026-02-05", "2026-02-07",
+        "2026-04-07", "2026-04-09",
+        "2026-06-04", "2026-06-06",
+        "2026-08-05", "2026-08-07",
+        "2026-09-29", "2026-10-01",
+        "2026-12-03", "2026-12-05",
+    ],
+}
+
+
+def _get_fomc_dates(year: int) -> list[str]:
+    """Get FOMC meeting dates for a year. Falls back to empty if unknown."""
+    return _FOMC_SCHEDULES.get(year, [])
+
+
+def _get_rbi_mpc_dates(year: int) -> list[str]:
+    """Get RBI MPC meeting dates for a year. Falls back to empty if unknown."""
+    return _RBI_MPC_SCHEDULES.get(year, [])
 
 
 class EconomicCalendarSource:
-    """Fetches economic calendar events from multiple sources."""
+    """Fetches economic calendar events from multiple sources.
+
+    Uses dynamic year handling: scrapes official websites for current dates,
+    falls back to static schedule tables when scraping fails.
+    """
 
     def __init__(self, session: aiohttp.ClientSession | None = None) -> None:
         self._session = session
         self._owns_session = session is None
+        self._fomc_cache: dict[int, list[str]] = {}
+        self._rbi_cache: dict[int, list[str]] = {}
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -87,12 +136,14 @@ class EconomicCalendarSource:
 
         Uses RBI's public press release RSS feed as primary source.
         Falls back to known scheduled dates if RSS is unavailable.
+        Handles year boundaries dynamically.
         """
         events: list[dict[str, Any]] = []
         today = date.today()
         window_start = today - timedelta(days=lookback_days)
         window_end = today + timedelta(days=lookahead_days)
 
+        # Try scraping RBI website for dynamic dates
         try:
             session = await self._get_session()
             async with session.get(
@@ -107,28 +158,29 @@ class EconomicCalendarSource:
         except Exception as e:
             logger.debug("RBI RSS fetch failed, using scheduled dates: %s", e)
 
-        # Always add known RBI MPC scheduled dates (published in advance)
-        # RBI MPC typically meets 6 times a year, dates announced beforehand
-        rbi_mpc_2026 = [
-            "2026-02-05", "2026-02-07",  # Feb MPC
-            "2026-04-07", "2026-04-09",  # Apr MPC
-            "2026-06-04", "2026-06-06",  # Jun MPC
-            "2026-08-05", "2026-08-07",  # Aug MPC
-            "2026-09-29", "2026-10-01",  # Oct MPC
-            "2026-12-03", "2026-12-05",  # Dec MPC
-        ]
+        # Add known RBI MPC dates for all years in the window
+        years = set()
+        years.add(window_start.year)
+        years.add(window_end.year)
 
-        for date_str in rbi_mpc_2026:
-            event_date = date.fromisoformat(date_str)
-            if window_start <= event_date <= window_end:
-                events.append(self._make_event(
-                    event_date=date_str,
-                    event_type="monetary_policy",
-                    title="RBI MPC Meeting",
-                    country="IN",
-                    impact="high",
-                    source="rbi_schedule",
-                ))
+        for year in years:
+            rbi_dates = _get_rbi_mpc_dates(year)
+            if not rbi_dates:
+                logger.info(
+                    "No RBI MPC schedule for %d — scrape RBI website or update "
+                    "_RBI_MPC_SCHEDULES when published", year
+                )
+            for date_str in rbi_dates:
+                event_date = date.fromisoformat(date_str)
+                if window_start <= event_date <= window_end:
+                    events.append(self._make_event(
+                        event_date=date_str,
+                        event_type="monetary_policy",
+                        title="RBI MPC Meeting",
+                        country="IN",
+                        impact="high",
+                        source="rbi_schedule",
+                    ))
 
         return self._deduplicate(events)
 
@@ -137,14 +189,32 @@ class EconomicCalendarSource:
     ) -> list[dict[str, Any]]:
         """Fetch US Federal Reserve FOMC meeting dates.
 
-        Uses known FOMC schedule (published yearly by the Fed).
+        Tries scraping the Fed's calendar page first, falls back to
+        static schedule tables for known years.
         """
         events: list[dict[str, Any]] = []
         today = date.today()
         window_start = today - timedelta(days=lookback_days)
         window_end = today + timedelta(days=lookahead_days)
 
-        for date_str in _FOMC_2026:
+        # Try fetching dynamic FOMC dates from the Fed website
+        scraped_dates = await self._scrape_fomc_dates()
+        if scraped_dates:
+            fomc_dates = scraped_dates
+        else:
+            # Fall back to static schedules for years in the window
+            fomc_dates = []
+            years = {window_start.year, window_end.year}
+            for year in years:
+                year_dates = _get_fomc_dates(year)
+                if not year_dates:
+                    logger.info(
+                        "No FOMC schedule for %d — update _FOMC_SCHEDULES "
+                        "when the Fed publishes", year
+                    )
+                fomc_dates.extend(year_dates)
+
+        for date_str in fomc_dates:
             event_date = date.fromisoformat(date_str)
             if window_start <= event_date <= window_end:
                 events.append(self._make_event(
@@ -157,6 +227,70 @@ class EconomicCalendarSource:
                 ))
 
         return events
+
+    async def _scrape_fomc_dates(self) -> list[str]:
+        """Try to scrape FOMC meeting dates from the Fed's website.
+
+        Returns list of ISO date strings, or empty list on failure.
+        """
+        try:
+            session = await self._get_session()
+            url = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+            async with session.get(
+                url, headers={"User-Agent": "YoloVest/1.0"}
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                html = await resp.text()
+                return self._parse_fomc_calendar(html)
+        except Exception as e:
+            logger.debug("FOMC calendar scrape failed: %s", e)
+            return []
+
+    @staticmethod
+    def _parse_fomc_calendar(html: str) -> list[str]:
+        """Extract FOMC meeting dates from the Fed's calendar HTML.
+
+        The Fed calendar page lists meetings with month/day patterns.
+        """
+        dates: list[str] = []
+        # Pattern: dates in format "January 28-29" or "March 18-19*"
+        # followed by a year context
+        year_pattern = re.compile(r'<h4[^>]*>\s*(\d{4})\s*</h4>', re.IGNORECASE)
+        meeting_pattern = re.compile(
+            r'(January|February|March|April|May|June|July|August|'
+            r'September|October|November|December)\s+(\d{1,2})(?:-(\d{1,2}))?',
+            re.IGNORECASE,
+        )
+
+        current_year = date.today().year
+        # Find year headers
+        year_positions = [(m.start(), int(m.group(1))) for m in year_pattern.finditer(html)]
+
+        for match in meeting_pattern.finditer(html):
+            month_name = match.group(1)
+            day1 = int(match.group(2))
+            day2 = int(match.group(3)) if match.group(3) else day1
+
+            # Determine year from nearest preceding year header
+            pos = match.start()
+            year = current_year
+            for ypos, y in reversed(year_positions):
+                if ypos < pos:
+                    year = y
+                    break
+
+            try:
+                month = datetime.strptime(month_name, "%B").month
+                d1 = date(year, month, day1)
+                dates.append(d1.isoformat())
+                if day2 != day1:
+                    d2 = date(year, month, day2)
+                    dates.append(d2.isoformat())
+            except ValueError:
+                continue
+
+        return dates
 
     async def _fetch_earnings_dates(
         self, lookback_days: int, lookahead_days: int
@@ -257,9 +391,6 @@ class EconomicCalendarSource:
         """
         events: list[dict[str, Any]] = []
         keywords = ["monetary policy", "policy rate", "repo rate", "mpc", "credit policy"]
-
-        # Basic extraction: find date-like patterns near keywords
-        import re
 
         # Match patterns like "February 07, 2026" or "07-02-2026"
         date_patterns = [

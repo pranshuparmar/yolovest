@@ -319,6 +319,11 @@ class MarketHoursChecker:
         market_open = self._parse_time(self._mh.open)
         market_close = self._parse_time(self._mh.close)
 
+        # On early close days, use the early close time instead
+        date_str = now.date().isoformat()
+        if date_str in self._mh.early_close_days:
+            market_close = self._parse_time(self._mh.early_close_days[date_str])
+
         return market_open <= current_time <= market_close
 
     def is_holiday(self, check_date: date | None = None) -> bool:
@@ -344,7 +349,11 @@ class MarketHoursChecker:
         return self._parse_time(self._mh.square_off)
 
     def is_order_window(self, now: datetime | None = None) -> bool:
-        """Check if the current time is within the order placement window."""
+        """Check if the current time is within the order placement window.
+
+        On early close days (FR-11.2), the order window end is adjusted
+        to the early square-off time so no new orders are placed too late.
+        """
         if now is None:
             now = self._now()
         elif now.tzinfo is None:
@@ -357,7 +366,18 @@ class MarketHoursChecker:
         order_start = self._parse_time(self._mh.order_start)
         order_end = self._parse_time(self._mh.order_end)
 
+        # On early close days, cap order window at square-off time
+        sq_time = self.get_square_off_time(now.date())
+        if sq_time < order_end:
+            order_end = sq_time
+
         return order_start <= current_time <= order_end
+
+    def is_early_close_day(self, check_date: date | None = None) -> bool:
+        """Check if a date is an early close day."""
+        if check_date is None:
+            check_date = self._now().date()
+        return check_date.isoformat() in self._mh.early_close_days
 
     def is_premarket_window(self, now: datetime | None = None) -> bool:
         """Check if now is in the pre-market window (before market open).
@@ -435,3 +455,4 @@ class AppContext:
     event_bus: EventBus = field(default_factory=EventBus)
     ml: MLProtocol | None = None
     news_aggregator: Any = None
+    memory: Any = None

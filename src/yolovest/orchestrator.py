@@ -168,6 +168,22 @@ class HeartbeatOrchestrator:
         results["position-monitor"] = pm_result
         await self._alert_position_monitor(pm_result)
 
+        # FR-1.5: Persist heartbeat state for cross-restart continuity
+        if self._ctx.memory:
+            try:
+                summary = {
+                    "signals_processed": len(signals),
+                    "signal_results": [
+                        {k: v.success if isinstance(v, SkillResult) else v
+                         for k, v in sr.items()}
+                        for sr in signal_pipeline
+                    ],
+                    "position_monitor_ok": pm_result.success,
+                }
+                await self._ctx.memory.save_heartbeat_state(summary)
+            except Exception:
+                logger.debug("Failed to persist heartbeat state", exc_info=True)
+
         return results
 
     async def _execute_signal_chain(

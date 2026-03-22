@@ -54,6 +54,24 @@ class RiskCheckSkill(SkillBase):
         if not self.ctx.market_hours.is_order_window():
             return self._reject(signal, "Outside order window")
 
+        # FR-11.2: Early close day — block new MIS positions if close to square-off
+        if (self.ctx.market_hours.is_early_close_day()
+                and signal.get("product", "MIS") == "MIS"):
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            now = datetime.now(ZoneInfo("Asia/Kolkata"))
+            sq_time = self.ctx.market_hours.get_square_off_time(now.date())
+            minutes_to_sq = (
+                datetime.combine(now.date(), sq_time) - now.replace(tzinfo=None)
+            ).total_seconds() / 60
+            # Block new MIS if less than 30 min to early square-off
+            if minutes_to_sq < 30:
+                return self._reject(
+                    signal,
+                    f"Early close day: only {minutes_to_sq:.0f}min to square-off",
+                )
+
         # FR-5.5: Daily circuit breaker
         if portfolio["daily_pnl_pct"] <= -cfg.daily_loss_limit_pct:
             return self._reject(signal, f"Daily loss limit hit ({cfg.daily_loss_limit_pct:.0%})")

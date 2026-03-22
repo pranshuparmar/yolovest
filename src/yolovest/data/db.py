@@ -1615,3 +1615,67 @@ class Database:
             )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Agent Memory Persistence (FR-1.5)
+    # ------------------------------------------------------------------
+
+    async def get_memory(self, namespace: str, key: str) -> dict[str, Any] | None:
+        """Retrieve a memory entry by namespace and key."""
+        cursor = await self.conn.execute(
+            "SELECT key, value, expires_at FROM agent_memory "
+            "WHERE namespace = ? AND key = ?",
+            (namespace, key),
+        )
+        row = await cursor.fetchone()
+        return dict[str, Any](row) if row else None
+
+    async def set_memory(
+        self, namespace: str, key: str, value: str, expires_at: str | None = None
+    ) -> None:
+        """Upsert a memory entry."""
+        now = datetime.now(IST).isoformat()
+        await self.conn.execute(
+            "INSERT INTO agent_memory (namespace, key, value, created_at, updated_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(namespace, key) DO UPDATE SET "
+            "value = excluded.value, updated_at = excluded.updated_at, "
+            "expires_at = excluded.expires_at",
+            (namespace, key, value, now, now, expires_at),
+        )
+        await self.conn.commit()
+
+    async def delete_memory(self, namespace: str, key: str) -> None:
+        """Delete a memory entry."""
+        await self.conn.execute(
+            "DELETE FROM agent_memory WHERE namespace = ? AND key = ?",
+            (namespace, key),
+        )
+        await self.conn.commit()
+
+    async def list_memory_keys(self, namespace: str) -> list[str]:
+        """List all keys in a namespace."""
+        cursor = await self.conn.execute(
+            "SELECT key FROM agent_memory WHERE namespace = ?", (namespace,)
+        )
+        rows = await cursor.fetchall()
+        return [row["key"] for row in rows]
+
+    async def get_all_memory(self, namespace: str) -> list[dict[str, Any]]:
+        """Get all entries in a namespace."""
+        cursor = await self.conn.execute(
+            "SELECT key, value, expires_at FROM agent_memory WHERE namespace = ?",
+            (namespace,),
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](row) for row in rows]
+
+    async def cleanup_expired_memory(self) -> int:
+        """Delete expired memory entries. Returns count deleted."""
+        now = datetime.now(IST).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM agent_memory WHERE expires_at IS NOT NULL AND expires_at < ?",
+            (now,),
+        )
+        await self.conn.commit()
+        return cursor.rowcount

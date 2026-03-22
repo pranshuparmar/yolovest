@@ -179,10 +179,27 @@ def _build_llm(config: AppConfig) -> GeminiLLM | _StubLLM:
 
 
 def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketData:
-    """Build market data ingester with provider fallback chain."""
+    """Build market data ingester with provider fallback chain.
+
+    If kite_data_enabled is True and broker API keys are set, Kite Connect
+    is added as the primary provider (FR-2.1e). Requires paid data plan.
+    """
     from yolovest.data.base import MarketDataBase
 
     daily_providers: list[MarketDataBase] = []
+
+    # FR-2.1e: Kite data plan as primary when enabled
+    if config.market_data.kite_data_enabled:
+        api_key = config.broker.api_key
+        if api_key and api_key != "${KITE_API_KEY}":
+            try:
+                from yolovest.data.kite_data import KiteDataProvider
+
+                kite_provider = KiteDataProvider(api_key=api_key)
+                daily_providers.append(kite_provider)
+                logger.info("Kite Connect data provider enabled as primary")
+            except Exception as e:
+                logger.warning("Failed to initialize Kite data provider: %s", e)
 
     if config.market_data.daily_provider == "jugaad":
         daily_providers.append(JugaadDataProvider())
@@ -193,7 +210,13 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
         return _StubMarketData()
 
     intraday = None
-    if config.market_data.intraday_provider == "tvdatafeed":
+    # Kite handles intraday too, so skip tvDatafeed if Kite is primary
+    if config.market_data.kite_data_enabled and daily_providers:
+        from yolovest.data.kite_data import KiteDataProvider
+
+        if isinstance(daily_providers[0], KiteDataProvider):
+            intraday = daily_providers[0]  # Kite handles all intervals
+    if intraday is None and config.market_data.intraday_provider == "tvdatafeed":
         intraday = TVDatafeedProvider()
 
     return MarketDataIngester(
@@ -201,6 +224,17 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
         intraday_provider=intraday,
         stale_threshold_minutes=config.market_data.stale_threshold_minutes,
     )
+
+
+def _build_memory(db: Any) -> Any:
+    """Build agent memory persistence layer (FR-1.5)."""
+    try:
+        from yolovest.memory import AgentMemory
+
+        return AgentMemory(db)
+    except Exception:
+        logger.warning("Failed to build agent memory")
+        return None
 
 
 def _build_news_aggregator() -> Any:
@@ -233,9 +267,10 @@ def build_context(config: AppConfig) -> AppContext:
         NotifierProtocol,
     )
 
+    db = _build_db(config)
     return AppContext(
         config=config,
-        db=cast(DatabaseProtocol, _build_db(config)),
+        db=cast(DatabaseProtocol, db),
         broker=cast(BrokerProtocol, _build_broker(config)),
         llm=cast(LLMProtocol, _build_llm(config)),
         market_data=cast(MarketDataProtocol, _build_market_data(config)),
@@ -243,6 +278,7 @@ def build_context(config: AppConfig) -> AppContext:
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
         news_aggregator=_build_news_aggregator(),
+        memory=_build_memory(db),
     )
 
 
