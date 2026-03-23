@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/endpoints";
 
 const STALE_30S = 30_000;
@@ -126,5 +126,43 @@ export function useAudit(params?: { limit?: number; action_type?: string }) {
     queryKey: ["audit", params],
     queryFn: () => api.audit(params),
     staleTime: STALE_30S,
+  });
+}
+
+export function useIntegrations() {
+  return useQuery({
+    queryKey: ["integrations"],
+    queryFn: api.integrations,
+    staleTime: STALE_30S,
+  });
+}
+
+export function usePingGemini() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.pingGemini,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }),
+  });
+}
+
+export function useAuthenticateZerodha() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (token: string) => api.authenticateZerodha(token),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }),
+  });
+}
+
+export function useTestTelegram() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.testTelegram,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }),
+  });
+}
+
+export function useSendTelegram() {
+  return useMutation({
+    mutationFn: (message: string) => api.sendTelegram(message),
   });
 }

@@ -12,6 +12,8 @@ import type {
   LLMAccuracy,
   Report,
   AuditEntry,
+  IntegrationsStatus,
+  ActionResult,
 } from "../types/api";
 
 export const api = {
@@ -86,4 +88,24 @@ export const api = {
     const qs = q.toString();
     return apiFetch<AuditEntry[]>(`/api/audit${qs ? "?" + qs : ""}`);
   },
+
+  integrations: () => apiFetch<IntegrationsStatus>("/api/integrations"),
+
+  pingGemini: () =>
+    apiFetch<ActionResult>("/api/integrations/gemini/ping", { method: "POST" }),
+
+  authenticateZerodha: (requestToken: string) =>
+    apiFetch<ActionResult>("/api/integrations/zerodha/authenticate", {
+      method: "POST",
+      body: JSON.stringify({ request_token: requestToken }),
+    }),
+
+  testTelegram: () =>
+    apiFetch<ActionResult>("/api/integrations/telegram/test", { method: "POST" }),
+
+  sendTelegram: (message: string) =>
+    apiFetch<ActionResult>("/api/integrations/telegram/send", {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    }),
 };

@@ -205,6 +205,127 @@ def create_app(ctx: AppContext) -> FastAPI:
         return await ctx.db.get_audit_log(limit=limit, action_type=action_type)
 
     # ------------------------------------------------------------------
+    # Integrations
+    # ------------------------------------------------------------------
+
+    @app.get("/api/integrations")
+    async def get_integrations_status(
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Status of all external integrations."""
+        results: dict[str, Any] = {}
+
+        # --- Gemini LLM ---
+        gemini_configured = bool(getattr(ctx.config.llm, "api_key", ""))
+        gemini_ok = False
+        if gemini_configured:
+            try:
+                gemini_ok = await ctx.llm.ping()
+            except Exception:
+                gemini_ok = False
+        results["gemini"] = {
+            "configured": gemini_configured,
+            "connected": gemini_ok,
+            "model": getattr(ctx.config.llm, "model", ""),
+        }
+
+        # --- Zerodha Broker ---
+        broker_configured = bool(getattr(ctx.config.broker, "api_key", ""))
+        broker_authenticated = False
+        broker_margins: dict[str, Any] | None = None
+        if broker_configured:
+            try:
+                broker_authenticated = await ctx.broker.is_authenticated()
+            except Exception:
+                broker_authenticated = False
+            if broker_authenticated:
+                try:
+                    broker_margins = await ctx.broker.get_margins()
+                except Exception:
+                    pass
+        results["zerodha"] = {
+            "configured": broker_configured,
+            "connected": broker_authenticated,
+            "mode": ctx.config.mode,
+            "login_url": ctx.broker.get_login_url() if broker_configured else None,
+            "margins": broker_margins,
+        }
+
+        # --- Telegram Bot ---
+        telegram_cfg = ctx.config.telegram if hasattr(ctx.config, "telegram") else None
+        telegram_enabled = bool(telegram_cfg and getattr(telegram_cfg, "enabled", False))
+        telegram_configured = bool(
+            telegram_cfg
+            and getattr(telegram_cfg, "bot_token", "")
+            and getattr(telegram_cfg, "chat_id", "")
+        )
+        results["telegram"] = {
+            "configured": telegram_configured,
+            "enabled": telegram_enabled,
+            "chat_id": getattr(telegram_cfg, "chat_id", "") if telegram_cfg else "",
+        }
+
+        return results
+
+    @app.post("/api/integrations/gemini/ping")
+    async def ping_gemini(
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Test Gemini LLM connectivity."""
+        try:
+            ok = await ctx.llm.ping()
+            return {"success": ok}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    @app.post("/api/integrations/zerodha/authenticate")
+    async def authenticate_zerodha(
+        body: dict[str, Any],
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Authenticate Zerodha with a request token."""
+        request_token = body.get("request_token", "").strip()
+        if not request_token:
+            raise HTTPException(status_code=400, detail="request_token is required")
+        try:
+            ok = await ctx.broker.authenticate(request_token)
+            margins = None
+            if ok:
+                try:
+                    margins = await ctx.broker.get_margins()
+                except Exception:
+                    pass
+            return {"success": ok, "margins": margins}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    @app.post("/api/integrations/telegram/test")
+    async def test_telegram(
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Send a test message via Telegram."""
+        try:
+            ok = await ctx.notify.send("YoloVest: Test message from dashboard")
+            return {"success": ok}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    @app.post("/api/integrations/telegram/send")
+    async def send_telegram_message(
+        body: dict[str, Any],
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Send a custom message via Telegram."""
+        message = body.get("message", "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="message is required")
+        try:
+            ok = await ctx.notify.send(message)
+            return {"success": ok}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------
     # FR-8.2: WebSocket Live Updates
     # ------------------------------------------------------------------
 

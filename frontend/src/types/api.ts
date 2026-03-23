@@ -158,3 +158,35 @@ export interface Report {
   content: Record<string, unknown>;
   created_at: string;
 }
+
+export interface GeminiStatus {
+  configured: boolean;
+  connected: boolean;
+  model: string;
+}
+
+export interface ZerodhaStatus {
+  configured: boolean;
+  connected: boolean;
+  mode: "paper" | "live";
+  login_url: string | null;
+  margins: Record<string, unknown> | null;
+}
+
+export interface TelegramStatus {
+  configured: boolean;
+  enabled: boolean;
+  chat_id: string;
+}
+
+export interface IntegrationsStatus {
+  gemini: GeminiStatus;
+  zerodha: ZerodhaStatus;
+  telegram: TelegramStatus;
+}
+
+export interface ActionResult {
+  success: boolean;
+  error?: string;
+  margins?: Record<string, unknown> | null;
+}
