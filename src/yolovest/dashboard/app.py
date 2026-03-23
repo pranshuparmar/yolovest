@@ -9,10 +9,14 @@ All endpoints read from the shared database via AppContext.
 import json
 import logging
 import secrets
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.staticfiles import StaticFiles
 
 from yolovest.context import AppContext
 
@@ -30,6 +34,15 @@ def create_app(ctx: AppContext) -> FastAPI:
         title="YoloVest Dashboard",
         description="Autonomous AI-driven Indian stock trading platform",
         version="0.1.0",
+    )
+
+    # CORS for development (Vite dev server)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     # Store context for dependency injection
@@ -206,6 +219,22 @@ def create_app(ctx: AppContext) -> FastAPI:
                 await websocket.receive_text()
         except WebSocketDisconnect:
             _ws_clients.discard(websocket)
+
+    # ------------------------------------------------------------------
+    # Static frontend serving (production)
+    # ------------------------------------------------------------------
+    frontend_dist = Path(__file__).resolve().parent.parent.parent.parent / "frontend" / "dist"
+    if frontend_dist.is_dir():
+        # Serve built React assets
+        app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="static")
+
+        @app.get("/{full_path:path}")
+        async def serve_spa(full_path: str) -> FileResponse:
+            """Serve the React SPA for any non-API route."""
+            file_path = frontend_dist / full_path
+            if file_path.is_file():
+                return FileResponse(str(file_path))
+            return FileResponse(str(frontend_dist / "index.html"))
 
     return app
 
