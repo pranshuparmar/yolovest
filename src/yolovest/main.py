@@ -371,6 +371,10 @@ async def async_main(args: argparse.Namespace) -> None:
             dashboard_task.cancel()
         if isinstance(ctx.db, Database):
             await ctx.db.close()
+        # Force-cancel any remaining tasks (e.g. orphaned updater polling)
+        for task in asyncio.all_tasks():
+            if task is not asyncio.current_task():
+                task.cancel()
 
     logger.info("YoloVest shutdown complete")
 

@@ -27,6 +27,7 @@ class TelegramBot:
         self._cfg = ctx.config.notifications.telegram
         self._bot: Any = None
         self._app: Any = None
+        self._stop_event: asyncio.Event = asyncio.Event()
 
     @property
     def enabled(self) -> bool:
@@ -68,8 +69,12 @@ class TelegramBot:
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
 
+        # Block until stop is requested — keeps the task alive and cancellable
+        await self._stop_event.wait()
+
     async def stop(self) -> None:
         """Stop the Telegram bot with timeouts to avoid hanging on shutdown."""
+        self._stop_event.set()
         if self._app:
             try:
                 await asyncio.wait_for(self._app.updater.stop(), timeout=3.0)
