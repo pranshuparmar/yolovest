@@ -252,7 +252,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         }
 
         # --- Telegram Bot ---
-        telegram_cfg = ctx.config.telegram if hasattr(ctx.config, "telegram") else None
+        telegram_cfg = ctx.config.notifications.telegram if hasattr(ctx.config, "notifications") else None
         telegram_enabled = bool(telegram_cfg and getattr(telegram_cfg, "enabled", False))
         bot_token = getattr(telegram_cfg, "bot_token", "") if telegram_cfg else ""
         chat_id = getattr(telegram_cfg, "chat_id", "") if telegram_cfg else ""
