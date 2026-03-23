@@ -79,7 +79,8 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 - **Reports**: Daily (trades, PnL, win rate, slippage, predictions) and weekly (cumulative PnL, LLM accuracy, slippage trends, best/worst trades)
 
 ### Dashboard & Deployment
-- **FastAPI dashboard**: 14 REST endpoints + WebSocket. Basic auth. Endpoints include `/api/slippage`, `/api/llm-accuracy`.
+- **React frontend**: SPA in `frontend/` built with Vite + TypeScript + Tailwind CSS + Recharts. 8 pages (Dashboard, Positions, Trades, Trade Detail, Watchlist, Analytics, Reports, Audit). React Query for server state, WebSocket for real-time updates, Basic Auth login. Dev server: `cd frontend && npm run dev`.
+- **FastAPI backend**: 14 REST endpoints + WebSocket. Basic auth. CORS middleware + static file serving for production. Endpoints include `/api/slippage`, `/api/llm-accuracy`.
 - **Telegram bot**: `/start`, `/status`, `/pnl`, `/positions`, `/stop`, `/kill`, `/resume`, `/auth`
 - **Agent memory**: Cross-restart state persistence via `agent_memory` DB table with TTL support
 - **Database maintenance**: CRON skill for daily backups, data retention cleanup (OHLCV, audit logs, predictions), old backup pruning
@@ -105,7 +106,12 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 - **`src/yolovest/news/`** — News scrapers + aggregator with dedup
 - **`src/yolovest/strategy/ml_signal.py`** — XGBoost model for signal generation
 - **`src/yolovest/strategy/backtest.py`** — Walk-forward backtesting engine
-- **`src/yolovest/dashboard/app.py`** — FastAPI dashboard (14 endpoints + WebSocket)
+- **`src/yolovest/dashboard/app.py`** — FastAPI backend (14 endpoints + WebSocket + CORS + static serving)
+- **`frontend/`** — React SPA (Vite + TypeScript + Tailwind CSS + Recharts)
+- **`frontend/src/api/`** — API client with Basic Auth and endpoint definitions
+- **`frontend/src/pages/`** — 8 pages: Dashboard, Positions, Trades, TradeDetail, Watchlist, Analytics, Reports, Audit
+- **`frontend/src/components/`** — Reusable UI: EquityChart, PortfolioCards, TradesTable, PositionsTable, SlippageChart, LLMAccuracyCard, etc.
+- **`frontend/src/hooks/`** — React Query hooks, WebSocket hook, auth hook
 - **`migrations/`** — 5 numbered SQL migration files (001-005)
 - **`config.example.yaml`** — Sample config with all keys documented
 
@@ -127,3 +133,4 @@ All data exchange between skills uses typed Pydantic models in `src/yolovest/mod
 - Paper trading mode by default — live trading requires explicit `mode: live` in config.
 - India-first design: RBI MPC is primary economic event; global indices tracked as secondary sentiment context only.
 - Tests use pytest-asyncio with `asyncio_mode = "auto"`. Run with `PYTHONPATH=src python -m pytest tests/ -v`.
+- Frontend uses Vite + TypeScript + Tailwind CSS. Run with `cd frontend && npm run dev`. Build with `npm run build`.
