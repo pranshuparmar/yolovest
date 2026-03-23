@@ -1,0 +1,32 @@
+services:
+  yolovest:
+    build: .
+    container_name: yolovest
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - yolovest-data:/app/data
+      - yolovest-backups:/app/backups
+      - yolovest-models:/app/models
+      - yolovest-logs:/app/logs
+    environment:
+      - KITE_API_KEY=${KITE_API_KEY:-}
+      - KITE_API_SECRET=${KITE_API_SECRET:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - TZ=Asia/Kolkata
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  yolovest-data:
+  yolovest-backups:
+  yolovest-models:
+  yolovest-logs:

@@ -1,0 +1,133 @@
+# YoloVest Configuration
+# Copy to config.yaml and set environment variables for secrets.
+# See REQUIREMENTS.md Section 10 for full documentation.
+
+mode: paper  # paper | live
+
+capital:
+  initial_amount: 100000              # starting capital in INR
+
+broker:
+  name: zerodha
+  api_key: ${KITE_API_KEY}            # from environment
+  api_secret: ${KITE_API_SECRET}
+
+llm:
+  provider: gemini
+  model: gemini-2.5-pro               # or gemini-2.5-flash for lower latency
+  api_key: ${GEMINI_API_KEY}
+
+market_data:
+  daily_provider: jugaad              # jugaad | yfinance
+  daily_fallback: yfinance            # fallback if primary fails
+  intraday_provider: tvdatafeed       # tvdatafeed | kite (paid)
+  bhavcopy_dir: ./data/bhavcopy       # path to downloaded NSE Bhavcopy CSVs
+  cache_ttl_minutes: 15               # cache fetched data to reduce API calls
+  stale_threshold_minutes: 30         # reject data older than this many minutes
+
+heartbeat:
+  market_hours_interval_min: 15       # heartbeat frequency during market hours
+  off_hours_interval_min: 60          # heartbeat frequency outside market hours
+  max_consecutive_skips: 3            # alert if N heartbeats skipped due to overrun
+
+scanning:
+  seed_symbols: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
+  shortlist_size: 25                  # number of candidate stocks from daily scan
+  min_avg_daily_volume: 500000        # filter out stocks below this avg daily volume
+  weights:                            # ranking algorithm weights (must sum to 1.0)
+    technical: 0.40
+    volume_momentum: 0.25
+    news_sentiment: 0.20
+    fundamental: 0.15
+
+strategy:
+  exchange: NSE
+  interval: "5minute"                 # default candle interval
+  ema_periods: [9, 21, 50, 200]       # moving average periods
+  indicators:                         # toggle individual indicators
+    rsi: true
+    macd: true
+    bollinger_bands: true
+    vwap: true
+    atr: true
+    volume_profile: true
+    obv: true
+    supertrend: true
+  default_trade_type: "intraday"      # intraday | swing
+  backtest_min_sharpe: 1.0            # minimum Sharpe ratio for model deployment
+  backtest_max_drawdown_pct: 0.20     # maximum drawdown % for model deployment
+
+risk:
+  max_risk_per_trade_pct: 0.02        # 2% of capital per trade
+  max_portfolio_exposure_pct: 0.60    # 60% max exposure, 40% always cash
+  max_open_positions: 3               # simultaneous open positions
+  max_single_stock_pct: 0.25          # 25% max in one stock
+  daily_loss_limit_pct: 0.03          # stop trading if down 3% today
+  weekly_loss_limit_pct: 0.05         # weekly circuit breaker at 5%
+  weekly_loss_sizing_reduction: 0.50  # reduce sizing by 50% when weekly breaker hits
+  mandatory_stop_loss: true           # enforce SL on every trade
+  trailing_sl_enabled: true           # enable trailing stop-loss
+  trailing_sl_trigger_multiple: 1.5   # activate trailing SL at 1.5x risk in profit
+  trailing_sl_step_pct: 0.005         # trail SL in 0.5% steps
+  llm_review_enabled: true            # Gemini risk review before execution
+  llm_fallback_to_rules: true         # rules-only if LLM unavailable
+  max_same_sector_positions: 1        # correlation check — max positions per sector
+  kill_switch_enabled: true           # enable /stop and /kill commands
+  kill_switch_persistent: true        # kill switch survives restarts
+  min_confidence_score: 0.65          # minimum ML confidence to take a trade
+  max_trades_per_day: 10              # max trades per day (anti-overtrading)
+  loss_cooldown_minutes: 15           # wait after a losing trade before next entry
+  margin_usage_enabled: false         # MIS leverage disabled unless explicitly enabled
+  weekly_reset_day: "monday"          # day when weekly circuit breaker resets
+
+market_hours:
+  open: "09:15"
+  close: "15:30"
+  order_start: "09:15"               # earliest time for new orders
+  order_end: "15:15"                  # latest time for new orders
+  square_off: "15:15"                 # auto square-off intraday positions
+  square_off_extension: "00:05"       # extra window for square-off orders after order_end
+  timezone: "Asia/Kolkata"
+  holidays: []                        # list of NSE holiday dates (YYYY-MM-DD)
+  early_close_days: {}                # map of date -> early close time
+
+execution:
+  max_order_retries: 3                # retry failed orders this many times
+  retry_base_delay_sec: 2             # exponential backoff base (2s, 4s, 8s)
+  max_pipeline_latency_sec: 2         # signal->risk->order must complete within this
+  paper_slippage_pct: 0.001           # simulated slippage for paper trading (0.1%)
+  order_timeout_sec: 30               # cancel unfilled remainder after this many seconds
+
+database:
+  backup_enabled: true                # enable daily DB backups
+  backup_cron: "0 18 * * *"           # backup schedule (daily 6 PM)
+  backup_dir: ./backups               # backup directory
+  retention:
+    ohlcv_days: 730                   # OHLCV data retention (2 years)
+    audit_log_days: 365               # audit log retention (1 financial year)
+    predictions_days: 365             # prediction data retention (1 year)
+
+retraining:
+  schedule_cron: "0 6 * * 6"          # retrain schedule (Saturday 6 AM)
+  shadow_mode_days: 7                 # run new model in shadow for N days before promoting
+
+reports:
+  daily_report_time: "16:00"          # daily report generation time (IST)
+  weekly_report_cron: "0 10 * * 6"    # weekly report (Saturday 10 AM)
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8080
+
+notifications:
+  telegram:
+    enabled: false
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    alerts:                           # toggle individual alert types
+      trade_entry: true
+      trade_exit: true
+      daily_summary: true
+      weekly_summary: true
+      errors: true
+      kill_switch: true               # alert when kill switch is triggered
