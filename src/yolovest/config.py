@@ -20,6 +20,22 @@ def _parse_time(t: str) -> dt_time:
     return dt_time(int(parts[0]), int(parts[1]))
 
 
+def _load_dotenv(config_dir: Path) -> None:
+    """Load .env file into os.environ if present. Does not override existing vars."""
+    for candidate in [config_dir / ".env", Path(".env")]:
+        if candidate.is_file():
+            with open(candidate) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip("'\"")
+                    os.environ.setdefault(key, value)
+            break
+
+
 def _expand_env_vars(value: object) -> object:
     """Recursively expand ${VAR_NAME} patterns with environment variable values.
 
@@ -289,6 +305,8 @@ def load_config(path: str) -> AppConfig:
     config_path = Path(path)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
+
+    _load_dotenv(config_path.parent)
 
     with open(config_path) as f:
         raw = yaml.safe_load(f)
