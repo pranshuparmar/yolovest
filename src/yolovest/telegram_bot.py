@@ -90,14 +90,24 @@ class TelegramBot:
             return False
 
         try:
-            from telegram import Bot
+            if self._app:
+                # Use the already-initialized bot from the running Application
+                await self._app.bot.send_message(
+                    chat_id=self._cfg.chat_id,
+                    text=text,
+                    parse_mode="HTML",
+                )
+            else:
+                # Fallback: create and initialize a standalone bot
+                from telegram import Bot
 
-            bot = Bot(token=self._cfg.bot_token)
-            await bot.send_message(
-                chat_id=self._cfg.chat_id,
-                text=text,
-                parse_mode="HTML",
-            )
+                bot = Bot(token=self._cfg.bot_token)
+                async with bot:
+                    await bot.send_message(
+                        chat_id=self._cfg.chat_id,
+                        text=text,
+                        parse_mode="HTML",
+                    )
             return True
         except Exception as e:
             logger.warning("Telegram send failed: %s", e)
