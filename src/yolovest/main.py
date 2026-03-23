@@ -22,7 +22,7 @@ from yolovest.data.tvfeed import TVDatafeedProvider
 from yolovest.data.yfinance_provider import YFinanceProvider
 from yolovest.events import EventBus
 from yolovest.llm.gemini import GeminiLLM
-from yolovest.notify import ConsoleNotifier
+from yolovest.notify import Notifier
 from yolovest.orchestrator import HeartbeatOrchestrator
 
 logger = logging.getLogger("yolovest")
@@ -274,7 +274,7 @@ def build_context(config: AppConfig) -> AppContext:
         broker=cast(BrokerProtocol, _build_broker(config)),
         llm=cast(LLMProtocol, _build_llm(config)),
         market_data=cast(MarketDataProtocol, _build_market_data(config)),
-        notify=cast(NotifierProtocol, ConsoleNotifier(enabled=True)),
+        notify=cast(NotifierProtocol, Notifier(config)),
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
         news_aggregator=_build_news_aggregator(),
