@@ -237,6 +237,11 @@ export function IntegrationsPage() {
                 <span className="text-gray-300 font-mono text-xs">{telegram.chat_id}</span>
               </div>
             )}
+            {telegram.hint && (
+              <p className="text-xs text-amber-400 bg-amber-900/20 rounded px-2 py-1.5 leading-relaxed">
+                {telegram.hint}
+              </p>
+            )}
           </div>
 
           <div className="mt-auto pt-3 border-t border-gray-800 space-y-2">

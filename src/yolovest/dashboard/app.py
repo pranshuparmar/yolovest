@@ -254,15 +254,30 @@ def create_app(ctx: AppContext) -> FastAPI:
         # --- Telegram Bot ---
         telegram_cfg = ctx.config.telegram if hasattr(ctx.config, "telegram") else None
         telegram_enabled = bool(telegram_cfg and getattr(telegram_cfg, "enabled", False))
-        telegram_configured = bool(
-            telegram_cfg
-            and getattr(telegram_cfg, "bot_token", "")
-            and getattr(telegram_cfg, "chat_id", "")
-        )
+        bot_token = getattr(telegram_cfg, "bot_token", "") if telegram_cfg else ""
+        chat_id = getattr(telegram_cfg, "chat_id", "") if telegram_cfg else ""
+        telegram_configured = bool(telegram_cfg and bot_token and chat_id)
+
+        # Build diagnostic hint
+        telegram_hint = ""
+        if not telegram_cfg:
+            telegram_hint = "No telegram section found in config"
+        elif not bot_token:
+            telegram_hint = "bot_token is empty — ensure config.yaml has bot_token: ${TELEGRAM_BOT_TOKEN} and the env var is exported before startup"
+        elif "${" in bot_token:
+            telegram_hint = "bot_token placeholder was not expanded — env var TELEGRAM_BOT_TOKEN was not set when the app started"
+        elif not chat_id:
+            telegram_hint = "chat_id is empty — ensure config.yaml has chat_id: ${TELEGRAM_CHAT_ID} and the env var is exported before startup"
+        elif "${" in chat_id:
+            telegram_hint = "chat_id placeholder was not expanded — env var TELEGRAM_CHAT_ID was not set when the app started"
+        elif not telegram_enabled:
+            telegram_hint = "Tokens are set but telegram is disabled — set notifications.telegram.enabled: true in config.yaml"
+
         results["telegram"] = {
             "configured": telegram_configured,
             "enabled": telegram_enabled,
-            "chat_id": getattr(telegram_cfg, "chat_id", "") if telegram_cfg else "",
+            "chat_id": chat_id if "${" not in chat_id else "",
+            "hint": telegram_hint,
         }
 
         return results

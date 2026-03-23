@@ -177,6 +177,7 @@ export interface TelegramStatus {
   configured: boolean;
   enabled: boolean;
   chat_id: string;
+  hint?: string;
 }
 
 export interface IntegrationsStatus {
