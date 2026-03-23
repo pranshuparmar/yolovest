@@ -10,6 +10,7 @@ Uses python-telegram-bot async API. Runs as a background task
 alongside the heartbeat orchestrator.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -68,11 +69,20 @@ class TelegramBot:
         await self._app.updater.start_polling(drop_pending_updates=True)
 
     async def stop(self) -> None:
-        """Stop the Telegram bot."""
+        """Stop the Telegram bot with timeouts to avoid hanging on shutdown."""
         if self._app:
-            await self._app.updater.stop()
-            await self._app.stop()
-            await self._app.shutdown()
+            try:
+                await asyncio.wait_for(self._app.updater.stop(), timeout=3.0)
+            except (asyncio.TimeoutError, Exception):
+                logger.warning("Telegram updater stop timed out")
+            try:
+                await asyncio.wait_for(self._app.stop(), timeout=2.0)
+            except (asyncio.TimeoutError, Exception):
+                logger.warning("Telegram app stop timed out")
+            try:
+                await asyncio.wait_for(self._app.shutdown(), timeout=2.0)
+            except (asyncio.TimeoutError, Exception):
+                logger.warning("Telegram app shutdown timed out")
 
     async def send_message(self, text: str) -> bool:
         """Send a message to the configured chat_id."""

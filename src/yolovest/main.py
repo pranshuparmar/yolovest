@@ -358,10 +358,15 @@ async def async_main(args: argparse.Namespace) -> None:
     finally:
         cron_scheduler.stop()
         cron_task.cancel()
-        if telegram_bot:
-            await telegram_bot.stop()
+        # Cancel telegram task first to interrupt the long-poll HTTP request,
+        # which lets the subsequent stop() return much faster.
         if telegram_task:
             telegram_task.cancel()
+        if telegram_bot:
+            try:
+                await asyncio.wait_for(telegram_bot.stop(), timeout=5.0)
+            except (asyncio.TimeoutError, Exception):
+                logger.warning("Telegram bot stop timed out, forcing shutdown")
         if dashboard_task:
             dashboard_task.cancel()
         if isinstance(ctx.db, Database):
