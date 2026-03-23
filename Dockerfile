@@ -4,17 +4,15 @@ WORKDIR /app
 
 # System deps for aiosqlite, aiohttp, etc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
+    gcc git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first (cached layer)
 COPY pyproject.toml README.md ./
-RUN pip install --no-cache-dir pip --upgrade && \
-    pip install --no-cache-dir . 2>/dev/null || \
-    pip install --no-cache-dir \
-      pydantic pyyaml aiosqlite aiohttp pandas \
-      fastapi uvicorn websockets httpx \
-      python-telegram-bot
+RUN mkdir -p src/yolovest && \
+    touch src/yolovest/__init__.py && \
+    pip install --no-cache-dir pip --upgrade && \
+    pip install --no-cache-dir .
 
 # Copy source code
 COPY src/ src/
@@ -22,7 +20,7 @@ COPY migrations/ migrations/
 COPY config.example.yaml config.example.yaml
 
 # Install the package
-RUN pip install --no-cache-dir -e . 2>/dev/null || true
+RUN pip install --no-cache-dir .
 
 # Create data directories
 RUN mkdir -p /app/data /app/backups /app/models /app/logs

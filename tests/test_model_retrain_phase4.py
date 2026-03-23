@@ -109,6 +109,8 @@ class TestFullRetrain:
             {"direction_correct": False, "symbol": "RELIANCE"},
             {"direction_correct": True, "symbol": "TCS"},
         ])
+        retrain_skill.ctx.db.get_production_model = AsyncMock(return_value=None)
+        retrain_skill.ctx.db.get_shadow_models_ready = AsyncMock(return_value=[])
         retrain_skill.ctx.market_hours.is_market_hours = lambda: False
 
         result = await retrain_skill.execute()

@@ -24,7 +24,7 @@ class TestJugaadDataProvider:
             "VOLUME": [1000000, 1200000],
         })
 
-        with patch("yolovest.data.jugaad.stock_df", return_value=mock_df, create=True):
+        with patch("jugaad_data.nse.stock_df", return_value=mock_df):
             bars = JugaadDataProvider._fetch_stock_data(
                 "RELIANCE",
                 datetime(2026, 3, 20).date(),
@@ -51,7 +51,7 @@ class TestJugaadDataProvider:
             "TOTTRDQTY": [999999],
         })
 
-        with patch("yolovest.data.jugaad.stock_df", return_value=mock_df, create=True):
+        with patch("jugaad_data.nse.stock_df", return_value=mock_df):
             bars = JugaadDataProvider._fetch_stock_data(
                 "RELIANCE",
                 datetime(2026, 3, 20).date(),
@@ -94,8 +94,8 @@ class TestYFinanceProvider:
 
         provider = YFinanceProvider()
 
-        with patch("yolovest.data.yfinance_provider.yf") as mock_yf:
-            mock_yf.Ticker.return_value = mock_ticker
+        with patch("yfinance.Ticker") as mock_ticker_cls:
+            mock_ticker_cls.return_value = mock_ticker
             bars = provider._fetch_data("RELIANCE", "1d", 30)
 
         assert len(bars) == 2
