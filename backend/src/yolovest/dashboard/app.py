@@ -752,7 +752,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     ) -> dict[str, Any]:
         """Replay historical signals against modified risk parameters."""
         max_exposure_pct = body.get("max_exposure_pct", ctx.config.risk.max_portfolio_exposure_pct)
-        max_single_stock_pct = body.get("max_single_stock_pct", ctx.config.risk.max_single_stock_exposure_pct)
+        max_single_stock_pct = body.get("max_single_stock_pct", ctx.config.risk.max_single_stock_pct)
         max_positions = body.get("max_positions", ctx.config.risk.max_open_positions)
         initial_capital = body.get("initial_capital", 100000)
 

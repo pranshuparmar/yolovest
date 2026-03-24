@@ -5,7 +5,8 @@ import {
 } from "recharts";
 import clsx from "clsx";
 
-function fmt(n: number, d = 2) {
+function fmt(n: number | null | undefined, d = 2) {
+  if (n == null) return "0";
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
