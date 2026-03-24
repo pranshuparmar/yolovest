@@ -1736,3 +1736,281 @@ class Database:
         )
         await self.conn.commit()
         return cursor.rowcount
+
+    # ------------------------------------------------------------------
+    # Symbol Deep-Dive (Feature #3)
+    # ------------------------------------------------------------------
+
+    async def get_symbol_trades(self, symbol: str, limit: int = 50) -> list[dict[str, Any]]:
+        """All trades for a specific symbol."""
+        return await self.get_trades_history(symbol=symbol, limit=limit)
+
+    async def get_symbol_predictions(self, symbol: str) -> list[dict[str, Any]]:
+        """Predictions linked to a specific symbol via signals."""
+        cursor = await self.conn.execute(
+            "SELECT p.*, s.symbol, s.signal_type, s.confidence_score "
+            "FROM predictions p "
+            "JOIN signals s ON p.signal_id = s.id "
+            "WHERE s.symbol = ? "
+            "ORDER BY p.created_at DESC LIMIT 50",
+            (symbol,),
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Strategy Performance (Feature #5)
+    # ------------------------------------------------------------------
+
+    async def get_strategy_performance(self) -> dict[str, Any]:
+        """Aggregate trade performance by signal type, product, sector, time-of-day, holding period."""
+        result: dict[str, Any] = {}
+
+        # By signal type (BUY vs SELL)
+        cursor = await self.conn.execute(
+            "SELECT signal_type, COUNT(*) as cnt, "
+            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, "
+            "SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses, "
+            "COALESCE(SUM(pnl), 0) as total_pnl, "
+            "COALESCE(AVG(pnl), 0) as avg_pnl "
+            "FROM trades WHERE pnl IS NOT NULL "
+            "GROUP BY signal_type"
+        )
+        rows = await cursor.fetchall()
+        result["by_signal_type"] = [dict[str, Any](r) for r in rows]
+
+        # By product (MIS vs CNC)
+        cursor = await self.conn.execute(
+            "SELECT product, COUNT(*) as cnt, "
+            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, "
+            "SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses, "
+            "COALESCE(SUM(pnl), 0) as total_pnl, "
+            "COALESCE(AVG(pnl), 0) as avg_pnl "
+            "FROM trades WHERE pnl IS NOT NULL "
+            "GROUP BY product"
+        )
+        rows = await cursor.fetchall()
+        result["by_product"] = [dict[str, Any](r) for r in rows]
+
+        # By hour of entry
+        cursor = await self.conn.execute(
+            "SELECT CAST(strftime('%H', created_at) AS INTEGER) as hour, "
+            "COUNT(*) as cnt, "
+            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, "
+            "SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses, "
+            "COALESCE(SUM(pnl), 0) as total_pnl, "
+            "COALESCE(AVG(pnl), 0) as avg_pnl "
+            "FROM trades WHERE pnl IS NOT NULL "
+            "GROUP BY hour ORDER BY hour"
+        )
+        rows = await cursor.fetchall()
+        result["by_hour"] = [dict[str, Any](r) for r in rows]
+
+        # By sector
+        cursor = await self.conn.execute(
+            "SELECT COALESCE(w.sector, 'Unknown') as sector, COUNT(*) as cnt, "
+            "SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END) as wins, "
+            "SUM(CASE WHEN t.pnl < 0 THEN 1 ELSE 0 END) as losses, "
+            "COALESCE(SUM(t.pnl), 0) as total_pnl, "
+            "COALESCE(AVG(t.pnl), 0) as avg_pnl "
+            "FROM trades t LEFT JOIN watchlist w ON t.symbol = w.symbol "
+            "WHERE t.pnl IS NOT NULL "
+            "GROUP BY sector ORDER BY total_pnl DESC"
+        )
+        rows = await cursor.fetchall()
+        result["by_sector"] = [dict[str, Any](r) for r in rows]
+
+        # By holding period bucket
+        cursor = await self.conn.execute(
+            "SELECT "
+            "CASE "
+            "  WHEN (julianday(closed_at) - julianday(created_at)) * 24 < 1 THEN '<1h' "
+            "  WHEN (julianday(closed_at) - julianday(created_at)) * 24 < 4 THEN '1-4h' "
+            "  WHEN (julianday(closed_at) - julianday(created_at)) < 1 THEN '4h-1d' "
+            "  ELSE '>1d' "
+            "END as holding_period, "
+            "COUNT(*) as cnt, "
+            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, "
+            "SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses, "
+            "COALESCE(SUM(pnl), 0) as total_pnl, "
+            "COALESCE(AVG(pnl), 0) as avg_pnl "
+            "FROM trades WHERE pnl IS NOT NULL AND closed_at IS NOT NULL "
+            "GROUP BY holding_period"
+        )
+        rows = await cursor.fetchall()
+        result["by_holding_period"] = [dict[str, Any](r) for r in rows]
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Execution Quality (Feature #8)
+    # ------------------------------------------------------------------
+
+    async def get_execution_quality(self, days: int = 30) -> dict[str, Any]:
+        """Detailed execution quality metrics."""
+        from datetime import timedelta
+        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+
+        # Slippage by hour
+        cursor = await self.conn.execute(
+            "SELECT CAST(strftime('%H', created_at) AS INTEGER) as hour, "
+            "COUNT(*) as cnt, "
+            "AVG(ABS(slippage)) as avg_slippage, "
+            "MAX(ABS(slippage)) as max_slippage "
+            "FROM trades WHERE created_at >= ? AND slippage IS NOT NULL "
+            "GROUP BY hour ORDER BY hour",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        slippage_by_hour = [dict[str, Any](r) for r in rows]
+
+        # Slippage by order size bucket
+        cursor = await self.conn.execute(
+            "SELECT "
+            "CASE "
+            "  WHEN quantity * entry_price < 10000 THEN '<10K' "
+            "  WHEN quantity * entry_price < 50000 THEN '10K-50K' "
+            "  WHEN quantity * entry_price < 100000 THEN '50K-1L' "
+            "  ELSE '>1L' "
+            "END as size_bucket, "
+            "COUNT(*) as cnt, "
+            "AVG(ABS(slippage)) as avg_slippage, "
+            "MAX(ABS(slippage)) as max_slippage "
+            "FROM trades WHERE created_at >= ? AND slippage IS NOT NULL "
+            "GROUP BY size_bucket",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        slippage_by_size = [dict[str, Any](r) for r in rows]
+
+        # Fill rate (% with non-null fill)
+        cursor = await self.conn.execute(
+            "SELECT COUNT(*) as total, "
+            "SUM(CASE WHEN fill_price IS NOT NULL AND fill_price > 0 THEN 1 ELSE 0 END) as filled "
+            "FROM trades WHERE created_at >= ?",
+            (cutoff,),
+        )
+        row = await cursor.fetchone()
+        total = row[0] if row else 0
+        filled = row[1] if row else 0
+
+        # Order-to-fill latency (approx: created_at to first audit entry of trade_execute)
+        cursor = await self.conn.execute(
+            "SELECT AVG(t.slippage) as avg_slip, "
+            "COUNT(*) as cnt, "
+            "SUM(CASE WHEN ABS(t.slippage) < 0.1 THEN 1 ELSE 0 END) as zero_slip_cnt "
+            "FROM trades t WHERE t.created_at >= ? AND t.slippage IS NOT NULL",
+            (cutoff,),
+        )
+        row = await cursor.fetchone()
+
+        # Overall stats
+        cursor = await self.conn.execute(
+            "SELECT AVG(ABS(slippage)) as avg_abs_slippage, "
+            "MAX(ABS(slippage)) as max_abs_slippage, "
+            "AVG(slippage) as avg_signed_slippage "
+            "FROM trades WHERE created_at >= ? AND slippage IS NOT NULL",
+            (cutoff,),
+        )
+        overall_row = await cursor.fetchone()
+
+        return {
+            "total_orders": total,
+            "filled_orders": filled,
+            "fill_rate_pct": round(filled / total * 100, 2) if total > 0 else 0,
+            "avg_abs_slippage": overall_row[0] if overall_row else 0,
+            "max_abs_slippage": overall_row[1] if overall_row else 0,
+            "avg_signed_slippage": overall_row[2] if overall_row else 0,
+            "zero_slippage_pct": round((row[2] or 0) / (row[1] or 1) * 100, 2) if row else 0,
+            "slippage_by_hour": slippage_by_hour,
+            "slippage_by_size": slippage_by_size,
+        }
+
+    # ------------------------------------------------------------------
+    # Correlation Data (Feature #7)
+    # ------------------------------------------------------------------
+
+    async def get_ohlcv_multi(self, symbols: list[str], days: int = 60) -> dict[str, list[dict[str, Any]]]:
+        """Fetch close prices for multiple symbols for correlation computation."""
+        from datetime import timedelta
+        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+
+        result: dict[str, list[dict[str, Any]]] = {}
+        for symbol in symbols:
+            cursor = await self.conn.execute(
+                "SELECT timestamp, close FROM ohlcv "
+                "WHERE symbol = ? AND interval = '1d' AND timestamp >= ? "
+                "ORDER BY timestamp ASC",
+                (symbol, cutoff),
+            )
+            rows = await cursor.fetchall()
+            result[symbol] = [{"timestamp": r[0], "close": r[1]} for r in rows]
+        return result
+
+    # ------------------------------------------------------------------
+    # Price Alerts (Feature #4)
+    # ------------------------------------------------------------------
+
+    async def create_price_alert(
+        self, symbol: str, target_price: float, direction: str, note: str | None = None
+    ) -> int:
+        """Create a new price alert. Returns the alert ID."""
+        cursor = await self.conn.execute(
+            "INSERT INTO price_alerts (symbol, target_price, direction, note) "
+            "VALUES (?, ?, ?, ?)",
+            (symbol.upper(), target_price, direction, note),
+        )
+        await self.conn.commit()
+        return cursor.lastrowid or 0
+
+    async def get_price_alerts(self, active_only: bool = True) -> list[dict[str, Any]]:
+        """Get price alerts."""
+        if active_only:
+            cursor = await self.conn.execute(
+                "SELECT * FROM price_alerts WHERE active = 1 ORDER BY created_at DESC"
+            )
+        else:
+            cursor = await self.conn.execute(
+                "SELECT * FROM price_alerts ORDER BY created_at DESC LIMIT 100"
+            )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](r) for r in rows]
+
+    async def delete_price_alert(self, alert_id: int) -> bool:
+        """Delete a price alert."""
+        cursor = await self.conn.execute(
+            "DELETE FROM price_alerts WHERE id = ?", (alert_id,)
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def trigger_price_alert(self, alert_id: int) -> None:
+        """Mark an alert as triggered."""
+        now = datetime.now(IST).isoformat()
+        await self.conn.execute(
+            "UPDATE price_alerts SET active = 0, triggered_at = ? WHERE id = ?",
+            (now, alert_id),
+        )
+        await self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Risk Simulator (Feature #6)
+    # ------------------------------------------------------------------
+
+    async def get_historical_signals(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Fetch historical signals with their trade outcomes for simulation."""
+        cursor = await self.conn.execute(
+            "SELECT s.*, t.pnl, t.quantity, t.fill_price, t.slippage, "
+            "COALESCE(w.sector, 'Unknown') as sector "
+            "FROM signals s "
+            "LEFT JOIN trades t ON t.trade_id = ("
+            "  SELECT t2.trade_id FROM trades t2 "
+            "  JOIN predictions p ON p.trade_id = t2.trade_id "
+            "  WHERE p.signal_id = s.id LIMIT 1"
+            ") "
+            "LEFT JOIN watchlist w ON s.symbol = w.symbol "
+            "ORDER BY s.created_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](r) for r in rows]

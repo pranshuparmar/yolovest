@@ -20,6 +20,12 @@ import { NewsFeedPage } from "./pages/NewsFeedPage";
 import { MLModelsPage } from "./pages/MLModelsPage";
 import { PredictionsPage } from "./pages/PredictionsPage";
 import { WeeklySummaryPage } from "./pages/WeeklySummaryPage";
+import { SymbolPage } from "./pages/SymbolPage";
+import { StrategyPerformancePage } from "./pages/StrategyPerformancePage";
+import { AlertsPage } from "./pages/AlertsPage";
+import { RiskSimulatorPage } from "./pages/RiskSimulatorPage";
+import { CorrelationPage } from "./pages/CorrelationPage";
+import { ExecutionQualityPage } from "./pages/ExecutionQualityPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -65,6 +71,12 @@ function AppRoutes() {
         <Route path="/calendar" element={<EconomicCalendarPage />} />
         <Route path="/predictions" element={<PredictionsPage />} />
         <Route path="/ml-models" element={<MLModelsPage />} />
+        <Route path="/symbol/:symbol" element={<SymbolPage />} />
+        <Route path="/alerts" element={<AlertsPage />} />
+        <Route path="/strategy" element={<StrategyPerformancePage />} />
+        <Route path="/execution" element={<ExecutionQualityPage />} />
+        <Route path="/correlations" element={<CorrelationPage />} />
+        <Route path="/risk-sim" element={<RiskSimulatorPage />} />
         <Route path="/analytics" element={<AnalyticsPage />} />
         <Route path="/weekly" element={<WeeklySummaryPage />} />
         <Route path="/reports" element={<ReportsPage />} />

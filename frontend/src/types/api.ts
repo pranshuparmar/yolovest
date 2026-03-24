@@ -290,6 +290,86 @@ export interface NSESymbol {
   [key: string]: unknown;
 }
 
+export interface OHLCVBar {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface StrategyPerformance {
+  by_signal_type: PerformanceRow[];
+  by_product: PerformanceRow[];
+  by_hour: PerformanceRow[];
+  by_sector: PerformanceRow[];
+  by_holding_period: PerformanceRow[];
+}
+
+export interface PerformanceRow {
+  signal_type?: string;
+  product?: string;
+  hour?: number;
+  sector?: string;
+  holding_period?: string;
+  cnt: number;
+  wins: number;
+  losses: number;
+  total_pnl: number;
+  avg_pnl: number;
+}
+
+export interface ExecutionQuality {
+  total_orders: number;
+  filled_orders: number;
+  fill_rate_pct: number;
+  avg_abs_slippage: number;
+  max_abs_slippage: number;
+  avg_signed_slippage: number;
+  zero_slippage_pct: number;
+  slippage_by_hour: { hour: number; cnt: number; avg_slippage: number; max_slippage: number }[];
+  slippage_by_size: { size_bucket: string; cnt: number; avg_slippage: number; max_slippage: number }[];
+}
+
+export interface CorrelationData {
+  symbols: string[];
+  matrix: number[][];
+}
+
+export interface PriceAlert {
+  id: number;
+  symbol: string;
+  target_price: number;
+  direction: "above" | "below";
+  note: string | null;
+  active: number;
+  triggered_at: string | null;
+  created_at: string;
+}
+
+export interface RiskSimParams {
+  max_exposure_pct: number;
+  max_single_stock_pct: number;
+  max_positions: number;
+  initial_capital: number;
+}
+
+export interface RiskSimResult {
+  params: RiskSimParams;
+  results: {
+    trades_taken: number;
+    trades_skipped: number;
+    total_pnl: number;
+    final_capital: number;
+    win_rate: number;
+    wins: number;
+    losses: number;
+    max_drawdown_pct: number;
+    return_pct: number;
+  };
+}
+
 export interface WeeklyLLMReview {
   id: number;
   trade_id: string;

@@ -570,6 +570,267 @@ def create_app(ctx: AppContext) -> FastAPI:
         }
 
     # ------------------------------------------------------------------
+    # Symbol Deep-Dive (Feature #3)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/symbol/{symbol}/ohlcv")
+    async def get_symbol_ohlcv(
+        symbol: str,
+        days: int = Query(60, ge=1, le=365),
+        interval: str = Query("1d"),
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """OHLCV bars for a symbol."""
+        bars = await ctx.db.get_ohlcv(symbol.upper(), interval, days)
+        return [
+            {
+                "timestamp": b.timestamp.isoformat(),
+                "open": b.open,
+                "high": b.high,
+                "low": b.low,
+                "close": b.close,
+                "volume": b.volume,
+            }
+            for b in bars
+        ]
+
+    @app.get("/api/symbol/{symbol}/trades")
+    async def get_symbol_trades(
+        symbol: str,
+        limit: int = Query(50, ge=1, le=200),
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Trades for a specific symbol."""
+        return await ctx.db.get_symbol_trades(symbol.upper(), limit)
+
+    @app.get("/api/symbol/{symbol}/predictions")
+    async def get_symbol_predictions(
+        symbol: str, user: str = Depends(verify_credentials)
+    ) -> list[dict[str, Any]]:
+        """Predictions for a specific symbol."""
+        return await ctx.db.get_symbol_predictions(symbol.upper())
+
+    # ------------------------------------------------------------------
+    # Strategy Performance (Feature #5)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/strategy-performance")
+    async def get_strategy_performance(
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Aggregate trade performance by signal type, product, sector, time, holding period."""
+        return await ctx.db.get_strategy_performance()
+
+    # ------------------------------------------------------------------
+    # Execution Quality (Feature #8)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/execution-quality")
+    async def get_execution_quality(
+        days: int = Query(30, ge=1, le=365),
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Detailed execution quality metrics: slippage by hour/size, fill rate."""
+        return await ctx.db.get_execution_quality(days=days)
+
+    # ------------------------------------------------------------------
+    # Correlation Data (Feature #7)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/correlations")
+    async def get_correlations(
+        days: int = Query(60, ge=7, le=365),
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Correlation matrix for open positions' symbols."""
+        positions = await ctx.db.get_open_positions()
+        watchlist = await ctx.db.get_watchlist()
+        # Use symbols from positions + top watchlist
+        symbols = list({p.get("symbol", "") for p in positions if p.get("symbol")})
+        wl_symbols = [w.get("symbol", "") for w in watchlist[:10] if w.get("symbol")]
+        for s in wl_symbols:
+            if s not in symbols:
+                symbols.append(s)
+        symbols = symbols[:15]  # Cap at 15
+
+        if len(symbols) < 2:
+            return {"symbols": symbols, "matrix": [], "data": {}}
+
+        ohlcv = await ctx.db.get_ohlcv_multi(symbols, days)
+
+        # Compute returns and correlation
+        import math
+        returns: dict[str, list[float]] = {}
+        for sym, bars in ohlcv.items():
+            if len(bars) < 2:
+                continue
+            r = []
+            for i in range(1, len(bars)):
+                prev = bars[i - 1]["close"]
+                curr = bars[i]["close"]
+                if prev and prev > 0:
+                    r.append((curr - prev) / prev)
+            if r:
+                returns[sym] = r
+
+        valid_symbols = [s for s in symbols if s in returns]
+
+        # Pearson correlation
+        def pearson(x: list[float], y: list[float]) -> float:
+            n = min(len(x), len(y))
+            if n < 3:
+                return 0.0
+            x, y = x[:n], y[:n]
+            mx = sum(x) / n
+            my = sum(y) / n
+            num = sum((xi - mx) * (yi - my) for xi, yi in zip(x, y))
+            dx = math.sqrt(sum((xi - mx) ** 2 for xi in x))
+            dy = math.sqrt(sum((yi - my) ** 2 for yi in y))
+            if dx == 0 or dy == 0:
+                return 0.0
+            return round(num / (dx * dy), 3)
+
+        matrix: list[list[float]] = []
+        for s1 in valid_symbols:
+            row = []
+            for s2 in valid_symbols:
+                if s1 == s2:
+                    row.append(1.0)
+                else:
+                    row.append(pearson(returns[s1], returns[s2]))
+            matrix.append(row)
+
+        return {"symbols": valid_symbols, "matrix": matrix}
+
+    # ------------------------------------------------------------------
+    # Price Alerts (Feature #4)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/alerts")
+    async def get_alerts(
+        active_only: bool = Query(True),
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Get price alerts."""
+        return await ctx.db.get_price_alerts(active_only=active_only)
+
+    @app.post("/api/alerts")
+    async def create_alert(
+        body: dict[str, Any],
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Create a price alert."""
+        symbol = body.get("symbol", "").strip().upper()
+        target_price = body.get("target_price")
+        direction = body.get("direction", "above")
+        note = body.get("note")
+        if not symbol or target_price is None:
+            raise HTTPException(status_code=400, detail="symbol and target_price required")
+        if direction not in ("above", "below"):
+            raise HTTPException(status_code=400, detail="direction must be 'above' or 'below'")
+        alert_id = await ctx.db.create_price_alert(symbol, float(target_price), direction, note)
+        return {"success": True, "id": alert_id}
+
+    @app.delete("/api/alerts/{alert_id}")
+    async def delete_alert(
+        alert_id: int, user: str = Depends(verify_credentials)
+    ) -> dict[str, Any]:
+        """Delete a price alert."""
+        ok = await ctx.db.delete_price_alert(alert_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        return {"success": True}
+
+    # ------------------------------------------------------------------
+    # Risk Simulator (Feature #6)
+    # ------------------------------------------------------------------
+
+    @app.post("/api/risk-simulator")
+    async def run_risk_simulation(
+        body: dict[str, Any],
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Replay historical signals against modified risk parameters."""
+        max_exposure_pct = body.get("max_exposure_pct", ctx.config.risk.max_portfolio_exposure_pct)
+        max_single_stock_pct = body.get("max_single_stock_pct", ctx.config.risk.max_single_stock_exposure_pct)
+        max_positions = body.get("max_positions", ctx.config.risk.max_open_positions)
+        initial_capital = body.get("initial_capital", 100000)
+
+        signals = await ctx.db.get_historical_signals(200)
+
+        # Simple simulation
+        capital = float(initial_capital)
+        open_pos = 0
+        exposure = 0.0
+        stock_exposure: dict[str, float] = {}
+        trades_taken = 0
+        trades_skipped = 0
+        total_pnl = 0.0
+        wins = 0
+        losses = 0
+        peak = capital
+        max_drawdown = 0.0
+
+        for sig in signals:
+            pnl = sig.get("pnl")
+            if pnl is None:
+                continue
+
+            qty = sig.get("quantity", sig.get("position_size", 0))
+            entry = sig.get("entry_price", 0)
+            value = qty * entry if qty and entry else 0
+            symbol = sig.get("symbol", "")
+            new_exposure = (exposure + value) / capital if capital > 0 else 1
+
+            # Apply risk filters
+            if new_exposure > max_exposure_pct:
+                trades_skipped += 1
+                continue
+            sym_exp = (stock_exposure.get(symbol, 0) + value) / capital if capital > 0 else 1
+            if sym_exp > max_single_stock_pct:
+                trades_skipped += 1
+                continue
+            if open_pos >= max_positions:
+                trades_skipped += 1
+                continue
+
+            # Take trade
+            trades_taken += 1
+            capital += pnl
+            total_pnl += pnl
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
+            if capital > peak:
+                peak = capital
+            dd = (peak - capital) / peak if peak > 0 else 0
+            if dd > max_drawdown:
+                max_drawdown = dd
+
+        win_rate = wins / trades_taken if trades_taken > 0 else 0
+
+        return {
+            "params": {
+                "max_exposure_pct": max_exposure_pct,
+                "max_single_stock_pct": max_single_stock_pct,
+                "max_positions": max_positions,
+                "initial_capital": initial_capital,
+            },
+            "results": {
+                "trades_taken": trades_taken,
+                "trades_skipped": trades_skipped,
+                "total_pnl": round(total_pnl, 2),
+                "final_capital": round(capital, 2),
+                "win_rate": round(win_rate, 4),
+                "wins": wins,
+                "losses": losses,
+                "max_drawdown_pct": round(max_drawdown * 100, 2),
+                "return_pct": round((capital - initial_capital) / initial_capital * 100, 2),
+            },
+        }
+
+    # ------------------------------------------------------------------
     # FR-8.2: WebSocket Live Updates
     # ------------------------------------------------------------------
 

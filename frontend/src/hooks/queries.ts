@@ -308,3 +308,88 @@ export function useSystemState() {
     refetchInterval: STALE_30S,
   });
 }
+
+// Feature #3: Symbol deep-dive
+export function useSymbolOHLCV(symbol: string, params?: { days?: number; interval?: string }) {
+  return useQuery({
+    queryKey: ["symbol-ohlcv", symbol, params],
+    queryFn: () => api.symbolOHLCV(symbol, params),
+    enabled: !!symbol,
+    staleTime: 60_000,
+  });
+}
+
+export function useSymbolTrades(symbol: string) {
+  return useQuery({
+    queryKey: ["symbol-trades", symbol],
+    queryFn: () => api.symbolTrades(symbol),
+    enabled: !!symbol,
+    staleTime: STALE_30S,
+  });
+}
+
+export function useSymbolPredictions(symbol: string) {
+  return useQuery({
+    queryKey: ["symbol-predictions", symbol],
+    queryFn: () => api.symbolPredictions(symbol),
+    enabled: !!symbol,
+    staleTime: 60_000,
+  });
+}
+
+// Feature #5
+export function useStrategyPerformance() {
+  return useQuery({
+    queryKey: ["strategy-performance"],
+    queryFn: api.strategyPerformance,
+    staleTime: 60_000,
+  });
+}
+
+// Feature #8
+export function useExecutionQuality(days = 30) {
+  return useQuery({
+    queryKey: ["execution-quality", days],
+    queryFn: () => api.executionQuality(days),
+    staleTime: 60_000,
+  });
+}
+
+// Feature #7
+export function useCorrelations(days = 60) {
+  return useQuery({
+    queryKey: ["correlations", days],
+    queryFn: () => api.correlations(days),
+    staleTime: 60_000,
+  });
+}
+
+// Feature #4
+export function useAlerts(activeOnly = true) {
+  return useQuery({
+    queryKey: ["alerts", activeOnly],
+    queryFn: () => api.alerts(activeOnly),
+    staleTime: STALE_30S,
+  });
+}
+
+export function useCreateAlert() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.createAlert,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["alerts"] }),
+  });
+}
+
+export function useDeleteAlert() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.deleteAlert,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["alerts"] }),
+  });
+}
+
+// Feature #6
+export function useRiskSimulator() {
+  return useMutation({ mutationFn: api.riskSimulator });
+}

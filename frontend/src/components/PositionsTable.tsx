@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import clsx from "clsx";
 import type { Trade } from "../types/api";
 
@@ -36,7 +37,9 @@ export function PositionsTable({ positions }: { positions: Trade[] }) {
               key={p.trade_id}
               className="border-b border-gray-800/50 hover:bg-gray-800/30"
             >
-              <td className="py-2 pr-4 font-medium">{p.symbol}</td>
+              <td className="py-2 pr-4 font-medium">
+                <Link to={`/symbol/${p.symbol}`} className="text-emerald-400 hover:underline">{p.symbol}</Link>
+              </td>
               <td className="py-2 pr-4">
                 <span
                   className={clsx(

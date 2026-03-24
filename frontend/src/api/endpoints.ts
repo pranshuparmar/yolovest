@@ -25,6 +25,13 @@ import type {
   SystemState,
   NSESymbol,
   WeeklyLLMReview,
+  OHLCVBar,
+  StrategyPerformance,
+  ExecutionQuality,
+  CorrelationData,
+  PriceAlert,
+  RiskSimParams,
+  RiskSimResult,
 } from "../types/api";
 
 export const api = {
@@ -185,4 +192,51 @@ export const api = {
   premarket: () => apiFetch<PremarketData>("/api/premarket"),
 
   systemState: () => apiFetch<SystemState>("/api/system-state"),
+
+  // Feature #3: Symbol deep-dive
+  symbolOHLCV: (symbol: string, params?: { days?: number; interval?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.days) q.set("days", String(params.days));
+    if (params?.interval) q.set("interval", params.interval);
+    const qs = q.toString();
+    return apiFetch<OHLCVBar[]>(`/api/symbol/${symbol}/ohlcv${qs ? "?" + qs : ""}`);
+  },
+
+  symbolTrades: (symbol: string, limit = 50) =>
+    apiFetch<Trade[]>(`/api/symbol/${symbol}/trades?limit=${limit}`),
+
+  symbolPredictions: (symbol: string) =>
+    apiFetch<PredictionDetail[]>(`/api/symbol/${symbol}/predictions`),
+
+  // Feature #5
+  strategyPerformance: () =>
+    apiFetch<StrategyPerformance>("/api/strategy-performance"),
+
+  // Feature #8
+  executionQuality: (days = 30) =>
+    apiFetch<ExecutionQuality>(`/api/execution-quality?days=${days}`),
+
+  // Feature #7
+  correlations: (days = 60) =>
+    apiFetch<CorrelationData>(`/api/correlations?days=${days}`),
+
+  // Feature #4
+  alerts: (activeOnly = true) =>
+    apiFetch<PriceAlert[]>(`/api/alerts?active_only=${activeOnly}`),
+
+  createAlert: (data: { symbol: string; target_price: number; direction: string; note?: string }) =>
+    apiFetch<ActionResult>("/api/alerts", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  deleteAlert: (id: number) =>
+    apiFetch<ActionResult>(`/api/alerts/${id}`, { method: "DELETE" }),
+
+  // Feature #6
+  riskSimulator: (params: Partial<RiskSimParams>) =>
+    apiFetch<RiskSimResult>("/api/risk-simulator", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
 };
