@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first (cached layer)
-COPY pyproject.toml README.md ./
+COPY pyproject.toml ./
 RUN mkdir -p src/yolovest && \
     touch src/yolovest/__init__.py && \
     pip install --no-cache-dir pip --upgrade && \

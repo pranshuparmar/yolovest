@@ -359,7 +359,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     # ------------------------------------------------------------------
     # Static frontend serving (production)
     # ------------------------------------------------------------------
-    frontend_dist = Path(__file__).resolve().parent.parent.parent.parent / "frontend" / "dist"
+    frontend_dist = Path(__file__).resolve().parent.parent.parent.parent.parent / "frontend" / "dist"
     if frontend_dist.is_dir():
         # Serve built React assets
         app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="static")
