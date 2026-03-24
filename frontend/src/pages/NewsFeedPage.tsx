@@ -82,7 +82,7 @@ export function NewsFeedPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-lg font-semibold">News Feed</h2>
         <div className="flex items-center gap-3">
           <input
@@ -90,7 +90,7 @@ export function NewsFeedPage() {
             placeholder="Filter by symbol..."
             value={symbol}
             onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-            className="bg-gray-800 border border-gray-700 rounded px-3 py-1 text-sm text-gray-100 w-40"
+            className="bg-gray-800 border border-gray-700 rounded px-3 py-1 text-sm text-gray-100 w-32 sm:w-40"
           />
           <select
             value={limit}

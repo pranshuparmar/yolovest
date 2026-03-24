@@ -59,7 +59,7 @@ export function WeeklySummaryPage() {
       <h2 className="text-lg font-semibold">Weekly Summary</h2>
 
       {/* KPI cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
           <p className="text-xs text-gray-500">Trades</p>
           <p className="text-xl font-semibold">{trades?.length || 0}</p>

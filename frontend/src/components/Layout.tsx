@@ -14,19 +14,22 @@ export function Layout() {
   const { theme, toggle } = useTheme();
   const { notifications, clearAll, dismiss } = useNotifications();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
     <div className="flex h-screen overflow-hidden bg-gray-950">
       <Sidebar
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+        mobileOpen={mobileOpen}
+        onMobileClose={() => setMobileOpen(false)}
       />
       <div className="flex-1 flex flex-col min-w-0 h-screen">
         <header className="h-12 border-b border-gray-800 flex items-center justify-between px-4 shrink-0">
           <div className="flex items-center gap-3">
             {/* Mobile sidebar toggle */}
             <button
-              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              onClick={() => setMobileOpen(true)}
               className="md:hidden text-gray-400 hover:text-gray-200"
             >
               <svg
@@ -95,7 +98,7 @@ export function Layout() {
             </button>
           </div>
         </header>
-        <main className="flex-1 p-4 md:p-6 overflow-auto">
+        <main className="flex-1 p-3 sm:p-4 md:p-6 overflow-auto">
           <Outlet />
         </main>
       </div>

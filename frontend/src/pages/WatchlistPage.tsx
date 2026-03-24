@@ -59,7 +59,7 @@ export function WatchlistPage() {
               value={newSymbol}
               onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
               placeholder="e.g. RELIANCE"
-              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-40 focus:outline-none focus:border-emerald-500"
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full sm:w-40 focus:outline-none focus:border-emerald-500"
               onKeyDown={(e) => e.key === "Enter" && handleAdd()}
             />
           </div>
@@ -72,7 +72,7 @@ export function WatchlistPage() {
               value={newSector}
               onChange={(e) => setNewSector(e.target.value)}
               placeholder="e.g. IT"
-              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-32 focus:outline-none focus:border-emerald-500"
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full sm:w-32 focus:outline-none focus:border-emerald-500"
               onKeyDown={(e) => e.key === "Enter" && handleAdd()}
             />
           </div>

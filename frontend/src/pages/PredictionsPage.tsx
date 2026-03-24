@@ -156,7 +156,7 @@ export function PredictionsPage() {
       <h2 className="text-lg font-semibold">Predictions</h2>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
           <p className="text-xs text-gray-500">Today</p>
           <p className="text-xl font-semibold">{today?.length || 0}</p>

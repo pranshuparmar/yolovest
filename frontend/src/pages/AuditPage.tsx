@@ -22,7 +22,7 @@ export function AuditPage() {
         />
       </div>
 
-      <div className="flex gap-3 items-end">
+      <div className="flex flex-wrap gap-3 items-end">
         <div>
           <label className="block text-xs text-gray-500 mb-1">
             Action Type
@@ -32,7 +32,7 @@ export function AuditPage() {
             value={actionType || ""}
             onChange={(e) => setActionType(e.target.value || undefined)}
             placeholder="Filter..."
-            className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 w-40"
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 w-full sm:w-40"
           />
         </div>
         <div>
@@ -63,16 +63,16 @@ export function AuditPage() {
                   onClick={() =>
                     setExpanded(expanded === entry.id ? null : entry.id)
                   }
-                  className="w-full flex items-center gap-3 py-2 text-left text-sm hover:bg-gray-800/30"
+                  className="w-full flex flex-wrap items-center gap-2 sm:gap-3 py-2 text-left text-sm hover:bg-gray-800/30"
                 >
-                  <span className="text-gray-500 text-xs whitespace-nowrap w-20">
+                  <span className="text-gray-500 text-xs whitespace-nowrap w-16 sm:w-20">
                     {new Date(entry.timestamp_ist).toLocaleTimeString("en-IN", {
                       hour: "2-digit",
                       minute: "2-digit",
                       second: "2-digit",
                     })}
                   </span>
-                  <span className="text-gray-300 font-medium w-40 truncate">
+                  <span className="text-gray-300 font-medium w-28 sm:w-40 truncate">
                     {entry.action_type}
                   </span>
                   {entry.skill_name && (

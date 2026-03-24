@@ -258,7 +258,7 @@ export function DataManagementPage() {
 
       {/* Backups Section */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+        <div className="px-4 py-3 border-b border-gray-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <div>
             <h3 className="text-sm font-semibold text-gray-300">Backups</h3>
             <p className="text-xs text-gray-500 mt-0.5">
@@ -268,12 +268,13 @@ export function DataManagementPage() {
           <button
             onClick={handleBackup}
             disabled={createBackup.isPending}
-            className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors"
+            className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors shrink-0"
           >
             {createBackup.isPending ? "Creating..." : "Create Backup Now"}
           </button>
         </div>
         {backups && backups.length > 0 ? (
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
@@ -292,6 +293,7 @@ export function DataManagementPage() {
               ))}
             </tbody>
           </table>
+          </div>
         ) : (
           <div className="px-4 py-6 text-center text-sm text-gray-500">
             No backups found. Create one before performing destructive operations.
@@ -304,6 +306,7 @@ export function DataManagementPage() {
         <div className="px-4 py-3 border-b border-gray-800">
           <h3 className="text-sm font-semibold text-gray-300">Storage by Table</h3>
         </div>
+        <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
@@ -330,6 +333,7 @@ export function DataManagementPage() {
             })}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* Read-only Tables */}
@@ -338,6 +342,7 @@ export function DataManagementPage() {
           <div className="px-4 py-3 border-b border-gray-800">
             <h3 className="text-sm font-semibold text-gray-300">Other Tables (read-only)</h3>
           </div>
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
@@ -364,6 +369,7 @@ export function DataManagementPage() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -373,7 +379,7 @@ export function DataManagementPage() {
           <h3 className="text-sm font-semibold text-red-400">Danger Zone</h3>
         </div>
         <div className="p-4 space-y-4">
-          <div className="flex items-start justify-between gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
             <div>
               <div className="font-medium text-gray-200">Factory Reset</div>
               <p className="text-xs text-gray-500 mt-1 max-w-lg">

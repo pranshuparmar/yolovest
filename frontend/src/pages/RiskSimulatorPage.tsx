@@ -35,7 +35,7 @@ export function RiskSimulatorPage() {
       {/* Parameters */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
         <h3 className="text-sm font-medium text-gray-400 mb-4">Parameters</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
           <div>
             <label className="block text-xs text-gray-500 mb-1">Max Exposure %</label>
             <input type="range" min="0.1" max="1" step="0.05" value={maxExposure}
