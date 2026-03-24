@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   useDryRunHistory,
   useDryRunDetail,
@@ -35,6 +35,13 @@ export function DryRunPage() {
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const { data: signals, isLoading: detailLoading } =
     useDryRunDetail(selectedRun);
+
+  // Auto-select the most recent run on page load
+  useEffect(() => {
+    if (!selectedRun && history && history.length > 0) {
+      setSelectedRun(history[0].run_id);
+    }
+  }, [history, selectedRun]);
 
   const handleRun = () => {
     runDryRun.mutate(undefined, {
