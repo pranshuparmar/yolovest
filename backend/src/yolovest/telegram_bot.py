@@ -19,6 +19,32 @@ from yolovest.context import AppContext
 logger = logging.getLogger(__name__)
 
 
+def _fmt_inr(n: float, decimals: int = 2) -> str:
+    """Format a number using Indian numbering system (lakhs/crores).
+
+    Examples: 1,00,000.00  12,34,567.50  5,00,00,000.00
+    """
+    if n < 0:
+        return "-" + _fmt_inr(-n, decimals)
+    rounded = round(n, decimals) if decimals > 0 else round(n)
+    integer = int(rounded)
+    if decimals > 0:
+        frac = abs(rounded - integer)
+        decimal_part = f"{frac:.{decimals}f}"[1:]  # ".XX"
+    else:
+        decimal_part = ""
+    s = str(integer)
+    if len(s) <= 3:
+        return s + decimal_part
+    # Last 3 digits, then groups of 2 from right
+    result = s[-3:]
+    s = s[:-3]
+    while s:
+        result = s[-2:] + "," + result
+        s = s[:-2]
+    return result + decimal_part
+
+
 class TelegramBot:
     """Telegram bot for YoloVest commands and alerts."""
 
@@ -201,7 +227,7 @@ class TelegramBot:
         sign = "+" if total_pnl >= 0 else ""
         await update.message.reply_html(
             f"<b>Today's PnL</b>\n"
-            f"Total: {sign}₹{total_pnl:,.2f}\n"
+            f"Total: {sign}₹{_fmt_inr(total_pnl)}\n"
             f"Trades: {len(trades)} (W:{wins} L:{losses})"
         )
 
@@ -216,7 +242,7 @@ class TelegramBot:
         for pos in positions:
             lines.append(
                 f"  {pos.get('signal_type', '?')} {pos.get('symbol', '?')} "
-                f"qty={pos.get('quantity', 0)} @ {pos.get('entry_price', 0):.2f}"
+                f"qty={pos.get('quantity', 0)} @ ₹{_fmt_inr(pos.get('entry_price', 0))}"
             )
         await update.message.reply_html("\n".join(lines))
 
@@ -244,7 +270,7 @@ class TelegramBot:
         pnl = result.data.get("total_pnl", 0)
         await update.message.reply_html(
             f"<b>KILLED</b>\n"
-            f"All positions squared off. PnL: ₹{pnl:,.2f}\n"
+            f"All positions squared off. PnL: ₹{_fmt_inr(pnl)}\n"
             "Use /resume to restart."
         )
 
@@ -306,7 +332,7 @@ class TelegramBot:
             signal = p.get("signal_type", "?")
             qty = p.get("quantity", 0)
             entry = p.get("entry_price", 0)
-            pos_lines.append(f"  {signal} {symbol} x{qty} @ ₹{entry:,.0f}")
+            pos_lines.append(f"  {signal} {symbol} x{qty} @ ₹{_fmt_inr(entry, 0)}")
         if len(positions) > 5:
             pos_lines.append(f"  ... and {len(positions) - 5} more")
 
@@ -319,14 +345,14 @@ class TelegramBot:
             f"Mode: {self._ctx.config.mode.upper()}"
             f"{' | KILL SWITCH ACTIVE' if kill_active else ''}\n"
             f"\n<b>Portfolio</b>\n"
-            f"Capital: ₹{total_capital:,.0f}\n"
-            f"Cash: ₹{available_cash:,.0f}\n"
+            f"Capital: ₹{_fmt_inr(total_capital, 0)}\n"
+            f"Cash: ₹{_fmt_inr(available_cash, 0)}\n"
             f"Exposure: {exposure_pct:.1f}%\n"
             f"Daily PnL: {sign_d}{daily_pnl_pct:.2f}%\n"
             f"Weekly PnL: {sign_w}{weekly_pnl_pct:.2f}%\n"
             f"\n<b>Today's Activity</b>\n"
             f"Trades: {len(todays_trades)} (W:{wins} L:{losses} Open:{open_trades})\n"
-            f"PnL: {sign_p}₹{total_pnl:,.2f}\n"
+            f"PnL: {sign_p}₹{_fmt_inr(total_pnl)}\n"
         )
 
         if positions:
