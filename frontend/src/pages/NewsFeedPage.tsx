@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useNews, useSentiment } from "../hooks/queries";
 import clsx from "clsx";
 
@@ -52,19 +52,68 @@ function SentimentBadge({ symbol }: { symbol: string }) {
   );
 }
 
+function formatDateKey(iso: string): string {
+  const d = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+
+  if (d.toDateString() === today.toDateString()) return "Today";
+  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return d.toLocaleDateString("en-IN", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function NewsFeedPage() {
   const [symbol, setSymbol] = useState<string>("");
   const [sourceFilter, setSourceFilter] = useState<string>("");
   const [limit, setLimit] = useState(50);
+  const [dateFrom, setDateFrom] = useState<string>("");
   const { data: articles, isLoading } = useNews({
     symbol: symbol || undefined,
     limit,
   });
 
-  // Apply client-side source filter
-  const filtered = sourceFilter
-    ? (articles || []).filter((a) => a.source === sourceFilter)
-    : articles || [];
+  // Apply client-side filters
+  const filtered = useMemo(() => {
+    let list = articles || [];
+    if (sourceFilter) {
+      list = list.filter((a) => a.source === sourceFilter);
+    }
+    if (dateFrom) {
+      const cutoff = new Date(dateFrom).getTime();
+      list = list.filter(
+        (a) => a.published_at && new Date(a.published_at).getTime() >= cutoff
+      );
+    }
+    return list;
+  }, [articles, sourceFilter, dateFrom]);
+
+  // Group by date
+  const grouped = useMemo(() => {
+    const groups: { label: string; articles: typeof filtered }[] = [];
+    const map = new Map<string, typeof filtered>();
+    for (const a of filtered) {
+      const key = a.published_at ? formatDateKey(a.published_at) : "Unknown";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(a);
+    }
+    for (const [label, arts] of map) {
+      groups.push({ label, articles: arts });
+    }
+    return groups;
+  }, [filtered]);
 
   // Extract unique symbols from filtered articles for the sentiment panel
   const symbolsInFeed = Array.from(
@@ -80,22 +129,65 @@ export function NewsFeedPage() {
     setSourceFilter((prev) => (prev === source ? "" : source));
   };
 
+  const activeFilterCount =
+    (sourceFilter ? 1 : 0) + (dateFrom ? 1 : 0) + (symbol ? 1 : 0);
+
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold">News Feed</h2>
-        <div className="flex items-center gap-3">
+    <div className="flex flex-col h-full -m-3 sm:-m-4 md:-m-6">
+      {/* Fixed header with filters */}
+      <div className="shrink-0 px-3 sm:px-4 md:px-6 pt-3 sm:pt-4 md:pt-6 pb-3 border-b border-gray-800 bg-gray-950">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <h2 className="text-lg font-semibold">News Feed</h2>
+          {activeFilterCount > 0 && (
+            <button
+              onClick={() => {
+                setSymbol("");
+                setSourceFilter("");
+                setDateFrom("");
+              }}
+              className="text-xs text-gray-500 hover:text-gray-300"
+            >
+              Clear all filters ({activeFilterCount})
+            </button>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
           <input
             type="text"
             placeholder="Filter by symbol..."
             value={symbol}
             onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-            className="bg-gray-800 border border-gray-700 rounded px-3 py-1 text-sm text-gray-100 w-32 sm:w-40"
+            className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-32 sm:w-36"
           />
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100"
+          />
+          <select
+            value={sourceFilter}
+            onChange={(e) => setSourceFilter(e.target.value)}
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100"
+          >
+            <option value="">All sources</option>
+            {Object.keys(sourceColors).map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+            {allSources
+              .filter((s) => !sourceColors[s])
+              .map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+          </select>
           <select
             value={limit}
             onChange={(e) => setLimit(Number(e.target.value))}
-            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-gray-100"
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100"
           >
             <option value={25}>25 articles</option>
             <option value={50}>50 articles</option>
@@ -105,95 +197,97 @@ export function NewsFeedPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        {/* News articles */}
-        <div className="lg:col-span-3 space-y-3">
+      {/* Content area */}
+      <div className="flex-1 min-h-0 flex">
+        {/* Scrollable news feed */}
+        <div className="flex-1 overflow-y-auto px-3 sm:px-4 md:px-6 py-4">
           {isLoading ? (
             <div className="space-y-3">
               {Array.from({ length: 5 }).map((_, i) => (
                 <div
                   key={i}
-                  className="h-24 animate-pulse bg-gray-900 rounded-lg"
+                  className="h-20 animate-pulse bg-gray-900 rounded-lg"
                 />
               ))}
             </div>
           ) : filtered.length === 0 ? (
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
               <p className="text-gray-500 text-sm">No news articles found</p>
-              {sourceFilter && (
-                <button
-                  onClick={() => setSourceFilter("")}
-                  className="text-xs text-emerald-400 hover:underline mt-1"
-                >
-                  Clear source filter
-                </button>
-              )}
             </div>
           ) : (
-            filtered.map((article) => (
-              <div
-                key={article.content_hash}
-                className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors"
-              >
-                <div className="flex-1 min-w-0">
-                  <a
-                    href={article.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-gray-200 hover:text-emerald-400 transition-colors line-clamp-2"
-                  >
-                    {article.headline}
-                  </a>
-                  <div className="flex items-center gap-2 mt-2 flex-wrap">
-                    <SourceChip
-                      source={article.source}
-                      active={sourceFilter === article.source}
-                      onClick={() => toggleSource(article.source)}
-                    />
-                    <a
-                      href={article.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-gray-500 hover:text-emerald-400 transition-colors"
-                      title="Open original article"
-                    >
-                      {article.published_at
-                        ? new Date(article.published_at).toLocaleString(
-                            "en-IN",
-                            {
-                              month: "short",
-                              day: "numeric",
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            }
-                          )
-                        : "View source"}
-                      {" \u2197"}
-                    </a>
-                    {article.symbols.length > 0 && (
-                      <div className="flex gap-1 flex-wrap">
-                        {article.symbols.map((s) => (
-                          <span
-                            key={s}
-                            className="px-1.5 py-0.5 rounded bg-gray-800 text-emerald-400 text-xs cursor-pointer hover:bg-gray-700"
-                            onClick={() => setSymbol(s)}
-                          >
-                            {s}
+            <div className="space-y-6">
+              {grouped.map((group) => (
+                <div key={group.label}>
+                  {/* Date header */}
+                  <div className="flex items-center gap-3 mb-3">
+                    <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">
+                      {group.label}
+                    </h3>
+                    <div className="flex-1 border-t border-gray-800" />
+                    <span className="text-xs text-gray-600">
+                      {group.articles.length}
+                    </span>
+                  </div>
+
+                  {/* Articles in group */}
+                  <div className="space-y-2">
+                    {group.articles.map((article) => (
+                      <div
+                        key={article.content_hash}
+                        className="bg-gray-900 border border-gray-800 rounded-lg p-3 hover:border-gray-700 transition-colors"
+                      >
+                        <p className="text-sm text-gray-200 line-clamp-2">
+                          {article.headline}
+                        </p>
+                        <div className="flex items-center gap-2 mt-2 flex-wrap">
+                          <SourceChip
+                            source={article.source}
+                            active={sourceFilter === article.source}
+                            onClick={() => toggleSource(article.source)}
+                          />
+                          <span className="text-xs text-gray-500">
+                            {article.published_at
+                              ? formatTime(article.published_at)
+                              : ""}
                           </span>
-                        ))}
+                          {article.url && (
+                            <a
+                              href={article.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-gray-500 hover:text-emerald-400 transition-colors"
+                              title="Open original article"
+                            >
+                              &#8599;
+                            </a>
+                          )}
+                          {article.symbols.length > 0 && (
+                            <div className="flex gap-1 flex-wrap">
+                              {article.symbols.map((s) => (
+                                <span
+                                  key={s}
+                                  className="px-1.5 py-0.5 rounded bg-gray-800 text-emerald-400 text-xs cursor-pointer hover:bg-gray-700"
+                                  onClick={() => setSymbol(s)}
+                                >
+                                  {s}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    )}
+                    ))}
                   </div>
                 </div>
-              </div>
-            ))
+              ))}
+            </div>
           )}
         </div>
 
-        {/* Right sidebar */}
-        <div className="space-y-4">
-          {/* Sources — clickable to filter */}
-          <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+        {/* Fixed right sidebar */}
+        <div className="hidden lg:block w-64 shrink-0 border-l border-gray-800 overflow-y-auto p-4 space-y-4">
+          {/* Sources */}
+          <div>
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-medium text-gray-400">Sources</h3>
               {sourceFilter && (
@@ -224,7 +318,6 @@ export function NewsFeedPage() {
                   </div>
                 );
               })}
-              {/* Show any extra sources not in the predefined list */}
               {allSources
                 .filter((s) => !sourceColors[s])
                 .map((source) => {
@@ -249,7 +342,7 @@ export function NewsFeedPage() {
           </div>
 
           {/* Sentiment overview */}
-          <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+          <div>
             <h3 className="text-sm font-medium text-gray-400 mb-3">
               Sentiment Overview
             </h3>
@@ -262,7 +355,7 @@ export function NewsFeedPage() {
                 {symbolsInFeed.map((s) => (
                   <div
                     key={s}
-                    className="flex items-center justify-between py-1.5 border-b border-gray-800/50 last:border-0"
+                    className="flex items-center justify-between py-1 border-b border-gray-800/50 last:border-0"
                   >
                     <span
                       className="text-sm font-medium text-emerald-400 cursor-pointer hover:underline"
