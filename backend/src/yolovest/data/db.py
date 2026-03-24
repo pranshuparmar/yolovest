@@ -1626,6 +1626,50 @@ class Database:
         logger.info("Manual cleanup: deleted %d rows from %s (older than %d days)", deleted, table, older_than_days)
         return deleted
 
+    async def reset_all_data(self) -> dict[str, int]:
+        """Delete ALL rows from all data tables. Schema and migrations are preserved.
+
+        Returns dict of table -> rows deleted.
+        """
+        tables = [
+            "ohlcv", "news_articles", "economic_events", "audit_log",
+            "predictions", "trades", "signals", "watchlist", "sentiment",
+            "premarket", "llm_reviews", "fundamentals", "model_versions",
+            "failure_analyses", "prediction_scoreboard", "reports",
+            "agent_memory", "price_alerts",
+        ]
+        deleted: dict[str, int] = {}
+        for table in tables:
+            try:
+                cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
+                deleted[table] = cursor.rowcount
+            except Exception:
+                deleted[table] = 0  # Table may not exist yet
+        await self.conn.commit()
+        # Reclaim disk space
+        await self.conn.execute("VACUUM")
+        total = sum(deleted.values())
+        logger.warning("Full database reset: deleted %d total rows across %d tables", total, len(tables))
+        return deleted
+
+    async def list_backups(self, backup_dir: str) -> list[dict[str, Any]]:
+        """List available backup files with size and timestamp."""
+        import os
+
+        backup_path = Path(backup_dir)
+        if not backup_path.is_dir():
+            return []
+
+        backups = []
+        for f in sorted(backup_path.glob("yolovest_*.db"), key=lambda p: p.stat().st_mtime, reverse=True):
+            stat = f.stat()
+            backups.append({
+                "filename": f.name,
+                "size_bytes": stat.st_size,
+                "created_at": datetime.fromtimestamp(stat.st_mtime, tz=IST).isoformat(),
+            })
+        return backups
+
     # ------------------------------------------------------------------
     # Slippage Stats (FR-6.7)
     # ------------------------------------------------------------------

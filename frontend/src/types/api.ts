@@ -408,3 +408,20 @@ export interface CleanupResult {
   table: string;
   rows_deleted: number;
 }
+
+export interface BackupResult {
+  success: boolean;
+  backup_path: string;
+}
+
+export interface BackupEntry {
+  filename: string;
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface ResetResult {
+  success: boolean;
+  total_rows_deleted: number;
+  by_table: Record<string, number>;
+}

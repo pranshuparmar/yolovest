@@ -1,5 +1,11 @@
 import { useState } from "react";
-import { useStorageStats, useCleanupTable } from "../hooks/queries";
+import {
+  useStorageStats,
+  useCleanupTable,
+  useBackups,
+  useCreateBackup,
+  useResetAllData,
+} from "../hooks/queries";
 import type { TableStats } from "../types/api";
 
 const TABLE_INFO: Record<string, { label: string; description: string; defaultDays: number }> = {
@@ -25,6 +31,20 @@ function formatDate(iso: string | null): string {
       day: "2-digit",
       month: "short",
       year: "numeric",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function formatDateTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString("en-IN", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
     });
   } catch {
     return iso;
@@ -117,18 +137,55 @@ function TableRow({
 
 export function DataManagementPage() {
   const { data, isLoading, error } = useStorageStats();
+  const { data: backups } = useBackups();
   const cleanup = useCleanupTable();
-  const [lastResult, setLastResult] = useState<{ table: string; deleted: number } | null>(null);
+  const createBackup = useCreateBackup();
+  const resetAll = useResetAllData();
+  const [lastResult, setLastResult] = useState<string | null>(null);
+  const [resetStep, setResetStep] = useState<"idle" | "warn" | "confirm">("idle");
 
   const handleCleanup = (table: string, days: number) => {
     cleanup.mutate(
       { table, older_than_days: days },
       {
         onSuccess: (result) => {
-          setLastResult({ table, deleted: result.rows_deleted });
+          setLastResult(
+            `Deleted ${formatNumber(result.rows_deleted)} rows from ${TABLE_INFO[result.table]?.label ?? result.table}.`
+          );
         },
       }
     );
+  };
+
+  const handleBackup = () => {
+    createBackup.mutate(undefined, {
+      onSuccess: (result) => {
+        setLastResult(`Backup created: ${result.backup_path.split("/").pop()}`);
+      },
+    });
+  };
+
+  const handleReset = () => {
+    if (resetStep === "idle") {
+      setResetStep("warn");
+      return;
+    }
+    if (resetStep === "warn") {
+      setResetStep("confirm");
+      return;
+    }
+    // Final confirm
+    resetAll.mutate(undefined, {
+      onSuccess: (result) => {
+        setLastResult(
+          `Reset complete: deleted ${formatNumber(result.total_rows_deleted)} rows across all tables.`
+        );
+        setResetStep("idle");
+      },
+      onError: () => {
+        setResetStep("idle");
+      },
+    });
   };
 
   if (isLoading) {
@@ -163,11 +220,11 @@ export function DataManagementPage() {
       <div>
         <h2 className="text-lg font-bold text-gray-100">Data Management</h2>
         <p className="text-sm text-gray-500 mt-1">
-          Monitor database storage and clean up old data to free space.
+          Monitor database storage, manage backups, and clean up old data.
         </p>
       </div>
 
-      {/* DB Size Card */}
+      {/* DB Size Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
           <div className="text-xs text-gray-500 uppercase tracking-wide">Database Size</div>
@@ -192,15 +249,55 @@ export function DataManagementPage() {
       {/* Result Toast */}
       {lastResult && (
         <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3 text-sm text-emerald-400 flex items-center justify-between">
-          <span>
-            Deleted {formatNumber(lastResult.deleted)} rows from{" "}
-            <span className="font-medium">{TABLE_INFO[lastResult.table]?.label ?? lastResult.table}</span>.
-          </span>
+          <span>{lastResult}</span>
           <button onClick={() => setLastResult(null)} className="text-emerald-600 hover:text-emerald-400 text-xs">
             Dismiss
           </button>
         </div>
       )}
+
+      {/* Backups Section */}
+      <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-300">Backups</h3>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Automatic daily backups at 6 PM IST. Create a manual backup anytime.
+            </p>
+          </div>
+          <button
+            onClick={handleBackup}
+            disabled={createBackup.isPending}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors"
+          >
+            {createBackup.isPending ? "Creating..." : "Create Backup Now"}
+          </button>
+        </div>
+        {backups && backups.length > 0 ? (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                <th className="py-2 px-4 text-left">Filename</th>
+                <th className="py-2 px-4 text-right">Size</th>
+                <th className="py-2 px-4 text-right">Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {backups.map((b) => (
+                <tr key={b.filename} className="border-b border-gray-800 hover:bg-gray-800/30">
+                  <td className="py-2 px-4 font-mono text-gray-300 text-xs">{b.filename}</td>
+                  <td className="py-2 px-4 text-right text-gray-400">{formatBytes(b.size_bytes)}</td>
+                  <td className="py-2 px-4 text-right text-gray-400">{formatDateTime(b.created_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="px-4 py-6 text-center text-sm text-gray-500">
+            No backups found. Create one before performing destructive operations.
+          </div>
+        )}
+      </div>
 
       {/* Cleanable Tables */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
@@ -269,6 +366,68 @@ export function DataManagementPage() {
           </table>
         </div>
       )}
+
+      {/* Factory Reset - Danger Zone */}
+      <div className="bg-gray-900 border border-red-900/50 rounded-lg overflow-hidden">
+        <div className="px-4 py-3 border-b border-red-900/50">
+          <h3 className="text-sm font-semibold text-red-400">Danger Zone</h3>
+        </div>
+        <div className="p-4 space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="font-medium text-gray-200">Factory Reset</div>
+              <p className="text-xs text-gray-500 mt-1 max-w-lg">
+                Delete <span className="text-red-400 font-medium">ALL data</span> from every table and start from zero.
+                This includes trades, positions, predictions, news, OHLCV history, audit logs, and agent memory.
+                The database schema and migrations are preserved — the app will rebuild data from scratch on the next heartbeat.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {resetStep !== "idle" && (
+                <button
+                  onClick={() => setResetStep("idle")}
+                  className="px-3 py-1.5 rounded text-sm text-gray-400 hover:text-gray-200"
+                >
+                  Cancel
+                </button>
+              )}
+              <button
+                onClick={handleReset}
+                disabled={resetAll.isPending}
+                className={`px-4 py-1.5 rounded text-sm font-medium transition-colors disabled:opacity-50 ${
+                  resetStep === "confirm"
+                    ? "bg-red-600 hover:bg-red-700 text-white animate-pulse"
+                    : resetStep === "warn"
+                      ? "bg-red-700 hover:bg-red-800 text-white"
+                      : "bg-gray-700 hover:bg-gray-600 text-gray-200 border border-red-900/50"
+                }`}
+              >
+                {resetAll.isPending
+                  ? "Resetting..."
+                  : resetStep === "confirm"
+                    ? "I understand, delete everything"
+                    : resetStep === "warn"
+                      ? "Are you sure?"
+                      : "Reset All Data"}
+              </button>
+            </div>
+          </div>
+
+          {/* Warning banner shown during reset flow */}
+          {resetStep === "warn" && (
+            <div className="bg-amber-900/20 border border-amber-800 rounded-lg p-3 text-sm text-amber-400">
+              <span className="font-semibold">Create a backup first!</span> Use the "Create Backup Now" button above
+              before proceeding. This action is irreversible.
+            </div>
+          )}
+          {resetStep === "confirm" && (
+            <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-sm text-red-400">
+              <span className="font-semibold">Final warning:</span> This will permanently delete all data.
+              The app will start fresh on the next heartbeat cycle. Click "I understand, delete everything" to proceed.
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

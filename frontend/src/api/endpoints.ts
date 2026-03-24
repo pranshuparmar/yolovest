@@ -34,6 +34,9 @@ import type {
   RiskSimResult,
   StorageStats,
   CleanupResult,
+  BackupResult,
+  BackupEntry,
+  ResetResult,
 } from "../types/api";
 
 export const api = {
@@ -249,4 +252,10 @@ export const api = {
     apiFetch<CleanupResult>(`/api/cleanup?table=${data.table}&older_than_days=${data.older_than_days}`, {
       method: "POST",
     }),
+
+  createBackup: () => apiFetch<BackupResult>("/api/backup", { method: "POST" }),
+
+  listBackups: () => apiFetch<BackupEntry[]>("/api/backups"),
+
+  resetAllData: () => apiFetch<ResetResult>("/api/reset", { method: "POST" }),
 };

@@ -410,3 +410,30 @@ export function useCleanupTable() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["storage-stats"] }),
   });
 }
+
+export function useBackups() {
+  return useQuery({
+    queryKey: ["backups"],
+    queryFn: api.listBackups,
+    staleTime: 60_000,
+  });
+}
+
+export function useCreateBackup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.createBackup,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["backups"] }),
+  });
+}
+
+export function useResetAllData() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.resetAllData,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+      qc.invalidateQueries({ queryKey: ["backups"] });
+    },
+  });
+}

@@ -855,6 +855,26 @@ def create_app(ctx: AppContext) -> FastAPI:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
+    @app.post("/api/backup")
+    async def create_backup(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
+        """Create a manual database backup."""
+        backup_dir = ctx.config.database.backup_dir
+        backup_path = await ctx.db.backup(backup_dir)
+        return {"success": True, "backup_path": backup_path}
+
+    @app.get("/api/backups")
+    async def list_backups(_user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
+        """List available database backups."""
+        backup_dir = ctx.config.database.backup_dir
+        return await ctx.db.list_backups(backup_dir)
+
+    @app.post("/api/reset")
+    async def reset_all_data(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
+        """Delete ALL data from all tables. Schema is preserved."""
+        deleted = await ctx.db.reset_all_data()
+        total = sum(deleted.values())
+        return {"success": True, "total_rows_deleted": total, "by_table": deleted}
+
     # ------------------------------------------------------------------
     # FR-8.2: WebSocket Live Updates
     # ------------------------------------------------------------------
