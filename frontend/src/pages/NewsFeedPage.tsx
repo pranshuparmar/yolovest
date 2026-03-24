@@ -10,6 +10,30 @@ const sourceColors: Record<string, string> = {
   "Google Finance": "bg-red-900/40 text-red-400",
 };
 
+function SourceChip({
+  source,
+  active,
+  onClick,
+}: {
+  source: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={clsx(
+        "px-2 py-0.5 rounded text-xs font-medium transition-all",
+        sourceColors[source] || "bg-gray-800 text-gray-400",
+        active && "ring-1 ring-current",
+        "cursor-pointer hover:opacity-80"
+      )}
+    >
+      {source}
+    </button>
+  );
+}
+
 function SentimentBadge({ symbol }: { symbol: string }) {
   const { data } = useSentiment(symbol);
   if (!data) return null;
@@ -30,16 +54,31 @@ function SentimentBadge({ symbol }: { symbol: string }) {
 
 export function NewsFeedPage() {
   const [symbol, setSymbol] = useState<string>("");
+  const [sourceFilter, setSourceFilter] = useState<string>("");
   const [limit, setLimit] = useState(50);
   const { data: articles, isLoading } = useNews({
     symbol: symbol || undefined,
     limit,
   });
 
-  // Extract unique symbols from articles for the sentiment panel
+  // Apply client-side source filter
+  const filtered = sourceFilter
+    ? (articles || []).filter((a) => a.source === sourceFilter)
+    : articles || [];
+
+  // Extract unique symbols from filtered articles for the sentiment panel
   const symbolsInFeed = Array.from(
-    new Set((articles || []).flatMap((a) => a.symbols))
+    new Set(filtered.flatMap((a) => a.symbols))
   ).slice(0, 20);
+
+  // All sources present in the unfiltered feed
+  const allSources = Array.from(
+    new Set((articles || []).map((a) => a.source))
+  );
+
+  const toggleSource = (source: string) => {
+    setSourceFilter((prev) => (prev === source ? "" : source));
+  };
 
   return (
     <div className="space-y-6">
@@ -78,63 +117,72 @@ export function NewsFeedPage() {
                 />
               ))}
             </div>
-          ) : !articles || articles.length === 0 ? (
+          ) : filtered.length === 0 ? (
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
               <p className="text-gray-500 text-sm">No news articles found</p>
+              {sourceFilter && (
+                <button
+                  onClick={() => setSourceFilter("")}
+                  className="text-xs text-emerald-400 hover:underline mt-1"
+                >
+                  Clear source filter
+                </button>
+              )}
             </div>
           ) : (
-            articles.map((article) => (
+            filtered.map((article) => (
               <div
                 key={article.content_hash}
                 className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
+                <div className="flex-1 min-w-0">
+                  <a
+                    href={article.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-gray-200 hover:text-emerald-400 transition-colors line-clamp-2"
+                  >
+                    {article.headline}
+                  </a>
+                  <div className="flex items-center gap-2 mt-2 flex-wrap">
+                    <SourceChip
+                      source={article.source}
+                      active={sourceFilter === article.source}
+                      onClick={() => toggleSource(article.source)}
+                    />
                     <a
                       href={article.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-sm text-gray-200 hover:text-emerald-400 transition-colors line-clamp-2"
+                      className="text-xs text-gray-500 hover:text-emerald-400 transition-colors"
+                      title="Open original article"
                     >
-                      {article.headline}
+                      {article.published_at
+                        ? new Date(article.published_at).toLocaleString(
+                            "en-IN",
+                            {
+                              month: "short",
+                              day: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            }
+                          )
+                        : "View source"}
+                      {" \u2197"}
                     </a>
-                    <div className="flex items-center gap-2 mt-2 flex-wrap">
-                      <span
-                        className={clsx(
-                          "px-2 py-0.5 rounded text-xs font-medium",
-                          sourceColors[article.source] ||
-                            "bg-gray-800 text-gray-400"
-                        )}
-                      >
-                        {article.source}
-                      </span>
-                      <span className="text-xs text-gray-500">
-                        {article.published_at
-                          ? new Date(article.published_at).toLocaleString(
-                              "en-IN",
-                              {
-                                month: "short",
-                                day: "numeric",
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              }
-                            )
-                          : ""}
-                      </span>
-                      {article.symbols.length > 0 && (
-                        <div className="flex gap-1 flex-wrap">
-                          {article.symbols.map((s) => (
-                            <span
-                              key={s}
-                              className="px-1.5 py-0.5 rounded bg-gray-800 text-emerald-400 text-xs cursor-pointer hover:bg-gray-700"
-                              onClick={() => setSymbol(s)}
-                            >
-                              {s}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                    {article.symbols.length > 0 && (
+                      <div className="flex gap-1 flex-wrap">
+                        {article.symbols.map((s) => (
+                          <span
+                            key={s}
+                            className="px-1.5 py-0.5 rounded bg-gray-800 text-emerald-400 text-xs cursor-pointer hover:bg-gray-700"
+                            onClick={() => setSymbol(s)}
+                          >
+                            {s}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -142,8 +190,65 @@ export function NewsFeedPage() {
           )}
         </div>
 
-        {/* Sentiment sidebar */}
+        {/* Right sidebar */}
         <div className="space-y-4">
+          {/* Sources — clickable to filter */}
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium text-gray-400">Sources</h3>
+              {sourceFilter && (
+                <button
+                  onClick={() => setSourceFilter("")}
+                  className="text-xs text-gray-500 hover:text-gray-300"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div className="space-y-2">
+              {Object.keys(sourceColors).map((source) => {
+                const count = (articles || []).filter(
+                  (a) => a.source === source
+                ).length;
+                return (
+                  <div
+                    key={source}
+                    className="flex items-center justify-between"
+                  >
+                    <SourceChip
+                      source={source}
+                      active={sourceFilter === source}
+                      onClick={() => toggleSource(source)}
+                    />
+                    <span className="text-xs text-gray-500">{count}</span>
+                  </div>
+                );
+              })}
+              {/* Show any extra sources not in the predefined list */}
+              {allSources
+                .filter((s) => !sourceColors[s])
+                .map((source) => {
+                  const count = (articles || []).filter(
+                    (a) => a.source === source
+                  ).length;
+                  return (
+                    <div
+                      key={source}
+                      className="flex items-center justify-between"
+                    >
+                      <SourceChip
+                        source={source}
+                        active={sourceFilter === source}
+                        onClick={() => toggleSource(source)}
+                      />
+                      <span className="text-xs text-gray-500">{count}</span>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+
+          {/* Sentiment overview */}
           <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
             <h3 className="text-sm font-medium text-gray-400 mb-3">
               Sentiment Overview
@@ -170,25 +275,6 @@ export function NewsFeedPage() {
                 ))}
               </div>
             )}
-          </div>
-
-          {/* Source legend */}
-          <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <h3 className="text-sm font-medium text-gray-400 mb-3">Sources</h3>
-            <div className="space-y-2">
-              {Object.entries(sourceColors).map(([source, color]) => (
-                <div key={source} className="flex items-center gap-2">
-                  <span
-                    className={clsx(
-                      "px-2 py-0.5 rounded text-xs font-medium",
-                      color
-                    )}
-                  >
-                    {source}
-                  </span>
-                </div>
-              ))}
-            </div>
           </div>
         </div>
       </div>

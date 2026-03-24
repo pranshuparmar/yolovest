@@ -8,7 +8,7 @@ const links = [
   { to: "/watchlist", label: "Watchlist", icon: "W" },
   { to: "/news", label: "News Feed", icon: "N" },
   { to: "/calendar", label: "Calendar", icon: "C" },
-  { to: "/predictions", label: "Predictions", icon: "?" },
+  { to: "/predictions", label: "Predictions", icon: "F" },
   { to: "/ml-models", label: "ML Models", icon: "M" },
   { to: "/analytics", label: "Analytics", icon: "A" },
   { to: "/weekly", label: "Weekly", icon: "7" },
