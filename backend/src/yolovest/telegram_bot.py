@@ -69,23 +69,31 @@ class TelegramBot:
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
 
-        # Block until stop is requested — keeps the task alive and cancellable
-        await self._stop_event.wait()
+        # Block until stop is requested — keeps the task alive and cancellable.
+        # When the task is cancelled (Ctrl+C), CancelledError propagates and
+        # the finally block ensures the updater is stopped promptly.
+        try:
+            await self._stop_event.wait()
+        except asyncio.CancelledError:
+            logger.info("Telegram bot task cancelled, stopping updater")
+            raise
 
     async def stop(self) -> None:
         """Stop the Telegram bot with timeouts to avoid hanging on shutdown."""
         self._stop_event.set()
         if self._app:
+            # Short timeouts — the polling task should already be cancelled
+            # by the time stop() is called, so these are just cleanup.
             try:
-                await asyncio.wait_for(self._app.updater.stop(), timeout=3.0)
+                await asyncio.wait_for(self._app.updater.stop(), timeout=1.5)
             except (asyncio.TimeoutError, Exception):
                 logger.warning("Telegram updater stop timed out")
             try:
-                await asyncio.wait_for(self._app.stop(), timeout=2.0)
+                await asyncio.wait_for(self._app.stop(), timeout=1.0)
             except (asyncio.TimeoutError, Exception):
                 logger.warning("Telegram app stop timed out")
             try:
-                await asyncio.wait_for(self._app.shutdown(), timeout=2.0)
+                await asyncio.wait_for(self._app.shutdown(), timeout=1.0)
             except (asyncio.TimeoutError, Exception):
                 logger.warning("Telegram app shutdown timed out")
 

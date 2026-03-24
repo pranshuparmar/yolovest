@@ -305,6 +305,7 @@ class HeartbeatOrchestrator:
     async def start(self) -> None:
         """Start the heartbeat loop. Runs until stopped."""
         self._running = True
+        self._stop_event = asyncio.Event()
         logger.info("Heartbeat orchestrator started")
 
         while self._running:
@@ -337,9 +338,15 @@ class HeartbeatOrchestrator:
             sleep_time = max(0, interval - elapsed)
 
             if self._running:
-                await asyncio.sleep(sleep_time)
+                # Use event wait instead of sleep so stop() can interrupt immediately
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=sleep_time)
+                except asyncio.TimeoutError:
+                    pass  # Normal: timeout means interval elapsed, continue loop
 
     def stop(self) -> None:
         """Signal the heartbeat loop to stop."""
         self._running = False
+        if hasattr(self, "_stop_event"):
+            self._stop_event.set()
         logger.info("Heartbeat orchestrator stop requested")

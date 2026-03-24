@@ -356,25 +356,44 @@ async def async_main(args: argparse.Namespace) -> None:
     try:
         await orchestrator.start()
     finally:
+        # 1. Stop cron scheduler
         cron_scheduler.stop()
         cron_task.cancel()
-        # Cancel telegram task first to interrupt the long-poll HTTP request,
-        # which lets the subsequent stop() return much faster.
+
+        # 2. Cancel telegram task to interrupt the long-poll HTTP request,
+        #    then call stop() to cleanly shut down the updater.
         if telegram_task:
             telegram_task.cancel()
+            try:
+                await telegram_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if telegram_bot:
             try:
-                await asyncio.wait_for(telegram_bot.stop(), timeout=5.0)
+                await asyncio.wait_for(telegram_bot.stop(), timeout=3.0)
             except (asyncio.TimeoutError, Exception):
                 logger.warning("Telegram bot stop timed out, forcing shutdown")
+
+        # 3. Cancel dashboard
         if dashboard_task:
             dashboard_task.cancel()
+            try:
+                await dashboard_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # 4. Close database
         if isinstance(ctx.db, Database):
             await ctx.db.close()
-        # Force-cancel any remaining tasks (e.g. orphaned updater polling)
+
+        # 5. Force-cancel any remaining tasks (e.g. orphaned updater polling)
         for task in asyncio.all_tasks():
             if task is not asyncio.current_task():
                 task.cancel()
+        # Give cancelled tasks a chance to finish
+        remaining = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if remaining:
+            await asyncio.gather(*remaining, return_exceptions=True)
 
     logger.info("YoloVest shutdown complete")
 
