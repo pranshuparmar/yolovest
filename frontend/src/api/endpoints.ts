@@ -59,6 +59,15 @@ export const api = {
 
   watchlist: () => apiFetch<WatchlistItem[]>("/api/watchlist"),
 
+  addWatchlistSymbol: (symbol: string, sector?: string) =>
+    apiFetch<ActionResult>("/api/watchlist", {
+      method: "POST",
+      body: JSON.stringify({ symbol, sector }),
+    }),
+
+  removeWatchlistSymbol: (symbol: string) =>
+    apiFetch<ActionResult>(`/api/watchlist/${symbol}`, { method: "DELETE" }),
+
   sectors: () => apiFetch<SectorRotation>("/api/sectors"),
 
   scoreboard: (groupType?: string) => {

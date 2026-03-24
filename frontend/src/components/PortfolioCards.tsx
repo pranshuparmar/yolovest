@@ -69,7 +69,14 @@ export function PortfolioCards() {
       <Card label="Trades Today" value={String(data.trades_today)} />
       <Card
         label="Since Last Loss"
-        value={`${fmt(data.minutes_since_last_loss, 0)} min`}
+        value={
+          data.minutes_since_last_loss >= 999
+            ? "No losses"
+            : data.minutes_since_last_loss >= 60
+              ? `${fmt(data.minutes_since_last_loss / 60, 1)} hrs`
+              : `${fmt(data.minutes_since_last_loss, 0)} min`
+        }
+        color={data.minutes_since_last_loss >= 999 ? "text-emerald-400" : undefined}
       />
     </div>
   );

@@ -76,6 +76,23 @@ export function useWatchlist() {
   });
 }
 
+export function useAddWatchlistSymbol() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ symbol, sector }: { symbol: string; sector?: string }) =>
+      api.addWatchlistSymbol(symbol, sector),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist"] }),
+  });
+}
+
+export function useRemoveWatchlistSymbol() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (symbol: string) => api.removeWatchlistSymbol(symbol),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist"] }),
+  });
+}
+
 export function useSectors() {
   return useQuery({
     queryKey: ["sectors"],

@@ -16,12 +16,12 @@ export function Layout() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   return (
-    <div className="flex min-h-screen bg-gray-950 dark:bg-gray-950 light:bg-gray-50">
+    <div className="flex h-screen overflow-hidden bg-gray-950">
       <Sidebar
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 h-screen">
         <header className="h-12 border-b border-gray-800 flex items-center justify-between px-4 shrink-0">
           <div className="flex items-center gap-3">
             {/* Mobile sidebar toggle */}

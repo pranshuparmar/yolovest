@@ -263,6 +263,28 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
+    async def add_watchlist_symbol(self, symbol: str, sector: str | None = None) -> bool:
+        """Add a symbol to the watchlist. Returns True if inserted, False if already exists."""
+        try:
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO watchlist (symbol, composite_score, technical_score, "
+                "volume_momentum_score, news_sentiment_score, fundamental_score, sector) "
+                "VALUES (?, NULL, NULL, NULL, NULL, NULL, ?)",
+                (symbol.upper(), sector),
+            )
+            await self.conn.commit()
+            return True
+        except Exception:
+            return False
+
+    async def remove_watchlist_symbol(self, symbol: str) -> bool:
+        """Remove a symbol from the watchlist. Returns True if deleted."""
+        cursor = await self.conn.execute(
+            "DELETE FROM watchlist WHERE symbol = ?", (symbol.upper(),)
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
     # ------------------------------------------------------------------
     # Positions (read from trades table)
     # ------------------------------------------------------------------

@@ -159,6 +159,30 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Current watchlist with scores."""
         return await ctx.db.get_watchlist()
 
+    @app.post("/api/watchlist")
+    async def add_watchlist_symbol(
+        body: dict[str, Any],
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Add a symbol to the watchlist."""
+        symbol = body.get("symbol", "").strip().upper()
+        if not symbol:
+            raise HTTPException(status_code=400, detail="symbol is required")
+        sector = body.get("sector")
+        ok = await ctx.db.add_watchlist_symbol(symbol, sector)
+        return {"success": ok, "symbol": symbol}
+
+    @app.delete("/api/watchlist/{symbol}")
+    async def remove_watchlist_symbol(
+        symbol: str,
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Remove a symbol from the watchlist."""
+        ok = await ctx.db.remove_watchlist_symbol(symbol)
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found in watchlist")
+        return {"success": True, "symbol": symbol.upper()}
+
     @app.get("/api/sectors")
     async def get_sector_rotation(user: str = Depends(verify_credentials)) -> dict[str, Any]:
         """Sector rotation analysis."""

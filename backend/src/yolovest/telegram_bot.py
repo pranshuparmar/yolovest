@@ -63,6 +63,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("kill", self._cmd_kill))
         self._app.add_handler(CommandHandler("resume", self._cmd_resume))
         self._app.add_handler(CommandHandler("auth", self._cmd_auth))
+        self._app.add_handler(CommandHandler("dashboard", self._cmd_dashboard))
 
         logger.info("Telegram bot starting (polling)")
         await self._app.initialize()
@@ -143,22 +144,50 @@ class TelegramBot:
             "/stop — Pause trading\n"
             "/kill — Square off everything\n"
             "/resume — Resume trading\n"
-            "/auth <token> — Daily Kite auth"
+            "/auth <token> — Daily Kite auth\n"
+            "/dashboard — High-level overview"
         )
 
     async def _cmd_status(self, update: Any, context: Any) -> None:
-        """Handle /status command."""
+        """Handle /status command — system status + integration health."""
         db_ok = await self._ctx.db.health_check()
         kill_active = await self._ctx.db.is_kill_switch_active()
         positions = await self._ctx.db.get_open_positions()
         mode = self._ctx.config.mode
 
+        # Integration checks
+        gemini_ok = False
+        try:
+            gemini_ok = await self._ctx.llm.ping()
+        except Exception:
+            pass
+
+        broker_ok = False
+        try:
+            broker_ok = await self._ctx.broker.is_authenticated()
+        except Exception:
+            pass
+
+        market_data_ok = False
+        try:
+            market_data_ok = await self._ctx.market_data.health_check()
+        except Exception:
+            pass
+
+        def icon(ok: bool) -> str:
+            return "OK" if ok else "DOWN"
+
         status_text = (
             f"<b>YoloVest Status</b>\n"
             f"Mode: {mode.upper()}\n"
-            f"Database: {'OK' if db_ok else 'DOWN'}\n"
             f"Kill Switch: {'ACTIVE' if kill_active else 'Off'}\n"
-            f"Open Positions: {len(positions)}"
+            f"Open Positions: {len(positions)}\n"
+            f"\n<b>Integrations</b>\n"
+            f"Database: {icon(db_ok)}\n"
+            f"Gemini LLM: {icon(gemini_ok)}\n"
+            f"Zerodha Broker: {icon(broker_ok)}\n"
+            f"Market Data: {icon(market_data_ok)}\n"
+            f"Telegram: OK"  # If we're receiving this, Telegram works
         )
         await update.message.reply_html(status_text)
 
@@ -250,3 +279,58 @@ class TelegramBot:
             )
         except Exception as e:
             await update.message.reply_text(f"Auth failed: {e}")
+
+    async def _cmd_dashboard(self, update: Any, context: Any) -> None:
+        """Handle /dashboard — high-level overview of portfolio, trades, and system."""
+        portfolio = await self._ctx.db.get_portfolio_state()
+        positions = await self._ctx.db.get_open_positions()
+        todays_trades = await self._ctx.db.get_todays_trades()
+        kill_active = await self._ctx.db.is_kill_switch_active()
+
+        # Compute today's stats
+        total_pnl = sum(t.get("pnl", 0) for t in todays_trades if t.get("pnl") is not None)
+        wins = sum(1 for t in todays_trades if (t.get("pnl") or 0) > 0)
+        losses = sum(1 for t in todays_trades if (t.get("pnl") or 0) < 0)
+        open_trades = sum(1 for t in todays_trades if t.get("pnl") is None)
+
+        total_capital = portfolio.get("total_capital", 0)
+        available_cash = portfolio.get("available_cash", 0)
+        exposure_pct = portfolio.get("exposure_pct", 0) * 100
+        daily_pnl_pct = portfolio.get("daily_pnl_pct", 0)
+        weekly_pnl_pct = portfolio.get("weekly_pnl_pct", 0)
+
+        # Position summary
+        pos_lines = []
+        for p in positions[:5]:  # Top 5 positions
+            symbol = p.get("symbol", "?")
+            signal = p.get("signal_type", "?")
+            qty = p.get("quantity", 0)
+            entry = p.get("entry_price", 0)
+            pos_lines.append(f"  {signal} {symbol} x{qty} @ ₹{entry:,.0f}")
+        if len(positions) > 5:
+            pos_lines.append(f"  ... and {len(positions) - 5} more")
+
+        sign_d = "+" if daily_pnl_pct >= 0 else ""
+        sign_w = "+" if weekly_pnl_pct >= 0 else ""
+        sign_p = "+" if total_pnl >= 0 else ""
+
+        msg = (
+            f"<b>YoloVest Dashboard</b>\n"
+            f"Mode: {self._ctx.config.mode.upper()}"
+            f"{' | KILL SWITCH ACTIVE' if kill_active else ''}\n"
+            f"\n<b>Portfolio</b>\n"
+            f"Capital: ₹{total_capital:,.0f}\n"
+            f"Cash: ₹{available_cash:,.0f}\n"
+            f"Exposure: {exposure_pct:.1f}%\n"
+            f"Daily PnL: {sign_d}{daily_pnl_pct:.2f}%\n"
+            f"Weekly PnL: {sign_w}{weekly_pnl_pct:.2f}%\n"
+            f"\n<b>Today's Activity</b>\n"
+            f"Trades: {len(todays_trades)} (W:{wins} L:{losses} Open:{open_trades})\n"
+            f"PnL: {sign_p}₹{total_pnl:,.2f}\n"
+        )
+
+        if positions:
+            msg += f"\n<b>Open Positions ({len(positions)})</b>\n"
+            msg += "\n".join(pos_lines)
+
+        await update.message.reply_html(msg)
