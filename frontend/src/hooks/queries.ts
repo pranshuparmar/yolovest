@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/endpoints";
 
 const STALE_30S = 30_000;
@@ -213,6 +213,20 @@ export function useNews(params?: { symbol?: string; limit?: number }) {
   return useQuery({
     queryKey: ["news", params],
     queryFn: () => api.news(params),
+    staleTime: STALE_30S,
+  });
+}
+
+const NEWS_PAGE_SIZE = 50;
+
+export function useNewsInfinite(params?: { symbol?: string }) {
+  return useInfiniteQuery({
+    queryKey: ["news-infinite", params],
+    queryFn: ({ pageParam = 0 }) =>
+      api.news({ symbol: params?.symbol, limit: NEWS_PAGE_SIZE, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, _allPages, lastPageParam) =>
+      lastPage.length < NEWS_PAGE_SIZE ? undefined : lastPageParam + NEWS_PAGE_SIZE,
     staleTime: STALE_30S,
   });
 }

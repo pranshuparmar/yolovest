@@ -524,21 +524,21 @@ class Database:
         return inserted
 
     async def get_news_articles(
-        self, symbol: str | None = None, limit: int = 50
+        self, symbol: str | None = None, limit: int = 50, offset: int = 0
     ) -> list[dict[str, Any]]:
         """Retrieve recent news articles, optionally filtered by symbol."""
         if symbol:
             rows = await self.conn.execute_fetchall(
                 "SELECT content_hash, headline, source, url, symbols, published_at "
                 "FROM news_articles WHERE symbols LIKE ? "
-                "ORDER BY published_at DESC LIMIT ?",
-                (f"%{symbol}%", limit),
+                "ORDER BY published_at DESC LIMIT ? OFFSET ?",
+                (f"%{symbol}%", limit, offset),
             )
         else:
             rows = await self.conn.execute_fetchall(
                 "SELECT content_hash, headline, source, url, symbols, published_at "
-                "FROM news_articles ORDER BY published_at DESC LIMIT ?",
-                (limit,),
+                "FROM news_articles ORDER BY published_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             )
         results = []
         for r in rows:

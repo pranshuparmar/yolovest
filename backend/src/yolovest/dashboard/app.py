@@ -461,10 +461,11 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def get_news_feed(
         symbol: str | None = Query(None),
         limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Recent news articles with source attribution."""
-        articles = await ctx.db.get_news_articles(symbol=symbol, limit=limit)
+        articles = await ctx.db.get_news_articles(symbol=symbol, limit=limit, offset=offset)
         return articles
 
     @app.get("/api/sentiment/{symbol}")

@@ -1,6 +1,7 @@
-import { useState, useMemo } from "react";
-import { useNews, useSentiment } from "../hooks/queries";
+import { useState, useMemo, useRef, useCallback, useEffect } from "react";
+import { useNewsInfinite, useSentiment } from "../hooks/queries";
 import clsx from "clsx";
+import type { NewsArticle } from "../types/api";
 
 const sourceColors: Record<string, { color: string; label: string }> = {
   moneycontrol: { color: "bg-blue-900/40 text-blue-400", label: "MoneyControl" },
@@ -86,16 +87,25 @@ function formatTime(iso: string): string {
 export function NewsFeedPage() {
   const [symbol, setSymbol] = useState<string>("");
   const [sourceFilter, setSourceFilter] = useState<string>("");
-  const [limit, setLimit] = useState(50);
   const [dateFrom, setDateFrom] = useState<string>("");
-  const { data: articles, isLoading } = useNews({
-    symbol: symbol || undefined,
-    limit,
-  });
+
+  const {
+    data,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useNewsInfinite({ symbol: symbol || undefined });
+
+  // Flatten all pages into one list
+  const allArticles = useMemo(
+    () => data?.pages.flat() ?? [],
+    [data]
+  );
 
   // Apply client-side filters
   const filtered = useMemo(() => {
-    let list = articles || [];
+    let list = allArticles;
     if (sourceFilter) {
       list = list.filter((a) => a.source === sourceFilter);
     }
@@ -106,12 +116,12 @@ export function NewsFeedPage() {
       );
     }
     return list;
-  }, [articles, sourceFilter, dateFrom]);
+  }, [allArticles, sourceFilter, dateFrom]);
 
   // Group by date
   const grouped = useMemo(() => {
-    const groups: { label: string; articles: typeof filtered }[] = [];
-    const map = new Map<string, typeof filtered>();
+    const groups: { label: string; articles: NewsArticle[] }[] = [];
+    const map = new Map<string, NewsArticle[]>();
     for (const a of filtered) {
       const key = a.published_at ? formatDateKey(a.published_at) : "Unknown";
       if (!map.has(key)) map.set(key, []);
@@ -130,7 +140,7 @@ export function NewsFeedPage() {
 
   // All sources present in the unfiltered feed
   const allSources = Array.from(
-    new Set((articles || []).map((a) => a.source))
+    new Set(allArticles.map((a) => a.source))
   );
 
   const toggleSource = (source: string) => {
@@ -139,6 +149,32 @@ export function NewsFeedPage() {
 
   const activeFilterCount =
     (sourceFilter ? 1 : 0) + (dateFrom ? 1 : 0) + (symbol ? 1 : 0);
+
+  // Infinite scroll: observe a sentinel element at the bottom
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  const handleIntersect = useCallback(
+    (entries: IntersectionObserverEntry[]) => {
+      if (entries[0]?.isIntersecting && hasNextPage && !isFetchingNextPage) {
+        fetchNextPage();
+      }
+    },
+    [hasNextPage, isFetchingNextPage, fetchNextPage]
+  );
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const root = scrollRef.current;
+    if (!sentinel || !root) return;
+
+    const observer = new IntersectionObserver(handleIntersect, {
+      root,
+      rootMargin: "200px",
+    });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [handleIntersect]);
 
   return (
     <div className="flex flex-col h-full -m-3 sm:-m-4 md:-m-6">
@@ -192,23 +228,16 @@ export function NewsFeedPage() {
                 </option>
               ))}
           </select>
-          <select
-            value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
-            className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100"
-          >
-            <option value={25}>25 articles</option>
-            <option value={50}>50 articles</option>
-            <option value={100}>100 articles</option>
-            <option value={200}>200 articles</option>
-          </select>
+          <span className="text-xs text-gray-500">
+            {filtered.length} article{filtered.length !== 1 ? "s" : ""}
+          </span>
         </div>
       </div>
 
       {/* Content area */}
       <div className="flex-1 min-h-0 flex">
         {/* Scrollable news feed */}
-        <div className="flex-1 overflow-y-auto px-3 sm:px-4 md:px-6 py-4">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 sm:px-4 md:px-6 py-4">
           {isLoading ? (
             <div className="space-y-3">
               {Array.from({ length: 5 }).map((_, i) => (
@@ -288,6 +317,21 @@ export function NewsFeedPage() {
                   </div>
                 </div>
               ))}
+
+              {/* Sentinel + loading indicator */}
+              <div ref={sentinelRef} className="py-2">
+                {isFetchingNextPage && (
+                  <div className="flex items-center justify-center gap-2 py-4 text-gray-500 text-sm">
+                    <div className="w-4 h-4 border-2 border-gray-600 border-t-emerald-400 rounded-full animate-spin" />
+                    Loading more...
+                  </div>
+                )}
+                {!hasNextPage && allArticles.length > 0 && (
+                  <p className="text-center text-xs text-gray-600 py-2">
+                    All articles loaded
+                  </p>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -309,7 +353,7 @@ export function NewsFeedPage() {
             </div>
             <div className="space-y-2">
               {Object.keys(sourceColors).map((source) => {
-                const count = (articles || []).filter(
+                const count = allArticles.filter(
                   (a) => a.source === source
                 ).length;
                 return (
@@ -329,7 +373,7 @@ export function NewsFeedPage() {
               {allSources
                 .filter((s) => !sourceColors[s])
                 .map((source) => {
-                  const count = (articles || []).filter(
+                  const count = allArticles.filter(
                     (a) => a.source === source
                   ).length;
                   return (
