@@ -2,13 +2,21 @@ import { useState, useMemo } from "react";
 import { useNews, useSentiment } from "../hooks/queries";
 import clsx from "clsx";
 
-const sourceColors: Record<string, string> = {
-  MoneyControl: "bg-blue-900/40 text-blue-400",
-  "ET Markets": "bg-purple-900/40 text-purple-400",
-  LiveMint: "bg-emerald-900/40 text-emerald-400",
-  "NSE Official": "bg-amber-900/40 text-amber-400",
-  "Google Finance": "bg-red-900/40 text-red-400",
+const sourceColors: Record<string, { color: string; label: string }> = {
+  moneycontrol: { color: "bg-blue-900/40 text-blue-400", label: "MoneyControl" },
+  et_markets: { color: "bg-purple-900/40 text-purple-400", label: "ET Markets" },
+  livemint: { color: "bg-emerald-900/40 text-emerald-400", label: "LiveMint" },
+  nse: { color: "bg-amber-900/40 text-amber-400", label: "NSE Official" },
+  google_finance: { color: "bg-red-900/40 text-red-400", label: "Google Finance" },
 };
+
+function sourceLabel(source: string): string {
+  return sourceColors[source]?.label ?? source;
+}
+
+function sourceColorClass(source: string): string {
+  return sourceColors[source]?.color ?? "bg-gray-800 text-gray-400";
+}
 
 function SourceChip({
   source,
@@ -24,12 +32,12 @@ function SourceChip({
       onClick={onClick}
       className={clsx(
         "px-2 py-0.5 rounded text-xs font-medium transition-all",
-        sourceColors[source] || "bg-gray-800 text-gray-400",
+        sourceColorClass(source),
         active && "ring-1 ring-current",
         "cursor-pointer hover:opacity-80"
       )}
     >
-      {source}
+      {sourceLabel(source)}
     </button>
   );
 }
@@ -171,9 +179,9 @@ export function NewsFeedPage() {
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100"
           >
             <option value="">All sources</option>
-            {Object.keys(sourceColors).map((s) => (
-              <option key={s} value={s}>
-                {s}
+            {Object.entries(sourceColors).map(([key, { label }]) => (
+              <option key={key} value={key}>
+                {label}
               </option>
             ))}
             {allSources
