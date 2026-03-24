@@ -2,7 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
-import { useWebSocket } from "./hooks/useWebSocket";
+import { ThemeProvider } from "./hooks/useTheme";
 import { setAuthHeader, setOnUnauthorized } from "./api/client";
 import { Layout } from "./components/Layout";
 import { LoginPage } from "./pages/LoginPage";
@@ -15,6 +15,11 @@ import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
+import { EconomicCalendarPage } from "./pages/EconomicCalendarPage";
+import { NewsFeedPage } from "./pages/NewsFeedPage";
+import { MLModelsPage } from "./pages/MLModelsPage";
+import { PredictionsPage } from "./pages/PredictionsPage";
+import { WeeklySummaryPage } from "./pages/WeeklySummaryPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -33,8 +38,7 @@ function AuthSync() {
     setOnUnauthorized(logout);
   }, [authHeader, logout]);
 
-  useWebSocket();
-
+  // WebSocket is now handled by NotificationCenter in Layout
   if (!isAuthenticated) {
     return null;
   }
@@ -57,7 +61,12 @@ function AppRoutes() {
         <Route path="/trades" element={<TradesPage />} />
         <Route path="/trades/:tradeId" element={<TradeDetailPage />} />
         <Route path="/watchlist" element={<WatchlistPage />} />
+        <Route path="/news" element={<NewsFeedPage />} />
+        <Route path="/calendar" element={<EconomicCalendarPage />} />
+        <Route path="/predictions" element={<PredictionsPage />} />
+        <Route path="/ml-models" element={<MLModelsPage />} />
         <Route path="/analytics" element={<AnalyticsPage />} />
+        <Route path="/weekly" element={<WeeklySummaryPage />} />
         <Route path="/reports" element={<ReportsPage />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
@@ -71,10 +80,12 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <BrowserRouter>
-          <AuthSync />
-          <AppRoutes />
-        </BrowserRouter>
+        <ThemeProvider>
+          <BrowserRouter>
+            <AuthSync />
+            <AppRoutes />
+          </BrowserRouter>
+        </ThemeProvider>
       </AuthProvider>
     </QueryClientProvider>
   );

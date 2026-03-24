@@ -14,6 +14,17 @@ import type {
   AuditEntry,
   IntegrationsStatus,
   ActionResult,
+  EconomicEvent,
+  EarningsEvent,
+  NewsArticle,
+  SentimentResult,
+  MLModelsResponse,
+  PredictionDetail,
+  RiskExposure,
+  PremarketData,
+  SystemState,
+  NSESymbol,
+  WeeklyLLMReview,
 } from "../types/api";
 
 export const api = {
@@ -108,4 +119,61 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message }),
     }),
+
+  // --- New endpoints ---
+
+  economicCalendar: (params?: { days?: number; country?: string; event_type?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.days) q.set("days", String(params.days));
+    if (params?.country) q.set("country", params.country);
+    if (params?.event_type) q.set("event_type", params.event_type);
+    const qs = q.toString();
+    return apiFetch<EconomicEvent[]>(`/api/economic-calendar${qs ? "?" + qs : ""}`);
+  },
+
+  earnings: (params?: { symbol?: string; days?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.symbol) q.set("symbol", params.symbol);
+    if (params?.days) q.set("days", String(params.days));
+    const qs = q.toString();
+    return apiFetch<EarningsEvent[]>(`/api/earnings${qs ? "?" + qs : ""}`);
+  },
+
+  news: (params?: { symbol?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.symbol) q.set("symbol", params.symbol);
+    if (params?.limit) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return apiFetch<NewsArticle[]>(`/api/news${qs ? "?" + qs : ""}`);
+  },
+
+  sentiment: (symbol: string) =>
+    apiFetch<SentimentResult>(`/api/sentiment/${symbol}`),
+
+  mlModels: () => apiFetch<MLModelsResponse>("/api/ml-models"),
+
+  predictionsToday: () =>
+    apiFetch<PredictionDetail[]>("/api/predictions/today"),
+
+  predictionsUnscored: () =>
+    apiFetch<PredictionDetail[]>("/api/predictions/unscored"),
+
+  predictionOutcomes: () =>
+    apiFetch<PredictionDetail[]>("/api/predictions/outcomes"),
+
+  weeklyTrades: () => apiFetch<Trade[]>("/api/weekly/trades"),
+
+  weeklyPredictions: () =>
+    apiFetch<PredictionDetail[]>("/api/weekly/predictions"),
+
+  weeklyLLMReviews: () =>
+    apiFetch<WeeklyLLMReview[]>("/api/weekly/llm-reviews"),
+
+  riskExposure: () => apiFetch<RiskExposure>("/api/risk-exposure"),
+
+  nseUniverse: () => apiFetch<NSESymbol[]>("/api/nse-universe"),
+
+  premarket: () => apiFetch<PremarketData>("/api/premarket"),
+
+  systemState: () => apiFetch<SystemState>("/api/system-state"),
 };

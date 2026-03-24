@@ -166,3 +166,128 @@ export function useSendTelegram() {
     mutationFn: (message: string) => api.sendTelegram(message),
   });
 }
+
+// --- New hooks ---
+
+export function useEconomicCalendar(params?: { days?: number; country?: string; event_type?: string }) {
+  return useQuery({
+    queryKey: ["economic-calendar", params],
+    queryFn: () => api.economicCalendar(params),
+    staleTime: 60_000,
+  });
+}
+
+export function useEarnings(params?: { symbol?: string; days?: number }) {
+  return useQuery({
+    queryKey: ["earnings", params],
+    queryFn: () => api.earnings(params),
+    staleTime: 60_000,
+  });
+}
+
+export function useNews(params?: { symbol?: string; limit?: number }) {
+  return useQuery({
+    queryKey: ["news", params],
+    queryFn: () => api.news(params),
+    staleTime: STALE_30S,
+  });
+}
+
+export function useSentiment(symbol: string) {
+  return useQuery({
+    queryKey: ["sentiment", symbol],
+    queryFn: () => api.sentiment(symbol),
+    enabled: !!symbol,
+    staleTime: 60_000,
+  });
+}
+
+export function useMLModels() {
+  return useQuery({
+    queryKey: ["ml-models"],
+    queryFn: api.mlModels,
+    staleTime: 60_000,
+  });
+}
+
+export function usePredictionsToday() {
+  return useQuery({
+    queryKey: ["predictions", "today"],
+    queryFn: api.predictionsToday,
+    staleTime: STALE_30S,
+  });
+}
+
+export function usePredictionsUnscored() {
+  return useQuery({
+    queryKey: ["predictions", "unscored"],
+    queryFn: api.predictionsUnscored,
+    staleTime: STALE_30S,
+  });
+}
+
+export function usePredictionOutcomes() {
+  return useQuery({
+    queryKey: ["predictions", "outcomes"],
+    queryFn: api.predictionOutcomes,
+    staleTime: 60_000,
+  });
+}
+
+export function useWeeklyTrades() {
+  return useQuery({
+    queryKey: ["weekly", "trades"],
+    queryFn: api.weeklyTrades,
+    staleTime: 60_000,
+  });
+}
+
+export function useWeeklyPredictions() {
+  return useQuery({
+    queryKey: ["weekly", "predictions"],
+    queryFn: api.weeklyPredictions,
+    staleTime: 60_000,
+  });
+}
+
+export function useWeeklyLLMReviews() {
+  return useQuery({
+    queryKey: ["weekly", "llm-reviews"],
+    queryFn: api.weeklyLLMReviews,
+    staleTime: 60_000,
+  });
+}
+
+export function useRiskExposure() {
+  return useQuery({
+    queryKey: ["risk-exposure"],
+    queryFn: api.riskExposure,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function useNSEUniverse() {
+  return useQuery({
+    queryKey: ["nse-universe"],
+    queryFn: api.nseUniverse,
+    staleTime: 300_000,
+  });
+}
+
+export function usePremarket() {
+  return useQuery({
+    queryKey: ["premarket"],
+    queryFn: api.premarket,
+    staleTime: 60_000,
+  });
+}
+
+export function useSystemState() {
+  return useQuery({
+    queryKey: ["system-state"],
+    queryFn: api.systemState,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}

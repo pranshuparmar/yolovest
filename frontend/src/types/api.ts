@@ -191,3 +191,110 @@ export interface ActionResult {
   error?: string;
   margins?: Record<string, unknown> | null;
 }
+
+// --- New types for enhanced UI ---
+
+export interface EconomicEvent {
+  event_date: string;
+  event_type: string;
+  title: string;
+  country: string;
+  impact: "high" | "medium" | "low";
+  source: string;
+  symbol?: string;
+}
+
+export interface EarningsEvent {
+  event_date: string;
+  title: string;
+  symbol: string;
+  impact: string;
+  source: string;
+}
+
+export interface NewsArticle {
+  content_hash: string;
+  headline: string;
+  source: string;
+  url: string;
+  symbols: string[];
+  published_at: string;
+}
+
+export interface SentimentResult {
+  symbol: string;
+  sentiment: "bullish" | "bearish" | "neutral";
+  confidence: number;
+  key_drivers: string[];
+}
+
+export interface MLModelInfo {
+  model_type: string;
+  version: string;
+  file_path?: string;
+  sharpe_ratio?: number;
+  max_drawdown_pct?: number;
+  win_rate?: number;
+  profit_factor?: number;
+  status?: string;
+}
+
+export interface MLModelsResponse {
+  production: Record<string, MLModelInfo>;
+  shadow: MLModelInfo[];
+}
+
+export interface PredictionDetail {
+  prediction_id: string;
+  signal_id: number;
+  trade_id: string;
+  symbol?: string;
+  signal_type?: string;
+  confidence_score?: number;
+  created_at: string;
+  prediction_end_time: string | null;
+  actual_price: number | null;
+  direction_correct: boolean | null;
+  target_hit: boolean | null;
+  actual_pnl_pct: number | null;
+}
+
+export interface RiskExposure {
+  total_capital: number;
+  exposure_pct: number;
+  stock_exposures: Record<string, number>;
+  sector_counts: Record<string, number>;
+  sector_exposure_value: Record<string, number>;
+  sector_exposure_pct: Record<string, number>;
+  positions_count: number;
+}
+
+export interface PremarketData {
+  date: string | null;
+  gift_nifty_change_pct: number | null;
+  us_sp500_change_pct?: number | null;
+  market_bias: string | null;
+  llm_summary?: string | null;
+}
+
+export interface SystemState {
+  kill_switch_active: boolean;
+  orchestrator: string | null;
+  mode: "paper" | "live";
+}
+
+export interface NSESymbol {
+  symbol: string;
+  sector?: string;
+  industry?: string;
+  [key: string]: unknown;
+}
+
+export interface WeeklyLLMReview {
+  id: number;
+  trade_id: string;
+  decision: "APPROVE" | "REJECT" | "RESIZE";
+  reasoning: string;
+  pnl?: number | null;
+  created_at: string;
+}

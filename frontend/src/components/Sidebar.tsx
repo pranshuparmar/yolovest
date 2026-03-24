@@ -2,24 +2,57 @@ import { NavLink } from "react-router-dom";
 import clsx from "clsx";
 
 const links = [
-  { to: "/", label: "Dashboard", icon: "📊" },
-  { to: "/positions", label: "Positions", icon: "📈" },
-  { to: "/trades", label: "Trades", icon: "💹" },
-  { to: "/watchlist", label: "Watchlist", icon: "👁" },
-  { to: "/analytics", label: "Analytics", icon: "🔬" },
-  { to: "/reports", label: "Reports", icon: "📄" },
-  { to: "/audit", label: "Audit Log", icon: "📋" },
-  { to: "/integrations", label: "Integrations", icon: "🔌" },
+  { to: "/", label: "Dashboard", icon: "D" },
+  { to: "/positions", label: "Positions", icon: "P" },
+  { to: "/trades", label: "Trades", icon: "T" },
+  { to: "/watchlist", label: "Watchlist", icon: "W" },
+  { to: "/news", label: "News Feed", icon: "N" },
+  { to: "/calendar", label: "Calendar", icon: "C" },
+  { to: "/predictions", label: "Predictions", icon: "?" },
+  { to: "/ml-models", label: "ML Models", icon: "M" },
+  { to: "/analytics", label: "Analytics", icon: "A" },
+  { to: "/weekly", label: "Weekly", icon: "7" },
+  { to: "/reports", label: "Reports", icon: "R" },
+  { to: "/audit", label: "Audit Log", icon: "L" },
+  { to: "/integrations", label: "Integrations", icon: "I" },
 ];
 
-export function Sidebar() {
+export function Sidebar({
+  collapsed,
+  onToggle,
+}: {
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
   return (
-    <aside className="w-56 bg-gray-900 border-r border-gray-800 flex flex-col min-h-screen">
-      <div className="p-4 border-b border-gray-800">
-        <h1 className="text-lg font-bold text-emerald-400">YoloVest</h1>
-        <p className="text-xs text-gray-500">Trading Dashboard</p>
+    <aside
+      className={clsx(
+        "bg-gray-900 border-r border-gray-800 flex flex-col min-h-screen transition-all duration-200 shrink-0",
+        collapsed ? "w-14" : "w-52"
+      )}
+    >
+      <div className="p-3 border-b border-gray-800 flex items-center justify-between">
+        {!collapsed && (
+          <div>
+            <h1 className="text-base font-bold text-emerald-400">YoloVest</h1>
+            <p className="text-xs text-gray-500">Trading Dashboard</p>
+          </div>
+        )}
+        <button
+          onClick={onToggle}
+          className="text-gray-500 hover:text-gray-300 p-1"
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            {collapsed ? (
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+            ) : (
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+            )}
+          </svg>
+        </button>
       </div>
-      <nav className="flex-1 p-2 space-y-1">
+      <nav className="flex-1 p-1.5 space-y-0.5 overflow-y-auto">
         {links.map((link) => (
           <NavLink
             key={link.to}
@@ -27,15 +60,18 @@ export function Sidebar() {
             end={link.to === "/"}
             className={({ isActive }) =>
               clsx(
-                "flex items-center gap-2 px-3 py-2 rounded text-sm",
+                "flex items-center gap-2 px-2.5 py-1.5 rounded text-sm",
                 isActive
                   ? "bg-emerald-900/40 text-emerald-400"
                   : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
               )
             }
+            title={collapsed ? link.label : undefined}
           >
-            <span>{link.icon}</span>
-            {link.label}
+            <span className="w-5 h-5 rounded bg-gray-800/50 flex items-center justify-center text-xs font-bold shrink-0">
+              {link.icon}
+            </span>
+            {!collapsed && <span>{link.label}</span>}
           </NavLink>
         ))}
       </nav>

@@ -427,6 +427,40 @@ class Database:
         await self.conn.commit()
         return inserted
 
+    async def get_news_articles(
+        self, symbol: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Retrieve recent news articles, optionally filtered by symbol."""
+        if symbol:
+            rows = await self.conn.execute_fetchall(
+                "SELECT content_hash, headline, source, url, symbols, published_at "
+                "FROM news_articles WHERE symbols LIKE ? "
+                "ORDER BY published_at DESC LIMIT ?",
+                (f"%{symbol}%", limit),
+            )
+        else:
+            rows = await self.conn.execute_fetchall(
+                "SELECT content_hash, headline, source, url, symbols, published_at "
+                "FROM news_articles ORDER BY published_at DESC LIMIT ?",
+                (limit,),
+            )
+        results = []
+        for r in rows:
+            symbols_raw = r[4]
+            try:
+                symbols_parsed = json.loads(symbols_raw) if symbols_raw else []
+            except (json.JSONDecodeError, TypeError):
+                symbols_parsed = []
+            results.append({
+                "content_hash": r[0],
+                "headline": r[1],
+                "source": r[2],
+                "url": r[3],
+                "symbols": symbols_parsed,
+                "published_at": r[5],
+            })
+        return results
+
     # ------------------------------------------------------------------
     # Economic Calendar (FR-2.6)
     # ------------------------------------------------------------------

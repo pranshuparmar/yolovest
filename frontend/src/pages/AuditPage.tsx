@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useAudit } from "../hooks/queries";
+import { CSVExportButton } from "../components/CSVExportButton";
 
 export function AuditPage() {
   const [actionType, setActionType] = useState<string | undefined>(undefined);
@@ -13,7 +14,13 @@ export function AuditPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-semibold">Audit Log</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Audit Log</h2>
+        <CSVExportButton
+          data={(data || []) as unknown as Record<string, unknown>[]}
+          filename={`audit-${new Date().toISOString().split("T")[0]}`}
+        />
+      </div>
 
       <div className="flex gap-3 items-end">
         <div>

@@ -1,3 +1,115 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Light theme overrides */
+html.light {
+  --tw-bg-opacity: 1;
+}
+
+html.light body {
+  background-color: #f9fafb;
+  color: #111827;
+}
+
+html.light .bg-gray-950 {
+  background-color: #f9fafb;
+}
+
+html.light .bg-gray-900 {
+  background-color: #ffffff;
+}
+
+html.light .bg-gray-800 {
+  background-color: #f3f4f6;
+}
+
+html.light .bg-gray-800\/50 {
+  background-color: rgba(243, 244, 246, 0.5);
+}
+
+html.light .bg-gray-800\/30 {
+  background-color: rgba(243, 244, 246, 0.3);
+}
+
+html.light .border-gray-800 {
+  border-color: #e5e7eb;
+}
+
+html.light .border-gray-800\/50 {
+  border-color: rgba(229, 231, 235, 0.5);
+}
+
+html.light .border-gray-700 {
+  border-color: #d1d5db;
+}
+
+html.light .text-gray-100 {
+  color: #111827;
+}
+
+html.light .text-gray-200 {
+  color: #1f2937;
+}
+
+html.light .text-gray-300 {
+  color: #374151;
+}
+
+html.light .text-gray-400 {
+  color: #6b7280;
+}
+
+html.light .text-gray-500 {
+  color: #9ca3af;
+}
+
+html.light .text-gray-600 {
+  color: #d1d5db;
+}
+
+html.light input,
+html.light select {
+  background-color: #f3f4f6;
+  border-color: #d1d5db;
+  color: #111827;
+}
+
+html.light .hover\:bg-gray-800:hover {
+  background-color: #e5e7eb;
+}
+
+html.light .hover\:bg-gray-800\/30:hover {
+  background-color: rgba(229, 231, 235, 0.3);
+}
+
+html.light .hover\:bg-gray-700:hover {
+  background-color: #d1d5db;
+}
+
+html.light .hover\:text-gray-200:hover {
+  color: #1f2937;
+}
+
+html.light .hover\:text-gray-300:hover {
+  color: #374151;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #374151;
+  border-radius: 3px;
+}
+
+html.light ::-webkit-scrollbar-thumb {
+  background-color: #d1d5db;
+}

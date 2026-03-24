@@ -341,6 +341,211 @@ def create_app(ctx: AppContext) -> FastAPI:
             return {"success": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
+    # Economic Calendar & Earnings
+    # ------------------------------------------------------------------
+
+    @app.get("/api/economic-calendar")
+    async def get_economic_calendar(
+        days: int = Query(30, ge=1, le=90),
+        country: str | None = Query(None),
+        event_type: str | None = Query(None),
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Upcoming economic events (RBI MPC, FOMC, NSE earnings)."""
+        return await ctx.db.get_upcoming_economic_events(
+            days=days, country=country, event_type=event_type
+        )
+
+    @app.get("/api/earnings")
+    async def get_earnings(
+        symbol: str | None = Query(None),
+        days: int = Query(30, ge=1, le=90),
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Upcoming earnings events, optionally filtered by symbol."""
+        return await ctx.db.get_earnings_events(symbol=symbol, days=days)
+
+    # ------------------------------------------------------------------
+    # News Feed & Sentiment
+    # ------------------------------------------------------------------
+
+    @app.get("/api/news")
+    async def get_news_feed(
+        symbol: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=200),
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Recent news articles with source attribution."""
+        articles = await ctx.db.get_news_articles(symbol=symbol, limit=limit)
+        return articles
+
+    @app.get("/api/sentiment/{symbol}")
+    async def get_symbol_sentiment(
+        symbol: str, user: str = Depends(verify_credentials)
+    ) -> dict[str, Any]:
+        """Latest sentiment analysis for a symbol."""
+        result = await ctx.db.get_sentiment(symbol)
+        if not result:
+            return {"symbol": symbol, "sentiment": "neutral", "confidence": 0, "key_drivers": []}
+        # SentimentResult is a Pydantic model or dict
+        if hasattr(result, "model_dump"):
+            return result.model_dump()
+        if hasattr(result, "dict"):
+            return result.dict()
+        return result if isinstance(result, dict) else {"symbol": symbol, "sentiment": "neutral", "confidence": 0, "key_drivers": []}
+
+    # ------------------------------------------------------------------
+    # ML Models & Performance
+    # ------------------------------------------------------------------
+
+    @app.get("/api/ml-models")
+    async def get_ml_models(
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """ML model information: production models and shadow candidates."""
+        result: dict[str, Any] = {"production": {}, "shadow": []}
+        for model_type in ["intraday", "swing"]:
+            try:
+                model = await ctx.db.get_production_model(model_type)
+                if model:
+                    result["production"][model_type] = model
+            except Exception:
+                pass
+        try:
+            shadow_days = getattr(ctx.config, "ml", None)
+            days = getattr(shadow_days, "shadow_mode_days", 14) if shadow_days else 14
+            result["shadow"] = await ctx.db.get_shadow_models_ready(days)
+        except Exception:
+            pass
+        return result
+
+    # ------------------------------------------------------------------
+    # Predictions Detail & Failures
+    # ------------------------------------------------------------------
+
+    @app.get("/api/predictions/today")
+    async def get_todays_predictions(
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Today's predictions with linked symbols and confidence."""
+        return await ctx.db.get_todays_predictions()
+
+    @app.get("/api/predictions/unscored")
+    async def get_unscored_predictions(
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Predictions awaiting scoring (holding period not yet elapsed)."""
+        return await ctx.db.get_unscored_predictions()
+
+    @app.get("/api/predictions/outcomes")
+    async def get_prediction_outcomes(
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Scored prediction outcomes for failure analysis."""
+        return await ctx.db.get_prediction_outcomes()
+
+    # ------------------------------------------------------------------
+    # Weekly Summary
+    # ------------------------------------------------------------------
+
+    @app.get("/api/weekly/trades")
+    async def get_weekly_trades(
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """This week's trades."""
+        return await ctx.db.get_weekly_trades()
+
+    @app.get("/api/weekly/predictions")
+    async def get_weekly_predictions(
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """This week's predictions."""
+        return await ctx.db.get_weekly_predictions()
+
+    @app.get("/api/weekly/llm-reviews")
+    async def get_weekly_llm_reviews(
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """This week's LLM reviews with linked trade outcomes."""
+        return await ctx.db.get_weekly_llm_reviews()
+
+    # ------------------------------------------------------------------
+    # Risk Exposure
+    # ------------------------------------------------------------------
+
+    @app.get("/api/risk-exposure")
+    async def get_risk_exposure(
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Portfolio risk breakdown by stock and sector."""
+        portfolio = await ctx.db.get_portfolio_state()
+        positions = await ctx.db.get_open_positions()
+        stock_exposures = portfolio.get("stock_exposures", {})
+        sector_counts = portfolio.get("sector_counts", {})
+
+        # Build sector exposure from positions
+        sector_exposure: dict[str, float] = {}
+        for pos in positions:
+            sector = await ctx.db.get_stock_sector(pos.get("symbol", ""))
+            sector_name = sector or "Unknown"
+            value = pos.get("fill_price", 0) * pos.get("quantity", 0)
+            sector_exposure[sector_name] = sector_exposure.get(sector_name, 0) + value
+
+        total_capital = portfolio.get("total_capital", 1)
+        return {
+            "total_capital": total_capital,
+            "exposure_pct": portfolio.get("exposure_pct", 0),
+            "stock_exposures": stock_exposures,
+            "sector_counts": sector_counts,
+            "sector_exposure_value": sector_exposure,
+            "sector_exposure_pct": {
+                k: round(v / total_capital * 100, 2) if total_capital > 0 else 0
+                for k, v in sector_exposure.items()
+            },
+            "positions_count": len(positions),
+        }
+
+    # ------------------------------------------------------------------
+    # NSE Universe
+    # ------------------------------------------------------------------
+
+    @app.get("/api/nse-universe")
+    async def get_nse_universe(
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """All symbols in the NSE tracking universe."""
+        return await ctx.db.get_nse_universe()
+
+    # ------------------------------------------------------------------
+    # Pre-Market Data
+    # ------------------------------------------------------------------
+
+    @app.get("/api/premarket")
+    async def get_premarket(
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Latest pre-market data (GIFT Nifty, market bias)."""
+        data = await ctx.db.get_latest_premarket()
+        return data or {"date": None, "gift_nifty_change_pct": None, "market_bias": None}
+
+    # ------------------------------------------------------------------
+    # System State & Kill Switch
+    # ------------------------------------------------------------------
+
+    @app.get("/api/system-state")
+    async def get_system_state(
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """System state including kill switch and orchestrator status."""
+        kill_switch = await ctx.db.is_kill_switch_active()
+        orchestrator_state = await ctx.db.get_system_state("orchestrator")
+        return {
+            "kill_switch_active": kill_switch,
+            "orchestrator": orchestrator_state,
+            "mode": ctx.config.mode,
+        }
+
+    # ------------------------------------------------------------------
     # FR-8.2: WebSocket Live Updates
     # ------------------------------------------------------------------
 

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { TradesTable } from "../components/TradesTable";
+import { CSVExportButton } from "../components/CSVExportButton";
 import { useTrades } from "../hooks/queries";
 
 export function TradesPage() {
@@ -17,7 +18,13 @@ export function TradesPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-semibold">Trade History</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Trade History</h2>
+        <CSVExportButton
+          data={(data || []) as unknown as Record<string, unknown>[]}
+          filename={`trades-${new Date().toISOString().split("T")[0]}`}
+        />
+      </div>
 
       <div className="flex flex-wrap gap-3 items-end">
         <div>
