@@ -6,6 +6,7 @@ See REQUIREMENTS.md FR-2.1b.
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -83,6 +84,12 @@ class YFinanceProvider(MarketDataBase):
 
         bars = []
         for idx, row in df.iterrows():
+            # Skip rows with NaN values — yfinance sometimes returns
+            # incomplete bars for recently listed or illiquid stocks
+            o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
+            if any(math.isnan(v) for v in (o, h, l, c)):
+                continue
+
             ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else datetime.fromisoformat(str(idx))
             # Strip timezone for consistency
             if ts.tzinfo is not None:
@@ -90,10 +97,10 @@ class YFinanceProvider(MarketDataBase):
             bars.append(
                 OHLCVBar(
                     timestamp=ts,
-                    open=float(row["Open"]),
-                    high=float(row["High"]),
-                    low=float(row["Low"]),
-                    close=float(row["Close"]),
+                    open=float(o),
+                    high=float(h),
+                    low=float(l),
+                    close=float(c),
                     volume=int(row["Volume"]),
                 )
             )

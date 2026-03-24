@@ -40,7 +40,18 @@ class SquareOffSkill(SkillBase):
     name = "square-off"
     description = "Auto close all intraday positions at EOD"
     trigger = SkillTrigger.CRON
-    schedule = None  # dynamically set from market_hours.square_off config
+    schedule = None  # set from market_hours.square_off config in __init__
+
+    def __init__(self, ctx: Any) -> None:
+        super().__init__(ctx)
+        # Build cron from market_hours.square_off (e.g. "15:15" → "15 15 * * 1-5")
+        sq_time = ctx.config.market_hours.square_off
+        try:
+            parts = sq_time.split(":")
+            h, m = int(parts[0]), int(parts[1])
+            self.schedule = f"{m} {h} * * 1-5"  # weekdays only
+        except (ValueError, IndexError):
+            self.schedule = "15 15 * * 1-5"  # fallback default
 
     def should_run(self) -> bool:
         return bool(self.ctx.market_hours.is_square_off_window())

@@ -54,6 +54,7 @@ class NSEOfficialSource(NewsSource):
         self._session = session
         self._owns_session = session is None
         self._cookies_initialized = False
+        self._cookies_failed = False  # True if cookie init failed — skip further attempts
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create an aiohttp session with NSE cookies.
@@ -68,7 +69,7 @@ class NSEOfficialSource(NewsSource):
             )
             self._owns_session = True
 
-        if not self._cookies_initialized:
+        if not self._cookies_initialized and not self._cookies_failed:
             await self._initialize_cookies()
 
         return self._session
@@ -88,9 +89,14 @@ class NSEOfficialSource(NewsSource):
                     self._cookies_initialized = True
                     logger.debug("NSE cookies initialized successfully")
                 else:
-                    logger.warning("NSE homepage returned status %d", resp.status)
+                    logger.warning(
+                        "NSE homepage returned status %d — NSE data will be unavailable this session",
+                        resp.status,
+                    )
+                    self._cookies_failed = True
         except Exception as e:
-            logger.warning("Failed to initialize NSE cookies: %s", e)
+            logger.warning("Failed to initialize NSE cookies: %s — NSE data will be unavailable this session", e)
+            self._cookies_failed = True
 
     async def _api_get(self, path: str, params: dict[str, str] | None = None) -> Any:
         """Make a rate-limited GET request to NSE API.
@@ -102,6 +108,10 @@ class NSEOfficialSource(NewsSource):
         Returns:
             Parsed JSON response, or None on failure.
         """
+        # Skip all API calls if cookie initialization failed (NSE is blocking us)
+        if self._cookies_failed:
+            return None
+
         session = await self._get_session()
         url = f"{_BASE_URL}{path}"
 
