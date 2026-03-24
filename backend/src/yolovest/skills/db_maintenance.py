@@ -63,6 +63,8 @@ class DatabaseMaintenanceSkill(SkillBase):
                 ohlcv_days=retention.ohlcv_days,
                 audit_days=retention.audit_log_days,
                 predictions_days=retention.predictions_days,
+                news_days=retention.news_days,
+                economic_events_days=retention.economic_events_days,
             )
             results["retention_cleanup"] = deleted
             results["retention_success"] = True

@@ -26,6 +26,7 @@ import { AlertsPage } from "./pages/AlertsPage";
 import { RiskSimulatorPage } from "./pages/RiskSimulatorPage";
 import { CorrelationPage } from "./pages/CorrelationPage";
 import { ExecutionQualityPage } from "./pages/ExecutionQualityPage";
+import { DataManagementPage } from "./pages/DataManagementPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -81,6 +82,7 @@ function AppRoutes() {
         <Route path="/weekly" element={<WeeklySummaryPage />} />
         <Route path="/reports" element={<ReportsPage />} />
         <Route path="/audit" element={<AuditPage />} />
+        <Route path="/data" element={<DataManagementPage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

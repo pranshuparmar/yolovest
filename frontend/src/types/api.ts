@@ -378,3 +378,33 @@ export interface WeeklyLLMReview {
   pnl?: number | null;
   created_at: string;
 }
+
+export interface TableStats {
+  row_count: number;
+  oldest: string | null;
+  newest: string | null;
+}
+
+export interface DbFileStats {
+  db_bytes: number;
+  wal_bytes: number;
+  total_bytes: number;
+}
+
+export interface StorageStats {
+  ohlcv: TableStats;
+  news_articles: TableStats;
+  economic_events: TableStats;
+  audit_log: TableStats;
+  predictions: TableStats;
+  trades: TableStats;
+  agent_memory: TableStats;
+  _db_file: DbFileStats;
+  [key: string]: TableStats | DbFileStats;
+}
+
+export interface CleanupResult {
+  success: boolean;
+  table: string;
+  rows_deleted: number;
+}

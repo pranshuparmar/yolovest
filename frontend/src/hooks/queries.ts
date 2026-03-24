@@ -393,3 +393,20 @@ export function useDeleteAlert() {
 export function useRiskSimulator() {
   return useMutation({ mutationFn: api.riskSimulator });
 }
+
+// Data Management
+export function useStorageStats() {
+  return useQuery({
+    queryKey: ["storage-stats"],
+    queryFn: api.storageStats,
+    staleTime: 60_000,
+  });
+}
+
+export function useCleanupTable() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.cleanupTable,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["storage-stats"] }),
+  });
+}

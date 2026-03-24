@@ -20,11 +20,15 @@ Flow:
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 logger = logging.getLogger(__name__)
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class IngestDataSkill(SkillBase):
@@ -36,27 +40,59 @@ class IngestDataSkill(SkillBase):
     def should_run(self) -> bool:
         return True  # Always run; frequency controlled by orchestrator
 
+    async def _is_cached_fresh(self, symbol: str, interval: str) -> bool:
+        """Check if DB already has fresh enough data for this symbol/interval.
+
+        Uses market_data.cache_ttl_minutes from config (default 15 min).
+        For daily data during non-market hours, cached data from today is fresh.
+        """
+        ttl = self.ctx.config.market_data.cache_ttl_minutes
+        try:
+            bars = await self.ctx.db.get_ohlcv(symbol, interval, days=2)
+            if not bars:
+                return False
+            latest = bars[-1].timestamp
+            now = datetime.now(IST)
+            if latest.tzinfo is None:
+                latest = latest.replace(tzinfo=IST)
+
+            if interval in ("daily", "1d"):
+                # Daily data: fresh if latest bar is from today or yesterday
+                return (now - latest) < timedelta(days=2)
+            else:
+                # Intraday: fresh if within cache_ttl_minutes
+                return (now - latest) < timedelta(minutes=ttl)
+        except Exception:
+            return False
+
     async def execute(self, **kwargs: Any) -> SkillResult:
         symbols = kwargs.get("symbols", self.ctx.config.scanning.seed_symbols)
-        results: dict[str, Any] = {"symbols_ingested": 0, "news_articles": 0, "errors": []}
+        results: dict[str, Any] = {"symbols_ingested": 0, "news_articles": 0, "errors": [], "cache_hits": 0}
 
         # --- OHLCV Data (primary + fallback) ---
         for symbol in symbols:
             try:
-                daily = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=30)
-                await self.ctx.db.upsert_ohlcv(symbol, "daily", daily, "ingester")
+                # Skip external fetch if DB cache is fresh
+                if await self._is_cached_fresh(symbol, "daily"):
+                    results["symbols_ingested"] += 1
+                    results["cache_hits"] += 1
+                    logger.debug("Cache hit for %s daily — skipping external fetch", symbol)
+                else:
+                    daily = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=30)
+                    await self.ctx.db.upsert_ohlcv(symbol, "daily", daily, "ingester")
+                    results["symbols_ingested"] += 1
 
                 # Intraday candles if market is open
                 if self.ctx.market_hours.is_market_hours():
-                    try:
-                        intraday = await self.ctx.market_data.get_ohlcv(
-                            symbol, "5minute", days=1
-                        )
-                        await self.ctx.db.upsert_ohlcv(symbol, "5minute", intraday, "ingester")
-                    except Exception as e:
-                        logger.debug("Intraday fetch skipped for %s: %s", symbol, e)
+                    if not await self._is_cached_fresh(symbol, "5minute"):
+                        try:
+                            intraday = await self.ctx.market_data.get_ohlcv(
+                                symbol, "5minute", days=1
+                            )
+                            await self.ctx.db.upsert_ohlcv(symbol, "5minute", intraday, "ingester")
+                        except Exception as e:
+                            logger.debug("Intraday fetch skipped for %s: %s", symbol, e)
 
-                results["symbols_ingested"] += 1
             except Exception as e:
                 results["errors"].append(f"{symbol}: {e}")
                 logger.warning("OHLCV fetch failed for %s: %s", symbol, e)

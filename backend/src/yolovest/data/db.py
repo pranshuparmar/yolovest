@@ -1491,7 +1491,12 @@ class Database:
         return backup_path
 
     async def run_retention_cleanup(
-        self, ohlcv_days: int = 730, audit_days: int = 365, predictions_days: int = 365
+        self,
+        ohlcv_days: int = 730,
+        audit_days: int = 365,
+        predictions_days: int = 365,
+        news_days: int = 180,
+        economic_events_days: int = 365,
     ) -> dict[str, Any]:
         """Delete data older than retention periods (FR-10.3)."""
         from datetime import timedelta
@@ -1520,8 +1525,105 @@ class Database:
         )
         deleted["predictions"] = cursor.rowcount
 
+        # News articles retention
+        cutoff = (now - timedelta(days=news_days)).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM news_articles WHERE created_at < ?", (cutoff,)
+        )
+        deleted["news_articles"] = cursor.rowcount
+
+        # Economic events retention
+        cutoff = (now - timedelta(days=economic_events_days)).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM economic_events WHERE created_at < ?", (cutoff,)
+        )
+        deleted["economic_events"] = cursor.rowcount
+
         await self.conn.commit()
         logger.info("Retention cleanup: %s", deleted)
+        return deleted
+
+    # ------------------------------------------------------------------
+    # Storage Stats & Manual Cleanup
+    # ------------------------------------------------------------------
+
+    async def get_storage_stats(self) -> dict[str, Any]:
+        """Get row counts and date ranges for all major tables."""
+        import os
+
+        tables = {
+            "ohlcv": {"ts_col": "timestamp"},
+            "news_articles": {"ts_col": "created_at"},
+            "economic_events": {"ts_col": "created_at"},
+            "audit_log": {"ts_col": "timestamp_ist"},
+            "predictions": {"ts_col": "created_at"},
+            "trades": {"ts_col": "created_at"},
+            "agent_memory": {"ts_col": "updated_at"},
+        }
+        stats: dict[str, Any] = {}
+
+        for table, meta in tables.items():
+            ts_col = meta["ts_col"]
+            try:
+                cursor = await self.conn.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+                row = await cursor.fetchone()
+                count = row[0] if row else 0
+
+                oldest = newest = None
+                if count > 0:
+                    cursor = await self.conn.execute(
+                        f"SELECT MIN({ts_col}), MAX({ts_col}) FROM {table}"  # noqa: S608
+                    )
+                    row = await cursor.fetchone()
+                    if row:
+                        oldest, newest = row[0], row[1]
+
+                stats[table] = {
+                    "row_count": count,
+                    "oldest": oldest,
+                    "newest": newest,
+                }
+            except Exception:
+                stats[table] = {"row_count": 0, "oldest": None, "newest": None}
+
+        # Database file size
+        try:
+            db_size = os.path.getsize(self._db_path)
+            wal_path = self._db_path + "-wal"
+            wal_size = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
+            stats["_db_file"] = {
+                "db_bytes": db_size,
+                "wal_bytes": wal_size,
+                "total_bytes": db_size + wal_size,
+            }
+        except OSError:
+            stats["_db_file"] = {"db_bytes": 0, "wal_bytes": 0, "total_bytes": 0}
+
+        return stats
+
+    async def cleanup_table(self, table: str, older_than_days: int) -> int:
+        """Delete rows older than N days from a specific table. Returns rows deleted."""
+        from datetime import timedelta
+
+        # Whitelist of tables + their timestamp columns
+        allowed = {
+            "ohlcv": "timestamp",
+            "news_articles": "created_at",
+            "economic_events": "created_at",
+            "audit_log": "timestamp_ist",
+            "predictions": "created_at",
+        }
+        ts_col = allowed.get(table)
+        if ts_col is None:
+            raise ValueError(f"Cleanup not allowed for table: {table}")
+
+        cutoff = (datetime.now(IST) - timedelta(days=older_than_days)).isoformat()
+        cursor = await self.conn.execute(
+            f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,)  # noqa: S608
+        )
+        await self.conn.commit()
+        deleted = cursor.rowcount
+        logger.info("Manual cleanup: deleted %d rows from %s (older than %d days)", deleted, table, older_than_days)
         return deleted
 
     # ------------------------------------------------------------------

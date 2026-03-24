@@ -32,6 +32,8 @@ import type {
   PriceAlert,
   RiskSimParams,
   RiskSimResult,
+  StorageStats,
+  CleanupResult,
 } from "../types/api";
 
 export const api = {
@@ -238,5 +240,13 @@ export const api = {
     apiFetch<RiskSimResult>("/api/risk-simulator", {
       method: "POST",
       body: JSON.stringify(params),
+    }),
+
+  // Data Management
+  storageStats: () => apiFetch<StorageStats>("/api/storage-stats"),
+
+  cleanupTable: (data: { table: string; older_than_days: number }) =>
+    apiFetch<CleanupResult>(`/api/cleanup?table=${data.table}&older_than_days=${data.older_than_days}`, {
+      method: "POST",
     }),
 };

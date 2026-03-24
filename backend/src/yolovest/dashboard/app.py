@@ -831,6 +831,31 @@ def create_app(ctx: AppContext) -> FastAPI:
         }
 
     # ------------------------------------------------------------------
+    # Data Management: Storage Stats & Cleanup
+    # ------------------------------------------------------------------
+
+    @app.get("/api/storage-stats")
+    async def storage_stats(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
+        """Get row counts, date ranges, and DB file size for all tables."""
+        return await ctx.db.get_storage_stats()
+
+    @app.post("/api/cleanup")
+    async def cleanup_data(
+        table: str = Query(..., description="Table to clean up"),
+        older_than_days: int = Query(..., ge=1, description="Delete rows older than N days"),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete old data from a specific table to free up space."""
+        try:
+            deleted = await ctx.db.cleanup_table(table, older_than_days)
+            # VACUUM to reclaim disk space after large deletes
+            if deleted > 100:
+                await ctx.db.conn.execute("VACUUM")
+            return {"success": True, "table": table, "rows_deleted": deleted}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # ------------------------------------------------------------------
     # FR-8.2: WebSocket Live Updates
     # ------------------------------------------------------------------
 

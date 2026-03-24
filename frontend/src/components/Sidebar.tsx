@@ -19,6 +19,7 @@ const links = [
   { to: "/weekly", label: "Weekly", icon: "7" },
   { to: "/reports", label: "Reports", icon: "R" },
   { to: "/audit", label: "Audit Log", icon: "L" },
+  { to: "/data", label: "Data Mgmt", icon: "B" },
   { to: "/integrations", label: "Integrations", icon: "I" },
 ];
 
