@@ -437,3 +437,40 @@ export function useResetAllData() {
     },
   });
 }
+
+// Dry-Run Signal Preview
+export function useDryRunHistory() {
+  return useQuery({
+    queryKey: ["dry-run-history"],
+    queryFn: () => api.dryRunHistory(),
+    staleTime: 60_000,
+  });
+}
+
+export function useDryRunDetail(runId: string | null) {
+  return useQuery({
+    queryKey: ["dry-run-detail", runId],
+    queryFn: () => api.dryRunDetail(runId!),
+    enabled: !!runId,
+    staleTime: 60_000,
+  });
+}
+
+export function useRunDryRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.runDryRun,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["dry-run-history"] }),
+  });
+}
+
+export function useScoreDryRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.scoreDryRun,
+    onSuccess: (_data, runId) => {
+      qc.invalidateQueries({ queryKey: ["dry-run-history"] });
+      qc.invalidateQueries({ queryKey: ["dry-run-detail", runId] });
+    },
+  });
+}

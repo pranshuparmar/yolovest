@@ -1626,6 +1626,123 @@ class Database:
         logger.info("Manual cleanup: deleted %d rows from %s (older than %d days)", deleted, table, older_than_days)
         return deleted
 
+    # ------------------------------------------------------------------
+    # Dry-Run Signal Preview
+    # ------------------------------------------------------------------
+
+    async def insert_dry_run_results(
+        self, run_id: str, signals: list[dict[str, Any]]
+    ) -> int:
+        """Save dry-run signal results for next-day comparison."""
+        for s in signals:
+            await self.conn.execute(
+                "INSERT INTO dry_run_results "
+                "(run_id, symbol, signal_type, entry_price, target_price, "
+                "stop_loss_price, confidence_score, position_size, model_version, "
+                "composite_score, technical_score, volume_momentum_score, "
+                "news_sentiment_score, fundamental_score, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                (
+                    run_id,
+                    s["symbol"],
+                    s["signal_type"],
+                    s["entry_price"],
+                    s["target_price"],
+                    s["stop_loss_price"],
+                    s["confidence_score"],
+                    s.get("position_size"),
+                    s.get("model_version"),
+                    s.get("composite_score"),
+                    s.get("technical_score"),
+                    s.get("volume_momentum_score"),
+                    s.get("news_sentiment_score"),
+                    s.get("fundamental_score"),
+                ),
+            )
+        await self.conn.commit()
+        return len(signals)
+
+    async def get_dry_run_history(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Get dry-run results grouped by run_id, most recent first."""
+        cursor = await self.conn.execute(
+            "SELECT run_id, COUNT(*) as signal_count, "
+            "MIN(created_at) as created_at, "
+            "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
+            "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored "
+            "FROM dry_run_results "
+            "GROUP BY run_id ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](r) for r in rows]
+
+    async def get_dry_run_signals(self, run_id: str) -> list[dict[str, Any]]:
+        """Get all signals for a specific dry-run."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM dry_run_results WHERE run_id = ? ORDER BY confidence_score DESC",
+            (run_id,),
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](r) for r in rows]
+
+    async def score_dry_run(self, run_id: str) -> dict[str, Any]:
+        """Score a dry-run against actual next-day OHLCV data.
+
+        For each signal, fetch the next trading day's OHLCV and compare.
+        """
+        signals = await self.get_dry_run_signals(run_id)
+        if not signals:
+            return {"scored": 0, "not_found": 0}
+
+        scored = 0
+        not_found = 0
+        for sig in signals:
+            if sig.get("scored_at"):
+                scored += 1
+                continue
+
+            # Get the next day's OHLCV after the dry-run was created
+            cursor = await self.conn.execute(
+                "SELECT open, high, low, close FROM ohlcv "
+                "WHERE symbol = ? AND interval = 'daily' AND timestamp > ? "
+                "ORDER BY timestamp ASC LIMIT 1",
+                (sig["symbol"], sig["created_at"]),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                not_found += 1
+                continue
+
+            actual_open = row[0]
+            actual_high = row[1]
+            actual_low = row[2]
+            actual_close = row[3]
+            entry = sig["entry_price"]
+
+            if sig["signal_type"] == "BUY":
+                direction_correct = 1 if actual_close > entry else 0
+                target_hit = 1 if actual_high >= sig["target_price"] else 0
+                actual_move_pct = (actual_close - entry) / entry * 100 if entry else 0
+            else:  # SELL
+                direction_correct = 1 if actual_close < entry else 0
+                target_hit = 1 if actual_low <= sig["target_price"] else 0
+                actual_move_pct = (entry - actual_close) / entry * 100 if entry else 0
+
+            await self.conn.execute(
+                "UPDATE dry_run_results SET "
+                "actual_open = ?, actual_close = ?, actual_high = ?, actual_low = ?, "
+                "direction_correct = ?, target_hit = ?, actual_move_pct = ?, "
+                "scored_at = datetime('now') "
+                "WHERE id = ?",
+                (actual_open, actual_close, actual_high, actual_low,
+                 direction_correct, target_hit, round(actual_move_pct, 4),
+                 sig["id"]),
+            )
+            scored += 1
+
+        await self.conn.commit()
+        return {"scored": scored, "not_found": not_found}
+
     async def reset_all_data(self) -> dict[str, int]:
         """Delete ALL rows from all data tables. Schema and migrations are preserved.
 
@@ -1636,7 +1753,7 @@ class Database:
             "predictions", "trades", "signals", "watchlist", "sentiment",
             "premarket", "llm_reviews", "fundamentals", "model_versions",
             "failure_analyses", "prediction_scoreboard", "reports",
-            "agent_memory", "price_alerts",
+            "agent_memory", "price_alerts", "dry_run_results",
         ]
         deleted: dict[str, int] = {}
         for table in tables:

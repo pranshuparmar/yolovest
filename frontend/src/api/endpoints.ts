@@ -37,6 +37,9 @@ import type {
   BackupResult,
   BackupEntry,
   ResetResult,
+  DryRunResult,
+  DryRunSummary,
+  DryRunSignal,
 } from "../types/api";
 
 export const api = {
@@ -258,4 +261,16 @@ export const api = {
   listBackups: () => apiFetch<BackupEntry[]>("/api/backups"),
 
   resetAllData: () => apiFetch<ResetResult>("/api/reset", { method: "POST" }),
+
+  // Dry-Run Signal Preview
+  runDryRun: () => apiFetch<DryRunResult>("/api/dry-run", { method: "POST" }),
+
+  dryRunHistory: (limit = 10) =>
+    apiFetch<DryRunSummary[]>(`/api/dry-run/history?limit=${limit}`),
+
+  dryRunDetail: (runId: string) =>
+    apiFetch<DryRunSignal[]>(`/api/dry-run/${runId}`),
+
+  scoreDryRun: (runId: string) =>
+    apiFetch<{ scored: number; not_found: number }>(`/api/dry-run/${runId}/score`, { method: "POST" }),
 };

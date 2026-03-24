@@ -425,3 +425,46 @@ export interface ResetResult {
   total_rows_deleted: number;
   by_table: Record<string, number>;
 }
+
+export interface DryRunSignal {
+  id: number;
+  run_id: string;
+  symbol: string;
+  signal_type: string;
+  entry_price: number;
+  target_price: number;
+  stop_loss_price: number;
+  confidence_score: number;
+  position_size: number | null;
+  model_version: string | null;
+  composite_score: number | null;
+  technical_score: number | null;
+  volume_momentum_score: number | null;
+  news_sentiment_score: number | null;
+  fundamental_score: number | null;
+  actual_open: number | null;
+  actual_close: number | null;
+  actual_high: number | null;
+  actual_low: number | null;
+  direction_correct: number | null;
+  target_hit: number | null;
+  actual_move_pct: number | null;
+  created_at: string;
+  scored_at: string | null;
+}
+
+export interface DryRunSummary {
+  run_id: string;
+  signal_count: number;
+  created_at: string;
+  correct: number | null;
+  scored: number;
+}
+
+export interface DryRunResult {
+  success: boolean;
+  run_id: string;
+  universe_size: number;
+  shortlist_size: number;
+  signals: DryRunSignal[];
+}

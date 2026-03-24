@@ -9,6 +9,7 @@ All endpoints read from the shared database via AppContext.
 import json
 import logging
 import secrets
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,63 @@ security = HTTPBasic()
 
 # WebSocket connection manager
 _ws_clients: set[WebSocket] = set()
+
+
+def _compute_scan_scores(stock: dict[str, Any], min_vol: int) -> dict[str, Any]:
+    """Compute sub-scores for dry-run market scanning (mirrors MarketScanSkill logic)."""
+    # Technical score from indicators
+    signals: list[float] = []
+    rsi = stock.get("rsi")
+    if rsi is not None:
+        if rsi < 30:
+            signals.append(0.8)
+        elif rsi < 45:
+            signals.append(0.65)
+        elif rsi <= 55:
+            signals.append(0.5)
+        elif rsi <= 70:
+            signals.append(0.35)
+        else:
+            signals.append(0.2)
+    macd_hist = stock.get("macd_histogram")
+    if macd_hist is not None:
+        signals.append(0.7 if macd_hist > 0 else 0.3)
+    supertrend_dir = stock.get("supertrend_direction")
+    if supertrend_dir is not None:
+        signals.append(0.7 if supertrend_dir > 0 else 0.3)
+    momentum = stock.get("momentum_score")
+    if momentum is not None:
+        signals.append(min(momentum / 100.0, 1.0))
+    tech = round(sum(signals) / len(signals), 4) if signals else 0.5
+
+    # Volume score
+    avg_vol = stock.get("avg_daily_volume") or 0
+    vol_score = min(avg_vol / (min_vol * 5), 1.0) if min_vol > 0 else 0.5
+
+    # Sentiment score
+    sentiment = stock.get("sentiment")
+    sent_conf = stock.get("sentiment_confidence") or 0.5
+    if sentiment == "bullish":
+        sent_score = 0.5 + sent_conf * 0.5
+    elif sentiment == "bearish":
+        sent_score = 0.5 - sent_conf * 0.5
+    else:
+        sent_score = 0.5
+
+    # Fundamental score
+    pe = stock.get("pe_ratio")
+    promoter = stock.get("promoter_holding_pct") or 50.0
+    if pe and pe > 0:
+        fund_score = min(10.0 / pe, 1.0) * 0.6 + (promoter / 100.0) * 0.4
+    else:
+        fund_score = (promoter / 100.0) * 0.4 + 0.3
+
+    return {
+        "technical_score": tech,
+        "volume_momentum_score": round(vol_score, 4),
+        "news_sentiment_score": round(sent_score, 4),
+        "fundamental_score": round(min(fund_score, 1.0), 4),
+    }
 
 
 def create_app(ctx: AppContext) -> FastAPI:
@@ -854,6 +912,151 @@ def create_app(ctx: AppContext) -> FastAPI:
             return {"success": True, "table": table, "rows_deleted": deleted}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # ------------------------------------------------------------------
+    # Dry-Run Signal Preview
+    # ------------------------------------------------------------------
+
+    @app.post("/api/dry-run")
+    async def run_dry_run_signals(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Run market-scan + signal generation on current data (read-only, no trades).
+
+        Works regardless of market hours. Results are stored for next-day comparison.
+        """
+        from yolovest.data.features import IndicatorConfig, compute_features
+
+        run_id = str(uuid.uuid4())[:8]
+        cfg = ctx.config
+
+        # Step 1: Run market-scan logic (without writing to watchlist)
+        universe = await ctx.db.get_nse_universe()
+        if not universe:
+            universe = [
+                {"symbol": s, "avg_daily_volume": cfg.scanning.min_avg_daily_volume + 1}
+                for s in cfg.scanning.seed_symbols
+            ]
+        liquid = [
+            s for s in universe
+            if (s.get("avg_daily_volume") or 0) >= cfg.scanning.min_avg_daily_volume
+        ]
+
+        # Score stocks
+        weights = cfg.scanning.weights
+        scored = []
+        for stock in liquid:
+            sub = _compute_scan_scores(stock, cfg.scanning.min_avg_daily_volume)
+            composite = (
+                sub["technical_score"] * weights.technical
+                + sub["volume_momentum_score"] * weights.volume_momentum
+                + sub["news_sentiment_score"] * weights.news_sentiment
+                + sub["fundamental_score"] * weights.fundamental
+            )
+            scored.append({**stock, **sub, "composite_score": composite})
+
+        scored.sort(key=lambda s: s["composite_score"], reverse=True)
+        shortlist = scored[: cfg.scanning.shortlist_size]
+
+        if not shortlist:
+            return {
+                "success": True,
+                "run_id": run_id,
+                "universe_size": len(universe),
+                "shortlist_size": 0,
+                "signals": [],
+            }
+
+        # Step 2: Generate signals from shortlisted stocks
+        signals_out: list[dict[str, Any]] = []
+        min_confidence = cfg.risk.min_confidence_score
+
+        indicator_cfg = IndicatorConfig(
+            ema_periods=cfg.strategy.ema_periods,
+            rsi=cfg.strategy.indicators.rsi,
+            macd=cfg.strategy.indicators.macd,
+            bollinger_bands=cfg.strategy.indicators.bollinger_bands,
+            vwap=cfg.strategy.indicators.vwap,
+            atr=cfg.strategy.indicators.atr,
+            volume_profile=cfg.strategy.indicators.volume_profile,
+            obv=cfg.strategy.indicators.obv,
+            supertrend=cfg.strategy.indicators.supertrend,
+        )
+
+        for stock in shortlist:
+            symbol = stock["symbol"]
+            try:
+                bars = await ctx.db.get_ohlcv(symbol, "daily", days=60)
+                if len(bars) < 15:
+                    continue
+
+                features = compute_features(bars, indicator_cfg)
+                if not features:
+                    continue
+
+                if ctx.ml is None:
+                    continue
+
+                prediction = await ctx.ml.predict_swing(symbol, features)
+                if prediction.signal_type == "HOLD":
+                    continue
+
+                if prediction.confidence < min_confidence:
+                    continue
+
+                signals_out.append({
+                    "symbol": symbol,
+                    "signal_type": prediction.signal_type,
+                    "entry_price": prediction.entry_price,
+                    "target_price": prediction.target_price,
+                    "stop_loss_price": prediction.stop_loss_price,
+                    "confidence_score": prediction.confidence,
+                    "position_size": prediction.position_size,
+                    "model_version": prediction.model_version,
+                    "composite_score": stock.get("composite_score"),
+                    "technical_score": stock.get("technical_score"),
+                    "volume_momentum_score": stock.get("volume_momentum_score"),
+                    "news_sentiment_score": stock.get("news_sentiment_score"),
+                    "fundamental_score": stock.get("fundamental_score"),
+                })
+            except Exception as e:
+                logger.warning("Dry-run signal failed for %s: %s", symbol, e)
+
+        # Step 3: Persist for next-day comparison
+        if signals_out:
+            await ctx.db.insert_dry_run_results(run_id, signals_out)
+
+        return {
+            "success": True,
+            "run_id": run_id,
+            "universe_size": len(universe),
+            "shortlist_size": len(shortlist),
+            "signals": signals_out,
+        }
+
+    @app.get("/api/dry-run/history")
+    async def get_dry_run_history(
+        limit: int = Query(default=10, ge=1, le=50),
+        _user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Get past dry-run summaries."""
+        return await ctx.db.get_dry_run_history(limit)
+
+    @app.get("/api/dry-run/{run_id}")
+    async def get_dry_run_detail(
+        run_id: str,
+        _user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Get all signals for a specific dry-run."""
+        return await ctx.db.get_dry_run_signals(run_id)
+
+    @app.post("/api/dry-run/{run_id}/score")
+    async def score_dry_run(
+        run_id: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Score a dry-run against actual next-day market data."""
+        return await ctx.db.score_dry_run(run_id)
 
     @app.post("/api/backup")
     async def create_backup(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
