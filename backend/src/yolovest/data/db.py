@@ -264,7 +264,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     async def add_watchlist_symbol(self, symbol: str, sector: str | None = None) -> bool:
-        """Add a symbol to the watchlist. Returns True if inserted, False if already exists."""
+        """Add a symbol to the algorithmic watchlist (legacy, used by market-scan)."""
         try:
             await self.conn.execute(
                 "INSERT OR IGNORE INTO watchlist (symbol, composite_score, technical_score, "
@@ -278,12 +278,86 @@ class Database:
             return False
 
     async def remove_watchlist_symbol(self, symbol: str) -> bool:
-        """Remove a symbol from the watchlist. Returns True if deleted."""
+        """Remove a symbol from the algorithmic watchlist (legacy)."""
         cursor = await self.conn.execute(
             "DELETE FROM watchlist WHERE symbol = ?", (symbol.upper(),)
         )
         await self.conn.commit()
         return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # User Watchlist (separate from algorithmic watchlist)
+    # ------------------------------------------------------------------
+
+    async def get_user_watchlist(self) -> list[dict[str, Any]]:
+        """Get user-managed watchlist symbols."""
+        cursor = await self.conn.execute(
+            "SELECT uw.symbol, uw.sector, uw.notes, uw.created_at, "
+            "w.composite_score, w.technical_score, w.volume_momentum_score, "
+            "w.news_sentiment_score, w.fundamental_score "
+            "FROM user_watchlist uw "
+            "LEFT JOIN watchlist w ON uw.symbol = w.symbol "
+            "ORDER BY uw.created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](row) for row in rows]
+
+    async def add_user_watchlist_symbol(
+        self, symbol: str, sector: str | None = None, notes: str | None = None
+    ) -> bool:
+        """Add a symbol to the user watchlist. Returns True if inserted."""
+        try:
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO user_watchlist (symbol, sector, notes) VALUES (?, ?, ?)",
+                (symbol.upper(), sector, notes),
+            )
+            await self.conn.commit()
+            return True
+        except Exception:
+            return False
+
+    async def remove_user_watchlist_symbol(self, symbol: str) -> bool:
+        """Remove a symbol from the user watchlist."""
+        cursor = await self.conn.execute(
+            "DELETE FROM user_watchlist WHERE symbol = ?", (symbol.upper(),)
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def get_combined_watchlist(self) -> list[dict[str, Any]]:
+        """Get merged watchlist for signal generation: algorithmic + user picks.
+
+        User watchlist symbols are included even if not in algorithmic top-N.
+        Deduplicates by symbol, preferring the algorithmic entry (has scores).
+        Adds a 'source' field: 'algo', 'user', or 'both'.
+        """
+        algo = await self.get_watchlist()
+        user = await self.get_user_watchlist()
+
+        algo_symbols = {s["symbol"] for s in algo}
+        user_symbols = {s["symbol"] for s in user}
+
+        combined = []
+        for s in algo:
+            s["source"] = "both" if s["symbol"] in user_symbols else "algo"
+            combined.append(s)
+
+        # Add user-only symbols (not in algo list)
+        for s in user:
+            if s["symbol"] not in algo_symbols:
+                combined.append({
+                    "symbol": s["symbol"],
+                    "composite_score": s.get("composite_score"),
+                    "technical_score": s.get("technical_score"),
+                    "volume_momentum_score": s.get("volume_momentum_score"),
+                    "news_sentiment_score": s.get("news_sentiment_score"),
+                    "fundamental_score": s.get("fundamental_score"),
+                    "sector": s.get("sector"),
+                    "updated_at": s.get("created_at"),
+                    "source": "user",
+                })
+
+        return combined
 
     # ------------------------------------------------------------------
     # Positions (read from trades table)
@@ -1754,6 +1828,7 @@ class Database:
             "premarket", "llm_reviews", "fundamentals", "model_versions",
             "failure_analyses", "prediction_scoreboard", "reports",
             "agent_memory", "price_alerts", "dry_run_results",
+            "user_watchlist",
         ]
         deleted: dict[str, int] = {}
         for table in tables:

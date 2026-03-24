@@ -107,6 +107,19 @@ export interface WatchlistItem {
   fundamental_score: number | null;
   sector: string | null;
   updated_at: string;
+  source?: "algo" | "user" | "both";
+}
+
+export interface UserWatchlistItem {
+  symbol: string;
+  sector: string | null;
+  notes: string | null;
+  created_at: string;
+  composite_score: number | null;
+  technical_score: number | null;
+  volume_momentum_score: number | null;
+  news_sentiment_score: number | null;
+  fundamental_score: number | null;
 }
 
 export interface SectorRotation {

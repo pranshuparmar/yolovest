@@ -14,6 +14,7 @@ import type {
   AuditEntry,
   IntegrationsStatus,
   ActionResult,
+  UserWatchlistItem,
   EconomicEvent,
   EarningsEvent,
   NewsArticle,
@@ -74,14 +75,16 @@ export const api = {
 
   watchlist: () => apiFetch<WatchlistItem[]>("/api/watchlist"),
 
-  addWatchlistSymbol: (symbol: string, sector?: string) =>
-    apiFetch<ActionResult>("/api/watchlist", {
+  userWatchlist: () => apiFetch<UserWatchlistItem[]>("/api/user-watchlist"),
+
+  addUserWatchlistSymbol: (data: { symbol: string; sector?: string; notes?: string }) =>
+    apiFetch<ActionResult>("/api/user-watchlist", {
       method: "POST",
-      body: JSON.stringify({ symbol, sector }),
+      body: JSON.stringify(data),
     }),
 
-  removeWatchlistSymbol: (symbol: string) =>
-    apiFetch<ActionResult>(`/api/watchlist/${symbol}`, { method: "DELETE" }),
+  removeUserWatchlistSymbol: (symbol: string) =>
+    apiFetch<ActionResult>(`/api/user-watchlist/${symbol}`, { method: "DELETE" }),
 
   sectors: () => apiFetch<SectorRotation>("/api/sectors"),
 

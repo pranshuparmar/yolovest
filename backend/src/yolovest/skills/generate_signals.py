@@ -36,7 +36,7 @@ class GenerateSignalsSkill(SkillBase):
         return bool(self.ctx.market_hours.is_market_hours())
 
     async def execute(self, **kwargs: Any) -> SkillResult:
-        watchlist = await self.ctx.db.get_watchlist()
+        watchlist = await self.ctx.db.get_combined_watchlist()
         signals_generated = []
         min_confidence = self.ctx.config.risk.min_confidence_score
 

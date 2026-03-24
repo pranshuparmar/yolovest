@@ -76,20 +76,27 @@ export function useWatchlist() {
   });
 }
 
-export function useAddWatchlistSymbol() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ symbol, sector }: { symbol: string; sector?: string }) =>
-      api.addWatchlistSymbol(symbol, sector),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist"] }),
+export function useUserWatchlist() {
+  return useQuery({
+    queryKey: ["user-watchlist"],
+    queryFn: api.userWatchlist,
+    staleTime: 60_000,
   });
 }
 
-export function useRemoveWatchlistSymbol() {
+export function useAddUserWatchlistSymbol() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (symbol: string) => api.removeWatchlistSymbol(symbol),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist"] }),
+    mutationFn: api.addUserWatchlistSymbol,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["user-watchlist"] }),
+  });
+}
+
+export function useRemoveUserWatchlistSymbol() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (symbol: string) => api.removeUserWatchlistSymbol(symbol),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["user-watchlist"] }),
   });
 }
 
