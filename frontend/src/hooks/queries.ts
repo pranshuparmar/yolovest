@@ -1,0 +1,497 @@
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "../api/endpoints";
+
+const STALE_30S = 30_000;
+
+export function useHealth() {
+  return useQuery({
+    queryKey: ["health"],
+    queryFn: api.health,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function usePortfolio() {
+  return useQuery({
+    queryKey: ["portfolio"],
+    queryFn: api.portfolio,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function usePositions() {
+  return useQuery({
+    queryKey: ["positions"],
+    queryFn: api.positions,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function useTradesToday() {
+  return useQuery({
+    queryKey: ["trades", "today"],
+    queryFn: api.tradesToday,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function useTrades(params?: {
+  start?: string;
+  end?: string;
+  symbol?: string;
+  limit?: number;
+}) {
+  return useQuery({
+    queryKey: ["trades", params],
+    queryFn: () => api.trades(params),
+    staleTime: STALE_30S,
+  });
+}
+
+export function useTradeDetail(tradeId: string) {
+  return useQuery({
+    queryKey: ["trade", tradeId],
+    queryFn: () => api.tradeDetail(tradeId),
+    enabled: !!tradeId,
+  });
+}
+
+export function useEquityCurve(days = 30) {
+  return useQuery({
+    queryKey: ["equity-curve", days],
+    queryFn: () => api.equityCurve(days),
+    staleTime: 60_000,
+  });
+}
+
+export function useWatchlist() {
+  return useQuery({
+    queryKey: ["watchlist"],
+    queryFn: api.watchlist,
+    staleTime: 60_000,
+  });
+}
+
+export function useUserWatchlist() {
+  return useQuery({
+    queryKey: ["user-watchlist"],
+    queryFn: api.userWatchlist,
+    staleTime: 60_000,
+  });
+}
+
+export function useAddUserWatchlistSymbol() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.addUserWatchlistSymbol,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["user-watchlist"] }),
+  });
+}
+
+export function useRemoveUserWatchlistSymbol() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (symbol: string) => api.removeUserWatchlistSymbol(symbol),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["user-watchlist"] }),
+  });
+}
+
+export function useSectors() {
+  return useQuery({
+    queryKey: ["sectors"],
+    queryFn: api.sectors,
+    staleTime: 60_000,
+  });
+}
+
+export function useScoreboard(groupType?: string) {
+  return useQuery({
+    queryKey: ["scoreboard", groupType],
+    queryFn: () => api.scoreboard(groupType),
+    staleTime: 60_000,
+  });
+}
+
+export function useReports(params?: {
+  report_type?: string;
+  start?: string;
+  end?: string;
+  limit?: number;
+}) {
+  return useQuery({
+    queryKey: ["reports", params],
+    queryFn: () => api.reports(params),
+    staleTime: 60_000,
+  });
+}
+
+export function useSlippage(params?: { symbol?: string; days?: number }) {
+  return useQuery({
+    queryKey: ["slippage", params],
+    queryFn: () => api.slippage(params),
+    staleTime: 60_000,
+  });
+}
+
+export function useLLMAccuracy(days = 30) {
+  return useQuery({
+    queryKey: ["llm-accuracy", days],
+    queryFn: () => api.llmAccuracy(days),
+    staleTime: 60_000,
+  });
+}
+
+export function useAudit(params?: { limit?: number; action_type?: string }) {
+  return useQuery({
+    queryKey: ["audit", params],
+    queryFn: () => api.audit(params),
+    staleTime: STALE_30S,
+  });
+}
+
+export function useIntegrations() {
+  return useQuery({
+    queryKey: ["integrations"],
+    queryFn: api.integrations,
+    staleTime: STALE_30S,
+  });
+}
+
+export function usePingGemini() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.pingGemini,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }),
+  });
+}
+
+export function useAuthenticateZerodha() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (token: string) => api.authenticateZerodha(token),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }),
+  });
+}
+
+export function useTestTelegram() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.testTelegram,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }),
+  });
+}
+
+export function useSendTelegram() {
+  return useMutation({
+    mutationFn: (message: string) => api.sendTelegram(message),
+  });
+}
+
+// --- New hooks ---
+
+export function useEconomicCalendar(params?: { days?: number; country?: string; event_type?: string }) {
+  return useQuery({
+    queryKey: ["economic-calendar", params],
+    queryFn: () => api.economicCalendar(params),
+    staleTime: 60_000,
+  });
+}
+
+export function useEarnings(params?: { symbol?: string; days?: number }) {
+  return useQuery({
+    queryKey: ["earnings", params],
+    queryFn: () => api.earnings(params),
+    staleTime: 60_000,
+  });
+}
+
+export function useNews(params?: { symbol?: string; limit?: number }) {
+  return useQuery({
+    queryKey: ["news", params],
+    queryFn: () => api.news(params),
+    staleTime: STALE_30S,
+  });
+}
+
+const NEWS_PAGE_SIZE = 50;
+
+export function useNewsInfinite(params?: { symbol?: string }) {
+  return useInfiniteQuery({
+    queryKey: ["news-infinite", params],
+    queryFn: ({ pageParam = 0 }) =>
+      api.news({ symbol: params?.symbol, limit: NEWS_PAGE_SIZE, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, _allPages, lastPageParam) =>
+      lastPage.length < NEWS_PAGE_SIZE ? undefined : lastPageParam + NEWS_PAGE_SIZE,
+    staleTime: STALE_30S,
+  });
+}
+
+export function useSentiment(symbol: string) {
+  return useQuery({
+    queryKey: ["sentiment", symbol],
+    queryFn: () => api.sentiment(symbol),
+    enabled: !!symbol,
+    staleTime: 60_000,
+  });
+}
+
+export function useMLModels() {
+  return useQuery({
+    queryKey: ["ml-models"],
+    queryFn: api.mlModels,
+    staleTime: 60_000,
+  });
+}
+
+export function usePredictionsToday() {
+  return useQuery({
+    queryKey: ["predictions", "today"],
+    queryFn: api.predictionsToday,
+    staleTime: STALE_30S,
+  });
+}
+
+export function usePredictionsUnscored() {
+  return useQuery({
+    queryKey: ["predictions", "unscored"],
+    queryFn: api.predictionsUnscored,
+    staleTime: STALE_30S,
+  });
+}
+
+export function usePredictionOutcomes() {
+  return useQuery({
+    queryKey: ["predictions", "outcomes"],
+    queryFn: api.predictionOutcomes,
+    staleTime: 60_000,
+  });
+}
+
+export function useWeeklyTrades() {
+  return useQuery({
+    queryKey: ["weekly", "trades"],
+    queryFn: api.weeklyTrades,
+    staleTime: 60_000,
+  });
+}
+
+export function useWeeklyPredictions() {
+  return useQuery({
+    queryKey: ["weekly", "predictions"],
+    queryFn: api.weeklyPredictions,
+    staleTime: 60_000,
+  });
+}
+
+export function useWeeklyLLMReviews() {
+  return useQuery({
+    queryKey: ["weekly", "llm-reviews"],
+    queryFn: api.weeklyLLMReviews,
+    staleTime: 60_000,
+  });
+}
+
+export function useRiskExposure() {
+  return useQuery({
+    queryKey: ["risk-exposure"],
+    queryFn: api.riskExposure,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function useNSEUniverse() {
+  return useQuery({
+    queryKey: ["nse-universe"],
+    queryFn: api.nseUniverse,
+    staleTime: 300_000,
+  });
+}
+
+export function usePremarket() {
+  return useQuery({
+    queryKey: ["premarket"],
+    queryFn: api.premarket,
+    staleTime: 60_000,
+  });
+}
+
+export function useSystemState() {
+  return useQuery({
+    queryKey: ["system-state"],
+    queryFn: api.systemState,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+// Feature #3: Symbol deep-dive
+export function useSymbolOHLCV(symbol: string, params?: { days?: number; interval?: string }) {
+  return useQuery({
+    queryKey: ["symbol-ohlcv", symbol, params],
+    queryFn: () => api.symbolOHLCV(symbol, params),
+    enabled: !!symbol,
+    staleTime: 60_000,
+  });
+}
+
+export function useSymbolTrades(symbol: string) {
+  return useQuery({
+    queryKey: ["symbol-trades", symbol],
+    queryFn: () => api.symbolTrades(symbol),
+    enabled: !!symbol,
+    staleTime: STALE_30S,
+  });
+}
+
+export function useSymbolPredictions(symbol: string) {
+  return useQuery({
+    queryKey: ["symbol-predictions", symbol],
+    queryFn: () => api.symbolPredictions(symbol),
+    enabled: !!symbol,
+    staleTime: 60_000,
+  });
+}
+
+// Feature #5
+export function useStrategyPerformance() {
+  return useQuery({
+    queryKey: ["strategy-performance"],
+    queryFn: api.strategyPerformance,
+    staleTime: 60_000,
+  });
+}
+
+// Feature #8
+export function useExecutionQuality(days = 30) {
+  return useQuery({
+    queryKey: ["execution-quality", days],
+    queryFn: () => api.executionQuality(days),
+    staleTime: 60_000,
+  });
+}
+
+// Feature #7
+export function useCorrelations(days = 60) {
+  return useQuery({
+    queryKey: ["correlations", days],
+    queryFn: () => api.correlations(days),
+    staleTime: 60_000,
+  });
+}
+
+// Feature #4
+export function useAlerts(activeOnly = true) {
+  return useQuery({
+    queryKey: ["alerts", activeOnly],
+    queryFn: () => api.alerts(activeOnly),
+    staleTime: STALE_30S,
+  });
+}
+
+export function useCreateAlert() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.createAlert,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["alerts"] }),
+  });
+}
+
+export function useDeleteAlert() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.deleteAlert,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["alerts"] }),
+  });
+}
+
+// Feature #6
+export function useRiskSimulator() {
+  return useMutation({ mutationFn: api.riskSimulator });
+}
+
+// Data Management
+export function useStorageStats() {
+  return useQuery({
+    queryKey: ["storage-stats"],
+    queryFn: api.storageStats,
+    staleTime: 60_000,
+  });
+}
+
+export function useCleanupTable() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.cleanupTable,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["storage-stats"] }),
+  });
+}
+
+export function useBackups() {
+  return useQuery({
+    queryKey: ["backups"],
+    queryFn: api.listBackups,
+    staleTime: 60_000,
+  });
+}
+
+export function useCreateBackup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.createBackup,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["backups"] }),
+  });
+}
+
+export function useResetAllData() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.resetAllData,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+      qc.invalidateQueries({ queryKey: ["backups"] });
+    },
+  });
+}
+
+// Dry-Run Signal Preview
+export function useDryRunHistory() {
+  return useQuery({
+    queryKey: ["dry-run-history"],
+    queryFn: () => api.dryRunHistory(),
+    staleTime: 60_000,
+  });
+}
+
+export function useDryRunDetail(runId: string | null) {
+  return useQuery({
+    queryKey: ["dry-run-detail", runId],
+    queryFn: () => api.dryRunDetail(runId!),
+    enabled: !!runId,
+    staleTime: 60_000,
+  });
+}
+
+export function useRunDryRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.runDryRun,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["dry-run-history"] }),
+  });
+}
+
+export function useScoreDryRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.scoreDryRun,
+    onSuccess: (_data, runId) => {
+      qc.invalidateQueries({ queryKey: ["dry-run-history"] });
+      qc.invalidateQueries({ queryKey: ["dry-run-detail", runId] });
+    },
+  });
+}

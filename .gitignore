@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -7,12 +8,17 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.python-version
+
+# Node
+node_modules/
+
+# Data & secrets
 *.db
 *.sqlite
 backups/
 .env
-data/
-models/
-logs/
+/data/
+/models/
+/logs/
 config.yaml
-.python-version

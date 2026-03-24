@@ -1,12 +1,12 @@
 services:
-  yolovest:
-    build: .
-    container_name: yolovest
+  backend:
+    build: ./backend
+    container_name: yolovest-backend
     restart: unless-stopped
     ports:
-      - "${DASHBOARD_PORT:-8080}:8080"
+      - "${BACKEND_PORT:-8080}:8080"
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
+      - ./backend/config.yaml:/app/config.yaml:ro
       - yolovest-data:/app/data
       - yolovest-backups:/app/backups
       - yolovest-models:/app/models
@@ -24,6 +24,16 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  frontend:
+    build: ./frontend
+    container_name: yolovest-frontend
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-80}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
 
 volumes:
   yolovest-data:
