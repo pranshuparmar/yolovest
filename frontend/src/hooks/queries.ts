@@ -485,6 +485,12 @@ export function useRunDryRun() {
   });
 }
 
+export function useRunSkill() {
+  return useMutation({
+    mutationFn: (skillName: string) => api.runSkill(skillName),
+  });
+}
+
 export function useScoreDryRun() {
   const qc = useQueryClient();
   return useMutation({

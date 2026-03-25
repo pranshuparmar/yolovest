@@ -1098,6 +1098,39 @@ def create_app(ctx: AppContext) -> FastAPI:
         return {"success": True, "total_rows_deleted": total, "by_table": deleted}
 
     # ------------------------------------------------------------------
+    # Manual Skill Trigger
+    # ------------------------------------------------------------------
+
+    @app.post("/api/skills/{skill_name}/run")
+    async def run_skill(
+        skill_name: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Manually trigger a registered skill by name."""
+        from yolovest.skills import SKILL_REGISTRY
+
+        if skill_name not in SKILL_REGISTRY:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Unknown skill: {skill_name}. "
+                f"Available: {sorted(SKILL_REGISTRY.keys())}",
+            )
+
+        skill_cls = SKILL_REGISTRY[skill_name]
+        skill = skill_cls(ctx)
+        try:
+            result = await skill.execute()
+            return {
+                "success": result.success,
+                "skill": result.skill_name,
+                "data": result.data,
+                "error": result.error,
+            }
+        except Exception as e:
+            logger.exception("Manual skill run failed: %s", skill_name)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ------------------------------------------------------------------
     # FR-8.2: WebSocket Live Updates
     # ------------------------------------------------------------------
 
