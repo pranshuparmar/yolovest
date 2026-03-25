@@ -88,6 +88,7 @@ class MarketDataConfig(BaseModel):
     bhavcopy_dir: str = "./data/bhavcopy"
     cache_ttl_minutes: int = 15
     stale_threshold_minutes: int = 30
+    backfill_days: int = 365  # days of history to fetch in backfill-data skill
 
 
 class HeartbeatConfig(BaseModel):

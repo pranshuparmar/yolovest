@@ -27,7 +27,8 @@ class BackfillDataSkill(SkillBase):
         return True
 
     async def execute(self, **kwargs: Any) -> SkillResult:
-        days = int(kwargs.get("days", 365))
+        default_days = self.ctx.config.market_data.backfill_days
+        days = int(kwargs.get("days", default_days))
         symbols = kwargs.get("symbols", self.ctx.config.scanning.seed_symbols)
 
         results: dict[str, Any] = {

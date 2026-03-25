@@ -1,10 +1,31 @@
 """Tests for model-retrain shadow promotion (Phase 4, FR-7.5)."""
 
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 
 from yolovest.skills.model_retrain import ModelRetrainSkill
+
+
+def _make_bars(n: int, symbol: str = "RELIANCE") -> list[dict]:
+    """Generate n realistic OHLCV bar dicts for testing."""
+    base = datetime(2025, 1, 1)
+    bars = []
+    close = 100.0
+    for i in range(n):
+        # Add small variation so labels aren't all HOLD
+        close = close * (1 + (0.01 if i % 3 == 0 else -0.008 if i % 3 == 1 else 0.002))
+        bars.append({
+            "symbol": symbol,
+            "timestamp": (base + timedelta(days=i)).isoformat(),
+            "open": close * 0.998,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": 1_000_000 + i * 100,
+        })
+    return bars
 
 
 @pytest.fixture
@@ -84,7 +105,7 @@ class TestShadowPromotion:
 class TestFullRetrain:
     async def test_retrain_with_insufficient_data(self, retrain_skill):
         retrain_skill.ctx.db.get_training_dataset = AsyncMock(
-            return_value={"bars": [{"close": 100}] * 50}
+            return_value={"bars": _make_bars(50)}
         )
         retrain_skill.ctx.market_hours.is_market_hours = lambda: False
 
@@ -103,7 +124,7 @@ class TestFullRetrain:
 
     async def test_retrain_with_failure_analysis(self, retrain_skill):
         retrain_skill.ctx.db.get_training_dataset = AsyncMock(
-            return_value={"bars": [{"close": 100}] * 300}
+            return_value={"bars": _make_bars(300)}
         )
         retrain_skill.ctx.db.get_prediction_outcomes = AsyncMock(return_value=[
             {"direction_correct": False, "symbol": "RELIANCE"},
