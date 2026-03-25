@@ -36,7 +36,7 @@ class IngestUniverseSkill(SkillBase):
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         universe = kwargs.get("universe", self.ctx.config.scanning.universe)
-        days = int(kwargs.get("days", 30))
+        days = int(kwargs.get("days", 365))
 
         symbols = get_universe_symbols(universe)
         logger.info(

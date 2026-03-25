@@ -1012,8 +1012,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         for stock in shortlist:
             symbol = stock["symbol"]
             try:
-                bars = await ctx.db.get_ohlcv(symbol, "daily", days=60)
-                if len(bars) < 15:
+                bars = await ctx.db.get_ohlcv(symbol, "daily", days=365)
+                if len(bars) < 50:
                     continue
 
                 features = compute_features(bars, indicator_cfg)
