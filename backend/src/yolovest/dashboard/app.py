@@ -976,7 +976,12 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         # Step 2: Generate signals from shortlisted stocks
         signals_out: list[dict[str, Any]] = []
+        ml_unavailable = ctx.ml is None
         min_confidence = cfg.risk.min_confidence_score
+
+        if ml_unavailable:
+            logger.warning("Dry-run: ML model not loaded — cannot generate signals. "
+                           "Train a model first via the model-retrain skill.")
 
         indicator_cfg = IndicatorConfig(
             ema_periods=cfg.strategy.ema_periods,
@@ -1033,13 +1038,20 @@ def create_app(ctx: AppContext) -> FastAPI:
         if signals_out:
             await ctx.db.insert_dry_run_results(run_id, signals_out)
 
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "run_id": run_id,
             "universe_size": len(universe),
             "shortlist_size": len(shortlist),
             "signals": signals_out,
         }
+        if ml_unavailable:
+            result["warning"] = (
+                "ML model is not loaded — 0 signals generated. "
+                "Run the model-retrain skill first to train an XGBoost model, "
+                "then re-run the dry run."
+            )
+        return result
 
     @app.get("/api/dry-run/history")
     async def get_dry_run_history(

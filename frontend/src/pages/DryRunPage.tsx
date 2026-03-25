@@ -90,6 +90,12 @@ export function DryRunPage() {
         </div>
       )}
 
+      {runDryRun.isSuccess && runDryRun.data?.warning && (
+        <div className="bg-amber-900/20 border border-amber-800 rounded-lg p-3 text-sm text-amber-400">
+          {runDryRun.data.warning}
+        </div>
+      )}
+
       {runDryRun.isError && (
         <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-sm text-red-400">
           Dry run failed. Make sure you have OHLCV data ingested and ML model
