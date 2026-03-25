@@ -76,13 +76,13 @@ export function StrategyPerformancePage() {
           <h3 className="text-sm font-medium text-gray-400 mb-3">PnL by Entry Hour</h3>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={hourData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-              <XAxis dataKey="hour" tick={{ fontSize: 10, fill: "#6b7280" }} />
-              <YAxis tick={{ fontSize: 10, fill: "#6b7280" }} />
-              <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "1px solid #374151", borderRadius: "8px", fontSize: "12px" }} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#2a2c37" />
+              <XAxis dataKey="hour" tick={{ fontSize: 10, fill: "#6e7288" }} />
+              <YAxis tick={{ fontSize: 10, fill: "#6e7288" }} />
+              <Tooltip contentStyle={{ backgroundColor: "#2a2c37", border: "1px solid #353847", borderRadius: "8px", fontSize: "12px" }} />
               <Bar dataKey="pnl" name="PnL">
                 {hourData.map((d, i) => (
-                  <Cell key={i} fill={d.pnl >= 0 ? "#10b981" : "#ef4444"} />
+                  <Cell key={i} fill={d.pnl >= 0 ? "#a4cc78" : "#f38e82"} />
                 ))}
               </Bar>
             </BarChart>

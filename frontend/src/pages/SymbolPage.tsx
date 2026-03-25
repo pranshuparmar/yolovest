@@ -84,15 +84,15 @@ export function SymbolPage() {
             <AreaChart data={chartData}>
               <defs>
                 <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                  <stop offset="5%" stopColor="#a4cc78" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#a4cc78" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#6b7280" }} />
-              <YAxis domain={["auto", "auto"]} tick={{ fontSize: 10, fill: "#6b7280" }} />
-              <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "1px solid #374151", borderRadius: "8px", fontSize: "12px" }} />
-              <Area type="monotone" dataKey="close" stroke="#10b981" fill="url(#priceGrad)" strokeWidth={2} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#2a2c37" />
+              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#6e7288" }} />
+              <YAxis domain={["auto", "auto"]} tick={{ fontSize: 10, fill: "#6e7288" }} />
+              <Tooltip contentStyle={{ backgroundColor: "#2a2c37", border: "1px solid #353847", borderRadius: "8px", fontSize: "12px" }} />
+              <Area type="monotone" dataKey="close" stroke="#a4cc78" fill="url(#priceGrad)" strokeWidth={2} />
             </AreaChart>
           </ResponsiveContainer>
         )}
@@ -104,9 +104,9 @@ export function SymbolPage() {
           <h3 className="text-sm font-medium text-gray-400 mb-3">Volume</h3>
           <ResponsiveContainer width="100%" height={120}>
             <BarChart data={chartData}>
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#6b7280" }} />
-              <YAxis tick={{ fontSize: 10, fill: "#6b7280" }} />
-              <Bar dataKey="volume" fill="#3b82f6" opacity={0.6} />
+              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#6e7288" }} />
+              <YAxis tick={{ fontSize: 10, fill: "#6e7288" }} />
+              <Bar dataKey="volume" fill="#78cfe2" opacity={0.6} />
             </BarChart>
           </ResponsiveContainer>
         </div>

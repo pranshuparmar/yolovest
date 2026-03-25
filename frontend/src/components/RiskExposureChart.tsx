@@ -8,16 +8,16 @@ import {
 } from "recharts";
 
 const COLORS = [
-  "#10b981",
-  "#3b82f6",
-  "#f59e0b",
-  "#ef4444",
-  "#8b5cf6",
-  "#ec4899",
-  "#14b8a6",
-  "#f97316",
-  "#06b6d4",
-  "#84cc16",
+  "#a4cc78",
+  "#78cfe2",
+  "#f9cc6c",
+  "#f38e82",
+  "#c7a4e0",
+  "#f9967b",
+  "#78cfe2",
+  "#f9967b",
+  "#78cfe2",
+  "#a4cc78",
 ];
 
 function fmt(n: number, d = 2) {
@@ -104,8 +104,8 @@ export function RiskExposureChart() {
                 </Pie>
                 <Tooltip
                   contentStyle={{
-                    backgroundColor: "#1f2937",
-                    border: "1px solid #374151",
+                    backgroundColor: "#2a2c37",
+                    border: "1px solid #353847",
                     borderRadius: "8px",
                     fontSize: "12px",
                   }}
