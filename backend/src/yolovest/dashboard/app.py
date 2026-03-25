@@ -1091,11 +1091,14 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Score a dry-run against actual next-day market data."""
         return await ctx.db.score_dry_run(run_id)
 
+    def _model_dir() -> str:
+        return getattr(ctx.config.strategy, "model_dir", "./models")
+
     @app.post("/api/backup")
     async def create_backup(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
-        """Create a manual database backup."""
+        """Create a manual database backup including ML model artifacts."""
         backup_dir = ctx.config.database.backup_dir
-        backup_path = await ctx.db.backup(backup_dir)
+        backup_path = await ctx.db.backup(backup_dir, model_dir=_model_dir())
         return {"success": True, "backup_path": backup_path}
 
     @app.get("/api/backups")
@@ -1104,12 +1107,41 @@ def create_app(ctx: AppContext) -> FastAPI:
         backup_dir = ctx.config.database.backup_dir
         return await ctx.db.list_backups(backup_dir)
 
+    @app.post("/api/restore/{filename}")
+    async def restore_backup(
+        filename: str, _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Restore a database backup. Application should be restarted after restore."""
+        backup_dir = ctx.config.database.backup_dir
+        result = await ctx.db.restore_backup(
+            backup_dir, filename, model_dir=_model_dir(),
+        )
+        return {"success": True, **result}
+
     @app.post("/api/reset")
     async def reset_all_data(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
-        """Delete ALL data from all tables. Schema is preserved."""
+        """Delete ALL data from all tables and model artifacts. Schema is preserved."""
         deleted = await ctx.db.reset_all_data()
         total = sum(deleted.values())
-        return {"success": True, "total_rows_deleted": total, "by_table": deleted}
+        # Also clean up all model artifacts
+        model_cleanup = await ctx.db.cleanup_orphaned_models(_model_dir())
+        return {
+            "success": True,
+            "total_rows_deleted": total,
+            "by_table": deleted,
+            "model_files_deleted": model_cleanup.get("orphaned_files_deleted", 0),
+        }
+
+    @app.delete("/api/ml-models/{model_type}/{version}")
+    async def delete_model(
+        model_type: str, version: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete a model version (DB record + .pkl artifact)."""
+        result = await ctx.db.delete_model_version(
+            model_type, version, model_dir=_model_dir(),
+        )
+        return {"success": True, **result}
 
     # ------------------------------------------------------------------
     # Manual Skill Trigger

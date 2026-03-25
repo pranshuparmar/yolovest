@@ -1558,8 +1558,14 @@ class Database:
     # Backup & Retention (FR-10.2, FR-10.3)
     # ------------------------------------------------------------------
 
-    async def backup(self, backup_dir: str) -> str:
-        """Create a timestamped backup of the database (FR-10.2)."""
+    async def backup(self, backup_dir: str, model_dir: str | None = None) -> str:
+        """Create a timestamped backup of the database and model artifacts (FR-10.2).
+
+        Args:
+            backup_dir: Directory to store backup files.
+            model_dir: Optional path to ML model artifacts (.pkl files).
+                If provided, model files are copied into a subdirectory of the backup.
+        """
         import shutil
 
         Path(backup_dir).mkdir(parents=True, exist_ok=True)
@@ -1569,6 +1575,26 @@ class Database:
         await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         shutil.copy2(self._db_path, backup_path)
         logger.info("Database backup created: %s", backup_path)
+
+        # Backup ML model artifacts alongside the DB
+        models_backed_up = 0
+        if model_dir:
+            model_src = Path(model_dir)
+            if model_src.is_dir():
+                models_backup_dir = Path(backup_dir) / f"models_{timestamp}"
+                models_backup_dir.mkdir(parents=True, exist_ok=True)
+                for pkl_file in model_src.glob("*.pkl"):
+                    try:
+                        shutil.copy2(pkl_file, models_backup_dir / pkl_file.name)
+                        models_backed_up += 1
+                    except OSError as e:
+                        logger.warning("Failed to backup model %s: %s", pkl_file.name, e)
+                if models_backed_up:
+                    logger.info(
+                        "Backed up %d model artifacts to %s",
+                        models_backed_up, models_backup_dir,
+                    )
+
         return backup_path
 
     async def run_retention_cleanup(
@@ -1850,6 +1876,115 @@ class Database:
         total = sum(deleted.values())
         logger.warning("Full database reset: deleted %d total rows across %d tables", total, len(tables))
         return deleted
+
+    async def restore_backup(
+        self, backup_dir: str, filename: str, model_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """Restore a database backup. Replaces current DB and optionally restores models.
+
+        IMPORTANT: Caller must restart the application after restore.
+        """
+        import shutil
+
+        backup_file = Path(backup_dir) / filename
+        if not backup_file.exists():
+            raise FileNotFoundError(f"Backup not found: {filename}")
+
+        # Extract timestamp from filename (yolovest_YYYYMMDD_HHMMSS.db)
+        stem = backup_file.stem  # yolovest_YYYYMMDD_HHMMSS
+        timestamp_part = stem.replace("yolovest_", "")
+        models_backup_dir = Path(backup_dir) / f"models_{timestamp_part}"
+
+        # Close current connection before overwriting
+        await self.conn.close()
+
+        # Restore database
+        db_path = Path(self._db_path)
+        # Remove WAL/SHM files
+        for suffix in ["-wal", "-shm"]:
+            wal_file = db_path.with_suffix(db_path.suffix + suffix)
+            if wal_file.exists():
+                wal_file.unlink()
+        shutil.copy2(backup_file, db_path)
+        logger.info("Database restored from %s", filename)
+
+        result: dict[str, Any] = {"db_restored": True, "backup_file": filename}
+
+        # Restore model artifacts if backup has them
+        models_restored = 0
+        if model_dir and models_backup_dir.is_dir():
+            model_dest = Path(model_dir)
+            model_dest.mkdir(parents=True, exist_ok=True)
+            for pkl_file in models_backup_dir.glob("*.pkl"):
+                try:
+                    shutil.copy2(pkl_file, model_dest / pkl_file.name)
+                    models_restored += 1
+                except OSError as e:
+                    logger.warning("Failed to restore model %s: %s", pkl_file.name, e)
+            result["models_restored"] = models_restored
+
+        # Reopen connection
+        self.conn = await aiosqlite.connect(self._db_path)
+        self.conn.row_factory = aiosqlite.Row
+        await self.conn.execute("PRAGMA journal_mode=WAL")
+        await self.conn.execute("PRAGMA foreign_keys=ON")
+
+        return result
+
+    async def delete_model_version(
+        self, model_type: str, version: str, model_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete a model version from DB and remove its .pkl artifact from disk."""
+        # Remove from DB
+        cursor = await self.conn.execute(
+            "DELETE FROM model_versions WHERE model_type = ? AND version = ?",
+            (model_type, version),
+        )
+        await self.conn.commit()
+        db_deleted = cursor.rowcount > 0
+
+        # Remove .pkl file from disk
+        file_deleted = False
+        if model_dir:
+            pkl_path = Path(model_dir) / f"{version}.pkl"
+            if pkl_path.exists():
+                pkl_path.unlink()
+                file_deleted = True
+                logger.info("Deleted model artifact: %s", pkl_path)
+
+        return {
+            "model_type": model_type,
+            "version": version,
+            "db_deleted": db_deleted,
+            "file_deleted": file_deleted,
+        }
+
+    async def cleanup_orphaned_models(self, model_dir: str) -> dict[str, Any]:
+        """Remove .pkl files on disk that have no matching DB record (retired or deleted)."""
+        model_path = Path(model_dir)
+        if not model_path.is_dir():
+            return {"orphaned_files_deleted": 0}
+
+        # Get all known versions from DB
+        cursor = await self.conn.execute(
+            "SELECT version FROM model_versions WHERE status IN ('production', 'shadow')"
+        )
+        rows = await cursor.fetchall()
+        active_versions = {row[0] for row in rows}
+
+        deleted = 0
+        for pkl_file in model_path.glob("*.pkl"):
+            # Extract version from filename (e.g., intraday_v20260325_180000.pkl → intraday_v20260325_180000)
+            version = pkl_file.stem
+            if version not in active_versions:
+                try:
+                    pkl_file.unlink()
+                    deleted += 1
+                    logger.info("Removed orphaned model: %s", pkl_file.name)
+                except OSError as e:
+                    logger.warning("Failed to remove orphaned model %s: %s", pkl_file.name, e)
+
+        return {"orphaned_files_deleted": deleted}
 
     async def list_backups(self, backup_dir: str) -> list[dict[str, Any]]:
         """List available backup files with size and timestamp."""
