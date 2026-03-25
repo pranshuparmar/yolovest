@@ -102,7 +102,7 @@ class ModelRetrainSkill(SkillBase):
                 current = await self.ctx.db.get_production_model(model_type)
                 current_sharpe = current.get("sharpe_ratio", 0) if current else 0
 
-                improved = metrics.get("sharpe_ratio", 0) > current_sharpe
+                improved = metrics.get("sharpe", 0) > current_sharpe
                 if improved:
                     await self.ctx.ml.deploy_shadow(model_type, version, cfg.shadow_mode_days)
                     shadow_deployed.append(model_type)

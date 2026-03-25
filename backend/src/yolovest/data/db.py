@@ -728,7 +728,7 @@ class Database:
                 model_type,
                 version,
                 file_path,
-                metrics.get("sharpe_ratio"),
+                metrics.get("sharpe") or metrics.get("sharpe_ratio"),
                 metrics.get("max_drawdown_pct"),
                 metrics.get("win_rate"),
                 metrics.get("profit_factor"),
