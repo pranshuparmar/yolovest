@@ -16,14 +16,11 @@ Flow:
 import logging
 from datetime import datetime, time
 from typing import Any
-from zoneinfo import ZoneInfo
-
 from yolovest.data.features import IndicatorConfig, compute_features
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+from yolovest.timezone import IST
 
 logger = logging.getLogger(__name__)
-
-IST = ZoneInfo("Asia/Kolkata")
 
 
 class GenerateSignalsSkill(SkillBase):

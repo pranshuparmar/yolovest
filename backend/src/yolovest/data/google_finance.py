@@ -8,7 +8,7 @@ All methods return empty results on failure — never crash the pipeline.
 import asyncio
 import logging
 import re
-from datetime import datetime
+from yolovest.timezone import now_ist
 from typing import Any
 
 from yolovest.models.schemas import NewsArticle
@@ -260,7 +260,7 @@ class GoogleFinanceScraper:
                         headline=headline,
                         source="google_finance",
                         symbols=matched_symbols,
-                        published_at=datetime.now(),
+                        published_at=now_ist(),
                     )
                 )
 

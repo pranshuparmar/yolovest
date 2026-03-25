@@ -6,7 +6,7 @@ heartbeat mutex (skip-on-overrun), and consecutive skip alerting.
 
 import asyncio
 import logging
-from datetime import datetime
+import time
 from typing import Any, ClassVar
 
 from yolovest.context import AppContext
@@ -309,7 +309,7 @@ class HeartbeatOrchestrator:
         logger.info("Heartbeat orchestrator started")
 
         while self._running:
-            start = datetime.now()
+            start = time.monotonic()
 
             try:
                 results = await self.run_heartbeat()
@@ -334,7 +334,7 @@ class HeartbeatOrchestrator:
                 interval = self._ctx.config.heartbeat.off_hours_interval_min * 60
 
             # Sleep for remaining interval (subtract elapsed time)
-            elapsed = (datetime.now() - start).total_seconds()
+            elapsed = time.monotonic() - start
             sleep_time = max(0, interval - elapsed)
 
             if self._running:

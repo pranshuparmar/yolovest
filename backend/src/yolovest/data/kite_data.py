@@ -13,6 +13,8 @@ Requires:
 import asyncio
 import logging
 from datetime import date, datetime, timedelta
+
+from yolovest.timezone import now_ist
 from typing import Any
 
 from yolovest.data.base import MarketDataBase
@@ -169,7 +171,7 @@ class KiteDataProvider(MarketDataBase):
             return {
                 "ltp": quote.get("last_price", 0),
                 "volume": quote.get("volume", 0),
-                "timestamp": quote.get("timestamp", datetime.now().isoformat()),
+                "timestamp": quote.get("timestamp", now_ist().isoformat()),
                 "open": quote.get("ohlc", {}).get("open"),
                 "high": quote.get("ohlc", {}).get("high"),
                 "low": quote.get("ohlc", {}).get("low"),

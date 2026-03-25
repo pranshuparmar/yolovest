@@ -13,6 +13,8 @@ from datetime import datetime
 
 from croniter import croniter
 
+from yolovest.timezone import now_ist
+
 from yolovest.context import AppContext
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
@@ -124,9 +126,10 @@ class CronScheduler:
         )
         return result
 
-    def _now(self) -> datetime:
-        """Return the current time.  Extracted for easy patching in tests."""
-        return datetime.now()
+    @staticmethod
+    def _now():
+        """Return the current time in IST. Extracted for easy patching in tests."""
+        return now_ist()
 
     async def _check_and_fire(self) -> None:
         """One iteration: check every CRON skill and fire those that are due."""

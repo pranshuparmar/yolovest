@@ -8,17 +8,15 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import aiosqlite
 
 from typing import Any
 
 from yolovest.models.schemas import EconomicEvent, NewsArticle, OHLCVBar, SentimentResult
+from yolovest.timezone import IST, now_ist
 
 logger = logging.getLogger(__name__)
-
-IST = ZoneInfo("Asia/Kolkata")
 
 # Default migrations directory (relative to project root)
 _DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
@@ -203,7 +201,7 @@ class Database:
         """Fetch OHLCV bars for a symbol, most recent `days` days."""
         from datetime import timedelta
 
-        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+        cutoff = (now_ist() - timedelta(days=days)).isoformat()
         cursor = await self.conn.execute(
             "SELECT timestamp, open, high, low, close, volume FROM ohlcv "
             "WHERE symbol = ? AND interval = ? "
@@ -390,12 +388,12 @@ class Database:
         Set auto_commit=False when batching multiple audit entries,
         then call flush_audit() to commit them all at once.
         """
-        now_ist = datetime.now(IST).isoformat()
+        ts_now = now_ist().isoformat()
         await self.conn.execute(
             "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
             "input_summary, output_summary, duration_ms) VALUES (?, ?, ?, ?, ?, ?)",
             (
-                now_ist,
+                ts_now,
                 action_type,
                 skill_name,
                 json.dumps(input_summary) if input_summary else None,
@@ -593,8 +591,8 @@ class Database:
         """Get economic events within the next N days, optionally filtered."""
         from datetime import timedelta
 
-        today = datetime.now(IST).date().isoformat()
-        end = (datetime.now(IST).date() + timedelta(days=days)).isoformat()
+        today = now_ist().date().isoformat()
+        end = (now_ist().date() + timedelta(days=days)).isoformat()
 
         query = (
             "SELECT event_date, event_type, title, country, impact, source, symbol "
@@ -619,8 +617,8 @@ class Database:
         """Get upcoming earnings/board meeting dates, optionally for a specific symbol."""
         from datetime import timedelta
 
-        today = datetime.now(IST).date().isoformat()
-        end = (datetime.now(IST).date() + timedelta(days=days)).isoformat()
+        today = now_ist().date().isoformat()
+        end = (now_ist().date() + timedelta(days=days)).isoformat()
 
         query = (
             "SELECT event_date, title, symbol, impact, source "
@@ -827,7 +825,7 @@ class Database:
         """
         from datetime import timedelta
 
-        now = datetime.now(IST)
+        now = now_ist()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
         # Get initial capital from system_state or fallback
@@ -1007,7 +1005,7 @@ class Database:
 
     async def get_todays_trades(self) -> list[dict[str, Any]]:
         """Get all trades created today."""
-        today_start = datetime.now(IST).replace(
+        today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).isoformat()
         cursor = await self.conn.execute(
@@ -1038,7 +1036,7 @@ class Database:
         import uuid
 
         trade_id = trade.get("trade_id") or f"T-{uuid.uuid4().hex[:8]}"
-        now_ist = datetime.now(IST).isoformat()
+        ts_now = now_ist().isoformat()
 
         await self.conn.execute(
             "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
@@ -1060,7 +1058,7 @@ class Database:
                 trade.get("mode", "paper"),
                 trade.get("status", "open"),
                 trade.get("slippage", 0.0),
-                now_ist,
+                ts_now,
             ),
         )
         await self.conn.commit()
@@ -1080,7 +1078,7 @@ class Database:
         Note: PnL is stored as NULL while position is open; this updates
         a computed field or can be used for tracking in audit_log.
         """
-        now_ist = datetime.now(IST).isoformat()
+        ts_now = now_ist().isoformat()
         # Log unrealized PnL as audit entry for tracking
         await self.log_audit(
             action_type="unrealized_pnl_update",
@@ -1091,11 +1089,11 @@ class Database:
         self, position_id: int | str, exit_price: float, pnl: float
     ) -> None:
         """Close a position with exit price and realized PnL."""
-        now_ist = datetime.now(IST).isoformat()
+        ts_now = now_ist().isoformat()
         await self.conn.execute(
             "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, closed_at = ? "
             "WHERE trade_id = ?",
-            (exit_price, pnl, now_ist, str(position_id)),
+            (exit_price, pnl, ts_now, str(position_id)),
         )
         await self.conn.commit()
 
@@ -1108,13 +1106,13 @@ class Database:
         import uuid
 
         pred_id = prediction.get("prediction_id") or f"P-{uuid.uuid4().hex[:8]}"
-        now_ist = datetime.now(IST).isoformat()
+        ts_now = now_ist().isoformat()
 
         # Compute prediction end time from holding period
         from yolovest.models.schemas import _parse_holding_period
 
         holding = prediction.get("expected_holding_period", "intraday")
-        end_time = datetime.now(IST) + _parse_holding_period(holding)
+        end_time = now_ist() + _parse_holding_period(holding)
 
         # Try to find the matching signal_id from signals table
         signal_id = prediction.get("signal_id")
@@ -1132,7 +1130,7 @@ class Database:
             "INSERT INTO predictions (prediction_id, signal_id, trade_id, created_at, "
             "prediction_end_time, actual_price, direction_correct, target_hit, "
             "actual_pnl_pct) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
-            (pred_id, signal_id, prediction.get("trade_id"), now_ist, end_time.isoformat()),
+            (pred_id, signal_id, prediction.get("trade_id"), ts_now, end_time.isoformat()),
         )
 
         # Also store prediction details in audit for traceability
@@ -1154,7 +1152,7 @@ class Database:
 
     async def get_unscored_predictions(self) -> list[dict[str, Any]]:
         """Get predictions whose holding period has elapsed but haven't been scored."""
-        now_ist = datetime.now(IST).isoformat()
+        ts_now = now_ist().isoformat()
         cursor = await self.conn.execute(
             "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
             "p.prediction_end_time, "
@@ -1168,7 +1166,7 @@ class Database:
             "WHERE p.actual_price IS NULL "
             "AND p.prediction_end_time <= ? "
             "ORDER BY p.created_at",
-            (now_ist,),
+            (ts_now,),
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
@@ -1283,7 +1281,7 @@ class Database:
 
     async def get_todays_predictions(self) -> list[dict[str, Any]]:
         """Get predictions created today."""
-        today_start = datetime.now(IST).replace(
+        today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).isoformat()
         cursor = await self.conn.execute(
@@ -1304,7 +1302,7 @@ class Database:
         """Get trades for the current week (Monday-Friday)."""
         from datetime import timedelta
 
-        now = datetime.now(IST)
+        now = now_ist()
         days_since_monday = now.weekday()
         monday = (now - timedelta(days=days_since_monday)).replace(
             hour=9, minute=15, second=0, microsecond=0
@@ -1320,7 +1318,7 @@ class Database:
         """Get predictions for the current week."""
         from datetime import timedelta
 
-        now = datetime.now(IST)
+        now = now_ist()
         days_since_monday = now.weekday()
         monday = (now - timedelta(days=days_since_monday)).replace(
             hour=9, minute=15, second=0, microsecond=0
@@ -1339,7 +1337,7 @@ class Database:
         """Get LLM reviews for the current week with linked trade PnL."""
         from datetime import timedelta
 
-        now = datetime.now(IST)
+        now = now_ist()
         days_since_monday = now.weekday()
         monday = (now - timedelta(days=days_since_monday)).replace(
             hour=9, minute=15, second=0, microsecond=0
@@ -1382,7 +1380,7 @@ class Database:
         """Get shadow models that have completed their trial period."""
         from datetime import timedelta
 
-        cutoff = (datetime.now(IST) - timedelta(days=shadow_mode_days)).isoformat()
+        cutoff = (now_ist() - timedelta(days=shadow_mode_days)).isoformat()
         cursor = await self.conn.execute(
             "SELECT * FROM model_versions "
             "WHERE status = 'shadow' AND shadow_start_date <= ?",
@@ -1430,7 +1428,7 @@ class Database:
         """
         from datetime import timedelta
 
-        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+        cutoff = (now_ist() - timedelta(days=days)).isoformat()
         cursor = await self.conn.execute(
             "SELECT DATE(closed_at) as trade_date, "
             "SUM(pnl) as daily_pnl, COUNT(*) as trade_count "
@@ -1556,7 +1554,7 @@ class Database:
         import shutil
 
         Path(backup_dir).mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+        timestamp = now_ist().strftime("%Y%m%d_%H%M%S")
         backup_path = str(Path(backup_dir) / f"yolovest_{timestamp}.db")
         # Use SQLite backup API via a checkpoint first
         await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -1575,7 +1573,7 @@ class Database:
         """Delete data older than retention periods (FR-10.3)."""
         from datetime import timedelta
 
-        now = datetime.now(IST)
+        now = now_ist()
         deleted = {}
 
         # OHLCV retention
@@ -1691,7 +1689,7 @@ class Database:
         if ts_col is None:
             raise ValueError(f"Cleanup not allowed for table: {table}")
 
-        cutoff = (datetime.now(IST) - timedelta(days=older_than_days)).isoformat()
+        cutoff = (now_ist() - timedelta(days=older_than_days)).isoformat()
         cursor = await self.conn.execute(
             f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,)  # noqa: S608
         )
@@ -1875,7 +1873,7 @@ class Database:
         """
         from datetime import timedelta
 
-        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+        cutoff = (now_ist() - timedelta(days=days)).isoformat()
 
         if symbol:
             cursor = await self.conn.execute(
@@ -1949,7 +1947,7 @@ class Database:
         """
         from datetime import timedelta
 
-        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+        cutoff = (now_ist() - timedelta(days=days)).isoformat()
 
         # Get reviews with matching trade outcomes
         cursor = await self.conn.execute(
@@ -2029,7 +2027,7 @@ class Database:
         self, namespace: str, key: str, value: str, expires_at: str | None = None
     ) -> None:
         """Upsert a memory entry."""
-        now = datetime.now(IST).isoformat()
+        now = now_ist().isoformat()
         await self.conn.execute(
             "INSERT INTO agent_memory (namespace, key, value, created_at, updated_at, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?) "
@@ -2067,7 +2065,7 @@ class Database:
 
     async def cleanup_expired_memory(self) -> int:
         """Delete expired memory entries. Returns count deleted."""
-        now = datetime.now(IST).isoformat()
+        now = now_ist().isoformat()
         cursor = await self.conn.execute(
             "DELETE FROM agent_memory WHERE expires_at IS NOT NULL AND expires_at < ?",
             (now,),
@@ -2187,7 +2185,7 @@ class Database:
     async def get_execution_quality(self, days: int = 30) -> dict[str, Any]:
         """Detailed execution quality metrics."""
         from datetime import timedelta
-        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+        cutoff = (now_ist() - timedelta(days=days)).isoformat()
 
         # Slippage by hour
         cursor = await self.conn.execute(
@@ -2271,7 +2269,7 @@ class Database:
     async def get_ohlcv_multi(self, symbols: list[str], days: int = 60) -> dict[str, list[dict[str, Any]]]:
         """Fetch close prices for multiple symbols for correlation computation."""
         from datetime import timedelta
-        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+        cutoff = (now_ist() - timedelta(days=days)).isoformat()
 
         result: dict[str, list[dict[str, Any]]] = {}
         for symbol in symbols:
@@ -2324,7 +2322,7 @@ class Database:
 
     async def trigger_price_alert(self, alert_id: int) -> None:
         """Mark an alert as triggered."""
-        now = datetime.now(IST).isoformat()
+        now = now_ist().isoformat()
         await self.conn.execute(
             "UPDATE price_alerts SET active = 0, triggered_at = ? WHERE id = ?",
             (now, alert_id),

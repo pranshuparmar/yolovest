@@ -20,15 +20,13 @@ Flow:
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+from yolovest.timezone import IST, now_ist
 
 logger = logging.getLogger(__name__)
-
-IST = ZoneInfo("Asia/Kolkata")
 
 
 class IngestDataSkill(SkillBase):
@@ -52,7 +50,7 @@ class IngestDataSkill(SkillBase):
             if not bars:
                 return False
             latest = bars[-1].timestamp
-            now = datetime.now(IST)
+            now = now_ist()
             if latest.tzinfo is None:
                 latest = latest.replace(tzinfo=IST)
 

@@ -10,9 +10,10 @@ See REQUIREMENTS.md FR-2.1 for the fallback chain design.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
+
+from yolovest.timezone import IST, now_ist
 
 from yolovest.data.base import MarketDataBase
 from yolovest.models.schemas import OHLCVBar
@@ -146,11 +147,10 @@ class MarketDataIngester(MarketDataBase):
         if not bars:
             return True
         latest = bars[-1].timestamp
-        ist = ZoneInfo("Asia/Kolkata")
-        now = datetime.now(ist)
+        now = now_ist()
         # Normalize naive timestamps to IST for comparison
         if latest.tzinfo is None:
-            latest = latest.replace(tzinfo=ist)
+            latest = latest.replace(tzinfo=IST)
         # For daily data, stale means no data from today or yesterday
         if interval in ("daily", "1d"):
             threshold = timedelta(days=2)

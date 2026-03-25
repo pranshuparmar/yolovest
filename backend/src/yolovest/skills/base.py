@@ -4,11 +4,14 @@ All YoloVest skills extend SkillBase and implement execute().
 Skills are the discrete, independently invocable capabilities of the trading agent.
 """
 
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
+
+from yolovest.timezone import now_ist
 
 
 class SkillTrigger(Enum):
@@ -26,7 +29,7 @@ class SkillResult:
 
     success: bool
     skill_name: str
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=now_ist)
     data: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     duration_ms: float = 0.0
@@ -64,15 +67,15 @@ class SkillBase(ABC):
 
     async def safe_execute(self, **kwargs: Any) -> SkillResult:
         """Wrapper that catches exceptions and returns error SkillResult."""
-        start = datetime.now()
+        start = time.monotonic()
         try:
             result = await self.execute(**kwargs)
-            result.duration_ms = (datetime.now() - start).total_seconds() * 1000
+            result.duration_ms = (time.monotonic() - start) * 1000
             return result
         except Exception as e:
             return SkillResult(
                 success=False,
                 skill_name=self.name,
                 error=str(e),
-                duration_ms=(datetime.now() - start).total_seconds() * 1000,
+                duration_ms=(time.monotonic() - start) * 1000,
             )
