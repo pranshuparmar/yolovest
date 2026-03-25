@@ -769,6 +769,15 @@ class Database:
             await self.conn.rollback()
             raise
 
+    async def get_all_shadow_models(self) -> list[dict[str, Any]]:
+        """Get all models currently in shadow status."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM model_versions WHERE status = 'shadow' "
+            "ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](row) for row in rows]
+
     # ------------------------------------------------------------------
     # Training Data (Phase 2, FR-7.4)
     # ------------------------------------------------------------------

@@ -501,9 +501,8 @@ def create_app(ctx: AppContext) -> FastAPI:
             except Exception:
                 pass
         try:
-            shadow_days = getattr(ctx.config, "ml", None)
-            days = getattr(shadow_days, "shadow_mode_days", 14) if shadow_days else 14
-            result["shadow"] = await ctx.db.get_shadow_models_ready(days)
+            shadow_models = await ctx.db.get_all_shadow_models()
+            result["shadow"] = shadow_models
         except Exception:
             pass
         return result
