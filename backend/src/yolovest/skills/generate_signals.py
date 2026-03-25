@@ -76,21 +76,24 @@ class GenerateSignalsSkill(SkillBase):
 
             try:
                 # Step 2: Fetch OHLCV and compute features
-                interval = "5minute" if use_intraday else "daily"
-                days = 1 if use_intraday else 60
-                bars = await self.ctx.db.get_ohlcv(symbol, interval, days=days)
+                # Always use daily bars for feature computation — intraday bars
+                # are too few for long-window indicators (EMA-50/200, MACD etc.)
+                # which causes feature shape mismatches with the trained model.
+                daily_bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=60)
 
-                if not bars:
-                    # Fallback to daily if intraday not available
-                    bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=60)
-
-                if len(bars) < 15:
-                    logger.debug("Insufficient data for %s (%d bars)", symbol, len(bars))
+                if len(daily_bars) < 15:
+                    logger.debug("Insufficient daily data for %s (%d bars)", symbol, len(daily_bars))
                     continue
 
-                features = compute_features(bars, indicator_cfg)
+                features = compute_features(daily_bars, indicator_cfg)
                 if not features:
                     continue
+
+                # Use latest intraday price if available during market hours
+                if use_intraday:
+                    intraday_bars = await self.ctx.db.get_ohlcv(symbol, "5minute", days=1)
+                    if intraday_bars:
+                        features["close"] = intraday_bars[-1].close
 
                 # Step 3: Run ML model
                 if use_intraday:
