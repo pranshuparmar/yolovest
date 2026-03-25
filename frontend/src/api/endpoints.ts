@@ -180,6 +180,11 @@ export const api = {
 
   mlModels: () => apiFetch<MLModelsResponse>("/api/ml-models"),
 
+  promoteModel: (modelType: string, version: string) =>
+    apiFetch<{ promoted: boolean }>(`/api/ml-models/${modelType}/${version}/promote`, {
+      method: "POST",
+    }),
+
   predictionsToday: () =>
     apiFetch<PredictionDetail[]>("/api/predictions/today"),
 

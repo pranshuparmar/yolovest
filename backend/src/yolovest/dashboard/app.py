@@ -507,6 +507,21 @@ def create_app(ctx: AppContext) -> FastAPI:
             pass
         return result
 
+    @app.post("/api/ml-models/{model_type}/{version}/promote")
+    async def promote_model(
+        model_type: str,
+        version: str,
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Manually promote a shadow model to production."""
+        await ctx.db.promote_model(model_type, version)
+        if ctx.ml:
+            try:
+                await ctx.ml.load_model(model_type, version)
+            except Exception as e:
+                logger.warning("Failed to load promoted model %s/%s: %s", model_type, version, e)
+        return {"promoted": True, "model_type": model_type, "version": version}
+
     # ------------------------------------------------------------------
     # Predictions Detail & Failures
     # ------------------------------------------------------------------

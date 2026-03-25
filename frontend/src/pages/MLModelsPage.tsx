@@ -1,4 +1,4 @@
-import { useMLModels } from "../hooks/queries";
+import { useMLModels, usePromoteModel } from "../hooks/queries";
 import clsx from "clsx";
 import type { MLModelInfo } from "../types/api";
 
@@ -36,10 +36,14 @@ function ModelCard({
   model,
   type,
   isShadow,
+  onPromote,
+  isPromoting,
 }: {
   model: MLModelInfo;
   type: string;
   isShadow?: boolean;
+  onPromote?: () => void;
+  isPromoting?: boolean;
 }) {
   return (
     <div
@@ -57,18 +61,34 @@ function ModelCard({
             Version: {model.version || "—"}
           </p>
         </div>
-        <span
-          className={clsx(
-            "px-2 py-0.5 rounded text-xs font-medium",
-            isShadow
-              ? "bg-amber-900/40 text-amber-400"
-              : model.status === "production"
-                ? "bg-emerald-900/40 text-emerald-400"
-                : "bg-gray-800 text-gray-400"
+        <div className="flex items-center gap-2">
+          {isShadow && onPromote && (
+            <button
+              onClick={onPromote}
+              disabled={isPromoting}
+              className={clsx(
+                "px-2.5 py-1 rounded text-xs font-medium transition-colors",
+                isPromoting
+                  ? "bg-gray-700 text-gray-500 cursor-not-allowed"
+                  : "bg-emerald-900/40 text-emerald-400 hover:bg-emerald-800/60"
+              )}
+            >
+              {isPromoting ? "Promoting…" : "Promote to Production"}
+            </button>
           )}
-        >
-          {isShadow ? "Shadow" : model.status || "Production"}
-        </span>
+          <span
+            className={clsx(
+              "px-2 py-0.5 rounded text-xs font-medium",
+              isShadow
+                ? "bg-amber-900/40 text-amber-400"
+                : model.status === "production"
+                  ? "bg-emerald-900/40 text-emerald-400"
+                  : "bg-gray-800 text-gray-400"
+            )}
+          >
+            {isShadow ? "Shadow" : model.status || "Production"}
+          </span>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -117,6 +137,7 @@ function ModelCard({
 
 export function MLModelsPage() {
   const { data, isLoading } = useMLModels();
+  const promote = usePromoteModel();
 
   const productionModels = data?.production || {};
   const shadowModels = data?.shadow || [];
@@ -175,6 +196,15 @@ export function MLModelsPage() {
                 model={model}
                 type={model.model_type || "unknown"}
                 isShadow
+                onPromote={() =>
+                  model.model_type &&
+                  model.version &&
+                  promote.mutate({
+                    modelType: model.model_type,
+                    version: model.version,
+                  })
+                }
+                isPromoting={promote.isPending}
               />
             ))}
           </div>
