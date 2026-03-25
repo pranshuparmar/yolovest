@@ -485,6 +485,14 @@ export function useRunDryRun() {
   });
 }
 
+export function useListSkills() {
+  return useQuery({
+    queryKey: ["skills"],
+    queryFn: api.listSkills,
+    staleTime: 60_000,
+  });
+}
+
 export function useRunSkill() {
   return useMutation({
     mutationFn: (skillName: string) => api.runSkill(skillName),

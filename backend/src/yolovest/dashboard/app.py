@@ -1101,6 +1101,23 @@ def create_app(ctx: AppContext) -> FastAPI:
     # Manual Skill Trigger
     # ------------------------------------------------------------------
 
+    @app.get("/api/skills")
+    async def list_skills(
+        _user: str = Depends(verify_credentials),
+    ) -> list[dict[str, str | None]]:
+        """List all registered skills with metadata."""
+        from yolovest.skills import SKILL_REGISTRY
+
+        out = []
+        for name, cls in sorted(SKILL_REGISTRY.items()):
+            out.append({
+                "name": name,
+                "description": cls.description,
+                "trigger": cls.trigger.value,
+                "schedule": cls.schedule,
+            })
+        return out
+
     @app.post("/api/skills/{skill_name}/run")
     async def run_skill(
         skill_name: str,
