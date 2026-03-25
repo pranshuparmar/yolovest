@@ -11,6 +11,7 @@ from yolovest.skills.generate_signals import GenerateSignalsSkill
 from yolovest.skills.health_check import HealthCheckSkill
 from yolovest.skills.ingest_data import IngestDataSkill
 from yolovest.skills.ingest_premarket import IngestPremarketSkill
+from yolovest.skills.ingest_universe import IngestUniverseSkill
 from yolovest.skills.kill_switch import KillSwitchSkill
 from yolovest.skills.llm_review import LLMReviewSkill
 from yolovest.skills.market_scan import MarketScanSkill
@@ -27,6 +28,7 @@ SKILL_REGISTRY: dict[str, type] = {
     "backfill-data": BackfillDataSkill,
     "ingest-data": IngestDataSkill,
     "ingest-premarket": IngestPremarketSkill,
+    "ingest-universe": IngestUniverseSkill,
     "market-scan": MarketScanSkill,
     "generate-signals": GenerateSignalsSkill,
     "risk-check": RiskCheckSkill,

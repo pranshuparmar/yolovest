@@ -65,8 +65,24 @@ class IngestDataSkill(SkillBase):
         except Exception:
             return False
 
+    async def _get_active_symbols(self) -> list[str]:
+        """Get symbols for deep ingestion: watchlist first, seed_symbols as fallback.
+
+        After ingest-universe populates the OHLCV table and market-scan builds
+        a watchlist, ingest-data targets those shortlisted symbols for the
+        expensive deep pass (news, sentiment, fundamentals). On a fresh install
+        before the first scan, falls back to seed_symbols.
+        """
+        try:
+            watchlist = await self.ctx.db.get_combined_watchlist()
+            if watchlist:
+                return [s["symbol"] for s in watchlist]
+        except Exception:
+            pass
+        return self.ctx.config.scanning.seed_symbols
+
     async def execute(self, **kwargs: Any) -> SkillResult:
-        symbols = kwargs.get("symbols", self.ctx.config.scanning.seed_symbols)
+        symbols = kwargs.get("symbols") or await self._get_active_symbols()
         results: dict[str, Any] = {"symbols_ingested": 0, "news_articles": 0, "errors": [], "cache_hits": 0}
 
         # --- OHLCV Data (primary + fallback) ---

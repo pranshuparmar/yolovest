@@ -32,7 +32,9 @@ heartbeat:
   max_consecutive_skips: 3            # alert if N heartbeats skipped due to overrun
 
 scanning:
-  seed_symbols: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
+  universe: nifty500                  # nifty50 | nifty500 | all
+  universe_cron: "30 8 * * 1-5"      # daily 8:30 AM IST on weekdays
+  seed_symbols: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]  # day-zero bootstrap only
   shortlist_size: 25                  # number of candidate stocks from daily scan
   min_avg_daily_volume: 500000        # filter out stocks below this avg daily volume
   weights:                            # ranking algorithm weights (must sum to 1.0)
