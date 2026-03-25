@@ -68,24 +68,27 @@ class ModelRetrainSkill(SkillBase):
                 data={"reason": "insufficient_data", "bar_count": bar_count},
             )
 
-        # Build feature matrix (X) and labels (y) from raw bars
-        X, y = self._prepare_training_data(training_data)
-        if len(y) < min_samples:
-            logger.warning(
-                "Insufficient feature samples (%d, need %d), skipping retrain",
-                len(y), min_samples,
-            )
-            return SkillResult(
-                success=True,
-                skill_name=self.name,
-                data={"reason": "insufficient_features", "sample_count": len(y)},
-            )
-
         # Step 3: Retrain models
         results: dict[str, Any] = {}
         shadow_deployed = []
 
+        # Lookahead periods: intraday uses 1-bar, swing uses 5-bar returns
+        lookahead_map = {"intraday": 1, "swing": 5}
+
         for model_type in ("intraday", "swing"):
+            # Build feature matrix with model-specific labeling
+            lookahead = lookahead_map[model_type]
+            X, y = self._prepare_training_data(training_data, lookahead_bars=lookahead)
+            if len(y) < min_samples:
+                logger.warning(
+                    "Insufficient %s feature samples (%d, need %d), skipping",
+                    model_type, len(y), min_samples,
+                )
+                results[model_type] = {
+                    "error": f"insufficient_features ({len(y)} < {min_samples})"
+                }
+                continue
+
             try:
                 metrics = await self.ctx.ml.train(
                     model_type, X, y, {}
@@ -139,15 +142,20 @@ class ModelRetrainSkill(SkillBase):
         )
 
     def _prepare_training_data(
-        self, training_data: dict[str, Any]
+        self, training_data: dict[str, Any], lookahead_bars: int = 1
     ) -> tuple[list[list[float]], list[int]]:
         """Convert raw OHLCV bars into feature matrix X and label array y.
 
         Groups bars by symbol, computes technical features using a sliding window,
-        and generates labels based on future price returns:
-          - BUY (2): next-day return > +0.5%
-          - SELL (0): next-day return < -0.5%
+        and generates labels based on future price returns over lookahead_bars:
+          - BUY (2): return > +0.5%
+          - SELL (0): return < -0.5%
           - HOLD (1): otherwise
+
+        Args:
+            training_data: Dict with "bars" key containing OHLCV row dicts.
+            lookahead_bars: Number of bars to look ahead for labeling.
+                1 for intraday (next-bar), 5 for swing (5-bar).
         """
         raw_bars = training_data.get("bars", [])
 
@@ -191,17 +199,17 @@ class ModelRetrainSkill(SkillBase):
                 for r in rows
             ]
 
-            # Sliding window: compute features at position i, label from i+1
-            for i in range(window_size, len(bars) - 1):
+            # Sliding window: compute features at position i, label from i+lookahead
+            for i in range(window_size, len(bars) - lookahead_bars):
                 window = bars[i - window_size : i + 1]
                 features = compute_features(window, indicator_cfg)
                 if not features:
                     continue
 
-                # Label: future 1-bar return
+                # Label: future N-bar return
                 current_close = bars[i].close
-                next_close = bars[i + 1].close
-                ret = (next_close - current_close) / current_close if current_close else 0
+                future_close = bars[i + lookahead_bars].close
+                ret = (future_close - current_close) / current_close if current_close else 0
 
                 if ret > 0.005:
                     label = 2  # BUY
