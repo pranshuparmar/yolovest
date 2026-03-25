@@ -237,6 +237,18 @@ def _build_memory(db: Any) -> Any:
         return None
 
 
+def _build_ml(config: AppConfig, db: Any) -> Any:
+    """Build ML provider (XGBoost signal model)."""
+    try:
+        from yolovest.strategy.ml_signal import XGBoostSignalModel
+
+        model_dir = getattr(config.strategy, "model_dir", "./models")
+        return XGBoostSignalModel(model_dir=model_dir, db=db)
+    except Exception:
+        logger.warning("Failed to build ML provider, signals will be unavailable")
+        return None
+
+
 def _build_news_aggregator() -> Any:
     """Build news aggregator with all available news sources."""
     try:
@@ -277,6 +289,7 @@ def build_context(config: AppConfig) -> AppContext:
         notify=cast(NotifierProtocol, Notifier(config)),
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
+        ml=_build_ml(config, db),
         news_aggregator=_build_news_aggregator(),
         memory=_build_memory(db),
     )
