@@ -40,7 +40,9 @@ class BackfillDataSkill(SkillBase):
 
         for symbol in symbols:
             try:
-                bars = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=days)
+                bars = await self.ctx.market_data.get_ohlcv(
+                    symbol, "daily", days=days, skip_stale_check=True,
+                )
                 if bars:
                     count = await self.ctx.db.upsert_ohlcv(symbol, "daily", bars, "backfill")
                     results["total_bars_stored"] += count

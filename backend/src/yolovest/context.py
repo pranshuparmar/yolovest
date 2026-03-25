@@ -76,7 +76,8 @@ class LLMProtocol(Protocol):
 @runtime_checkable
 class MarketDataProtocol(Protocol):
     async def get_ohlcv(
-        self, symbol: str, interval: str, days: int = 30
+        self, symbol: str, interval: str, days: int = 30,
+        *, skip_stale_check: bool = False,
     ) -> list[OHLCVBar]: ...
 
     async def get_quote(self, symbol: str) -> dict[str, Any]: ...
