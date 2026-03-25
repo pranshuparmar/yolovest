@@ -459,6 +459,18 @@ export function useCreateBackup() {
   });
 }
 
+export function useRestoreBackup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (filename: string) => api.restoreBackup(filename),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["backups"] });
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+      qc.invalidateQueries({ queryKey: ["ml-models"] });
+    },
+  });
+}
+
 export function useResetAllData() {
   const qc = useQueryClient();
   return useMutation({

@@ -320,6 +320,17 @@ async def async_main(args: argparse.Namespace) -> None:
     if isinstance(ctx.db, Database):
         await ctx.db.initialize()
 
+    # Load production ML models from disk (if any exist)
+    if ctx.ml is not None:
+        for model_type in ("intraday", "swing"):
+            try:
+                await ctx.ml.load_model(model_type)
+                logger.info("Loaded production %s model at startup", model_type)
+            except FileNotFoundError:
+                logger.info("No saved %s model found, will be available after model-retrain", model_type)
+            except Exception as e:
+                logger.warning("Failed to load %s model at startup: %s", model_type, e)
+
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
 

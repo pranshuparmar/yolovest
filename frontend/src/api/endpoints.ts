@@ -269,6 +269,12 @@ export const api = {
 
   listBackups: () => apiFetch<BackupEntry[]>("/api/backups"),
 
+  restoreBackup: (filename: string) =>
+    apiFetch<{ success: boolean; db_restored: boolean; models_restored?: number }>(
+      `/api/restore/${filename}`,
+      { method: "POST" },
+    ),
+
   resetAllData: () => apiFetch<ResetResult>("/api/reset", { method: "POST" }),
 
   // Dry-Run Signal Preview

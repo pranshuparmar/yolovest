@@ -4,6 +4,7 @@ import {
   useCleanupTable,
   useBackups,
   useCreateBackup,
+  useRestoreBackup,
   useResetAllData,
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
@@ -140,9 +141,11 @@ export function DataManagementPage() {
   const { data: backups } = useBackups();
   const cleanup = useCleanupTable();
   const createBackup = useCreateBackup();
+  const restoreBackup = useRestoreBackup();
   const resetAll = useResetAllData();
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [resetStep, setResetStep] = useState<"idle" | "warn" | "confirm">("idle");
+  const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
 
   const handleCleanup = (table: string, days: number) => {
     cleanup.mutate(
@@ -281,6 +284,7 @@ export function DataManagementPage() {
                 <th className="py-2 px-4 text-left">Filename</th>
                 <th className="py-2 px-4 text-right">Size</th>
                 <th className="py-2 px-4 text-right">Created</th>
+                <th className="py-2 px-4 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -289,6 +293,41 @@ export function DataManagementPage() {
                   <td className="py-2 px-4 font-mono text-gray-300 text-xs">{b.filename}</td>
                   <td className="py-2 px-4 text-right text-gray-400">{formatBytes(b.size_bytes)}</td>
                   <td className="py-2 px-4 text-right text-gray-400">{formatDateTime(b.created_at)}</td>
+                  <td className="py-2 px-4 text-right">
+                    {restoreConfirm === b.filename ? (
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => {
+                            restoreBackup.mutate(b.filename, {
+                              onSuccess: (result) => {
+                                setLastResult(
+                                  `Restored from ${b.filename}${result.models_restored ? ` (${result.models_restored} models restored)` : ""}. Please restart the server.`
+                                );
+                                setRestoreConfirm(null);
+                              },
+                            });
+                          }}
+                          disabled={restoreBackup.isPending}
+                          className="px-2 py-0.5 rounded text-xs font-medium bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50"
+                        >
+                          {restoreBackup.isPending ? "Restoring..." : "Confirm"}
+                        </button>
+                        <button
+                          onClick={() => setRestoreConfirm(null)}
+                          className="text-xs text-gray-500 hover:text-gray-300"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setRestoreConfirm(b.filename)}
+                        className="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+                      >
+                        Restore
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
