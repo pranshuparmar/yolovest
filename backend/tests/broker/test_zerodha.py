@@ -75,7 +75,8 @@ class TestPaperMode:
     async def test_get_margins(self, paper_broker):
         margins = await paper_broker.get_margins()
         assert "available" in margins
-        assert margins["available"]["cash"] == 100_000
+        # Paper mode without Kite returns 0 (real balance comes from Kite API)
+        assert margins["available"]["cash"] == 0
 
     async def test_slippage_applied_to_market_buy(self, paper_broker):
         await paper_broker.authenticate("token")

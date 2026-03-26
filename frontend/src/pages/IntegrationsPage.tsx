@@ -101,7 +101,7 @@ export function IntegrationsPage() {
   if (isLoading || !data) {
     return (
       <div className="p-6 space-y-4">
-        <h2 className="text-lg font-semibold text-gray-100">Integrations</h2>
+        <h2 className="text-lg font-semibold text-gray-100">Settings</h2>
         <div className="grid gap-4 md:grid-cols-3">
           {[1, 2, 3].map((i) => (
             <div key={i} className="h-56 bg-gray-900 rounded-lg animate-pulse" />
@@ -115,7 +115,7 @@ export function IntegrationsPage() {
 
   return (
     <div className="p-6 space-y-4">
-      <h2 className="text-lg font-semibold text-gray-100">Integrations</h2>
+      <h2 className="text-lg font-semibold text-gray-100">Settings</h2>
 
       {authResult && (
         <div

@@ -25,6 +25,25 @@ logger = logging.getLogger(__name__)
 
 security = HTTPBasic()
 
+
+def _extract_broker_capital(margins: dict[str, Any]) -> float:
+    """Extract total capital from Kite margins response.
+
+    Kite returns: {"equity": {"available": {"cash": X}, "utilised": {"debits": Y}}}
+    Or sometimes: {"available": {"cash": X}} (simplified).
+    """
+    # Try Kite's nested equity structure first
+    equity = margins.get("equity", {})
+    if equity:
+        available = equity.get("available", {}).get("cash", 0)
+        used = equity.get("utilised", {}).get("debits", 0)
+        return float(available) + float(used)
+    # Fallback: flat structure
+    available = margins.get("available", {}).get("cash") or margins.get("available_cash") or 0
+    used = margins.get("utilised", {}).get("debits") or margins.get("used", {}).get("cash") or 0
+    return float(available) + float(used)
+
+
 # WebSocket connection manager
 _ws_clients: set[WebSocket] = set()
 
@@ -152,10 +171,8 @@ def create_app(ctx: AppContext) -> FastAPI:
             if await ctx.broker.is_authenticated():
                 margins = await ctx.broker.get_margins()
                 if margins:
-                    available = margins.get("available", {}).get("cash") or margins.get("available_cash")
-                    used = margins.get("utilised", {}).get("debits") or 0
-                    if available is not None:
-                        broker_capital = float(available) + float(used)
+                    broker_capital = _extract_broker_capital(margins)
+                    if broker_capital and broker_capital > 0:
                         await ctx.db.set_system_state("initial_capital", str(broker_capital))
         except Exception:
             pass  # Broker not configured or API failed — use DB value
@@ -186,9 +203,9 @@ def create_app(ctx: AppContext) -> FastAPI:
             margins = await ctx.broker.get_margins()
             if not margins:
                 return {"success": False, "error": "No margin data from broker"}
-            available = margins.get("available", {}).get("cash") or margins.get("available_cash") or 0
-            used = margins.get("utilised", {}).get("debits") or 0
-            broker_capital = float(available) + float(used)
+            broker_capital = _extract_broker_capital(margins)
+            if not broker_capital or broker_capital <= 0:
+                return {"success": False, "error": "Could not extract capital from margins data"}
             await ctx.db.set_system_state("initial_capital", str(broker_capital))
             return {"success": True, "initial_capital": broker_capital}
         except Exception as e:

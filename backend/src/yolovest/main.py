@@ -280,10 +280,14 @@ def build_context(config: AppConfig) -> AppContext:
     )
 
     db = _build_db(config)
+    broker = _build_broker(config)
+    # Pass DB to broker for token persistence (if real broker)
+    if isinstance(broker, ZerodhaBroker):
+        broker._db = db
     return AppContext(
         config=config,
         db=cast(DatabaseProtocol, db),
-        broker=cast(BrokerProtocol, _build_broker(config)),
+        broker=cast(BrokerProtocol, broker),
         llm=cast(LLMProtocol, _build_llm(config)),
         market_data=cast(MarketDataProtocol, _build_market_data(config)),
         notify=cast(NotifierProtocol, Notifier(config)),
@@ -319,6 +323,10 @@ async def async_main(args: argparse.Namespace) -> None:
     # Initialize database if real (not stub)
     if isinstance(ctx.db, Database):
         await ctx.db.initialize()
+
+    # Restore Zerodha session from persisted access token
+    if isinstance(ctx.broker, ZerodhaBroker):
+        await ctx.broker.restore_session()
 
     # Sync initial capital from config → DB (so portfolio reads the configured value)
     if isinstance(ctx.db, Database):

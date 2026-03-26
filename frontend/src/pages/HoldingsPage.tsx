@@ -178,7 +178,7 @@ function OrderForm({
 }
 
 export function HoldingsPage() {
-  const { data: holdings, isLoading } = useHoldings();
+  const { data: holdings, isLoading, refetch, isFetching } = useHoldings();
   const [orderForm, setOrderForm] = useState<{
     symbol?: string;
     side?: "BUY" | "SELL";
@@ -204,12 +204,21 @@ export function HoldingsPage() {
             Your Zerodha portfolio holdings (CNC/delivery)
           </p>
         </div>
-        <button
-          onClick={() => setOrderForm({})}
-          className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white transition-colors"
-        >
-          New Order
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => refetch()}
+            disabled={isFetching}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors disabled:opacity-50"
+          >
+            {isFetching ? "Refreshing..." : "Refresh"}
+          </button>
+          <button
+            onClick={() => setOrderForm({})}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white transition-colors"
+          >
+            New Order
+          </button>
+        </div>
       </div>
 
       {/* Order form */}
