@@ -39,32 +39,29 @@ def _extract_broker_capital(margins: dict[str, Any]) -> float:
     if isinstance(equity, dict) and equity:
         # Prefer "net" (total funds = available + used)
         net = equity.get("net")
-        if net is not None and float(net) > 0:
+        if net is not None:
             return float(net)
         # Fallback: available.cash + utilised.debits
         avail = equity.get("available", {})
         if isinstance(avail, dict):
             cash = avail.get("cash") or avail.get("live_balance") or 0
             used = equity.get("utilised", {}).get("debits", 0)
-            total = float(cash) + float(used)
-            if total > 0:
-                return total
+            return float(cash) + float(used)
 
     # Flat structure (segment-level response)
     net = margins.get("net")
-    if net is not None and float(net) > 0:
+    if net is not None:
         return float(net)
 
     avail = margins.get("available", {})
     if isinstance(avail, dict):
         cash = avail.get("cash") or avail.get("live_balance") or 0
-        if float(cash) > 0:
-            return float(cash)
+        return float(cash)
 
     # Direct keys
-    for key in ("available_cash", "net", "total_balance"):
+    for key in ("available_cash", "total_balance"):
         val = margins.get(key)
-        if val is not None and float(val) > 0:
+        if val is not None:
             return float(val)
 
     logger.warning("Could not extract capital from margins: %s", list(margins.keys()))
@@ -199,7 +196,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 margins = await ctx.broker.get_margins()
                 if margins:
                     broker_capital = _extract_broker_capital(margins)
-                    if broker_capital and broker_capital > 0:
+                    if broker_capital > 0:
                         await ctx.db.set_system_state("initial_capital", str(broker_capital))
         except Exception:
             pass  # Broker not configured or API failed — use DB value
@@ -233,7 +230,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             logger.info("Kite margins response: equity keys=%s",
                         list(margins.get("equity", {}).keys()) if isinstance(margins.get("equity"), dict) else margins.get("equity"))
             broker_capital = _extract_broker_capital(margins)
-            if not broker_capital or broker_capital <= 0:
+            if broker_capital is None:
                 return {"success": False, "error": "Could not extract capital from margins data"}
             await ctx.db.set_system_state("initial_capital", str(broker_capital))
             return {"success": True, "initial_capital": broker_capital}
