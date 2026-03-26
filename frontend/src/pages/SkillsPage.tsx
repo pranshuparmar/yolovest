@@ -26,8 +26,18 @@ export function SkillsPage() {
     });
     runSkill.mutate(skillName, {
       onSuccess: (result) => {
-        setResults((prev) => ({ ...prev, [skillName]: result }));
-        setRunningSkill(null);
+        const status = (result as Record<string, unknown>).status;
+        if (status === "started" || status === "already_running") {
+          // Background task — keep running state, result comes via WebSocket
+          setResults((prev) => ({
+            ...prev,
+            [skillName]: { success: true, data: { status } },
+          }));
+          // Don't clear runningSkill — it stays until WS notification or timeout
+        } else {
+          setResults((prev) => ({ ...prev, [skillName]: result }));
+          setRunningSkill(null);
+        }
       },
       onError: (err) => {
         setResults((prev) => ({
