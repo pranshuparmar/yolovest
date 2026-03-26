@@ -7,7 +7,6 @@ name = "yolovest"
 version = "0.1.0"
 description = "Fully autonomous AI-driven Indian stock trading platform"
 requires-python = ">=3.11"
-license = "MIT"
 
 dependencies = [
     "pydantic>=2.6,<3",
