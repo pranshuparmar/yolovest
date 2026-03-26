@@ -29,19 +29,46 @@ security = HTTPBasic()
 def _extract_broker_capital(margins: dict[str, Any]) -> float:
     """Extract total capital from Kite margins response.
 
-    Kite returns: {"equity": {"available": {"cash": X}, "utilised": {"debits": Y}}}
-    Or sometimes: {"available": {"cash": X}} (simplified).
+    Kite margins() returns different structures depending on the SDK version:
+    - {"equity": {"net": X, "available": {"cash": Y, ...}, "utilised": {...}}}
+    - Or a flat segment dict if called with segment="equity"
+    Handles all known variants.
     """
-    # Try Kite's nested equity structure first
+    # Try Kite's nested equity structure
     equity = margins.get("equity", {})
-    if equity:
-        available = equity.get("available", {}).get("cash", 0)
-        used = equity.get("utilised", {}).get("debits", 0)
-        return float(available) + float(used)
-    # Fallback: flat structure
-    available = margins.get("available", {}).get("cash") or margins.get("available_cash") or 0
-    used = margins.get("utilised", {}).get("debits") or margins.get("used", {}).get("cash") or 0
-    return float(available) + float(used)
+    if isinstance(equity, dict) and equity:
+        # Prefer "net" (total funds = available + used)
+        net = equity.get("net")
+        if net is not None and float(net) > 0:
+            return float(net)
+        # Fallback: available.cash + utilised.debits
+        avail = equity.get("available", {})
+        if isinstance(avail, dict):
+            cash = avail.get("cash") or avail.get("live_balance") or 0
+            used = equity.get("utilised", {}).get("debits", 0)
+            total = float(cash) + float(used)
+            if total > 0:
+                return total
+
+    # Flat structure (segment-level response)
+    net = margins.get("net")
+    if net is not None and float(net) > 0:
+        return float(net)
+
+    avail = margins.get("available", {})
+    if isinstance(avail, dict):
+        cash = avail.get("cash") or avail.get("live_balance") or 0
+        if float(cash) > 0:
+            return float(cash)
+
+    # Direct keys
+    for key in ("available_cash", "net", "total_balance"):
+        val = margins.get(key)
+        if val is not None and float(val) > 0:
+            return float(val)
+
+    logger.warning("Could not extract capital from margins: %s", list(margins.keys()))
+    return 0.0
 
 
 # WebSocket connection manager
@@ -203,6 +230,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             margins = await ctx.broker.get_margins()
             if not margins:
                 return {"success": False, "error": "No margin data from broker"}
+            logger.info("Kite margins response keys: %s", list(margins.keys()))
             broker_capital = _extract_broker_capital(margins)
             if not broker_capital or broker_capital <= 0:
                 return {"success": False, "error": "Could not extract capital from margins data"}
