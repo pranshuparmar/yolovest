@@ -22,8 +22,3 @@ backups/
 /models/
 /logs/
 config.yaml
-
-# SSL certs (keep .gitkeep)
-ssl/*.pem
-ssl/*.key
-ssl/*.crt

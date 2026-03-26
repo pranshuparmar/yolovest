@@ -1,8 +1,42 @@
 services:
+  nginx-proxy:
+    image: nginxproxy/nginx-proxy
+    container_name: nginx-proxy
+    restart: always
+    networks:
+      - yolovest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - certs:/etc/nginx/certs
+      - vhost:/etc/nginx/vhost.d
+      - html:/usr/share/nginx/html
+      - ./nginx/custom.conf:/etc/nginx/conf.d/zz-custom.conf:ro
+
+  letsencrypt:
+    image: nginxproxy/acme-companion
+    container_name: letsencrypt
+    restart: always
+    networks:
+      - yolovest
+    environment:
+      - NGINX_PROXY_CONTAINER=nginx-proxy
+    depends_on:
+      - nginx-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - certs:/etc/nginx/certs
+      - vhost:/etc/nginx/vhost.d
+      - html:/usr/share/nginx/html
+
   backend:
     build: ./backend
     container_name: yolovest-backend
     restart: unless-stopped
+    networks:
+      - yolovest
     expose:
       - "8080"
     volumes:
@@ -11,12 +45,9 @@ services:
       - yolovest-backups:/app/backups
       - yolovest-models:/app/models
       - yolovest-logs:/app/logs
+    env_file:
+      - .env
     environment:
-      - KITE_API_KEY=${KITE_API_KEY:-}
-      - KITE_API_SECRET=${KITE_API_SECRET:-}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - TZ=Asia/Kolkata
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
@@ -38,13 +69,14 @@ services:
     build: ./frontend
     container_name: yolovest-frontend
     restart: unless-stopped
-    ports:
-      - "${DASHBOARD_PORT:-7010}:80"
-      - "${DASHBOARD_SSL_PORT:-7443}:443"
-    volumes:
-      # To enable HTTPS, generate certs and uncomment the next line:
-      # - ./frontend/nginx-ssl.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./ssl:/etc/nginx/ssl:ro
+    networks:
+      - yolovest
+    environment:
+      - VIRTUAL_HOST=${DOMAIN:-yolovest.ddnsfree.com}
+      - LETSENCRYPT_HOST=${DOMAIN:-yolovest.ddnsfree.com}
+      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-}
+    expose:
+      - "80"
     depends_on:
       backend:
         condition: service_healthy
@@ -58,7 +90,14 @@ services:
         max-size: "5m"
         max-file: "3"
 
+networks:
+  yolovest:
+    driver: bridge
+
 volumes:
+  certs:
+  vhost:
+  html:
   yolovest-data:
   yolovest-backups:
   yolovest-models:
