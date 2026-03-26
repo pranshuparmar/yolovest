@@ -53,7 +53,7 @@ class IngestUniverseSkill(SkillBase):
             "cache_hits": 0,
         }
 
-        for symbol in symbols:
+        for idx, symbol in enumerate(symbols):
             try:
                 bars = await self.ctx.market_data.get_ohlcv(
                     symbol, "daily", days=days, skip_stale_check=True,
@@ -66,6 +66,15 @@ class IngestUniverseSkill(SkillBase):
                     results["symbols_ingested"] += 1
                 else:
                     logger.debug("No data returned for %s", symbol)
+
+                # Broadcast progress every 10 symbols
+                if (idx + 1) % 10 == 0 or idx + 1 == len(symbols):
+                    await self.broadcast("ingest_progress", {
+                        "skill": "ingest-universe",
+                        "current": idx + 1,
+                        "total": len(symbols),
+                        "symbol": symbol,
+                    })
             except Exception as e:
                 results["errors"].append(f"{symbol}: {e}")
                 logger.debug("Universe fetch failed for %s: %s", symbol, e)

@@ -90,10 +90,22 @@ class ModelRetrainSkill(SkillBase):
                 continue
 
             try:
+                await self.broadcast("retrain_progress", {
+                    "model_type": model_type,
+                    "status": "training",
+                    "samples": len(y),
+                })
                 metrics = await self.ctx.ml.train(
                     model_type, X, y, {}
                 )
                 version = await self.ctx.ml.save_model(model_type, metrics=metrics)
+                await self.broadcast("retrain_progress", {
+                    "model_type": model_type,
+                    "status": "completed",
+                    "version": version,
+                    "sharpe": metrics.get("sharpe"),
+                    "win_rate": metrics.get("win_rate"),
+                })
                 await self.ctx.db.save_model_version(
                     model_type, version, f"models/{model_type}_{version}.pkl", metrics
                 )

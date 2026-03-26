@@ -65,6 +65,14 @@ class SkillBase(ABC):
         """Check preconditions — is it the right time/state to run this skill?"""
         ...
 
+    async def broadcast(self, event_type: str, data: dict[str, Any]) -> None:
+        """Publish an event to the event bus (bridged to WebSocket clients)."""
+        try:
+            from yolovest.events import Event
+            await self.ctx.event_bus.publish(Event(event_type=event_type, data=data))
+        except Exception:
+            pass
+
     async def safe_execute(self, **kwargs: Any) -> SkillResult:
         """Wrapper that catches exceptions and returns error SkillResult."""
         start = time.monotonic()

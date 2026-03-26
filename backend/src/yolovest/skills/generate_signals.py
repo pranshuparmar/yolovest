@@ -122,6 +122,12 @@ class GenerateSignalsSkill(SkillBase):
                 if signal["confidence_score"] >= min_confidence:
                     await self.ctx.db.insert_signal(signal)
                     signals_generated.append(signal)
+                    await self.broadcast("signal_generated", {
+                        "symbol": symbol,
+                        "signal_type": prediction.signal_type,
+                        "confidence": prediction.confidence,
+                        "entry_price": prediction.entry_price,
+                    })
 
             except Exception as e:
                 logger.warning("Signal generation failed for %s: %s", symbol, e)

@@ -111,6 +111,9 @@ class HeartbeatOrchestrator:
     async def _execute_pipeline(self) -> dict[str, Any]:
         """Execute the full heartbeat pipeline with error propagation."""
         results: dict[str, Any] = {}
+        await self._broadcast("heartbeat_started", {
+            "market_hours": self._ctx.market_hours.is_market_hours(),
+        })
 
         # --- Step 1: health-check (ABORT on failure) ---
         health_result = await self._run_skill("health-check")
@@ -189,7 +192,25 @@ class HeartbeatOrchestrator:
             except Exception:
                 logger.debug("Failed to persist heartbeat state", exc_info=True)
 
+        # Broadcast heartbeat completion
+        skill_results = [
+            r for r in results.values() if isinstance(r, SkillResult)
+        ]
+        await self._broadcast("heartbeat_completed", {
+            "skills_run": len(skill_results),
+            "skills_succeeded": sum(1 for r in skill_results if r.success),
+            "signals_generated": len(signals) if "generate-signals" in results else 0,
+        })
+
         return results
+
+    async def _broadcast(self, event_type: str, data: dict[str, Any]) -> None:
+        """Publish an event to the event bus (bridged to WebSocket)."""
+        try:
+            from yolovest.events import Event
+            await self._ctx.event_bus.publish(Event(event_type=event_type, data=data))
+        except Exception:
+            pass
 
     async def _execute_signal_chain(
         self, signal: object, index: int

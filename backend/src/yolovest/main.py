@@ -335,9 +335,25 @@ async def async_main(args: argparse.Namespace) -> None:
     orchestrator = HeartbeatOrchestrator(ctx)
 
     # Wire WebSocket broadcasting for skill completion notifications
+    # and event bus → WebSocket bridge for real-time dashboard updates
     try:
         from yolovest.dashboard.app import broadcast_ws
+        from yolovest.events import Event
+
         orchestrator._on_skill_complete = broadcast_ws
+
+        # Bridge: any event published on the bus gets broadcast to WebSocket clients
+        async def _ws_bridge(event: Event) -> None:
+            await broadcast_ws(event.event_type, event.data)
+
+        for event_type in (
+            "heartbeat_started", "heartbeat_completed",
+            "signal_generated", "trade_executed", "trade_exit",
+            "position_updated", "portfolio_pnl",
+            "kill_switch_activated",
+            "ingest_progress", "retrain_progress",
+        ):
+            ctx.event_bus.subscribe(event_type, _ws_bridge)
     except Exception:
         pass
 

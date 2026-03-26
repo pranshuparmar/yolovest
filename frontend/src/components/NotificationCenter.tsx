@@ -97,10 +97,51 @@ export function useNotifications() {
               "skill",
               `${data.skill || "Unknown"} ${status}${dur}`
             );
-            // Refresh relevant data after skill completion
             queryClient.invalidateQueries({ queryKey: ["watchlist"] });
             queryClient.invalidateQueries({ queryKey: ["ml-models"] });
             queryClient.invalidateQueries({ queryKey: ["storage-stats"] });
+          } else if (type === "heartbeat_started") {
+            addNotification("heartbeat", "Heartbeat started");
+          } else if (type === "heartbeat_completed") {
+            const n = data.signals_generated || 0;
+            addNotification(
+              "heartbeat",
+              `Heartbeat done: ${data.skills_succeeded}/${data.skills_run} skills, ${n} signals`
+            );
+            queryClient.invalidateQueries({ queryKey: ["portfolio"] });
+            queryClient.invalidateQueries({ queryKey: ["positions"] });
+          } else if (type === "kill_switch_activated") {
+            addNotification(
+              "alert",
+              `Kill switch: ${data.command?.toUpperCase()}${data.total_pnl != null ? ` PnL: ${data.total_pnl}` : ""}`
+            );
+            queryClient.invalidateQueries({ queryKey: ["portfolio"] });
+            queryClient.invalidateQueries({ queryKey: ["positions"] });
+          } else if (type === "portfolio_pnl") {
+            if (data.targets_hit > 0 || data.stops_hit > 0) {
+              addNotification(
+                "position",
+                `Positions: ${data.positions} open, ${data.targets_hit} targets hit, ${data.stops_hit} SL hit`
+              );
+            }
+            queryClient.invalidateQueries({ queryKey: ["portfolio"] });
+            queryClient.invalidateQueries({ queryKey: ["positions"] });
+          } else if (type === "ingest_progress") {
+            // Only show final progress to avoid spam
+            if (data.current === data.total) {
+              addNotification(
+                "skill",
+                `${data.skill}: ${data.total} symbols ingested`
+              );
+            }
+          } else if (type === "retrain_progress") {
+            if (data.status === "completed") {
+              addNotification(
+                "skill",
+                `${data.model_type} model trained: Sharpe ${data.sharpe?.toFixed(2) ?? "?"}`
+              );
+              queryClient.invalidateQueries({ queryKey: ["ml-models"] });
+            }
           } else {
             addNotification(type, JSON.stringify(data).slice(0, 100));
           }
@@ -132,6 +173,8 @@ const typeIcons: Record<string, string> = {
   signal: "S",
   prediction: "?",
   skill: "K",
+  heartbeat: "H",
+  alert: "!",
 };
 
 const typeColors: Record<string, string> = {
@@ -141,6 +184,8 @@ const typeColors: Record<string, string> = {
   signal: "bg-amber-900/40 text-amber-400",
   prediction: "bg-cyan-900/40 text-cyan-400",
   skill: "bg-indigo-900/40 text-indigo-400",
+  heartbeat: "bg-gray-800 text-gray-400",
+  alert: "bg-red-900/40 text-red-400",
 };
 
 export function NotificationCenter({
