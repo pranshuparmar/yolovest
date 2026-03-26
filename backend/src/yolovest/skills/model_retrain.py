@@ -116,7 +116,6 @@ class ModelRetrainSkill(SkillBase):
 
                 improved = metrics.get("sharpe", 0) > current_sharpe
                 if improved:
-                    await self.ctx.ml.deploy_shadow(model_type, version, cfg.shadow_mode_days)
                     shadow_deployed.append(model_type)
 
                 results[model_type] = {

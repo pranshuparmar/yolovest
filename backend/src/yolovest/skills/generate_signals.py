@@ -79,9 +79,9 @@ class GenerateSignalsSkill(SkillBase):
                 # Always use daily bars for feature computation — intraday bars
                 # are too few for long-window indicators (EMA-50/200, MACD etc.)
                 # which causes feature shape mismatches with the trained model.
-                daily_bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=60)
+                daily_bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=365)
 
-                if len(daily_bars) < 15:
+                if len(daily_bars) < 50:
                     logger.debug("Insufficient daily data for %s (%d bars)", symbol, len(daily_bars))
                     continue
 
