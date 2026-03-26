@@ -230,7 +230,8 @@ def create_app(ctx: AppContext) -> FastAPI:
             margins = await ctx.broker.get_margins()
             if not margins:
                 return {"success": False, "error": "No margin data from broker"}
-            logger.info("Kite margins response keys: %s", list(margins.keys()))
+            logger.info("Kite margins response: equity keys=%s",
+                        list(margins.get("equity", {}).keys()) if isinstance(margins.get("equity"), dict) else margins.get("equity"))
             broker_capital = _extract_broker_capital(margins)
             if not broker_capital or broker_capital <= 0:
                 return {"success": False, "error": "Could not extract capital from margins data"}
