@@ -176,9 +176,11 @@ export const api = {
     return apiFetch<EarningsEvent[]>(`/api/earnings${qs ? "?" + qs : ""}`);
   },
 
-  news: (params?: { symbol?: string; limit?: number; offset?: number }) => {
+  news: (params?: { symbol?: string; source?: string; date_from?: string; limit?: number; offset?: number }) => {
     const q = new URLSearchParams();
     if (params?.symbol) q.set("symbol", params.symbol);
+    if (params?.source) q.set("source", params.source);
+    if (params?.date_from) q.set("date_from", params.date_from);
     if (params?.limit) q.set("limit", String(params.limit));
     if (params?.offset) q.set("offset", String(params.offset));
     const qs = q.toString();

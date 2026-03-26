@@ -95,29 +95,18 @@ export function NewsFeedPage() {
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
-  } = useNewsInfinite({ symbol: symbol || undefined });
+  } = useNewsInfinite({
+    symbol: symbol || undefined,
+    source: sourceFilter || undefined,
+    date_from: dateFrom || undefined,
+  });
 
-  // Flatten all pages into one list
-  const allArticles = useMemo(
+  // Flatten all pages into one list (all filtering is now server-side)
+  const filtered = useMemo(
     () => data?.pages.flat() ?? [],
     [data]
   );
-
-  // Apply client-side filters
-  const filtered = useMemo(() => {
-    let list = allArticles;
-    if (sourceFilter) {
-      list = list.filter((a) => a.source === sourceFilter);
-    }
-    if (dateFrom) {
-      // Append T00:00:00 to force local timezone parsing (not UTC)
-      const cutoff = new Date(dateFrom + "T00:00:00").getTime();
-      list = list.filter(
-        (a) => a.published_at && new Date(a.published_at).getTime() >= cutoff
-      );
-    }
-    return list;
-  }, [allArticles, sourceFilter, dateFrom]);
+  const allArticles = filtered;
 
   // Group by date
   const grouped = useMemo(() => {

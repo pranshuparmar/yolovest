@@ -522,22 +522,31 @@ class Database:
         return inserted
 
     async def get_news_articles(
-        self, symbol: str | None = None, limit: int = 50, offset: int = 0
+        self,
+        symbol: str | None = None,
+        source: str | None = None,
+        date_from: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """Retrieve recent news articles, optionally filtered by symbol."""
+        """Retrieve recent news articles with optional filters."""
+        query = (
+            "SELECT content_hash, headline, source, url, symbols, published_at "
+            "FROM news_articles WHERE 1=1"
+        )
+        params: list[Any] = []
         if symbol:
-            rows = await self.conn.execute_fetchall(
-                "SELECT content_hash, headline, source, url, symbols, published_at "
-                "FROM news_articles WHERE symbols LIKE ? "
-                "ORDER BY published_at DESC LIMIT ? OFFSET ?",
-                (f"%{symbol}%", limit, offset),
-            )
-        else:
-            rows = await self.conn.execute_fetchall(
-                "SELECT content_hash, headline, source, url, symbols, published_at "
-                "FROM news_articles ORDER BY published_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            )
+            query += " AND symbols LIKE ?"
+            params.append(f"%{symbol}%")
+        if source:
+            query += " AND source = ?"
+            params.append(source)
+        if date_from:
+            query += " AND published_at >= ?"
+            params.append(date_from + "T00:00:00")
+        query += " ORDER BY published_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        rows = await self.conn.execute_fetchall(query, tuple(params))
         results = []
         for r in rows:
             symbols_raw = r[4]

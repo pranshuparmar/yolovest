@@ -239,11 +239,11 @@ export function useNews(params?: { symbol?: string; limit?: number }) {
 
 const NEWS_PAGE_SIZE = 50;
 
-export function useNewsInfinite(params?: { symbol?: string }) {
+export function useNewsInfinite(params?: { symbol?: string; source?: string; date_from?: string }) {
   return useInfiniteQuery({
     queryKey: ["news-infinite", params],
     queryFn: ({ pageParam = 0 }) =>
-      api.news({ symbol: params?.symbol, limit: NEWS_PAGE_SIZE, offset: pageParam }),
+      api.news({ symbol: params?.symbol, source: params?.source, date_from: params?.date_from, limit: NEWS_PAGE_SIZE, offset: pageParam }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, _allPages, lastPageParam) =>
       lastPage.length < NEWS_PAGE_SIZE ? undefined : lastPageParam + NEWS_PAGE_SIZE,

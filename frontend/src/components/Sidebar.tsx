@@ -160,7 +160,7 @@ export function Sidebar({
   const sidebarContent = (
     <aside
       className={clsx(
-        "bg-gray-900 border-r border-gray-800 flex flex-col h-screen transition-all duration-200 shrink-0",
+        "bg-gray-850 border-r border-gray-800 flex flex-col h-screen transition-all duration-200 shrink-0",
         // Desktop sizing
         "hidden md:flex",
         collapsed ? "md:w-14" : "md:w-52"
