@@ -100,7 +100,7 @@ class ModelRetrainSkill(SkillBase):
 
                 # Step 5: Compare with production
                 current = await self.ctx.db.get_production_model(model_type)
-                current_sharpe = current.get("sharpe_ratio", 0) if current else 0
+                current_sharpe = (current.get("sharpe_ratio") or 0) if current else 0
 
                 improved = metrics.get("sharpe", 0) > current_sharpe
                 if improved:
