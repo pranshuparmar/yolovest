@@ -236,6 +236,18 @@ class ZerodhaBroker(BrokerBase):
             orders = await asyncio.to_thread(self._kite.orders)
         return [o for o in orders if o.get("status") in ("OPEN", "PENDING")]
 
+    async def get_holdings(self) -> list[dict[str, Any]]:
+        """Get all CNC/delivery holdings from Kite."""
+        if self._mode == "paper":
+            return []  # No holdings in paper mode
+
+        if self._kite is None:
+            raise RuntimeError("Not authenticated")
+
+        async with self._rate_limiter:
+            holdings = await asyncio.to_thread(self._kite.holdings)
+        return [dict[str, Any](h) for h in holdings]
+
     async def get_margins(self) -> dict[str, Any]:
         if self._mode == "paper":
             return {"available": {"cash": 100_000}, "used": {"cash": 0}}

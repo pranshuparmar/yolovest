@@ -1,0 +1,368 @@
+import { useState } from "react";
+import { useHoldings, usePlaceOrder } from "../hooks/queries";
+import clsx from "clsx";
+import type { ManualOrder } from "../types/api";
+
+function fmt(n: number, d = 2) {
+  return n.toLocaleString("en-IN", {
+    minimumFractionDigits: d,
+    maximumFractionDigits: d,
+  });
+}
+
+function fmtInr(n: number) {
+  return "\u20B9" + fmt(n);
+}
+
+function OrderForm({
+  defaultSymbol,
+  defaultSide,
+  onClose,
+}: {
+  defaultSymbol?: string;
+  defaultSide?: "BUY" | "SELL";
+  onClose: () => void;
+}) {
+  const placeOrder = usePlaceOrder();
+  const [symbol, setSymbol] = useState(defaultSymbol || "");
+  const [side, setSide] = useState<"BUY" | "SELL">(defaultSide || "BUY");
+  const [quantity, setQuantity] = useState("");
+  const [orderType, setOrderType] = useState<"MARKET" | "LIMIT">("MARKET");
+  const [product, setProduct] = useState<"CNC" | "MIS">("CNC");
+  const [price, setPrice] = useState("");
+  const [result, setResult] = useState<string | null>(null);
+
+  const handleSubmit = () => {
+    const order: ManualOrder = {
+      symbol: symbol.toUpperCase(),
+      side,
+      quantity: Number(quantity),
+      order_type: orderType,
+      product,
+    };
+    if (orderType === "LIMIT" && price) {
+      order.price = Number(price);
+    }
+    placeOrder.mutate(order, {
+      onSuccess: (res) => {
+        if (res.success) {
+          setResult(`Order placed: ${res.order_id}`);
+          setTimeout(onClose, 2000);
+        } else {
+          setResult(`Failed: ${res.error}`);
+        }
+      },
+    });
+  };
+
+  return (
+    <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-medium text-gray-200">Place Order</h3>
+        <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-sm">
+          Cancel
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Symbol</label>
+          <input
+            type="text"
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+            className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 focus:border-emerald-500 focus:outline-none"
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Side</label>
+          <div className="flex gap-1">
+            <button
+              onClick={() => setSide("BUY")}
+              className={clsx(
+                "flex-1 py-1.5 rounded text-sm font-medium transition-colors",
+                side === "BUY"
+                  ? "bg-emerald-600 text-white"
+                  : "bg-gray-900 text-gray-400 hover:text-gray-200"
+              )}
+            >
+              BUY
+            </button>
+            <button
+              onClick={() => setSide("SELL")}
+              className={clsx(
+                "flex-1 py-1.5 rounded text-sm font-medium transition-colors",
+                side === "SELL"
+                  ? "bg-red-600 text-white"
+                  : "bg-gray-900 text-gray-400 hover:text-gray-200"
+              )}
+            >
+              SELL
+            </button>
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Quantity</label>
+          <input
+            type="number"
+            min={1}
+            value={quantity}
+            onChange={(e) => setQuantity(e.target.value)}
+            className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 focus:border-emerald-500 focus:outline-none"
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Type</label>
+          <select
+            value={orderType}
+            onChange={(e) => setOrderType(e.target.value as "MARKET" | "LIMIT")}
+            className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 focus:border-emerald-500 focus:outline-none"
+          >
+            <option value="MARKET">Market</option>
+            <option value="LIMIT">Limit</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Product</label>
+          <select
+            value={product}
+            onChange={(e) => setProduct(e.target.value as "CNC" | "MIS")}
+            className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 focus:border-emerald-500 focus:outline-none"
+          >
+            <option value="CNC">CNC (Delivery)</option>
+            <option value="MIS">MIS (Intraday)</option>
+          </select>
+        </div>
+        {orderType === "LIMIT" && (
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Price</label>
+            <input
+              type="number"
+              step="0.05"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+              className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 focus:border-emerald-500 focus:outline-none"
+            />
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center gap-3">
+        <button
+          onClick={handleSubmit}
+          disabled={!symbol || !quantity || Number(quantity) <= 0 || placeOrder.isPending}
+          className={clsx(
+            "px-4 py-1.5 rounded text-sm font-medium disabled:opacity-40 transition-colors",
+            side === "BUY"
+              ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+              : "bg-red-600 hover:bg-red-700 text-white"
+          )}
+        >
+          {placeOrder.isPending
+            ? "Placing..."
+            : `${side} ${symbol || "..."} x${quantity || 0}`}
+        </button>
+        {result && (
+          <span
+            className={clsx(
+              "text-xs",
+              result.startsWith("Order") ? "text-emerald-400" : "text-red-400"
+            )}
+          >
+            {result}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function HoldingsPage() {
+  const { data: holdings, isLoading } = useHoldings();
+  const [orderForm, setOrderForm] = useState<{
+    symbol?: string;
+    side?: "BUY" | "SELL";
+  } | null>(null);
+
+  const totalInvestment = holdings?.reduce(
+    (sum, h) => sum + h.quantity * h.average_price,
+    0
+  ) ?? 0;
+  const totalCurrent = holdings?.reduce(
+    (sum, h) => sum + h.quantity * h.last_price,
+    0
+  ) ?? 0;
+  const totalPnl = totalCurrent - totalInvestment;
+  const totalPnlPct = totalInvestment > 0 ? (totalPnl / totalInvestment) * 100 : 0;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Holdings</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            Your Zerodha portfolio holdings (CNC/delivery)
+          </p>
+        </div>
+        <button
+          onClick={() => setOrderForm({})}
+          className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white transition-colors"
+        >
+          New Order
+        </button>
+      </div>
+
+      {/* Order form */}
+      {orderForm && (
+        <OrderForm
+          defaultSymbol={orderForm.symbol}
+          defaultSide={orderForm.side}
+          onClose={() => setOrderForm(null)}
+        />
+      )}
+
+      {/* Summary cards */}
+      {holdings && holdings.length > 0 && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
+            <p className="text-xs text-gray-500">Holdings</p>
+            <p className="text-lg font-bold text-gray-100">{holdings.length}</p>
+          </div>
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
+            <p className="text-xs text-gray-500">Invested</p>
+            <p className="text-lg font-bold text-gray-100">{fmtInr(totalInvestment)}</p>
+          </div>
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
+            <p className="text-xs text-gray-500">Current</p>
+            <p className="text-lg font-bold text-gray-100">{fmtInr(totalCurrent)}</p>
+          </div>
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
+            <p className="text-xs text-gray-500">P&L</p>
+            <p
+              className={clsx(
+                "text-lg font-bold",
+                totalPnl >= 0 ? "text-emerald-400" : "text-red-400"
+              )}
+            >
+              {totalPnl >= 0 ? "+" : ""}
+              {fmtInr(totalPnl)}{" "}
+              <span className="text-sm">({totalPnlPct >= 0 ? "+" : ""}{fmt(totalPnlPct)}%)</span>
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Holdings table */}
+      {isLoading ? (
+        <div className="h-48 animate-pulse bg-gray-900 rounded-lg" />
+      ) : !holdings || holdings.length === 0 ? (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
+          <p className="text-gray-500 text-sm">
+            No holdings found. Authenticate with Zerodha on the Integrations page to see your portfolio.
+          </p>
+        </div>
+      ) : (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                  <th className="py-2 px-3 text-left">Symbol</th>
+                  <th className="py-2 px-3 text-right">Qty</th>
+                  <th className="py-2 px-3 text-right">Avg Price</th>
+                  <th className="py-2 px-3 text-right">LTP</th>
+                  <th className="py-2 px-3 text-right">P&L</th>
+                  <th className="py-2 px-3 text-right">Day Change</th>
+                  <th className="py-2 px-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {holdings.map((h) => {
+                  const pnl = (h.last_price - h.average_price) * h.quantity;
+                  const pnlPct =
+                    h.average_price > 0
+                      ? ((h.last_price - h.average_price) / h.average_price) * 100
+                      : 0;
+
+                  return (
+                    <tr
+                      key={h.tradingsymbol}
+                      className="border-b border-gray-800/50 hover:bg-gray-800/30"
+                    >
+                      <td className="py-2.5 px-3">
+                        <span className="font-medium text-gray-200">
+                          {h.tradingsymbol}
+                        </span>
+                        <span className="text-xs text-gray-600 ml-1">
+                          {h.exchange}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-mono text-gray-300">
+                        {h.quantity}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-gray-400">
+                        {fmtInr(h.average_price)}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-gray-300">
+                        {fmtInr(h.last_price)}
+                      </td>
+                      <td
+                        className={clsx(
+                          "py-2.5 px-3 text-right font-mono",
+                          pnl >= 0 ? "text-emerald-400" : "text-red-400"
+                        )}
+                      >
+                        {pnl >= 0 ? "+" : ""}
+                        {fmtInr(pnl)}
+                        <span className="text-xs ml-1 opacity-70">
+                          ({pnlPct >= 0 ? "+" : ""}{fmt(pnlPct, 1)}%)
+                        </span>
+                      </td>
+                      <td
+                        className={clsx(
+                          "py-2.5 px-3 text-right text-xs",
+                          h.day_change_percentage >= 0
+                            ? "text-emerald-400"
+                            : "text-red-400"
+                        )}
+                      >
+                        {h.day_change_percentage >= 0 ? "+" : ""}
+                        {fmt(h.day_change_percentage, 1)}%
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            onClick={() =>
+                              setOrderForm({
+                                symbol: h.tradingsymbol,
+                                side: "BUY",
+                              })
+                            }
+                            className="px-2 py-0.5 rounded text-xs font-medium bg-emerald-900/30 text-emerald-400 hover:bg-emerald-800/50 transition-colors"
+                          >
+                            Buy
+                          </button>
+                          <button
+                            onClick={() =>
+                              setOrderForm({
+                                symbol: h.tradingsymbol,
+                                side: "SELL",
+                              })
+                            }
+                            className="px-2 py-0.5 rounded text-xs font-medium bg-red-900/30 text-red-400 hover:bg-red-800/50 transition-colors"
+                          >
+                            Sell
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -52,6 +52,26 @@ export function useTrades(params?: {
   });
 }
 
+export function useHoldings() {
+  return useQuery({
+    queryKey: ["holdings"],
+    queryFn: api.holdings,
+    staleTime: STALE_30S,
+  });
+}
+
+export function usePlaceOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.placeOrder,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["holdings"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["portfolio"] });
+    },
+  });
+}
+
 export function useTradeDetail(tradeId: string) {
   return useQuery({
     queryKey: ["trade", tradeId],

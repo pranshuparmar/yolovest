@@ -474,6 +474,30 @@ export interface DryRunSummary {
   scored: number;
 }
 
+export interface HoldingEntry {
+  tradingsymbol: string;
+  exchange: string;
+  quantity: number;
+  average_price: number;
+  last_price: number;
+  close_price: number;
+  pnl: number;
+  day_change: number;
+  day_change_percentage: number;
+  isin?: string;
+  t1_quantity?: number;
+}
+
+export interface ManualOrder {
+  symbol: string;
+  side: "BUY" | "SELL";
+  quantity: number;
+  order_type: "MARKET" | "LIMIT" | "SL" | "SL-M";
+  product: "CNC" | "MIS";
+  price?: number;
+  trigger_price?: number;
+}
+
 export interface DryRunResult {
   success: boolean;
   run_id: string;

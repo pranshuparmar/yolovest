@@ -199,6 +199,78 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Current open positions."""
         return await ctx.db.get_open_positions()
 
+    @app.get("/api/holdings")
+    async def get_holdings(_user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
+        """Zerodha portfolio holdings (CNC/delivery stocks held overnight).
+
+        These are external holdings — may include stocks not traded by YoloVest.
+        Returns empty list if broker is not authenticated.
+        """
+        try:
+            if not await ctx.broker.is_authenticated():
+                return []
+            return await ctx.broker.get_holdings()
+        except Exception as e:
+            logger.warning("Failed to fetch holdings: %s", e)
+            return []
+
+    @app.post("/api/orders")
+    async def place_manual_order(
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Place a manual order (buy/sell) via the broker.
+
+        Required fields: symbol, side (BUY/SELL), quantity, order_type, product
+        Optional: price (for LIMIT orders), trigger_price (for SL orders)
+        """
+        symbol = body.get("symbol", "").strip().upper()
+        side = body.get("side", "").strip().upper()
+        quantity = int(body.get("quantity", 0))
+        order_type = body.get("order_type", "MARKET").strip().upper()
+        product = body.get("product", "CNC").strip().upper()
+        price = body.get("price")
+        trigger_price = body.get("trigger_price")
+
+        if not symbol:
+            raise HTTPException(status_code=400, detail="symbol is required")
+        if side not in ("BUY", "SELL"):
+            raise HTTPException(status_code=400, detail="side must be BUY or SELL")
+        if quantity <= 0:
+            raise HTTPException(status_code=400, detail="quantity must be > 0")
+        if product not in ("CNC", "MIS"):
+            raise HTTPException(status_code=400, detail="product must be CNC or MIS")
+        if order_type not in ("MARKET", "LIMIT", "SL", "SL-M"):
+            raise HTTPException(status_code=400, detail="order_type must be MARKET, LIMIT, SL, or SL-M")
+        if order_type == "LIMIT" and not price:
+            raise HTTPException(status_code=400, detail="price is required for LIMIT orders")
+
+        try:
+            order_id = await ctx.broker.place_order(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                order_type=order_type,
+                product=product,
+                price=float(price) if price else None,
+                trigger_price=float(trigger_price) if trigger_price else None,
+            )
+            logger.info(
+                "Manual order placed: %s %s %s x%d @ %s (order_id: %s)",
+                side, symbol, order_type, quantity, price or "MARKET", order_id,
+            )
+            await broadcast_ws("trade_executed", {
+                "symbol": symbol,
+                "signal_type": side,
+                "quantity": quantity,
+                "mode": ctx.config.mode,
+                "manual": True,
+            })
+            return {"success": True, "order_id": order_id}
+        except Exception as e:
+            logger.warning("Manual order failed: %s", e)
+            return {"success": False, "error": str(e)}
+
     @app.get("/api/trades/today")
     async def get_todays_trades(user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
         """Today's trades."""
