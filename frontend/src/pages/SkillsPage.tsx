@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useListSkills, useRunSkill } from "../hooks/queries";
 import clsx from "clsx";
 
@@ -12,13 +12,70 @@ const TRIGGER_COLORS: Record<string, string> = {
 export function SkillsPage() {
   const { data: skills, isLoading } = useListSkills();
   const runSkill = useRunSkill();
-  const [runningSkill, setRunningSkill] = useState<string | null>(null);
+  const [runningSkills, setRunningSkills] = useState<Set<string>>(new Set());
   const [results, setResults] = useState<
-    Record<string, { success: boolean; data?: Record<string, unknown>; error?: string | null }>
+    Record<string, { success: boolean; data?: Record<string, unknown>; error?: string | null; status?: string }>
   >({});
 
-  const handleRun = (skillName: string) => {
-    setRunningSkill(skillName);
+  // Listen for WebSocket skill_completed events to clear running state
+  useEffect(() => {
+    function handleWsMessage(event: MessageEvent) {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "skill_completed" && msg.data?.skill) {
+          const name = msg.data.skill as string;
+          setRunningSkills((prev) => {
+            const next = new Set(prev);
+            next.delete(name);
+            return next;
+          });
+          setResults((prev) => ({
+            ...prev,
+            [name]: {
+              success: msg.data.success,
+              error: msg.data.error,
+              data: msg.data.data,
+              status: "completed",
+            },
+          }));
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // Find existing WebSocket connection
+    // The NotificationCenter creates the WS — we add a listener to the same connection
+    // Use a BroadcastChannel to share events between components
+    const bc = new BroadcastChannel("yolovest-ws");
+    bc.onmessage = (event) => handleWsMessage(event as unknown as MessageEvent);
+
+    // Also listen on window for direct WS messages forwarded from NotificationCenter
+    window.addEventListener("yolovest-skill-completed", ((e: CustomEvent) => {
+      const data = e.detail;
+      if (data?.skill) {
+        setRunningSkills((prev) => {
+          const next = new Set(prev);
+          next.delete(data.skill);
+          return next;
+        });
+        setResults((prev) => ({
+          ...prev,
+          [data.skill]: {
+            success: data.success,
+            error: data.error,
+            data: data.data || {},
+            status: "completed",
+          },
+        }));
+      }
+    }) as EventListener);
+
+    return () => bc.close();
+  }, []);
+
+  const handleRun = useCallback((skillName: string) => {
+    setRunningSkills((prev) => new Set(prev).add(skillName));
     setResults((prev) => {
       const next = { ...prev };
       delete next[skillName];
@@ -26,28 +83,34 @@ export function SkillsPage() {
     });
     runSkill.mutate(skillName, {
       onSuccess: (result) => {
-        const status = (result as Record<string, unknown>).status;
+        const status = (result as Record<string, unknown>).status as string | undefined;
         if (status === "started" || status === "already_running") {
-          // Background task — keep running state, result comes via WebSocket
           setResults((prev) => ({
             ...prev,
-            [skillName]: { success: true, data: { status } },
+            [skillName]: { success: true, data: { status }, status: status },
           }));
-          // Don't clear runningSkill — it stays until WS notification or timeout
         } else {
-          setResults((prev) => ({ ...prev, [skillName]: result }));
-          setRunningSkill(null);
+          setResults((prev) => ({ ...prev, [skillName]: { ...result, status: "completed" } }));
+          setRunningSkills((prev) => {
+            const next = new Set(prev);
+            next.delete(skillName);
+            return next;
+          });
         }
       },
       onError: (err) => {
         setResults((prev) => ({
           ...prev,
-          [skillName]: { success: false, error: String(err) },
+          [skillName]: { success: false, error: String(err), status: "failed" },
         }));
-        setRunningSkill(null);
+        setRunningSkills((prev) => {
+          const next = new Set(prev);
+          next.delete(skillName);
+          return next;
+        });
       },
     });
-  };
+  }, [runSkill]);
 
   if (isLoading) {
     return (
@@ -69,7 +132,7 @@ export function SkillsPage() {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {skills?.map((skill) => {
           const result = results[skill.name];
-          const isRunning = runningSkill === skill.name;
+          const isRunning = runningSkills.has(skill.name);
 
           return (
             <div
@@ -102,15 +165,21 @@ export function SkillsPage() {
                 </p>
               )}
 
-              <button
-                onClick={() => handleRun(skill.name)}
-                disabled={isRunning}
-                className="mt-auto px-3 py-1.5 rounded text-xs font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-50 transition-colors border border-gray-700"
-              >
-                {isRunning ? "Running..." : "Run Now"}
-              </button>
+              {isRunning ? (
+                <div className="mt-auto flex items-center gap-2 px-3 py-1.5 rounded text-xs font-medium bg-amber-900/20 border border-amber-800 text-amber-400">
+                  <div className="w-3 h-3 border-2 border-amber-800 border-t-amber-400 rounded-full animate-spin" />
+                  Running...
+                </div>
+              ) : (
+                <button
+                  onClick={() => handleRun(skill.name)}
+                  className="mt-auto px-3 py-1.5 rounded text-xs font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-700"
+                >
+                  Run Now
+                </button>
+              )}
 
-              {result && (
+              {result && result.status === "completed" && (
                 <div
                   className={clsx(
                     "rounded p-2 text-xs",
