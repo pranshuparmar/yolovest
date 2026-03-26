@@ -496,6 +496,19 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Recent audit log entries (FR-8.8)."""
         return await ctx.db.get_audit_log(limit=limit, action_type=action_type)
 
+    @app.get("/api/logs")
+    async def get_server_logs(
+        lines: int = Query(200, ge=1, le=500),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Recent server log lines from the in-memory buffer."""
+        from yolovest.log_buffer import get_log_buffer
+        buf = get_log_buffer()
+        if buf is None:
+            return {"lines": [], "total": 0}
+        log_lines = buf.get_lines(last_n=lines)
+        return {"lines": log_lines, "total": len(log_lines)}
+
     # ------------------------------------------------------------------
     # Integrations
     # ------------------------------------------------------------------

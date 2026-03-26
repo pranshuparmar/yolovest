@@ -67,6 +67,15 @@ def setup_logging() -> None:
     # Suppress google_genai internal logs
     logging.getLogger("google_genai").setLevel(logging.WARNING)
 
+    # Add in-memory ring buffer for live log viewing from dashboard
+    from yolovest.log_buffer import LogBuffer
+    buffer_handler = LogBuffer(maxlen=500)
+    buffer_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logging.getLogger().addHandler(buffer_handler)
+
 
 class _StubDB:
     """Minimal database stub for Phase 0 (no real DB yet)."""

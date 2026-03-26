@@ -137,6 +137,9 @@ export const api = {
     return apiFetch<AuditEntry[]>(`/api/audit${qs ? "?" + qs : ""}`);
   },
 
+  serverLogs: (lines = 200) =>
+    apiFetch<{ lines: string[]; total: number }>(`/api/logs?lines=${lines}`),
+
   integrations: () => apiFetch<IntegrationsStatus>("/api/integrations"),
 
   pingGemini: () =>

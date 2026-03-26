@@ -173,6 +173,14 @@ export function useAudit(params?: { limit?: number; action_type?: string }) {
   });
 }
 
+export function useServerLogs(lines = 200) {
+  return useQuery({
+    queryKey: ["server-logs", lines],
+    queryFn: () => api.serverLogs(lines),
+    refetchInterval: 5000,
+  });
+}
+
 export function useIntegrations() {
   return useQuery({
     queryKey: ["integrations"],
