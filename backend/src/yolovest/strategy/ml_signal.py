@@ -45,15 +45,29 @@ class XGBoostSignalModel(MLBase):
         self._intraday_version: str = "untrained"
         self._swing_version: str = "untrained"
 
+        # Feature names used during training (for consistent inference)
+        self._intraday_features: list[str] | None = None
+        self._swing_features: list[str] | None = None
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_feature_vector(features: dict[str, Any]) -> list[list[float]]:
-        """Build a 2D feature array from a dict, sorted by key for consistency."""
-        sorted_keys = sorted(features.keys())
-        values = [float(features[k]) for k in sorted_keys]
+    def _build_feature_vector(
+        features: dict[str, Any],
+        expected_features: list[str] | None = None,
+    ) -> list[list[float]]:
+        """Build a 2D feature array from a dict, sorted by key for consistency.
+
+        If expected_features is set (from training), use exactly those features
+        in that order. Missing features get 0.0, extra features are dropped.
+        """
+        if expected_features:
+            values = [float(features.get(k, 0.0)) for k in expected_features]
+        else:
+            sorted_keys = sorted(features.keys())
+            values = [float(features[k]) for k in sorted_keys]
         return [values]  # single-sample 2D array for predict
 
     def _get_model(self, model_type: str) -> Any:
@@ -115,7 +129,9 @@ class XGBoostSignalModel(MLBase):
                 f"No {model_type} model loaded. Call load_model() first."
             )
 
-        feature_vector = self._build_feature_vector(features)
+        expected = (self._intraday_features if model_type == "intraday"
+                    else self._swing_features)
+        feature_vector = self._build_feature_vector(features, expected)
 
         def _run_inference() -> tuple[int, float]:
             import numpy as np
@@ -186,7 +202,8 @@ class XGBoostSignalModel(MLBase):
     # ------------------------------------------------------------------
 
     async def train(
-        self, model_type: str, X: Any, y: Any, params: dict[str, Any]  # noqa: N803
+        self, model_type: str, X: Any, y: Any, params: dict[str, Any],  # noqa: N803
+        feature_names: list[str] | None = None,
     ) -> dict[str, Any]:
         """Train an XGBoost classifier with walk-forward validation.
 
@@ -195,6 +212,7 @@ class XGBoostSignalModel(MLBase):
             X: Feature matrix (numpy array or list of lists)
             y: Label array (numpy array or list)
             params: XGBoost params + optional min_training_samples
+            feature_names: Ordered feature names matching X columns
 
         Returns:
             Metrics dict with sharpe, drawdown, win_rate, profit_factor.
@@ -325,6 +343,13 @@ class XGBoostSignalModel(MLBase):
         self._set_model(model_type, model)
         self._set_calibrator(model_type, calibrator)
 
+        # Store feature names for consistent inference
+        if feature_names:
+            if model_type == "intraday":
+                self._intraday_features = feature_names
+            elif model_type == "swing":
+                self._swing_features = feature_names
+
         version = f"xgb_{model_type}_v{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
         self._set_version(model_type, version)
 
@@ -357,11 +382,14 @@ class XGBoostSignalModel(MLBase):
         def _save() -> None:
             import joblib
 
+            feature_names = (self._intraday_features if model_type == "intraday"
+                             else self._swing_features)
             artifact = {
                 "model": model,
                 "calibrator": self._get_calibrator(model_type),
                 "version": version_str,
                 "metrics": metrics,
+                "feature_names": feature_names,
                 "saved_at": datetime.now(UTC).isoformat(),
             }
             joblib.dump(artifact, filepath)
@@ -401,6 +429,14 @@ class XGBoostSignalModel(MLBase):
         self._set_model(model_type, artifact["model"])
         self._set_calibrator(model_type, artifact.get("calibrator"))
         self._set_version(model_type, artifact.get("version", "unknown"))
+
+        # Restore feature names for consistent inference
+        feature_names = artifact.get("feature_names")
+        if feature_names:
+            if model_type == "intraday":
+                self._intraday_features = feature_names
+            elif model_type == "swing":
+                self._swing_features = feature_names
 
         logger.info(
             "Loaded %s model version %s", model_type, self._get_version(model_type)

@@ -142,8 +142,9 @@ class GeminiLLM(LLMBase):
                 model=self._flash_model,
             )
             return "ok" in result.lower()
-        except Exception:
-            logger.exception("Gemini ping failed")
+        except Exception as e:
+            # Use warning not exception to avoid noisy tracebacks on 429
+            logger.warning("Gemini ping failed: %s", type(e).__name__)
             return False
 
     # ------------------------------------------------------------------

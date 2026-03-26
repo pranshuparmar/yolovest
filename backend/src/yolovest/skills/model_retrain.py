@@ -78,7 +78,7 @@ class ModelRetrainSkill(SkillBase):
         for model_type in ("intraday", "swing"):
             # Build feature matrix with model-specific labeling
             lookahead = lookahead_map[model_type]
-            X, y = self._prepare_training_data(training_data, lookahead_bars=lookahead)
+            X, y, feat_names = self._prepare_training_data(training_data, lookahead_bars=lookahead)
             if len(y) < min_samples:
                 logger.warning(
                     "Insufficient %s feature samples (%d, need %d), skipping",
@@ -96,7 +96,7 @@ class ModelRetrainSkill(SkillBase):
                     "samples": len(y),
                 })
                 metrics = await self.ctx.ml.train(
-                    model_type, X, y, {}
+                    model_type, X, y, {}, feature_names=feat_names,
                 )
                 version = await self.ctx.ml.save_model(model_type, metrics=metrics)
                 await self.broadcast("retrain_progress", {
@@ -153,8 +153,8 @@ class ModelRetrainSkill(SkillBase):
         )
 
     def _prepare_training_data(
-        self, training_data: dict[str, Any], lookahead_bars: int = 1
-    ) -> tuple[list[list[float]], list[int]]:
+        self, training_data: dict[str, Any], lookahead_bars: int = 1,
+    ) -> tuple[list[list[float]], list[int], list[str]]:
         """Convert raw OHLCV bars into feature matrix X and label array y.
 
         Groups bars by symbol, computes technical features using a sliding window,
@@ -192,6 +192,7 @@ class ModelRetrainSkill(SkillBase):
         window_size = 50
         X: list[list[float]] = []
         y: list[int] = []
+        feature_names: list[str] = []
 
         for _sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
@@ -231,10 +232,12 @@ class ModelRetrainSkill(SkillBase):
 
                 # Sort keys for consistent feature ordering across samples
                 sorted_keys = sorted(features.keys())
+                if not feature_names:
+                    feature_names = sorted_keys
                 X.append([features[k] for k in sorted_keys])
                 y.append(label)
 
-        return X, y
+        return X, y, feature_names
 
     async def _check_shadow_promotions(self) -> list[dict[str, Any]]:
         """Check if shadow models have completed trial period. FR-7.5.
