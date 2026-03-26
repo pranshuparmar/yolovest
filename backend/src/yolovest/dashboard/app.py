@@ -298,9 +298,28 @@ def create_app(ctx: AppContext) -> FastAPI:
                 price=float(price) if price else None,
                 trigger_price=float(trigger_price) if trigger_price else None,
             )
+
+            # Record trade in DB
+            fill_price = float(price) if price else 0.0
+            trade = {
+                "symbol": symbol,
+                "signal_type": side,
+                "entry_price": fill_price,
+                "fill_price": fill_price,
+                "quantity": quantity,
+                "stop_loss_price": 0,
+                "target_price": 0,
+                "order_id": order_id,
+                "product": product,
+                "status": "filled" if order_type == "MARKET" else "placed",
+                "mode": ctx.config.mode,
+                "slippage": 0,
+            }
+            trade_id = await ctx.db.insert_trade(trade)
+
             logger.info(
-                "Manual order placed: %s %s %s x%d @ %s (order_id: %s)",
-                side, symbol, order_type, quantity, price or "MARKET", order_id,
+                "Manual order placed: %s %s %s x%d @ %s (order_id: %s, trade_id: %s)",
+                side, symbol, order_type, quantity, price or "MARKET", order_id, trade_id,
             )
             await broadcast_ws("trade_executed", {
                 "symbol": symbol,
@@ -308,8 +327,9 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "quantity": quantity,
                 "mode": ctx.config.mode,
                 "manual": True,
+                "trade_id": trade_id,
             })
-            return {"success": True, "order_id": order_id}
+            return {"success": True, "order_id": order_id, "trade_id": trade_id}
         except Exception as e:
             logger.warning("Manual order failed: %s", e)
             return {"success": False, "error": str(e)}

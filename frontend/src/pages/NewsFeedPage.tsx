@@ -110,7 +110,8 @@ export function NewsFeedPage() {
       list = list.filter((a) => a.source === sourceFilter);
     }
     if (dateFrom) {
-      const cutoff = new Date(dateFrom).getTime();
+      // Append T00:00:00 to force local timezone parsing (not UTC)
+      const cutoff = new Date(dateFrom + "T00:00:00").getTime();
       list = list.filter(
         (a) => a.published_at && new Date(a.published_at).getTime() >= cutoff
       );

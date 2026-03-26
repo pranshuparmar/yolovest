@@ -330,7 +330,20 @@ async def async_main(args: argparse.Namespace) -> None:
 
     # Restore Zerodha session from persisted access token
     if isinstance(ctx.broker, ZerodhaBroker):
-        await ctx.broker.restore_session()
+        restored = await ctx.broker.restore_session()
+
+        # Sync capital from Zerodha if session was restored
+        if restored:
+            try:
+                margins = await ctx.broker.get_margins()
+                if margins:
+                    from yolovest.dashboard.app import _extract_broker_capital
+                    broker_capital = _extract_broker_capital(margins)
+                    if broker_capital > 0:
+                        await ctx.db.set_system_state("initial_capital", str(broker_capital))
+                        logger.info("Synced capital from Zerodha: %.2f", broker_capital)
+            except Exception as e:
+                logger.info("Could not sync capital from Zerodha: %s", e)
 
     # Sync initial capital from config → DB (so portfolio reads the configured value)
     if isinstance(ctx.db, Database):
