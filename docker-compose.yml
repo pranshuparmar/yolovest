@@ -39,7 +39,7 @@ services:
     container_name: yolovest-frontend
     restart: unless-stopped
     ports:
-      - "${DASHBOARD_PORT:-8080}:80"
+      - "${DASHBOARD_PORT:-7010}:80"
     depends_on:
       backend:
         condition: service_healthy
