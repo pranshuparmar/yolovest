@@ -8,6 +8,8 @@ import asyncio
 import logging
 import math
 from datetime import datetime, timedelta
+
+from yolovest.timezone import now_ist
 from typing import Any
 
 from yolovest.data.base import MarketDataBase
@@ -117,5 +119,5 @@ class YFinanceProvider(MarketDataBase):
         return {
             "ltp": float(info.last_price) if hasattr(info, "last_price") else 0.0,
             "volume": int(info.last_volume) if hasattr(info, "last_volume") else 0,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_ist().isoformat(),
         }

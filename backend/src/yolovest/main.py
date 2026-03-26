@@ -237,6 +237,18 @@ def _build_memory(db: Any) -> Any:
         return None
 
 
+def _build_ml(config: AppConfig, db: Any) -> Any:
+    """Build ML provider (XGBoost signal model)."""
+    try:
+        from yolovest.strategy.ml_signal import XGBoostSignalModel
+
+        model_dir = getattr(config.strategy, "model_dir", "./models")
+        return XGBoostSignalModel(model_dir=model_dir, db=db)
+    except Exception:
+        logger.warning("Failed to build ML provider, signals will be unavailable")
+        return None
+
+
 def _build_news_aggregator() -> Any:
     """Build news aggregator with all available news sources."""
     try:
@@ -277,6 +289,7 @@ def build_context(config: AppConfig) -> AppContext:
         notify=cast(NotifierProtocol, Notifier(config)),
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
+        ml=_build_ml(config, db),
         news_aggregator=_build_news_aggregator(),
         memory=_build_memory(db),
     )
@@ -307,8 +320,42 @@ async def async_main(args: argparse.Namespace) -> None:
     if isinstance(ctx.db, Database):
         await ctx.db.initialize()
 
+    # Load production ML models from disk (if any exist)
+    if ctx.ml is not None:
+        for model_type in ("intraday", "swing"):
+            try:
+                await ctx.ml.load_model(model_type)
+                logger.info("Loaded production %s model at startup", model_type)
+            except FileNotFoundError:
+                logger.info("No saved %s model found, will be available after model-retrain", model_type)
+            except Exception as e:
+                logger.warning("Failed to load %s model at startup: %s", model_type, e)
+
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
+
+    # Wire WebSocket broadcasting for skill completion notifications
+    # and event bus → WebSocket bridge for real-time dashboard updates
+    try:
+        from yolovest.dashboard.app import broadcast_ws
+        from yolovest.events import Event
+
+        orchestrator._on_skill_complete = broadcast_ws
+
+        # Bridge: any event published on the bus gets broadcast to WebSocket clients
+        async def _ws_bridge(event: Event) -> None:
+            await broadcast_ws(event.event_type, event.data)
+
+        for event_type in (
+            "heartbeat_started", "heartbeat_completed",
+            "signal_generated", "trade_executed", "trade_exit",
+            "position_updated", "portfolio_pnl",
+            "kill_switch_activated",
+            "ingest_progress", "retrain_progress",
+        ):
+            ctx.event_bus.subscribe(event_type, _ws_bridge)
+    except Exception:
+        pass
 
     # Build CRON scheduler sharing the same skill instances
     cron_scheduler = CronScheduler(ctx, orchestrator._skills)

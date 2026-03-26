@@ -24,6 +24,7 @@ market_data:
   bhavcopy_dir: ./data/bhavcopy       # path to downloaded NSE Bhavcopy CSVs
   cache_ttl_minutes: 15               # cache fetched data to reduce API calls
   stale_threshold_minutes: 30         # reject data older than this many minutes
+  backfill_days: 365                  # days of history for backfill-data skill
 
 heartbeat:
   market_hours_interval_min: 15       # heartbeat frequency during market hours
@@ -31,7 +32,9 @@ heartbeat:
   max_consecutive_skips: 3            # alert if N heartbeats skipped due to overrun
 
 scanning:
-  seed_symbols: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
+  universe: nifty500                  # nifty50 | nifty500 | all
+  universe_cron: "30 8 * * 1-5"      # daily 8:30 AM IST on weekdays
+  seed_symbols: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]  # day-zero bootstrap only
   shortlist_size: 25                  # number of candidate stocks from daily scan
   min_avg_daily_volume: 500000        # filter out stocks below this avg daily volume
   weights:                            # ranking algorithm weights (must sum to 1.0)

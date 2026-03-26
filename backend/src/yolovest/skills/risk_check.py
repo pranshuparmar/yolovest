@@ -57,10 +57,9 @@ class RiskCheckSkill(SkillBase):
         # FR-11.2: Early close day — block new MIS positions if close to square-off
         if (self.ctx.market_hours.is_early_close_day()
                 and signal.get("product", "MIS") == "MIS"):
-            from datetime import datetime
-            from zoneinfo import ZoneInfo
+            from yolovest.timezone import now_ist
 
-            now = datetime.now(ZoneInfo("Asia/Kolkata"))
+            now = now_ist()
             sq_time = self.ctx.market_hours.get_square_off_time(now.date())
             minutes_to_sq = (
                 datetime.combine(now.date(), sq_time) - now.replace(tzinfo=None)

@@ -7,6 +7,7 @@ import {
   useSectors,
   useAddUserWatchlistSymbol,
   useRemoveUserWatchlistSymbol,
+  useUniverseSymbols,
 } from "../hooks/queries";
 
 function score(n: number | null | undefined) {
@@ -17,10 +18,12 @@ export function WatchlistPage() {
   const { data: algoWatchlist, isLoading: algoLoading } = useWatchlist();
   const { data: userWatchlist, isLoading: userLoading } = useUserWatchlist();
   const { data: sectors, isLoading: secLoading } = useSectors();
+  const { data: allSymbols } = useUniverseSymbols();
   const addSymbol = useAddUserWatchlistSymbol();
   const removeSymbol = useRemoveUserWatchlistSymbol();
 
   const [newSymbol, setNewSymbol] = useState("");
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [newSector, setNewSector] = useState("");
   const [newNotes, setNewNotes] = useState("");
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
@@ -70,16 +73,44 @@ export function WatchlistPage() {
           Add to Your Watchlist
         </h3>
         <div className="flex flex-wrap gap-3 items-end">
-          <div>
+          <div className="relative">
             <label className="block text-xs text-gray-500 mb-1">Symbol</label>
             <input
               type="text"
               value={newSymbol}
-              onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
-              placeholder="e.g. RELIANCE"
-              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full sm:w-36 focus:outline-none focus:border-emerald-500"
-              onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+              onChange={(e) => {
+                setNewSymbol(e.target.value.toUpperCase());
+                setShowSuggestions(true);
+              }}
+              onFocus={() => setShowSuggestions(true)}
+              onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+              placeholder="Search NSE symbols..."
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full sm:w-48 focus:outline-none focus:border-emerald-500"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { setShowSuggestions(false); handleAdd(); }
+                if (e.key === "Escape") setShowSuggestions(false);
+              }}
             />
+            {showSuggestions && newSymbol.length >= 1 && allSymbols && (
+              <div className="absolute z-50 mt-1 w-full max-h-48 overflow-auto bg-gray-800 border border-gray-700 rounded shadow-lg">
+                {allSymbols
+                  .filter((s) => s.includes(newSymbol))
+                  .slice(0, 12)
+                  .map((s) => (
+                    <button
+                      key={s}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        setNewSymbol(s);
+                        setShowSuggestions(false);
+                      }}
+                      className="w-full text-left px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
+                    >
+                      {s}
+                    </button>
+                  ))}
+              </div>
+            )}
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">Sector</label>

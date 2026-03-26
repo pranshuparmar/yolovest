@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from yolovest.timezone import now_ist
+
 
 # ---------------------------------------------------------------------------
 # Market Data
@@ -76,7 +78,7 @@ class Trade(BaseModel):
     slippage: float = 0.0
     pnl: float | None = None  # None while open
     exit_price: float | None = None
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=now_ist)
     closed_at: datetime | None = None
 
 
@@ -160,7 +162,7 @@ class WebGroundingResult(BaseModel):
     query: str
     summary: str
     sources: list[str] = Field(default_factory=list)
-    timestamp: datetime = Field(default_factory=datetime.now)
+    timestamp: datetime = Field(default_factory=now_ist)
 
 
 class WatchlistValidation(BaseModel):
@@ -297,7 +299,7 @@ class Prediction(BaseModel):
     prediction_id: str
     signal: Signal
     trade_id: str | None = None
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=now_ist)
     prediction_end_time: datetime | None = None  # computed from holding period
     actual_price: float | None = None
     direction_correct: bool | None = None

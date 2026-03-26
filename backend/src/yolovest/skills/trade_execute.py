@@ -77,6 +77,14 @@ class TradeExecuteSkill(SkillBase):
         trade_id = await self.ctx.db.insert_trade(trade)
         trade["trade_id"] = trade_id
         await self.ctx.notify.send_trade_alert(trade)
+        await self.broadcast("trade_executed", {
+            "symbol": trade["symbol"],
+            "signal_type": trade["signal_type"],
+            "fill_price": trade["fill_price"],
+            "quantity": trade["quantity"],
+            "mode": "paper",
+            "trade_id": trade_id,
+        })
 
         return SkillResult(
             success=True,
@@ -167,6 +175,15 @@ class TradeExecuteSkill(SkillBase):
                 trade_id = await self.ctx.db.insert_trade(trade)
                 trade["trade_id"] = trade_id
                 await self.ctx.notify.send_trade_alert(trade)
+                await self.broadcast("trade_executed", {
+                    "symbol": trade["symbol"],
+                    "signal_type": trade["signal_type"],
+                    "fill_price": fill_price,
+                    "quantity": actual_qty,
+                    "slippage": slippage,
+                    "mode": "live",
+                    "trade_id": trade_id,
+                })
 
                 return SkillResult(
                     success=True,

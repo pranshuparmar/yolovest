@@ -3,6 +3,7 @@ import {
   useDryRunHistory,
   useDryRunDetail,
   useRunDryRun,
+  useRunSkill,
   useScoreDryRun,
 } from "../hooks/queries";
 import clsx from "clsx";
@@ -31,6 +32,7 @@ function formatDate(iso: string) {
 export function DryRunPage() {
   const { data: history, isLoading: histLoading } = useDryRunHistory();
   const runDryRun = useRunDryRun();
+  const runSkill = useRunSkill();
   const scoreDryRun = useScoreDryRun();
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const { data: signals, isLoading: detailLoading } =
@@ -87,6 +89,34 @@ export function DryRunPage() {
             {runDryRun.data.signals.length}
           </span>{" "}
           signals.
+        </div>
+      )}
+
+      {runDryRun.isSuccess && runDryRun.data?.warning && (
+        <div className="bg-amber-900/20 border border-amber-800 rounded-lg p-3 text-sm text-amber-400 flex items-center justify-between gap-3">
+          <span>{runDryRun.data.warning}</span>
+          <button
+            onClick={() => runSkill.mutate("model-retrain")}
+            disabled={runSkill.isPending}
+            className="px-3 py-1 rounded text-xs font-medium bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50 transition-colors shrink-0"
+          >
+            {runSkill.isPending ? "Training..." : "Train Model Now"}
+          </button>
+        </div>
+      )}
+
+      {runSkill.isSuccess && (
+        <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3 text-sm text-emerald-400">
+          Model retrain complete.{" "}
+          {runSkill.data.data?.reason === "insufficient_data"
+            ? `Insufficient training data (${runSkill.data.data?.bar_count ?? 0} bars). Ingest more OHLCV data first.`
+            : "You can now re-run the dry run."}
+        </div>
+      )}
+
+      {runSkill.isError && (
+        <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-sm text-red-400">
+          Model retrain failed. Check server logs for details.
         </div>
       )}
 

@@ -255,7 +255,8 @@ class TestAgentMemory:
     async def test_get_returns_none_for_expired(self, mock_db):
         from yolovest.memory import AgentMemory
 
-        past = (datetime.now() - timedelta(hours=1)).isoformat()
+        from yolovest.timezone import now_ist
+        past = (now_ist() - timedelta(hours=1)).isoformat()
         mock_db.get_memory.return_value = {
             "key": "k1",
             "value": '"old"',

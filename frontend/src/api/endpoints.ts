@@ -180,6 +180,11 @@ export const api = {
 
   mlModels: () => apiFetch<MLModelsResponse>("/api/ml-models"),
 
+  promoteModel: (modelType: string, version: string) =>
+    apiFetch<{ promoted: boolean }>(`/api/ml-models/${modelType}/${version}/promote`, {
+      method: "POST",
+    }),
+
   predictionsToday: () =>
     apiFetch<PredictionDetail[]>("/api/predictions/today"),
 
@@ -264,6 +269,14 @@ export const api = {
 
   listBackups: () => apiFetch<BackupEntry[]>("/api/backups"),
 
+  universeSymbols: () => apiFetch<string[]>("/api/universe-symbols"),
+
+  restoreBackup: (filename: string) =>
+    apiFetch<{ success: boolean; db_restored: boolean; models_restored?: number }>(
+      `/api/restore/${filename}`,
+      { method: "POST" },
+    ),
+
   resetAllData: () => apiFetch<ResetResult>("/api/reset", { method: "POST" }),
 
   // Dry-Run Signal Preview
@@ -277,4 +290,15 @@ export const api = {
 
   scoreDryRun: (runId: string) =>
     apiFetch<{ scored: number; not_found: number }>(`/api/dry-run/${runId}/score`, { method: "POST" }),
+
+  listSkills: () =>
+    apiFetch<{ name: string; description: string; trigger: string; schedule: string | null }[]>(
+      "/api/skills",
+    ),
+
+  runSkill: (skillName: string) =>
+    apiFetch<{ success: boolean; skill: string; data: Record<string, unknown>; error: string | null }>(
+      `/api/skills/${skillName}/run`,
+      { method: "POST" },
+    ),
 };

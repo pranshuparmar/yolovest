@@ -252,6 +252,15 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Sector rotation analysis."""
         return await ctx.db.get_sector_rotation()
 
+    @app.get("/api/universe-symbols")
+    async def get_universe_symbols_list(
+        _user: str = Depends(verify_credentials),
+    ) -> list[str]:
+        """All symbols in the OHLCV universe (for search/autocomplete)."""
+        from yolovest.data.nse_symbols import get_universe_symbols as get_syms
+        universe = ctx.config.scanning.universe
+        return get_syms(universe)
+
     # ------------------------------------------------------------------
     # System
     # ------------------------------------------------------------------
@@ -501,12 +510,26 @@ def create_app(ctx: AppContext) -> FastAPI:
             except Exception:
                 pass
         try:
-            shadow_days = getattr(ctx.config, "ml", None)
-            days = getattr(shadow_days, "shadow_mode_days", 14) if shadow_days else 14
-            result["shadow"] = await ctx.db.get_shadow_models_ready(days)
+            shadow_models = await ctx.db.get_all_shadow_models()
+            result["shadow"] = shadow_models
         except Exception:
             pass
         return result
+
+    @app.post("/api/ml-models/{model_type}/{version}/promote")
+    async def promote_model(
+        model_type: str,
+        version: str,
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Manually promote a shadow model to production."""
+        await ctx.db.promote_model(model_type, version)
+        if ctx.ml:
+            try:
+                await ctx.ml.load_model(model_type, version)
+            except Exception as e:
+                logger.warning("Failed to load promoted model %s/%s: %s", model_type, version, e)
+        return {"promoted": True, "model_type": model_type, "version": version}
 
     # ------------------------------------------------------------------
     # Predictions Detail & Failures
@@ -976,7 +999,12 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         # Step 2: Generate signals from shortlisted stocks
         signals_out: list[dict[str, Any]] = []
+        ml_unavailable = ctx.ml is None
         min_confidence = cfg.risk.min_confidence_score
+
+        if ml_unavailable:
+            logger.warning("Dry-run: ML model not loaded — cannot generate signals. "
+                           "Train a model first via the model-retrain skill.")
 
         indicator_cfg = IndicatorConfig(
             ema_periods=cfg.strategy.ema_periods,
@@ -993,8 +1021,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         for stock in shortlist:
             symbol = stock["symbol"]
             try:
-                bars = await ctx.db.get_ohlcv(symbol, "daily", days=60)
-                if len(bars) < 15:
+                bars = await ctx.db.get_ohlcv(symbol, "daily", days=365)
+                if len(bars) < 50:
                     continue
 
                 features = compute_features(bars, indicator_cfg)
@@ -1033,13 +1061,20 @@ def create_app(ctx: AppContext) -> FastAPI:
         if signals_out:
             await ctx.db.insert_dry_run_results(run_id, signals_out)
 
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "run_id": run_id,
             "universe_size": len(universe),
             "shortlist_size": len(shortlist),
             "signals": signals_out,
         }
+        if ml_unavailable:
+            result["warning"] = (
+                "ML model is not loaded — 0 signals generated. "
+                "Run the model-retrain skill first to train an XGBoost model, "
+                "then re-run the dry run."
+            )
+        return result
 
     @app.get("/api/dry-run/history")
     async def get_dry_run_history(
@@ -1065,11 +1100,14 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Score a dry-run against actual next-day market data."""
         return await ctx.db.score_dry_run(run_id)
 
+    def _model_dir() -> str:
+        return getattr(ctx.config.strategy, "model_dir", "./models")
+
     @app.post("/api/backup")
     async def create_backup(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
-        """Create a manual database backup."""
+        """Create a manual database backup including ML model artifacts."""
         backup_dir = ctx.config.database.backup_dir
-        backup_path = await ctx.db.backup(backup_dir)
+        backup_path = await ctx.db.backup(backup_dir, model_dir=_model_dir())
         return {"success": True, "backup_path": backup_path}
 
     @app.get("/api/backups")
@@ -1078,12 +1116,91 @@ def create_app(ctx: AppContext) -> FastAPI:
         backup_dir = ctx.config.database.backup_dir
         return await ctx.db.list_backups(backup_dir)
 
+    @app.post("/api/restore/{filename}")
+    async def restore_backup(
+        filename: str, _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Restore a database backup. Application should be restarted after restore."""
+        backup_dir = ctx.config.database.backup_dir
+        result = await ctx.db.restore_backup(
+            backup_dir, filename, model_dir=_model_dir(),
+        )
+        return {"success": True, **result}
+
     @app.post("/api/reset")
     async def reset_all_data(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
-        """Delete ALL data from all tables. Schema is preserved."""
+        """Delete ALL data from all tables and model artifacts. Schema is preserved."""
         deleted = await ctx.db.reset_all_data()
         total = sum(deleted.values())
-        return {"success": True, "total_rows_deleted": total, "by_table": deleted}
+        # Also clean up all model artifacts
+        model_cleanup = await ctx.db.cleanup_orphaned_models(_model_dir())
+        return {
+            "success": True,
+            "total_rows_deleted": total,
+            "by_table": deleted,
+            "model_files_deleted": model_cleanup.get("orphaned_files_deleted", 0),
+        }
+
+    @app.delete("/api/ml-models/{model_type}/{version}")
+    async def delete_model(
+        model_type: str, version: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete a model version (DB record + .pkl artifact)."""
+        result = await ctx.db.delete_model_version(
+            model_type, version, model_dir=_model_dir(),
+        )
+        return {"success": True, **result}
+
+    # ------------------------------------------------------------------
+    # Manual Skill Trigger
+    # ------------------------------------------------------------------
+
+    @app.get("/api/skills")
+    async def list_skills(
+        _user: str = Depends(verify_credentials),
+    ) -> list[dict[str, str | None]]:
+        """List all registered skills with metadata."""
+        from yolovest.skills import SKILL_REGISTRY
+
+        out = []
+        for name, cls in sorted(SKILL_REGISTRY.items()):
+            out.append({
+                "name": name,
+                "description": cls.description,
+                "trigger": cls.trigger.value,
+                "schedule": cls.schedule,
+            })
+        return out
+
+    @app.post("/api/skills/{skill_name}/run")
+    async def run_skill(
+        skill_name: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Manually trigger a registered skill by name."""
+        from yolovest.skills import SKILL_REGISTRY
+
+        if skill_name not in SKILL_REGISTRY:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Unknown skill: {skill_name}. "
+                f"Available: {sorted(SKILL_REGISTRY.keys())}",
+            )
+
+        skill_cls = SKILL_REGISTRY[skill_name]
+        skill = skill_cls(ctx)
+        try:
+            result = await skill.execute()
+            return {
+                "success": result.success,
+                "skill": result.skill_name,
+                "data": result.data,
+                "error": result.error,
+            }
+        except Exception as e:
+            logger.exception("Manual skill run failed: %s", skill_name)
+            raise HTTPException(status_code=500, detail=str(e))
 
     # ------------------------------------------------------------------
     # FR-8.2: WebSocket Live Updates

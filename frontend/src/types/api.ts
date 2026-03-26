@@ -480,4 +480,5 @@ export interface DryRunResult {
   universe_size: number;
   shortlist_size: number;
   signals: DryRunSignal[];
+  warning?: string;
 }

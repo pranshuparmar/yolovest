@@ -10,9 +10,10 @@ See REQUIREMENTS.md FR-2.1 for the fallback chain design.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
+
+from yolovest.timezone import IST, now_ist
 
 from yolovest.data.base import MarketDataBase
 from yolovest.models.schemas import OHLCVBar
@@ -43,26 +44,37 @@ class MarketDataIngester(MarketDataBase):
         self._stale_minutes = stale_threshold_minutes
 
     async def get_ohlcv(
-        self, symbol: str, interval: str, days: int = 30
+        self, symbol: str, interval: str, days: int = 30,
+        *, skip_stale_check: bool = False,
     ) -> list[OHLCVBar]:
-        """Fetch OHLCV with automatic fallback and validation."""
+        """Fetch OHLCV with automatic fallback and validation.
+
+        Args:
+            skip_stale_check: If True, accept data regardless of age.
+                Use for backfill/universe ingestion where historical data is fine.
+        """
         providers = self._select_providers(interval)
         last_error: Exception | None = None
+        best_stale_bars: list[OHLCVBar] | None = None
 
         for provider in providers:
             try:
                 bars = await provider.get_ohlcv(symbol, interval, days)
                 bars = self._validate_bars(bars)
-                if bars and not self._is_stale(bars, interval):
-                    return bars
-                if bars and self._is_stale(bars, interval):
-                    logger.warning(
-                        "Stale data from %s for %s (latest: %s)",
-                        type(provider).__name__, symbol,
-                        bars[-1].timestamp if bars else "none",
-                    )
-                    last_error = ValueError(f"Stale data from {type(provider).__name__}")
+                if not bars:
                     continue
+                if skip_stale_check or not self._is_stale(bars, interval):
+                    return bars
+                # Stale but valid — keep as fallback
+                logger.warning(
+                    "Stale data from %s for %s (latest: %s)",
+                    type(provider).__name__, symbol,
+                    bars[-1].timestamp,
+                )
+                if best_stale_bars is None or len(bars) > len(best_stale_bars):
+                    best_stale_bars = bars
+                last_error = ValueError(f"Stale data from {type(provider).__name__}")
+                continue
             except Exception as e:
                 logger.warning(
                     "Provider %s failed for %s: %s",
@@ -70,6 +82,11 @@ class MarketDataIngester(MarketDataBase):
                 )
                 last_error = e
                 continue
+
+        # If all providers returned stale data, return the best one anyway
+        # (better to have stale data in DB than nothing)
+        if best_stale_bars:
+            return best_stale_bars
 
         if last_error:
             raise last_error
@@ -146,11 +163,10 @@ class MarketDataIngester(MarketDataBase):
         if not bars:
             return True
         latest = bars[-1].timestamp
-        ist = ZoneInfo("Asia/Kolkata")
-        now = datetime.now(ist)
+        now = now_ist()
         # Normalize naive timestamps to IST for comparison
         if latest.tzinfo is None:
-            latest = latest.replace(tzinfo=ist)
+            latest = latest.replace(tzinfo=IST)
         # For daily data, stale means no data from today or yesterday
         if interval in ("daily", "1d"):
             threshold = timedelta(days=2)

@@ -82,6 +82,10 @@ class KillSwitchSkill(SkillBase):
                 "Send /resume to restart trading."
             )
 
+        await self.broadcast("kill_switch_activated", {
+            "command": "stop", "orders_cancelled": cancelled,
+        })
+
         return SkillResult(
             success=True,
             skill_name=self.name,
@@ -112,6 +116,10 @@ class KillSwitchSkill(SkillBase):
                 "Trading is paused.\n"
                 "Send /resume to restart trading."
             )
+
+        await self.broadcast("kill_switch_activated", {
+            "command": "kill", "total_pnl": total_pnl,
+        })
 
         return SkillResult(
             success=True,

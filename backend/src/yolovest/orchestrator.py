@@ -6,12 +6,16 @@ heartbeat mutex (skip-on-overrun), and consecutive skip alerting.
 
 import asyncio
 import logging
-from datetime import datetime
+import time
+from collections.abc import Callable, Coroutine
 from typing import Any, ClassVar
 
 from yolovest.context import AppContext
 from yolovest.skills import SKILL_REGISTRY
 from yolovest.skills.base import SkillBase, SkillResult
+
+# Callback type for skill completion broadcasting
+SkillCallback = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,7 @@ class HeartbeatOrchestrator:
         self._consecutive_skips = 0
         self._max_consecutive_skips = ctx.config.heartbeat.max_consecutive_skips
         self._running = False
+        self._on_skill_complete: SkillCallback | None = None
         self._skills: dict[str, SkillBase] = skills if skills is not None else {}
         if skills is None:
             self._init_skills()
@@ -106,6 +111,9 @@ class HeartbeatOrchestrator:
     async def _execute_pipeline(self) -> dict[str, Any]:
         """Execute the full heartbeat pipeline with error propagation."""
         results: dict[str, Any] = {}
+        await self._broadcast("heartbeat_started", {
+            "market_hours": self._ctx.market_hours.is_market_hours(),
+        })
 
         # --- Step 1: health-check (ABORT on failure) ---
         health_result = await self._run_skill("health-check")
@@ -184,7 +192,25 @@ class HeartbeatOrchestrator:
             except Exception:
                 logger.debug("Failed to persist heartbeat state", exc_info=True)
 
+        # Broadcast heartbeat completion
+        skill_results = [
+            r for r in results.values() if isinstance(r, SkillResult)
+        ]
+        await self._broadcast("heartbeat_completed", {
+            "skills_run": len(skill_results),
+            "skills_succeeded": sum(1 for r in skill_results if r.success),
+            "signals_generated": len(signals) if "generate-signals" in results else 0,
+        })
+
         return results
+
+    async def _broadcast(self, event_type: str, data: dict[str, Any]) -> None:
+        """Publish an event to the event bus (bridged to WebSocket)."""
+        try:
+            from yolovest.events import Event
+            await self._ctx.event_bus.publish(Event(event_type=event_type, data=data))
+        except Exception:
+            pass
 
     async def _execute_signal_chain(
         self, signal: object, index: int
@@ -292,6 +318,22 @@ class HeartbeatOrchestrator:
             result.success,
             result.duration_ms,
         )
+
+        # Broadcast skill completion to WebSocket clients
+        if self._on_skill_complete is not None:
+            try:
+                await self._on_skill_complete("skill_completed", {
+                    "skill": name,
+                    "success": result.success,
+                    "duration_ms": round(result.duration_ms, 1),
+                    "error": result.error,
+                    "summary": {k: v for k, v in result.data.items()
+                                if isinstance(v, (str, int, float, bool, type(None)))}
+                    if result.data else {},
+                })
+            except Exception:
+                pass  # Never let broadcast failures affect the pipeline
+
         return result
 
     async def _alert_position_monitor(self, result: SkillResult) -> None:
@@ -309,7 +351,7 @@ class HeartbeatOrchestrator:
         logger.info("Heartbeat orchestrator started")
 
         while self._running:
-            start = datetime.now()
+            start = time.monotonic()
 
             try:
                 results = await self.run_heartbeat()
@@ -334,7 +376,7 @@ class HeartbeatOrchestrator:
                 interval = self._ctx.config.heartbeat.off_hours_interval_min * 60
 
             # Sleep for remaining interval (subtract elapsed time)
-            elapsed = (datetime.now() - start).total_seconds()
+            elapsed = time.monotonic() - start
             sleep_time = max(0, interval - elapsed)
 
             if self._running:

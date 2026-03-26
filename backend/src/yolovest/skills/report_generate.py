@@ -53,10 +53,9 @@ class ReportGenerateSkill(SkillBase):
 
         if report_type is None:
             # Auto-detect: run weekly on the configured weekly cron day (default Saturday)
-            from datetime import datetime
-            from zoneinfo import ZoneInfo
+            from yolovest.timezone import now_ist
 
-            today = datetime.now(ZoneInfo("Asia/Kolkata")).weekday()
+            today = now_ist().weekday()
             # Saturday = 5; match against weekly_report_cron day
             report_type = "weekly" if today == 5 else "daily"
 

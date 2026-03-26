@@ -88,6 +88,7 @@ class MarketDataConfig(BaseModel):
     bhavcopy_dir: str = "./data/bhavcopy"
     cache_ttl_minutes: int = 15
     stale_threshold_minutes: int = 30
+    backfill_days: int = 365  # days of history to fetch in backfill-data skill
 
 
 class HeartbeatConfig(BaseModel):
@@ -114,6 +115,7 @@ class ScanningWeights(BaseModel):
 
 class ScanningConfig(BaseModel):
     universe: str = "nifty500"  # "nifty500", "nifty50", "all"
+    universe_cron: str = "30 8 * * 1-5"  # daily 8:30 AM IST on weekdays
     seed_symbols: list[str] = Field(
         default_factory=lambda: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
     )

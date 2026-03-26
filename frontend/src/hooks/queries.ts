@@ -248,6 +248,17 @@ export function useMLModels() {
   });
 }
 
+export function usePromoteModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ modelType, version }: { modelType: string; version: string }) =>
+      api.promoteModel(modelType, version),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ml-models"] });
+    },
+  });
+}
+
 export function usePredictionsToday() {
   return useQuery({
     queryKey: ["predictions", "today"],
@@ -415,6 +426,14 @@ export function useRiskSimulator() {
   return useMutation({ mutationFn: api.riskSimulator });
 }
 
+export function useUniverseSymbols() {
+  return useQuery({
+    queryKey: ["universe-symbols"],
+    queryFn: api.universeSymbols,
+    staleTime: 300_000, // 5 min — symbol list rarely changes
+  });
+}
+
 // Data Management
 export function useStorageStats() {
   return useQuery({
@@ -445,6 +464,18 @@ export function useCreateBackup() {
   return useMutation({
     mutationFn: api.createBackup,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["backups"] }),
+  });
+}
+
+export function useRestoreBackup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (filename: string) => api.restoreBackup(filename),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["backups"] });
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+      qc.invalidateQueries({ queryKey: ["ml-models"] });
+    },
   });
 }
 
@@ -482,6 +513,20 @@ export function useRunDryRun() {
   return useMutation({
     mutationFn: api.runDryRun,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["dry-run-history"] }),
+  });
+}
+
+export function useListSkills() {
+  return useQuery({
+    queryKey: ["skills"],
+    queryFn: api.listSkills,
+    staleTime: 60_000,
+  });
+}
+
+export function useRunSkill() {
+  return useMutation({
+    mutationFn: (skillName: string) => api.runSkill(skillName),
   });
 }
 

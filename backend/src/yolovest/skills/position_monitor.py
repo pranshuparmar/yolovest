@@ -94,6 +94,25 @@ class PositionMonitorSkill(SkillBase):
             # Update unrealized PnL
             await self.ctx.db.update_unrealized_pnl(pos["trade_id"], current_price)
 
+        # Broadcast target/stop hits as trade exits
+        for sym in targets_hit:
+            await self.broadcast("trade_exit", {
+                "symbol": sym, "reason": "target_hit",
+            })
+        for sym in stops_hit:
+            await self.broadcast("trade_exit", {
+                "symbol": sym, "reason": "stop_loss_hit",
+            })
+
+        # Broadcast portfolio PnL summary
+        if local_positions:
+            await self.broadcast("portfolio_pnl", {
+                "positions": len(local_positions),
+                "targets_hit": len(targets_hit),
+                "stops_hit": len(stops_hit),
+                "trails_modified": trails_modified,
+            })
+
         return SkillResult(
             success=True,
             skill_name=self.name,
