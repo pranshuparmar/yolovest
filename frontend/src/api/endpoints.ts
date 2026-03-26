@@ -277,6 +277,23 @@ export const api = {
       { method: "POST" },
     ),
 
+  changePassword: (newPassword: string) =>
+    apiFetch<{ success: boolean }>("/api/change-password", {
+      method: "POST",
+      body: JSON.stringify({ new_password: newPassword }),
+    }),
+
+  updateCapital: (amount: number) =>
+    apiFetch<{ success: boolean; initial_capital: number }>("/api/capital", {
+      method: "POST",
+      body: JSON.stringify({ amount }),
+    }),
+
+  syncCapital: () =>
+    apiFetch<{ success: boolean; initial_capital?: number; error?: string }>("/api/capital/sync", {
+      method: "POST",
+    }),
+
   resetAllData: () => apiFetch<ResetResult>("/api/reset", { method: "POST" }),
 
   // Dry-Run Signal Preview

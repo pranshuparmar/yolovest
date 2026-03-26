@@ -320,6 +320,15 @@ async def async_main(args: argparse.Namespace) -> None:
     if isinstance(ctx.db, Database):
         await ctx.db.initialize()
 
+    # Sync initial capital from config → DB (so portfolio reads the configured value)
+    if isinstance(ctx.db, Database):
+        existing = await ctx.db.get_system_state("initial_capital")
+        if not existing:
+            await ctx.db.set_system_state(
+                "initial_capital", str(ctx.config.capital.initial_amount)
+            )
+            logger.info("Set initial capital to %.0f from config", ctx.config.capital.initial_amount)
+
     # Load production ML models from disk (if any exist)
     if ctx.ml is not None:
         for model_type in ("intraday", "swing"):

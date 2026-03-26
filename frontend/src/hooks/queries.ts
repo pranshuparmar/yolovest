@@ -479,6 +479,28 @@ export function useRestoreBackup() {
   });
 }
 
+export function useChangePassword() {
+  return useMutation({
+    mutationFn: (newPassword: string) => api.changePassword(newPassword),
+  });
+}
+
+export function useUpdateCapital() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (amount: number) => api.updateCapital(amount),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["portfolio"] }),
+  });
+}
+
+export function useSyncCapital() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.syncCapital,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["portfolio"] }),
+  });
+}
+
 export function useResetAllData() {
   const qc = useQueryClient();
   return useMutation({

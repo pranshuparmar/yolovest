@@ -113,9 +113,22 @@ def create_app(ctx: AppContext) -> FastAPI:
         else "yolovest"
     )
 
+    # Mutable password container (allows runtime change)
+    # Check DB for a persisted password override (set via /api/change-password)
+    _password = {"current": dash_password}
+
+    @app.on_event("startup")
+    async def _load_persisted_password() -> None:
+        try:
+            saved_pw = await ctx.db.get_system_state("dashboard_password")
+            if saved_pw:
+                _password["current"] = saved_pw
+        except Exception:
+            pass
+
     def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)) -> str:  # noqa: B008
         """FR-8.9: Basic password protection."""
-        correct = secrets.compare_digest(credentials.password, dash_password)
+        correct = secrets.compare_digest(credentials.password, _password["current"])
         if not correct:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -130,9 +143,56 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.get("/api/portfolio")
     async def get_portfolio(user: str = Depends(verify_credentials)) -> dict[str, Any]:
-        """Portfolio overview: capital, exposure, open positions, PnL."""
+        """Portfolio overview: capital, exposure, open positions, PnL.
+
+        If broker is authenticated, syncs available funds from Zerodha.
+        """
+        # Sync capital from broker if authenticated
+        try:
+            if await ctx.broker.is_authenticated():
+                margins = await ctx.broker.get_margins()
+                if margins:
+                    available = margins.get("available", {}).get("cash") or margins.get("available_cash")
+                    used = margins.get("utilised", {}).get("debits") or 0
+                    if available is not None:
+                        broker_capital = float(available) + float(used)
+                        await ctx.db.set_system_state("initial_capital", str(broker_capital))
+        except Exception:
+            pass  # Broker not configured or API failed — use DB value
+
         portfolio = await ctx.db.get_portfolio_state()
         return portfolio
+
+    @app.post("/api/capital")
+    async def update_capital(
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Manually update the initial capital amount."""
+        amount = body.get("amount")
+        if amount is None or float(amount) <= 0:
+            raise HTTPException(status_code=400, detail="amount must be a positive number")
+        await ctx.db.set_system_state("initial_capital", str(float(amount)))
+        return {"success": True, "initial_capital": float(amount)}
+
+    @app.post("/api/capital/sync")
+    async def sync_capital_from_broker(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Sync capital from Zerodha broker account."""
+        try:
+            if not await ctx.broker.is_authenticated():
+                return {"success": False, "error": "Broker not authenticated"}
+            margins = await ctx.broker.get_margins()
+            if not margins:
+                return {"success": False, "error": "No margin data from broker"}
+            available = margins.get("available", {}).get("cash") or margins.get("available_cash") or 0
+            used = margins.get("utilised", {}).get("debits") or 0
+            broker_capital = float(available) + float(used)
+            await ctx.db.set_system_state("initial_capital", str(broker_capital))
+            return {"success": True, "initial_capital": broker_capital}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     @app.get("/api/positions")
     async def get_positions(user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
@@ -437,12 +497,12 @@ def create_app(ctx: AppContext) -> FastAPI:
                     await ctx.notify.send("Kite authenticated successfully via dashboard.")
                 except Exception:
                     pass
-                return RedirectResponse(url="/integrations?auth=success")
+                return RedirectResponse(url="/integrations?zerodha_auth=success")
             else:
-                return RedirectResponse(url="/integrations?auth=failed")
+                return RedirectResponse(url="/integrations?zerodha_auth=failed")
         except Exception as e:
             logger.warning("Zerodha OAuth callback failed: %s", e)
-            return RedirectResponse(url="/integrations?auth=failed")
+            return RedirectResponse(url="/integrations?zerodha_auth=failed")
 
     @app.post("/api/auth/zerodha/postback")
     async def zerodha_postback(body: dict[str, Any]) -> dict[str, str]:
@@ -1207,6 +1267,20 @@ def create_app(ctx: AppContext) -> FastAPI:
             model_type, version, model_dir=_model_dir(),
         )
         return {"success": True, **result}
+
+    @app.post("/api/change-password")
+    async def change_password(
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Change the dashboard password at runtime."""
+        new_password = body.get("new_password", "").strip()
+        if len(new_password) < 4:
+            raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+        _password["current"] = new_password
+        # Persist to DB so it survives restarts
+        await ctx.db.set_system_state("dashboard_password", new_password)
+        return {"success": True}
 
     # ------------------------------------------------------------------
     # Manual Skill Trigger
