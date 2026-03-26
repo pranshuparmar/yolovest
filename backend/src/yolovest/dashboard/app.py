@@ -15,7 +15,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
@@ -410,6 +410,62 @@ def create_app(ctx: AppContext) -> FastAPI:
             return {"success": ok, "margins": margins}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
+
+    @app.get("/api/auth/zerodha/callback", response_model=None)
+    async def zerodha_oauth_callback(
+        request_token: str = Query(default=""),
+        status_param: str = Query(default="", alias="status"),
+    ) -> RedirectResponse | HTMLResponse:
+        """OAuth callback — Zerodha redirects here after user logs in.
+
+        No auth required (this is the redirect target from Kite login).
+        Extracts request_token from query params, exchanges for access_token,
+        then redirects user to the dashboard integrations page.
+        """
+        if not request_token or status_param != "success":
+            return HTMLResponse(
+                "<h3>Zerodha login failed or was cancelled.</h3>"
+                '<p><a href="/integrations">Back to Dashboard</a></p>',
+                status_code=400,
+            )
+
+        try:
+            ok = await ctx.broker.authenticate(request_token)
+            if ok:
+                logger.info("Zerodha authenticated via OAuth callback")
+                try:
+                    await ctx.notify.send("Kite authenticated successfully via dashboard.")
+                except Exception:
+                    pass
+                return RedirectResponse(url="/integrations?auth=success")
+            else:
+                return RedirectResponse(url="/integrations?auth=failed")
+        except Exception as e:
+            logger.warning("Zerodha OAuth callback failed: %s", e)
+            return RedirectResponse(url="/integrations?auth=failed")
+
+    @app.post("/api/auth/zerodha/postback")
+    async def zerodha_postback(body: dict[str, Any]) -> dict[str, str]:
+        """Zerodha order postback — receives order status updates.
+
+        No auth required (called by Zerodha servers).
+        Logs the update and broadcasts to WebSocket clients.
+        """
+        order_id = body.get("order_id", "unknown")
+        order_status = body.get("status", "unknown")
+        logger.info("Zerodha postback: order=%s status=%s", order_id, order_status)
+
+        try:
+            await broadcast_ws("order_update", {
+                "order_id": order_id,
+                "status": order_status,
+                "symbol": body.get("tradingsymbol"),
+                "transaction_type": body.get("transaction_type"),
+            })
+        except Exception:
+            pass
+
+        return {"status": "ok"}
 
     @app.post("/api/integrations/telegram/test")
     async def test_telegram(

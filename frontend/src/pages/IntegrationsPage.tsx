@@ -75,6 +75,18 @@ export function IntegrationsPage() {
   const [requestToken, setRequestToken] = useState("");
   const [telegramMsg, setTelegramMsg] = useState("");
 
+  // Check for OAuth callback result in URL params
+  const [authResult, setAuthResult] = useState<string | null>(null);
+  useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    const auth = params.get("auth");
+    if (auth) {
+      setAuthResult(auth);
+      // Clean URL
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  });
+
   if (isLoading || !data) {
     return (
       <div className="p-6 space-y-4">
@@ -93,6 +105,26 @@ export function IntegrationsPage() {
   return (
     <div className="p-6 space-y-4">
       <h2 className="text-lg font-semibold text-gray-100">Integrations</h2>
+
+      {authResult && (
+        <div
+          className={`rounded-lg p-3 text-sm ${
+            authResult === "success"
+              ? "bg-emerald-900/20 border border-emerald-800 text-emerald-400"
+              : "bg-red-900/20 border border-red-800 text-red-400"
+          }`}
+        >
+          {authResult === "success"
+            ? "Zerodha authenticated successfully! You can now trade."
+            : "Zerodha authentication failed. Please try again."}
+          <button
+            onClick={() => setAuthResult(null)}
+            className="ml-3 text-xs opacity-60 hover:opacity-100"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <div className="grid gap-4 md:grid-cols-3">
         {/* ---- Gemini LLM ---- */}
