@@ -52,8 +52,26 @@ class HealthCheckSkill(SkillBase):
             critical_failures.append(f"Database: {e}")
 
         # Check 3: LLM (non-critical — fallback exists)
+        # Only ping once per hour to conserve Gemini free tier quota
         try:
-            checks["llm"] = await self.ctx.llm.ping()
+            last_llm_check = await self.ctx.db.get_system_state("last_llm_ping_ok")
+            if last_llm_check:
+                from datetime import datetime, timedelta
+                last_ts = datetime.fromisoformat(last_llm_check)
+                from yolovest.timezone import IST, now_ist
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=IST)
+                if (now_ist() - last_ts) < timedelta(hours=1):
+                    checks["llm"] = True  # cached result
+                else:
+                    checks["llm"] = await self.ctx.llm.ping()
+                    if checks["llm"]:
+                        await self.ctx.db.set_system_state("last_llm_ping_ok", now_ist().isoformat())
+            else:
+                checks["llm"] = await self.ctx.llm.ping()
+                if checks["llm"]:
+                    from yolovest.timezone import now_ist
+                    await self.ctx.db.set_system_state("last_llm_ping_ok", now_ist().isoformat())
         except Exception:
             checks["llm"] = False  # non-critical per FR-5.12
 

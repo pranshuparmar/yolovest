@@ -350,6 +350,9 @@ class HeartbeatOrchestrator:
         self._stop_event = asyncio.Event()
         logger.info("Heartbeat orchestrator started")
 
+        # Let dashboard and other async services start before first heartbeat
+        await asyncio.sleep(2)
+
         while self._running:
             start = time.monotonic()
 

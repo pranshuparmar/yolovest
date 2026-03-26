@@ -462,33 +462,24 @@ def create_app(ctx: AppContext) -> FastAPI:
         results: dict[str, Any] = {}
 
         # --- Gemini LLM ---
+        # Don't ping on page load (wastes quota and blocks for 20+s on 429).
+        # Just report config status; user can click "Test Connection" to verify.
         gemini_configured = bool(getattr(ctx.config.llm, "api_key", ""))
-        gemini_ok = False
-        if gemini_configured:
-            try:
-                gemini_ok = await ctx.llm.ping()
-            except Exception:
-                gemini_ok = False
+        gemini_api_key = getattr(ctx.config.llm, "api_key", "")
+        gemini_unexpanded = gemini_api_key.startswith("${")
         results["gemini"] = {
-            "configured": gemini_configured,
-            "connected": gemini_ok,
+            "configured": gemini_configured and not gemini_unexpanded,
+            "connected": gemini_configured and not gemini_unexpanded,  # assume OK if configured
             "model": getattr(ctx.config.llm, "model", ""),
         }
 
         # --- Zerodha Broker ---
         broker_configured = bool(getattr(ctx.config.broker, "api_key", ""))
-        broker_authenticated = False
+        # Quick local check — don't call kite.profile() on every page load
+        broker_authenticated = bool(
+            hasattr(ctx.broker, "_access_token") and ctx.broker._access_token
+        )
         broker_margins: dict[str, Any] | None = None
-        if broker_configured:
-            try:
-                broker_authenticated = await ctx.broker.is_authenticated()
-            except Exception:
-                broker_authenticated = False
-            if broker_authenticated:
-                try:
-                    broker_margins = await ctx.broker.get_margins()
-                except Exception:
-                    pass
         results["zerodha"] = {
             "configured": broker_configured,
             "connected": broker_authenticated,

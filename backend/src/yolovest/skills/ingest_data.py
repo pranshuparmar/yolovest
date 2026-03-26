@@ -111,9 +111,34 @@ class IngestDataSkill(SkillBase):
                 results["errors"].append(f"{symbol}: {e}")
                 logger.warning("OHLCV fetch failed for %s: %s", symbol, e)
 
+        # --- Check if expensive fetches should be skipped ---
+        # News, fundamentals, Google Finance etc. don't change minute-to-minute.
+        # Skip if we fetched them within the cache TTL.
+        skip_expensive = False
+        try:
+            last_full = await self.ctx.db.get_system_state("last_full_ingest")
+            if last_full:
+                from datetime import datetime
+                last_ts = datetime.fromisoformat(last_full)
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=IST)
+                from datetime import timedelta
+                ttl = self.ctx.config.market_data.cache_ttl_minutes
+                if (now_ist() - last_ts) < timedelta(minutes=ttl):
+                    skip_expensive = True
+                    results["cache_hits"] += 1
+                    logger.debug("Skipping expensive fetches (last full ingest %.0fs ago)",
+                                 (now_ist() - last_ts).total_seconds())
+        except Exception:
+            pass
+
         # --- News Aggregation + Dedup ---
-        raw_news = await self._fetch_all_news(symbols)
-        deduped = self._deduplicate_news(raw_news)
+        if skip_expensive:
+            raw_news = []
+            deduped = []
+        else:
+            raw_news = await self._fetch_all_news(symbols)
+            deduped = self._deduplicate_news(raw_news)
         results["news_articles"] = len(deduped)
 
         # Persist news articles
@@ -134,57 +159,63 @@ class IngestDataSkill(SkillBase):
                 except Exception as e:
                     logger.warning("Sentiment analysis failed for %s: %s", symbol, e)
 
-        # --- NSE Official Data (FR-2.2) ---
-        try:
-            nse_data = await self._fetch_nse_data()
-            if nse_data:
-                logger.info("NSE data fetched: %d items", len(nse_data))
-        except Exception as e:
-            logger.warning("NSE data fetch failed: %s", e)
+        if not skip_expensive:
+            # --- NSE Official Data (FR-2.2) ---
+            try:
+                nse_data = await self._fetch_nse_data()
+                if nse_data:
+                    logger.info("NSE data fetched: %d items", len(nse_data))
+            except Exception as e:
+                logger.warning("NSE data fetch failed: %s", e)
 
-        # --- Economic Calendar (FR-2.6) ---
-        try:
-            econ_events = await self._fetch_economic_calendar()
-            if econ_events:
-                count = await self.ctx.db.upsert_economic_events(econ_events)
-                results["economic_events"] = count
-                logger.info("Ingested %d economic calendar events", count)
-        except Exception as e:
-            logger.warning("Economic calendar fetch failed: %s", e)
+            # --- Economic Calendar (FR-2.6) ---
+            try:
+                econ_events = await self._fetch_economic_calendar()
+                if econ_events:
+                    count = await self.ctx.db.upsert_economic_events(econ_events)
+                    results["economic_events"] = count
+                    logger.info("Ingested %d economic calendar events", count)
+            except Exception as e:
+                logger.warning("Economic calendar fetch failed: %s", e)
 
-        # --- Fundamentals from Screener.in (FR-2.4) ---
-        try:
-            fundamentals_count = await self._fetch_fundamentals(symbols)
-            results["fundamentals_updated"] = fundamentals_count
-        except Exception as e:
-            logger.warning("Fundamentals fetch failed: %s", e)
+            # --- Fundamentals from Screener.in (FR-2.4) ---
+            try:
+                fundamentals_count = await self._fetch_fundamentals(symbols)
+                results["fundamentals_updated"] = fundamentals_count
+            except Exception as e:
+                logger.warning("Fundamentals fetch failed: %s", e)
 
-        # --- Technicals from Trendlyne (FR-2.5) ---
-        try:
-            technicals_count = await self._fetch_technicals(symbols)
-            results["technicals_updated"] = technicals_count
-        except Exception as e:
-            logger.warning("Technicals fetch failed: %s", e)
+            # --- Technicals from Trendlyne (FR-2.5) ---
+            try:
+                technicals_count = await self._fetch_technicals(symbols)
+                results["technicals_updated"] = technicals_count
+            except Exception as e:
+                logger.warning("Technicals fetch failed: %s", e)
 
-        # --- Google Finance (FR-2.12) ---
-        try:
-            gf_data = await self._fetch_google_finance(symbols)
-            if gf_data:
-                results["google_finance"] = {
-                    "indices": len(gf_data.get("indices", {})),
-                    "trending": len(gf_data.get("trending_tickers", [])),
-                    "news": len(gf_data.get("news", [])),
-                }
-                # Merge Google Finance news into the deduped articles
-                gf_news = gf_data.get("news", [])
-                if gf_news:
-                    gf_deduped = self._deduplicate_news(list(deduped) + gf_news)
-                    new_articles = [a for a in gf_deduped if a not in deduped]
-                    if new_articles:
-                        await self.ctx.db.upsert_news_articles(new_articles)
-                        results["news_articles"] += len(new_articles)
-        except Exception as e:
-            logger.warning("Google Finance fetch failed: %s", e)
+            # --- Google Finance (FR-2.12) ---
+            try:
+                gf_data = await self._fetch_google_finance(symbols)
+                if gf_data:
+                    results["google_finance"] = {
+                        "indices": len(gf_data.get("indices", {})),
+                        "trending": len(gf_data.get("trending_tickers", [])),
+                        "news": len(gf_data.get("news", [])),
+                    }
+                    gf_news = gf_data.get("news", [])
+                    if gf_news:
+                        gf_deduped = self._deduplicate_news(list(deduped) + gf_news)
+                        new_articles = [a for a in gf_deduped if a not in deduped]
+                        if new_articles:
+                            await self.ctx.db.upsert_news_articles(new_articles)
+                            results["news_articles"] += len(new_articles)
+            except Exception as e:
+                logger.warning("Google Finance fetch failed: %s", e)
+
+            # Mark last full ingest time
+            try:
+                await self.ctx.db.set_system_state("last_full_ingest", now_ist().isoformat())
+            except Exception:
+                pass
 
         # Partial success: only fail if ALL symbols failed OHLCV
         all_failed = results["symbols_ingested"] == 0 and len(results["errors"]) > 0

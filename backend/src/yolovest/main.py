@@ -62,6 +62,10 @@ def setup_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    # Suppress verbose httpx request logs (they leak Telegram tokens and API keys)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Suppress google_genai internal logs
+    logging.getLogger("google_genai").setLevel(logging.WARNING)
 
 
 class _StubDB:
