@@ -334,6 +334,13 @@ async def async_main(args: argparse.Namespace) -> None:
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
 
+    # Wire WebSocket broadcasting for skill completion notifications
+    try:
+        from yolovest.dashboard.app import broadcast_ws
+        orchestrator._on_skill_complete = broadcast_ws
+    except Exception:
+        pass
+
     # Build CRON scheduler sharing the same skill instances
     cron_scheduler = CronScheduler(ctx, orchestrator._skills)
 

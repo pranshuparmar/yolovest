@@ -426,6 +426,14 @@ export function useRiskSimulator() {
   return useMutation({ mutationFn: api.riskSimulator });
 }
 
+export function useUniverseSymbols() {
+  return useQuery({
+    queryKey: ["universe-symbols"],
+    queryFn: api.universeSymbols,
+    staleTime: 300_000, // 5 min — symbol list rarely changes
+  });
+}
+
 // Data Management
 export function useStorageStats() {
   return useQuery({

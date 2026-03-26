@@ -252,6 +252,15 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Sector rotation analysis."""
         return await ctx.db.get_sector_rotation()
 
+    @app.get("/api/universe-symbols")
+    async def get_universe_symbols_list(
+        _user: str = Depends(verify_credentials),
+    ) -> list[str]:
+        """All symbols in the OHLCV universe (for search/autocomplete)."""
+        from yolovest.data.nse_symbols import get_universe_symbols as get_syms
+        universe = ctx.config.scanning.universe
+        return get_syms(universe)
+
     # ------------------------------------------------------------------
     # System
     # ------------------------------------------------------------------

@@ -90,6 +90,17 @@ export function useNotifications() {
             );
             queryClient.invalidateQueries({ queryKey: ["predictions"] });
             queryClient.invalidateQueries({ queryKey: ["scoreboard"] });
+          } else if (type === "skill_completed") {
+            const status = data.success ? "completed" : "failed";
+            const dur = data.duration_ms ? ` (${(data.duration_ms / 1000).toFixed(1)}s)` : "";
+            addNotification(
+              "skill",
+              `${data.skill || "Unknown"} ${status}${dur}`
+            );
+            // Refresh relevant data after skill completion
+            queryClient.invalidateQueries({ queryKey: ["watchlist"] });
+            queryClient.invalidateQueries({ queryKey: ["ml-models"] });
+            queryClient.invalidateQueries({ queryKey: ["storage-stats"] });
           } else {
             addNotification(type, JSON.stringify(data).slice(0, 100));
           }
@@ -120,6 +131,7 @@ const typeIcons: Record<string, string> = {
   report: "R",
   signal: "S",
   prediction: "?",
+  skill: "K",
 };
 
 const typeColors: Record<string, string> = {
@@ -128,6 +140,7 @@ const typeColors: Record<string, string> = {
   report: "bg-purple-900/40 text-purple-400",
   signal: "bg-amber-900/40 text-amber-400",
   prediction: "bg-cyan-900/40 text-cyan-400",
+  skill: "bg-indigo-900/40 text-indigo-400",
 };
 
 export function NotificationCenter({

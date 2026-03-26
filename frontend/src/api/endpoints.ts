@@ -269,6 +269,8 @@ export const api = {
 
   listBackups: () => apiFetch<BackupEntry[]>("/api/backups"),
 
+  universeSymbols: () => apiFetch<string[]>("/api/universe-symbols"),
+
   restoreBackup: (filename: string) =>
     apiFetch<{ success: boolean; db_restored: boolean; models_restored?: number }>(
       `/api/restore/${filename}`,

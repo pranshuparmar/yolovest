@@ -38,12 +38,14 @@ function ModelCard({
   isShadow,
   onPromote,
   isPromoting,
+  prodModel,
 }: {
   model: MLModelInfo;
   type: string;
   isShadow?: boolean;
   onPromote?: () => void;
   isPromoting?: boolean;
+  prodModel?: MLModelInfo;
 }) {
   return (
     <div
@@ -131,6 +133,57 @@ function ModelCard({
           }
         />
       </div>
+
+      {/* Comparison vs production */}
+      {isShadow && prodModel && (
+        <ComparisonRow shadow={model} production={prodModel} />
+      )}
+    </div>
+  );
+}
+
+function delta(shadow: number | undefined, prod: number | undefined) {
+  if (shadow == null || prod == null) return null;
+  return shadow - prod;
+}
+
+function DeltaBadge({ value, suffix, invert }: { value: number | null; suffix?: string; invert?: boolean }) {
+  if (value == null) return <span className="text-gray-600">--</span>;
+  const positive = invert ? value < 0 : value > 0;
+  const color = positive ? "text-emerald-400" : value === 0 ? "text-gray-400" : "text-red-400";
+  const sign = value > 0 ? "+" : "";
+  return (
+    <span className={clsx("text-xs font-mono", color)}>
+      {sign}{value.toFixed(2)}{suffix}
+    </span>
+  );
+}
+
+function ComparisonRow({ shadow, production }: { shadow: MLModelInfo; production: MLModelInfo }) {
+  return (
+    <div className="mt-3 pt-3 border-t border-gray-800">
+      <p className="text-xs text-gray-500 mb-2">vs Production ({production.version?.split("_v")[0] || "current"})</p>
+      <div className="grid grid-cols-4 gap-2 text-center">
+        <div>
+          <p className="text-xs text-gray-600">Sharpe</p>
+          <DeltaBadge value={delta(shadow.sharpe_ratio, production.sharpe_ratio)} />
+        </div>
+        <div>
+          <p className="text-xs text-gray-600">Win Rate</p>
+          <DeltaBadge value={delta(
+            shadow.win_rate != null ? shadow.win_rate * 100 : undefined,
+            production.win_rate != null ? production.win_rate * 100 : undefined,
+          )} suffix="%" />
+        </div>
+        <div>
+          <p className="text-xs text-gray-600">Drawdown</p>
+          <DeltaBadge value={delta(shadow.max_drawdown_pct, production.max_drawdown_pct)} suffix="%" invert />
+        </div>
+        <div>
+          <p className="text-xs text-gray-600">Profit F.</p>
+          <DeltaBadge value={delta(shadow.profit_factor, production.profit_factor)} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -196,6 +249,7 @@ export function MLModelsPage() {
                 model={model}
                 type={model.model_type || "unknown"}
                 isShadow
+                prodModel={productionModels[model.model_type || ""]}
                 onPromote={() =>
                   model.model_type &&
                   model.version &&

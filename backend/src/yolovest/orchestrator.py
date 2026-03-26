@@ -7,11 +7,15 @@ heartbeat mutex (skip-on-overrun), and consecutive skip alerting.
 import asyncio
 import logging
 import time
+from collections.abc import Callable, Coroutine
 from typing import Any, ClassVar
 
 from yolovest.context import AppContext
 from yolovest.skills import SKILL_REGISTRY
 from yolovest.skills.base import SkillBase, SkillResult
+
+# Callback type for skill completion broadcasting
+SkillCallback = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,7 @@ class HeartbeatOrchestrator:
         self._consecutive_skips = 0
         self._max_consecutive_skips = ctx.config.heartbeat.max_consecutive_skips
         self._running = False
+        self._on_skill_complete: SkillCallback | None = None
         self._skills: dict[str, SkillBase] = skills if skills is not None else {}
         if skills is None:
             self._init_skills()
@@ -292,6 +297,22 @@ class HeartbeatOrchestrator:
             result.success,
             result.duration_ms,
         )
+
+        # Broadcast skill completion to WebSocket clients
+        if self._on_skill_complete is not None:
+            try:
+                await self._on_skill_complete("skill_completed", {
+                    "skill": name,
+                    "success": result.success,
+                    "duration_ms": round(result.duration_ms, 1),
+                    "error": result.error,
+                    "summary": {k: v for k, v in result.data.items()
+                                if isinstance(v, (str, int, float, bool, type(None)))}
+                    if result.data else {},
+                })
+            except Exception:
+                pass  # Never let broadcast failures affect the pipeline
+
         return result
 
     async def _alert_position_monitor(self, result: SkillResult) -> None:
