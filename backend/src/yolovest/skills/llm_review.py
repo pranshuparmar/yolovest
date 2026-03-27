@@ -21,9 +21,12 @@ Flow:
 8. Track LLM review accuracy over time (FR-7.8)
 """
 
+import logging
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
 
 
 class LLMReviewSkill(SkillBase):
@@ -59,6 +62,10 @@ class LLMReviewSkill(SkillBase):
             )
 
             if review.decision == "APPROVE":
+                logger.info(
+                    "llm-review: APPROVE %s — %s",
+                    signal["symbol"], review.reasoning[:100],
+                )
                 return SkillResult(
                     success=True,
                     skill_name=self.name,
@@ -69,6 +76,11 @@ class LLMReviewSkill(SkillBase):
                     },
                 )
             elif review.decision == "RESIZE":
+                logger.info(
+                    "llm-review: RESIZE %s %d→%d — %s",
+                    signal["symbol"], signal["position_size"],
+                    review.adjusted_size, review.reasoning[:100],
+                )
                 resized_signal = {**signal, "position_size": review.adjusted_size}
                 return SkillResult(
                     success=True,
@@ -83,6 +95,10 @@ class LLMReviewSkill(SkillBase):
                     },
                 )
             else:  # REJECT
+                logger.info(
+                    "llm-review: REJECT %s — %s",
+                    signal["symbol"], review.reasoning[:100],
+                )
                 return SkillResult(
                     success=True,
                     skill_name=self.name,
@@ -93,9 +109,13 @@ class LLMReviewSkill(SkillBase):
                     },
                 )
 
-        except Exception:
+        except Exception as e:
             # FR-5.12: Fallback to rules-only
             if cfg.llm_fallback_to_rules:
+                logger.warning(
+                    "llm-review: fallback to rules-only for %s — %s",
+                    signal["symbol"], e,
+                )
                 return self._auto_approve(signal, "LLM unavailable, fallback to rules-only")
             raise
 

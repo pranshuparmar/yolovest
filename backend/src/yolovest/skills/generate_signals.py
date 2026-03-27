@@ -175,11 +175,10 @@ class GenerateSignalsSkill(SkillBase):
                 })
                 logger.warning("Signal generation failed for %s: %s", symbol, e)
 
-        if not signals_generated:
-            logger.info(
-                "generate-signals: 0 signals from %d watchlist stocks — %s",
-                len(watchlist), filter_counts,
-            )
+        logger.info(
+            "generate-signals: %d signals from %d watchlist stocks — %s",
+            len(signals_generated), len(watchlist), filter_counts,
+        )
 
         return SkillResult(
             success=True,

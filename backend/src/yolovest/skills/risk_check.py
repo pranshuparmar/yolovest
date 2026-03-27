@@ -155,6 +155,11 @@ class RiskCheckSkill(SkillBase):
         if position_size <= 0:
             return self._reject(signal, "Computed position size is 0")
 
+        logger.info(
+            "risk-check: APPROVED %s — size=%d (risk=₹%.0f, slippage_penalty=%.1f%%)",
+            signal["symbol"], position_size, risk_amount, slippage_penalty * 100,
+        )
+
         return SkillResult(
             success=True,
             skill_name=self.name,
@@ -195,6 +200,7 @@ class RiskCheckSkill(SkillBase):
             return 0.0
 
     def _reject(self, signal: dict[str, Any], reason: str) -> SkillResult:
+        logger.info("risk-check: REJECTED %s — %s", signal["symbol"], reason)
         return SkillResult(
             success=True,  # skill ran fine, trade was rejected by design
             skill_name=self.name,

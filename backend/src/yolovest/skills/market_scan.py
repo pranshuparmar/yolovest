@@ -92,6 +92,14 @@ class MarketScanSkill(SkillBase):
         # Step 8: Persist watchlist (FR-3.4: updates each heartbeat)
         await self.ctx.db.upsert_watchlist(shortlist)
 
+        logger.info(
+            "market-scan: universe=%d, liquid=%d, shortlisted=%d — top: %s | sectors strong=%s weak=%s",
+            len(universe), len(filtered), len(shortlist),
+            [s["symbol"] for s in shortlist[:5]],
+            sector_analysis.get("strong", []),
+            sector_analysis.get("weak", []),
+        )
+
         return SkillResult(
             success=True,
             skill_name=self.name,

@@ -219,6 +219,15 @@ class IngestDataSkill(SkillBase):
 
         # Partial success: only fail if ALL symbols failed OHLCV
         all_failed = results["symbols_ingested"] == 0 and len(results["errors"]) > 0
+
+        logger.info(
+            "ingest-data: %d/%d symbols ingested (cache_hits=%d), "
+            "news=%d articles, errors=%d%s",
+            results["symbols_ingested"], len(symbols), results["cache_hits"],
+            results["news_articles"], len(results["errors"]),
+            " [SKIPPED expensive fetches]" if skip_expensive else "",
+        )
+
         return SkillResult(
             success=not all_failed,
             skill_name=self.name,

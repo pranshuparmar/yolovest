@@ -79,6 +79,13 @@ class PredictTrackSkill(SkillBase):
         }
         pred_id = await self.ctx.db.insert_prediction(prediction)
 
+        logger.info(
+            "predict-track: logged %s %s conf=%.2f target=%.2f (pred=%s, trade=%s)",
+            signal["signal_type"], signal["symbol"],
+            prediction["confidence"], prediction["predicted_target"],
+            pred_id, trade_id,
+        )
+
         return SkillResult(
             success=True,
             skill_name=self.name,
@@ -153,6 +160,14 @@ class PredictTrackSkill(SkillBase):
         failures_count = scored - correct
         if failures_count >= 5:
             failure_analysis_run = await self._run_failure_analysis()
+
+        if scored > 0 or pending:
+            logger.info(
+                "predict-track: scored %d/%d predictions, accuracy=%.0f%%%s",
+                correct, scored,
+                (correct / scored * 100) if scored > 0 else 0,
+                ", failure analysis triggered" if failure_analysis_run else "",
+            )
 
         return SkillResult(
             success=True,

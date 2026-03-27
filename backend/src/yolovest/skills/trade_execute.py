@@ -21,9 +21,12 @@ Flow:
 """
 
 import asyncio
+import logging
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
 
 
 class TradeExecuteSkill(SkillBase):
@@ -85,6 +88,12 @@ class TradeExecuteSkill(SkillBase):
             "mode": "paper",
             "trade_id": trade_id,
         })
+
+        logger.info(
+            "trade-execute: PAPER %s %s qty=%d fill=%.2f slippage=%.2f (id=%s)",
+            trade["signal_type"], trade["symbol"], trade["quantity"],
+            trade["fill_price"], trade["slippage"], trade_id,
+        )
 
         return SkillResult(
             success=True,
@@ -185,6 +194,13 @@ class TradeExecuteSkill(SkillBase):
                     "trade_id": trade_id,
                 })
 
+                logger.info(
+                    "trade-execute: LIVE %s %s qty=%d fill=%.2f slippage=%.2f "
+                    "attempt=%d (id=%s, order=%s)",
+                    trade["signal_type"], trade["symbol"], actual_qty,
+                    fill_price, slippage, attempt + 1, trade_id, order_id,
+                )
+
                 return SkillResult(
                     success=True,
                     skill_name=self.name,
@@ -193,9 +209,19 @@ class TradeExecuteSkill(SkillBase):
 
             except Exception as e:
                 last_error = e
+                logger.warning(
+                    "trade-execute: %s %s attempt %d failed: %s",
+                    signal["signal_type"], signal["symbol"], attempt + 1, e,
+                )
                 if attempt < cfg.max_order_retries:
                     delay = cfg.retry_base_delay_sec * (2**attempt)
                     await asyncio.sleep(delay)
+
+        logger.error(
+            "trade-execute: FAILED %s %s after %d attempts: %s",
+            signal["signal_type"], signal["symbol"],
+            cfg.max_order_retries + 1, last_error,
+        )
 
         return SkillResult(
             success=False,

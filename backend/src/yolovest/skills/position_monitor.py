@@ -19,9 +19,12 @@ Flow:
 6. Alert on any discrepancies between local and broker state
 """
 
+import logging
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
 
 
 class PositionMonitorSkill(SkillBase):
@@ -112,6 +115,13 @@ class PositionMonitorSkill(SkillBase):
                 "stops_hit": len(stops_hit),
                 "trails_modified": trails_modified,
             })
+
+        logger.info(
+            "position-monitor: %d positions — targets_hit=%s, stops_hit=%s, "
+            "trails_modified=%d, discrepancies=%d",
+            len(local_positions), targets_hit or "none", stops_hit or "none",
+            trails_modified, len(discrepancies) if discrepancies else 0,
+        )
 
         return SkillResult(
             success=True,

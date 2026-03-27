@@ -1383,12 +1383,13 @@ def create_app(ctx: AppContext) -> FastAPI:
                 })
                 logger.warning("Dry-run signal failed for %s: %s", symbol, e)
 
-        # Log diagnostics summary
-        if not signals_out:
-            logger.info(
-                "Dry-run %s: 0 signals from %d shortlisted — %s",
-                run_id, len(shortlist), filter_counts,
-            )
+        # Log diagnostics summary (always, not just on 0 signals)
+        logger.info(
+            "Dry-run %s complete: scanned %d stocks, shortlisted %d, "
+            "generated %d signals — %s",
+            run_id, len(universe), len(shortlist),
+            len(signals_out), filter_counts,
+        )
 
         # Step 3: Persist for next-day comparison
         if signals_out:

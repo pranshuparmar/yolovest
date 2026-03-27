@@ -23,7 +23,7 @@ class TestFeatureVector:
     """Test that feature dicts are converted to sorted-key vectors."""
 
     def test_sorted_keys(self):
-        features = {"rsi": 55.0, "atr": 10.0, "macd": 1.2, "close": 100.0}
+        features = {"rsi": 55.0, "atr_14": 10.0, "macd": 1.2, "close": 100.0}
         result = XGBoostSignalModel._build_feature_vector(features)
 
         # Keys sorted: atr, close, macd, rsi
@@ -62,7 +62,7 @@ class TestPredictIntraday:
         return sm
 
     async def test_predict_buy(self, signal_model, mock_xgb_model):
-        features = {"close": 100.0, "atr": 5.0, "rsi": 55.0}
+        features = {"close": 100.0, "atr_14": 5.0, "rsi": 55.0}
         result = await signal_model.predict_intraday("RELIANCE", features)
 
         assert isinstance(result, MLPrediction)
@@ -84,7 +84,7 @@ class TestPredictIntraday:
         sm._intraday_model = mock_model
         sm._intraday_version = "xgb_test_v1"
 
-        features = {"close": 200.0, "atr": 10.0, "rsi": 30.0}
+        features = {"close": 200.0, "atr_14": 10.0, "rsi": 30.0}
         result = await sm.predict_intraday("TCS", features)
 
         assert result.signal_type == "SELL"
@@ -101,7 +101,7 @@ class TestPredictIntraday:
         sm._intraday_model = mock_model
         sm._intraday_version = "xgb_test_v1"
 
-        features = {"close": 150.0, "atr": 3.0, "rsi": 50.0}
+        features = {"close": 150.0, "atr_14": 3.0, "rsi": 50.0}
         result = await sm.predict_intraday("INFY", features)
 
         assert result.signal_type == "HOLD"
@@ -119,7 +119,7 @@ class TestPredictIntraday:
         mock_calibrator.predict_proba.return_value = np.array([[0.05, 0.05, 0.90]])
         signal_model._intraday_calibrator = mock_calibrator
 
-        features = {"close": 100.0, "atr": 5.0, "rsi": 55.0}
+        features = {"close": 100.0, "atr_14": 5.0, "rsi": 55.0}
         result = await signal_model.predict_intraday("RELIANCE", features)
 
         # Calibrated confidence (0.9) > raw (0.8) — calibrated used
@@ -133,7 +133,7 @@ class TestPredictIntraday:
         mock_calibrator.predict_proba.return_value = np.array([[0.33, 0.34, 0.33]])
         signal_model._intraday_calibrator = mock_calibrator
 
-        features = {"close": 100.0, "atr": 5.0, "rsi": 55.0}
+        features = {"close": 100.0, "atr_14": 5.0, "rsi": 55.0}
         result = await signal_model.predict_intraday("RELIANCE", features)
 
         # Calibrated confidence (0.34) < raw (0.8) — raw used
@@ -147,7 +147,7 @@ class TestPredictIntraday:
         mock_calibrator.predict_proba.return_value = np.array([[0.85, 0.05, 0.10]])
         signal_model._intraday_calibrator = mock_calibrator
 
-        features = {"close": 100.0, "atr": 5.0, "rsi": 55.0}
+        features = {"close": 100.0, "atr_14": 5.0, "rsi": 55.0}
         result = await signal_model.predict_intraday("RELIANCE", features)
 
         # Calibrated confidence (0.85) > raw (0.8) — calibrated label+confidence used
@@ -167,7 +167,7 @@ class TestPredictSwing:
         sm._swing_model = mock_model
         sm._swing_version = "xgb_swing_v1"
 
-        features = {"close": 100.0, "atr": 5.0, "rsi": 55.0}
+        features = {"close": 100.0, "atr_14": 5.0, "rsi": 55.0}
         result = await sm.predict_swing("RELIANCE", features)
 
         assert result.holding_period == "3d"
@@ -406,7 +406,7 @@ class TestModelSlots:
         sm._intraday_version = "intraday_v1"
         sm._swing_version = "swing_v1"
 
-        features = {"close": 100.0, "atr": 5.0}
+        features = {"close": 100.0, "atr_14": 5.0}
         intraday_result = await sm.predict_intraday("TEST", features)
         swing_result = await sm.predict_swing("TEST", features)
 
