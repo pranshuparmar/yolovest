@@ -1245,7 +1245,10 @@ def create_app(ctx: AppContext) -> FastAPI:
             )
             scored.append({**stock, **sub, "composite_score": composite})
 
-        scored.sort(key=lambda s: s["composite_score"], reverse=True)
+        scored.sort(
+            key=lambda s: (s["composite_score"], s.get("avg_daily_volume") or 0),
+            reverse=True,
+        )
         shortlist = scored[: cfg.scanning.shortlist_size]
 
         if not shortlist:

@@ -435,11 +435,16 @@ async def async_main(args: argparse.Namespace) -> None:
     cron_task = asyncio.create_task(_start_cron_scheduler(cron_scheduler))
 
     # Start
+    dashboard_url = (
+        config.dashboard.public_url
+        or f"http://{config.dashboard.host}:{config.dashboard.port}"
+    )
+
     await ctx.notify.send(
         f"YoloVest started in {config.mode} mode. "
         f"Heartbeat interval: {config.heartbeat.market_hours_interval_min}min (market hours), "
         f"{config.heartbeat.off_hours_interval_min}min (off hours)."
-        + (f"\nDashboard: http://{config.dashboard.host}:{config.dashboard.port}"
+        + (f"\nDashboard: {dashboard_url}"
            if not args.no_dashboard else "")
     )
 

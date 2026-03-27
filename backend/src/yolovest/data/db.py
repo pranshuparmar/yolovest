@@ -760,7 +760,8 @@ class Database:
             "AND o.symbol NOT IN ("
             "  SELECT symbol FROM quarantined_symbols WHERE quarantined_at IS NOT NULL"
             ") "
-            "GROUP BY o.symbol"
+            "GROUP BY o.symbol "
+            "ORDER BY avg_daily_volume DESC"
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]

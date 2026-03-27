@@ -68,7 +68,11 @@ class MarketScanSkill(SkillBase):
             scored.append({**stock, **sub, "composite_score": composite})
 
         # Step 5: Rank and shortlist
-        scored.sort(key=lambda s: s["composite_score"], reverse=True)
+        # Sort by composite score, break ties by volume (avoids alphabetical bias)
+        scored.sort(
+            key=lambda s: (s["composite_score"], s.get("avg_daily_volume") or 0),
+            reverse=True,
+        )
         shortlist = scored[: cfg.shortlist_size]
 
         # Step 6: Sector rotation analysis (FR-3.5)

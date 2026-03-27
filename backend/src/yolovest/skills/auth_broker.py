@@ -13,9 +13,12 @@ Flow:
 6. If auth fails, retry up to 3 times then alert via Telegram
 """
 
+import logging
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
 
 
 class AuthBrokerSkill(SkillBase):
@@ -31,6 +34,19 @@ class AuthBrokerSkill(SkillBase):
         return True
 
     async def execute(self, **kwargs: Any) -> SkillResult:
+        # Check if already authenticated — skip if session is still valid
+        try:
+            if await self.ctx.broker.is_authenticated():
+                logger.info("auth-broker: already authenticated, skipping re-auth")
+                return SkillResult(
+                    success=True,
+                    skill_name=self.name,
+                    data={"authenticated": True, "skipped": True,
+                          "reason": "session_still_valid"},
+                )
+        except Exception as e:
+            logger.info("auth-broker: auth check failed (%s), proceeding with re-auth", e)
+
         # Step 1: Send Telegram reminder with login URL
         login_url = self.ctx.broker.get_login_url()
         await self.ctx.notify.send(
