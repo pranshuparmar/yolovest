@@ -1,4 +1,4 @@
-"""Tests for report-generate skill (Phase 4, FR-8.4, FR-8.5)."""
+"""Tests for report-generate skill."""
 
 from unittest.mock import AsyncMock
 

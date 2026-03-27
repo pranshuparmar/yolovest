@@ -1,4 +1,4 @@
-"""Tests for Phase 3 database methods (portfolio state, trades, LLM reviews)."""
+"""Tests for database methods (portfolio state, trades, LLM reviews)."""
 
 import pytest
 

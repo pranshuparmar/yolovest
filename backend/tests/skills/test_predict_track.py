@@ -1,4 +1,4 @@
-"""Tests for predict-track skill (Phase 4, FR-7.1 to FR-7.3)."""
+"""Tests for predict-track skill."""
 
 from unittest.mock import AsyncMock
 

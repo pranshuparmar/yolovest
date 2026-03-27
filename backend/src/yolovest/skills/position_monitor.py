@@ -1,21 +1,20 @@
 """Skill: position-monitor — Monitor open positions, trail SLs, reconcile.
 
-Covers: FR-6.5, FR-5.8, FR-5.8a, FR-5.8b, FR-6.7
 Trigger: HEARTBEAT during market hours
 Pipeline position: Runs continuously alongside generate-signals.
 
 Flow:
-1. Fetch current positions from broker (FR-6.5)
+1. Fetch current positions from broker
 2. Reconcile broker state with local DB state — flag discrepancies
 3. For each open position:
    a. Check if target hit → emit exit signal
    b. Check if SL hit → record loss
-   c. Check trailing SL logic (FR-5.8):
+   c. Check trailing SL logic:
       - If profit >= trailing_sl_trigger_multiple x risk -> move SL to breakeven
       - Continue trailing SL upward in trailing_sl_step_pct increments
    d. Modify SL order on broker if trail triggered
 4. Track unrealized PnL for portfolio state
-5. Update slippage records (FR-6.7)
+5. Update slippage records
 6. Alert on any discrepancies between local and broker state
 """
 
@@ -73,7 +72,7 @@ class PositionMonitorSkill(SkillBase):
                 stops_hit.append(symbol)
                 continue
 
-            # Trailing SL (FR-5.8)
+            # Trailing SL
             if cfg.trailing_sl_enabled and risk_per_share > 0:
                 if pos["signal_type"] == "BUY":
                     profit = current_price - entry
@@ -136,7 +135,7 @@ class PositionMonitorSkill(SkillBase):
         )
 
     def _reconcile(self, local: list[dict[str, Any]], broker: list[dict[str, Any]]) -> list[str]:
-        """Compare local DB positions with broker positions. FR-6.5."""
+        """Compare local DB positions with broker positions."""
         discrepancies = []
 
         # Build lookup by symbol for broker positions

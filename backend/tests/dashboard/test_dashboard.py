@@ -1,4 +1,4 @@
-"""Tests for FastAPI dashboard (Phase 5, FR-8)."""
+"""Tests for FastAPI dashboard."""
 
 import base64
 from datetime import datetime

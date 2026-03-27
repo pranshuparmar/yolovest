@@ -1,6 +1,5 @@
 """Skill: ingest-data — Market data ingestion from all sources.
 
-Covers: FR-2.1 to FR-2.9, FR-2.12, FR-2.13, FR-2.6 (economic calendar)
 Trigger: HEARTBEAT — every heartbeat during market hours
 Pipeline position: Feeds into market-scan and generate-signals.
 
@@ -14,9 +13,9 @@ Flow:
 7. Fetch economic calendar events
 8. Fetch Google Finance data for global cues
 9. Run Gemini sentiment analysis on aggregated news
-10. Deduplicate news across sources (FR-2.13)
+10. Deduplicate news across sources
 11. Persist everything to SQLite with timestamps
-12. Respect rate limits for all sources (FR-2.9)
+12. Respect rate limits for all sources
 """
 
 import logging
@@ -171,7 +170,7 @@ class IngestDataSkill(SkillBase):
         if deduped:
             await self.ctx.db.upsert_news_articles(deduped)
 
-        # --- Gemini Sentiment Analysis (FR-2.7) ---
+        # --- Gemini Sentiment Analysis ---
         if self.ctx.config.llm.enabled and deduped:
             for symbol in active_symbols:
                 symbol_headlines = [
@@ -188,7 +187,7 @@ class IngestDataSkill(SkillBase):
 
         scrapers_enabled = self.ctx.config.market_data.scrapers_enabled
         if not skip_expensive and scrapers_enabled:
-            # --- NSE Official Data (FR-2.2) ---
+            # --- NSE Official Data ---
             try:
                 nse_data = await self._fetch_nse_data()
                 if nse_data:
@@ -196,7 +195,7 @@ class IngestDataSkill(SkillBase):
             except Exception as e:
                 logger.warning("NSE data fetch failed: %s", e)
 
-            # --- Economic Calendar (FR-2.6) ---
+            # --- Economic Calendar ---
             try:
                 econ_events = await self._fetch_economic_calendar()
                 if econ_events:
@@ -206,21 +205,21 @@ class IngestDataSkill(SkillBase):
             except Exception as e:
                 logger.warning("Economic calendar fetch failed: %s", e)
 
-            # --- Fundamentals from Screener.in (FR-2.4) ---
+            # --- Fundamentals from Screener.in ---
             try:
                 fundamentals_count = await self._fetch_fundamentals(symbols)
                 results["fundamentals_updated"] = fundamentals_count
             except Exception as e:
                 logger.warning("Fundamentals fetch failed: %s", e)
 
-            # --- Technicals from Trendlyne (FR-2.5) ---
+            # --- Technicals from Trendlyne ---
             try:
                 technicals_count = await self._fetch_technicals(symbols)
                 results["technicals_updated"] = technicals_count
             except Exception as e:
                 logger.warning("Technicals fetch failed: %s", e)
 
-            # --- Google Finance (FR-2.12) ---
+            # --- Google Finance ---
             try:
                 gf_data = await self._fetch_google_finance(symbols)
                 if gf_data:
@@ -265,7 +264,7 @@ class IngestDataSkill(SkillBase):
     async def _fetch_nse_data(self) -> dict[str, Any]:
         """Fetch corp announcements, bulk/block deals, FII/DII, delivery data.
 
-        Uses NSEOfficialSource for all NSE API interactions (FR-2.2).
+        Uses NSEOfficialSource for all NSE API interactions.
         Failures are caught per-category so partial data is still returned.
         """
         from yolovest.news.nse_official import NSEOfficialSource
@@ -330,7 +329,7 @@ class IngestDataSkill(SkillBase):
         return all_articles
 
     def _deduplicate_news(self, articles: list[Any]) -> list[Any]:
-        """Merge duplicate news across sources. FR-2.13."""
+        """Merge duplicate news across sources."""
         if not articles:
             return []
 
@@ -348,7 +347,7 @@ class IngestDataSkill(SkillBase):
         return list(seen.values())
 
     async def _fetch_google_finance(self, symbols: list[str]) -> dict[str, Any] | None:
-        """Fetch market data from Google Finance (FR-2.12)."""
+        """Fetch market data from Google Finance."""
         from yolovest.data.google_finance import GoogleFinanceScraper
 
         scraper = GoogleFinanceScraper()
@@ -358,7 +357,7 @@ class IngestDataSkill(SkillBase):
             await scraper.close()
 
     async def _fetch_economic_calendar(self) -> list[dict[str, Any]]:
-        """Fetch economic calendar events (FR-2.6): RBI, Fed, earnings."""
+        """Fetch economic calendar events: RBI, Fed, earnings."""
         from yolovest.data.economic_calendar import EconomicCalendarSource
 
         source = EconomicCalendarSource()
@@ -368,7 +367,7 @@ class IngestDataSkill(SkillBase):
             await source.close()
 
     async def _fetch_fundamentals(self, symbols: list[str]) -> int:
-        """Fetch fundamental data from Screener.in (FR-2.4)."""
+        """Fetch fundamental data from Screener.in."""
         from yolovest.data.screener import ScreenerScraper
 
         scraper = ScreenerScraper()
@@ -385,7 +384,7 @@ class IngestDataSkill(SkillBase):
         return count
 
     async def _fetch_technicals(self, symbols: list[str]) -> int:
-        """Fetch technical screener data from Trendlyne (FR-2.5)."""
+        """Fetch technical screener data from Trendlyne."""
         from yolovest.data.trendlyne import TrendlyneScraper
 
         scraper = TrendlyneScraper()

@@ -1,4 +1,4 @@
-"""Tests for NSE official data source (FR-2.2).
+"""Tests for NSE official data source.
 
 All HTTP calls are mocked via aiohttp test utilities — no real network access.
 Covers: corporate announcements, corporate actions, bulk/block deals,

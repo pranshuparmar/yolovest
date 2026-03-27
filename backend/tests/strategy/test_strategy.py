@@ -175,12 +175,12 @@ class TestPredictSwing:
 
 
 # ---------------------------------------------------------------------------
-# Training guard (PM G5)
+# Training guard
 # ---------------------------------------------------------------------------
 
 
 class TestTrainingGuard:
-    """Test that training rejects insufficient data (PM G5)."""
+    """Test that training rejects insufficient data."""
 
     async def test_insufficient_samples_raises(self, tmp_path):
         sm = XGBoostSignalModel(model_dir=str(tmp_path))

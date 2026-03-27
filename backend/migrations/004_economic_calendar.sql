@@ -1,4 +1,4 @@
--- FR-2.6: Economic calendar events (RBI/Fed/earnings dates)
+-- Economic calendar events (RBI/Fed/earnings dates)
 
 CREATE TABLE IF NOT EXISTS economic_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

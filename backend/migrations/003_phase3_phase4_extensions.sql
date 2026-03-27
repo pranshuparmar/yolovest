@@ -1,6 +1,6 @@
--- Phase 3/4: Prediction scoreboard, reports, and LLM review tracking
+-- Prediction scoreboard, reports, and LLM review tracking
 
--- Prediction scoreboard for FR-7.3 (aggregated accuracy stats)
+-- Prediction scoreboard (aggregated accuracy stats)
 CREATE TABLE IF NOT EXISTS prediction_scoreboard (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     group_key TEXT NOT NULL,      -- e.g. "symbol:RELIANCE", "model:xgb-v1.0", "timeframe:intraday"
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS prediction_scoreboard (
 
 CREATE INDEX IF NOT EXISTS idx_scoreboard_type ON prediction_scoreboard(group_type);
 
--- Reports archive for FR-8.4, FR-8.5
+-- Reports archive
 CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     report_type TEXT NOT NULL,    -- "daily", "weekly"

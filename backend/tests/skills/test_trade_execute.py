@@ -1,4 +1,4 @@
-"""Tests for trade-execute skill (Phase 3, FR-6)."""
+"""Tests for trade-execute skill."""
 
 from unittest.mock import AsyncMock
 

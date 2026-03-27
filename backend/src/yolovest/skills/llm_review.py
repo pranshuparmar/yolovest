@@ -1,6 +1,5 @@
 """Skill: llm-review — Gemini-powered trade review gate.
 
-Covers: FR-4.4, FR-5.11, FR-5.12
 Trigger: EVENT — called for each risk-approved signal
 Pipeline position: After risk-check, before trade-execute.
 
@@ -17,8 +16,8 @@ Flow:
 4. Send to Gemini for structured review
 5. Gemini returns: APPROVE / REJECT / RESIZE with reasoning
 6. If RESIZE: adjust position size per Gemini recommendation
-7. Log the full LLM reasoning for audit trail (FR-8.8)
-8. Track LLM review accuracy over time (FR-7.8)
+7. Log the full LLM reasoning for audit trail
+8. Track LLM review accuracy over time
 """
 
 import logging
@@ -42,7 +41,7 @@ class LLMReviewSkill(SkillBase):
         signal = kwargs["signal"]
         cfg = self.ctx.config.risk
 
-        # FR-5.12: If LLM disabled or unavailable, auto-approve
+        # If LLM disabled or unavailable, auto-approve
         if not cfg.llm_review_enabled:
             return self._auto_approve(signal, "LLM review disabled")
 
@@ -53,7 +52,7 @@ class LLMReviewSkill(SkillBase):
             # Send to Gemini
             review = await self.ctx.llm.review_trade(context)
 
-            # Log for audit (FR-8.8) and accuracy tracking (FR-7.8)
+            # Log for audit and accuracy tracking
             await self.ctx.db.log_llm_review(
                 signal=signal,
                 decision=review.decision,
@@ -110,7 +109,7 @@ class LLMReviewSkill(SkillBase):
                 )
 
         except Exception as e:
-            # FR-5.12: Fallback to rules-only
+            # Fallback to rules-only
             if cfg.llm_fallback_to_rules:
                 logger.warning(
                     "llm-review: fallback to rules-only for %s — %s",

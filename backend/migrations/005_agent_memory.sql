@@ -1,4 +1,4 @@
--- Agent memory persistence (FR-1.5)
+-- Agent memory persistence
 -- Stores agent state, reasoning context, and cross-restart memory
 
 CREATE TABLE IF NOT EXISTS agent_memory (

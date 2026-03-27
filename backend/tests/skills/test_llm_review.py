@@ -1,4 +1,4 @@
-"""Tests for llm-review skill (Phase 3, FR-4.4, FR-5.11, FR-5.12)."""
+"""Tests for llm-review skill."""
 
 from unittest.mock import AsyncMock, MagicMock
 

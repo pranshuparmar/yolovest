@@ -1,6 +1,5 @@
 """Skill: ingest-premarket — Pre-market data and overnight global cues.
 
-Covers: FR-2.10, FR-2.11
 Trigger: CRON — daily at 8:30 AM IST (before market scan)
 Pipeline position: Runs after auth-broker, before market-scan.
 
@@ -56,7 +55,7 @@ class IngestPremarketSkill(SkillBase):
             else:
                 premarket[key] = result
 
-        # Gemini web grounding summary (FR-2.11)
+        # Gemini web grounding summary
         try:
             premarket["llm_summary"] = await self.ctx.llm.summarize_with_web_grounding(
                 "Summarize key overnight market developments affecting "

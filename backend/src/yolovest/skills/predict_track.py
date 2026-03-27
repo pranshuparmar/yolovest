@@ -1,16 +1,15 @@
 """Skill: predict-track — Log predictions and score outcomes.
 
-Covers: FR-7.1, FR-7.2, FR-7.3
 Trigger: EVENT (post-trade) + HEARTBEAT (check elapsed predictions)
 Pipeline position: Runs after trade-execute (to log) and on heartbeat (to score).
 
 Flow:
-Phase A — Logging (EVENT trigger, post-trade):
+Logging (EVENT trigger, post-trade):
 1. Log every prediction: symbol, predicted direction, confidence,
    predicted target, predicted timeframe, model version
 2. Store with trade_id linkage for full traceability
 
-Phase B — Scoring (HEARTBEAT trigger):
+Scoring (HEARTBEAT trigger):
 1. Query predictions whose timeframe has elapsed
 2. For each: fetch actual price at prediction end time
 3. Compute: was direction correct? did it hit target? actual PnL?

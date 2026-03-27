@@ -1,4 +1,4 @@
-"""Skill: database-maintenance — Automated backup and data retention (FR-10.2, FR-10.3).
+"""Skill: database-maintenance — Automated backup and data retention.
 
 Trigger: CRON — daily at configured time (default 18:00 IST).
 Runs backup first, then retention cleanup, then prunes old backups.
@@ -30,7 +30,7 @@ class DatabaseMaintenanceSkill(SkillBase):
     async def execute(self, **kwargs: Any) -> SkillResult:
         results: dict[str, Any] = {}
 
-        # --- Step 1: Backup (FR-10.2) ---
+        # --- Step 1: Backup ---
         try:
             backup_dir = self.ctx.config.database.backup_dir
             model_dir = getattr(self.ctx.config.strategy, "model_dir", "./models")
@@ -54,7 +54,7 @@ class DatabaseMaintenanceSkill(SkillBase):
             with contextlib.suppress(Exception):
                 await self.ctx.notify.send(f"DB backup FAILED: {e}")
 
-        # --- Step 2: Retention Cleanup (FR-10.3) ---
+        # --- Step 2: Retention Cleanup ---
         try:
             retention = self.ctx.config.database.retention
             deleted = await self.ctx.db.run_retention_cleanup(

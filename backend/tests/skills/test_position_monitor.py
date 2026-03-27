@@ -1,4 +1,4 @@
-"""Tests for position-monitor skill (Phase 3, FR-5.8, FR-6.5)."""
+"""Tests for position-monitor skill."""
 
 from unittest.mock import AsyncMock
 

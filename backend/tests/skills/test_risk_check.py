@@ -1,4 +1,4 @@
-"""Tests for risk-check skill (Phase 3, FR-5.1 to FR-5.18)."""
+"""Tests for risk-check skill."""
 
 from unittest.mock import AsyncMock
 

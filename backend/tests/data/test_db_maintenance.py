@@ -1,4 +1,4 @@
-"""Tests for database-maintenance skill (FR-10.2, FR-10.3)."""
+"""Tests for database-maintenance skill."""
 
 from datetime import datetime, timedelta
 from pathlib import Path

@@ -250,7 +250,7 @@ class TestGenerateSignalsFails:
 
 class TestLLMReviewFallback:
     async def test_llm_review_fails_with_fallback_continues(self, orchestrator_context):
-        """FR-5.12: If LLM is down and llm_fallback_to_rules=True, auto-approve."""
+        """If LLM is down and llm_fallback_to_rules=True, auto-approve."""
         ctx = orchestrator_context
         ctx.config.risk.llm_fallback_to_rules = True
 
@@ -269,7 +269,7 @@ class TestLLMReviewFallback:
         assert "signal-0/trade-execute" in result
 
     async def test_llm_review_fails_without_fallback_skips(self, orchestrator_context):
-        """FR-5.12: If LLM is down and llm_fallback_to_rules=False, skip signal."""
+        """If LLM is down and llm_fallback_to_rules=False, skip signal."""
         ctx = orchestrator_context
         ctx.config.risk.llm_fallback_to_rules = False
 

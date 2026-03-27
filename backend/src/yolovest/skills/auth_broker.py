@@ -1,6 +1,5 @@
 """Skill: auth-broker — Daily broker authentication.
 
-Covers: FR-6.3
 Trigger: CRON — daily at 9:00 AM IST (before market open)
 Pipeline position: First skill of the day, everything depends on this.
 

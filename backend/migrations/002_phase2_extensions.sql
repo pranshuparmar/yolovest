@@ -1,6 +1,6 @@
--- Phase 2: Intelligence Layer schema extensions
+-- Intelligence Layer schema extensions
 
--- News articles table for dedup tracking (FR-2.13)
+-- News articles table for dedup tracking
 CREATE TABLE IF NOT EXISTS news_articles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content_hash TEXT NOT NULL,
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS news_articles (
 CREATE INDEX IF NOT EXISTS idx_news_symbols ON news_articles(symbols);
 CREATE INDEX IF NOT EXISTS idx_news_created ON news_articles(created_at);
 
--- Fundamental data cache (FR-2.4)
+-- Fundamental data cache
 CREATE TABLE IF NOT EXISTS fundamentals (
     symbol TEXT NOT NULL,
     pe_ratio REAL,
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     PRIMARY KEY (symbol)
 );
 
--- Model versions tracking (FR-7.7)
+-- Model versions tracking
 CREATE TABLE IF NOT EXISTS model_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     model_type TEXT NOT NULL,
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS model_versions (
 
 CREATE INDEX IF NOT EXISTS idx_model_type_status ON model_versions(model_type, status);
 
--- Failure analysis from LLM (FR-7.6)
+-- Failure analysis from LLM
 CREATE TABLE IF NOT EXISTS failure_analyses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     model_type TEXT,
@@ -56,5 +56,5 @@ CREATE TABLE IF NOT EXISTS failure_analyses (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Add index on trades.status for get_open_positions (TL nit n1)
+-- Add index on trades.status for get_open_positions
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);

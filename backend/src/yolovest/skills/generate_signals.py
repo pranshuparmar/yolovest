@@ -1,14 +1,13 @@
 """Skill: generate-signals — ML-based trade signal generation.
 
-Covers: FR-4.1 to FR-4.5
 Trigger: HEARTBEAT during market hours
 Pipeline position: After market-scan, before risk-check.
 
 Flow:
 1. Load current watchlist from DB
-2. For each watchlist stock, compute features (FR-4.1)
-3. Run appropriate ML model (FR-4.2, FR-4.3)
-4. Generate signal with required fields (FR-4.5)
+2. For each watchlist stock, compute features
+3. Run appropriate ML model
+4. Generate signal with required fields
 5. Filter: only emit signals where confidence >= risk.min_confidence_score
 6. Emit signals as events for risk-check skill to consume
 """
@@ -204,7 +203,7 @@ class GenerateSignalsSkill(SkillBase):
                     "model_version": prediction.model_version,
                 }
 
-                # Step 5: Confidence filter (FR-4.8)
+                # Step 5: Confidence filter
                 # Use elevated threshold for recently traded symbols
                 effective_min = min_confidence
                 is_repeat = symbol in recently_traded
@@ -276,7 +275,7 @@ class GenerateSignalsSkill(SkillBase):
         )
 
     def _should_use_intraday_model(self) -> bool:
-        """Decide model type based on time of day and config (FR-4.3, H7)."""
+        """Decide model type based on time of day and config."""
         if self.ctx.config.strategy.default_trade_type == "swing":
             return False
         # Before 14:00 IST → intraday (MIS needs time to play out before 15:15 square-off)
