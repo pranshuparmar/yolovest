@@ -43,24 +43,24 @@ export function SlippageChart({ data }: { data: SlippageStats }) {
       {chartData.length > 0 && (
         <ResponsiveContainer width="100%" height={200}>
           <BarChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#353847" />
+            <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
             <XAxis
               dataKey="symbol"
-              tick={{ fill: "#908e96", fontSize: 10 }}
+              tick={{ fill: "#8b949e", fontSize: 10 }}
               angle={-45}
               textAnchor="end"
               height={60}
             />
-            <YAxis tick={{ fill: "#908e96", fontSize: 11 }} />
+            <YAxis tick={{ fill: "#8b949e", fontSize: 11 }} />
             <Tooltip
               contentStyle={{
-                backgroundColor: "#2a2c37",
-                border: "1px solid #353847",
+                backgroundColor: "#161b22",
+                border: "1px solid #30363d",
                 borderRadius: 8,
-                color: "#d5d3cd",
+                color: "#e6edf3",
               }}
             />
-            <Bar dataKey="avg" fill="#a4cc78" name="Avg Slippage" />
+            <Bar dataKey="avg" fill="#d29922" name="Avg Slippage" />
           </BarChart>
         </ResponsiveContainer>
       )}

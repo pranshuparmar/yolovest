@@ -145,7 +145,7 @@ export function TradeDetailPage() {
       <div className="flex items-center gap-3">
         <button onClick={() => navigate("/trades")} className="text-gray-500 hover:text-gray-300 text-sm">&larr; Back</button>
         <h2 className="text-lg font-semibold">
-          <Link to={`/symbol/${data.symbol}`} className="hover:text-emerald-400 transition-colors">{data.symbol}</Link>
+          <Link to={`/symbol/${data.symbol}`} className="hover:text-blue-400 transition-colors">{data.symbol}</Link>
           {" "}
           <span className={clsx("text-sm px-2 py-0.5 rounded",
             data.signal_type === "BUY" ? "bg-emerald-900/40 text-emerald-400" : "bg-red-900/40 text-red-400"

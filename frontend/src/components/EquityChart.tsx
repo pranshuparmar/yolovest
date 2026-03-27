@@ -33,25 +33,25 @@ export function EquityChart({ days = 30 }: { days?: number }) {
       </h3>
       <ResponsiveContainer width="100%" height={240}>
         <LineChart data={data}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#353847" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
           <XAxis
             dataKey="date"
-            tick={{ fill: "#908e96", fontSize: 11 }}
+            tick={{ fill: "#8b949e", fontSize: 11 }}
             tickFormatter={(v: string) => v.slice(5)}
           />
-          <YAxis tick={{ fill: "#908e96", fontSize: 11 }} />
+          <YAxis tick={{ fill: "#8b949e", fontSize: 11 }} />
           <Tooltip
             contentStyle={{
-              backgroundColor: "#2a2c37",
-              border: "1px solid #353847",
+              backgroundColor: "#161b22",
+              border: "1px solid #30363d",
               borderRadius: 8,
-              color: "#d5d3cd",
+              color: "#e6edf3",
             }}
           />
           <Line
             type="monotone"
             dataKey="cumulative_pnl"
-            stroke="#a4cc78"
+            stroke="#3fb950"
             strokeWidth={2}
             dot={false}
             name="Cumulative PnL"

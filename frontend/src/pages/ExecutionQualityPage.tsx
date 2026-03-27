@@ -64,11 +64,11 @@ export function ExecutionQualityPage() {
           <h3 className="text-sm font-medium text-gray-400 mb-3">Avg Slippage by Entry Hour</h3>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={hourData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2a2c37" />
-              <XAxis dataKey="hour" tick={{ fontSize: 10, fill: "#6e7288" }} />
-              <YAxis tick={{ fontSize: 10, fill: "#6e7288" }} />
-              <Tooltip contentStyle={{ backgroundColor: "#2a2c37", border: "1px solid #353847", borderRadius: "8px", fontSize: "12px" }} />
-              <Bar dataKey="avg" name="Avg Slippage" fill="#f9cc6c" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+              <XAxis dataKey="hour" tick={{ fontSize: 10, fill: "#8b949e" }} />
+              <YAxis tick={{ fontSize: 10, fill: "#8b949e" }} />
+              <Tooltip contentStyle={{ backgroundColor: "#161b22", border: "1px solid #30363d", borderRadius: "8px", fontSize: "12px" }} />
+              <Bar dataKey="avg" name="Avg Slippage" fill="#d29922" />
             </BarChart>
           </ResponsiveContainer>
         </div>

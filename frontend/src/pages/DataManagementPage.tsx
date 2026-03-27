@@ -253,7 +253,7 @@ export function DataManagementPage() {
       {lastResult && (
         <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3 text-sm text-emerald-400 flex items-center justify-between">
           <span>{lastResult}</span>
-          <button onClick={() => setLastResult(null)} className="text-emerald-600 hover:text-emerald-400 text-xs">
+          <button onClick={() => setLastResult(null)} className="text-blue-500 hover:text-blue-400 text-xs">
             Dismiss
           </button>
         </div>
