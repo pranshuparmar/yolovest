@@ -176,7 +176,7 @@ class XGBoostSignalModel(MLBase):
 
         # Use ATR from features for target/SL computation
         entry_price = features.get("close", features.get("ltp", 100.0))
-        atr = features.get("atr", entry_price * 0.02)  # fallback: 2% of price
+        atr = features.get("atr_14", features.get("atr", entry_price * 0.02))
 
         if signal_type_str == "BUY":
             target_price = entry_price + 2 * atr

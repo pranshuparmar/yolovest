@@ -50,6 +50,12 @@ def compute_features(
 
     features: dict[str, float] = {}
 
+    # Always include latest price data — needed for entry/target/SL computation
+    features["close"] = closes[-1]
+    features["open"] = opens[-1]
+    features["high"] = highs[-1]
+    features["low"] = lows[-1]
+
     if cfg.rsi:
         rsi = compute_rsi(closes, period=14)
         if rsi is not None:
