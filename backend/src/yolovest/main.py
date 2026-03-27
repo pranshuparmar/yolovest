@@ -185,9 +185,13 @@ def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
 
 
 def _build_llm(config: AppConfig) -> GeminiLLM | _StubLLM:
-    """Build LLM — real if API key set, stub otherwise."""
-    if config.llm.api_key and config.llm.api_key != "${GEMINI_API_KEY}":
+    """Build LLM — real if enabled + API key set, stub otherwise."""
+    if (config.llm.enabled
+            and config.llm.api_key
+            and config.llm.api_key != "${GEMINI_API_KEY}"):
         return GeminiLLM(api_key=config.llm.api_key, model=config.llm.model)
+    if not config.llm.enabled:
+        logger.info("LLM disabled via config (llm.enabled=false)")
     return _StubLLM()
 
 
@@ -262,8 +266,11 @@ def _build_ml(config: AppConfig, db: Any) -> Any:
         return None
 
 
-def _build_news_aggregator() -> Any:
+def _build_news_aggregator(config: AppConfig) -> Any:
     """Build news aggregator with all available news sources."""
+    if not config.market_data.news_enabled:
+        logger.info("News sources disabled via config (market_data.news_enabled=false)")
+        return None
     try:
         from yolovest.news.aggregator import NewsAggregator
         from yolovest.news.et_markets import ETMarketsSource
@@ -307,7 +314,7 @@ def build_context(config: AppConfig) -> AppContext:
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
         ml=_build_ml(config, db),
-        news_aggregator=_build_news_aggregator(),
+        news_aggregator=_build_news_aggregator(config),
         memory=_build_memory(db),
     )
 

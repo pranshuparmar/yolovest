@@ -158,7 +158,8 @@ class IngestDataSkill(SkillBase):
             pass
 
         # --- News Aggregation + Dedup ---
-        if skip_expensive:
+        news_enabled = self.ctx.config.market_data.news_enabled
+        if skip_expensive or not news_enabled:
             raw_news = []
             deduped = []
         else:
@@ -171,20 +172,22 @@ class IngestDataSkill(SkillBase):
             await self.ctx.db.upsert_news_articles(deduped)
 
         # --- Gemini Sentiment Analysis (FR-2.7) ---
-        for symbol in symbols:
-            symbol_headlines = [
-                n.headline for n in deduped
-                if symbol.lower() in " ".join(n.symbols).lower()
-                or symbol.lower() in n.headline.lower()
-            ]
-            if symbol_headlines:
-                try:
-                    sentiment = await self.ctx.llm.analyze_sentiment(symbol, symbol_headlines)
-                    await self.ctx.db.upsert_sentiment(symbol, sentiment)
-                except Exception as e:
-                    logger.warning("Sentiment analysis failed for %s: %s", symbol, e)
+        if self.ctx.config.llm.enabled and deduped:
+            for symbol in active_symbols:
+                symbol_headlines = [
+                    n.headline for n in deduped
+                    if symbol.lower() in " ".join(n.symbols).lower()
+                    or symbol.lower() in n.headline.lower()
+                ]
+                if symbol_headlines:
+                    try:
+                        sentiment = await self.ctx.llm.analyze_sentiment(symbol, symbol_headlines)
+                        await self.ctx.db.upsert_sentiment(symbol, sentiment)
+                    except Exception as e:
+                        logger.warning("Sentiment analysis failed for %s: %s", symbol, e)
 
-        if not skip_expensive:
+        scrapers_enabled = self.ctx.config.market_data.scrapers_enabled
+        if not skip_expensive and scrapers_enabled:
             # --- NSE Official Data (FR-2.2) ---
             try:
                 nse_data = await self._fetch_nse_data()

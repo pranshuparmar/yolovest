@@ -127,10 +127,11 @@ class RiskCheckSkill(SkillBase):
         # Validate entry price against fresh LTP
         entry = signal["entry_price"]
         sl = signal["stop_loss_price"]
+        drift_max = self.ctx.config.execution.price_drift_max_pct
         try:
             fresh_ltp = await self.ctx.market_data.get_ltp(signal["symbol"])
             drift_pct = abs(fresh_ltp - entry) / entry if entry > 0 else 0
-            if drift_pct > 0.02:
+            if drift_pct > drift_max:
                 return self._reject(
                     signal,
                     f"Entry price drift too high: signal=₹{entry:.2f}, "

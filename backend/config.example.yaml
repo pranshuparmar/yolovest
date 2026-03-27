@@ -13,6 +13,7 @@ broker:
   api_secret: ${KITE_API_SECRET}
 
 llm:
+  enabled: false                      # set true to activate Gemini (sentiment, trade review, analysis)
   provider: gemini
   model: gemini-2.5-pro               # or gemini-2.5-flash for lower latency
   api_key: ${GEMINI_API_KEY}
@@ -21,6 +22,8 @@ market_data:
   daily_provider: jugaad              # jugaad | yfinance
   daily_fallback: yfinance            # fallback if primary fails
   intraday_provider: tvdatafeed       # tvdatafeed | kite (paid)
+  news_enabled: true                  # fetch news from MoneyControl, ET Markets, LiveMint
+  scrapers_enabled: true              # fetch from Screener.in, Trendlyne, Google Finance, NSE, economic calendar
   bhavcopy_dir: ./data/bhavcopy       # path to downloaded NSE Bhavcopy CSVs
   cache_ttl_minutes: 15               # cache fetched data to reduce API calls
   stale_threshold_minutes: 30         # reject data older than this many minutes
@@ -103,6 +106,7 @@ execution:
   max_pipeline_latency_sec: 2         # signal->risk->order must complete within this
   paper_slippage_pct: 0.001           # simulated slippage for paper trading (0.1%)
   order_timeout_sec: 30               # cancel unfilled remainder after this many seconds
+  price_drift_max_pct: 0.02           # reject signal if LTP drifted >2% from entry price
 
 database:
   backup_enabled: true                # enable daily DB backups

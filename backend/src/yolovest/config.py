@@ -75,6 +75,7 @@ class BrokerConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
+    enabled: bool = False  # set true + api_key to activate Gemini
     provider: str = "gemini"
     model: str = "gemini-2.5-pro"
     api_key: str = ""
@@ -85,6 +86,8 @@ class MarketDataConfig(BaseModel):
     daily_fallback: str = "yfinance"
     intraday_provider: str = "tvdatafeed"
     kite_data_enabled: bool = False  # FR-2.1e: enable Kite Connect as data provider
+    news_enabled: bool = True  # fetch news from MoneyControl, ET Markets, LiveMint
+    scrapers_enabled: bool = True  # fetch from Screener.in, Trendlyne, Google Finance, NSE, economic calendar
     bhavcopy_dir: str = "./data/bhavcopy"
     cache_ttl_minutes: int = 15
     stale_threshold_minutes: int = 30
@@ -218,6 +221,7 @@ class ExecutionConfig(BaseModel):
     max_pipeline_latency_sec: int = 2
     paper_slippage_pct: float = Field(default=0.001, ge=0)
     order_timeout_sec: int = 30
+    price_drift_max_pct: float = Field(default=0.02, gt=0, lt=1)  # reject if LTP drifted >2% from signal
 
 
 class RetentionConfig(BaseModel):

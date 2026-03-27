@@ -116,7 +116,7 @@ class TradeExecuteSkill(SkillBase):
         try:
             order_price = await self.ctx.market_data.get_ltp(signal["symbol"])
             drift = abs(order_price - signal["entry_price"]) / signal["entry_price"]
-            if drift > 0.02:
+            if drift > cfg.price_drift_max_pct:
                 logger.warning(
                     "trade-execute: price drift %.1f%% for %s (signal=%.2f, ltp=%.2f), rejecting",
                     drift * 100, signal["symbol"], signal["entry_price"], order_price,
