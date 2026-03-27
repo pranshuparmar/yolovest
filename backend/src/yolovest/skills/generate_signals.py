@@ -82,8 +82,22 @@ class GenerateSignalsSkill(SkillBase):
             supertrend=self.ctx.config.strategy.indicators.supertrend,
         )
 
+        # Skip symbols that already have a signal or open position today
+        already_signaled = await self.ctx.db.get_todays_signaled_symbols()
+        if already_signaled:
+            filter_counts["already_signaled"] = 0
+
         for stock in watchlist:
             symbol = stock["symbol"]
+
+            if symbol in already_signaled:
+                filter_counts.setdefault("already_signaled", 0)
+                filter_counts["already_signaled"] += 1
+                rejection_details.append({
+                    "symbol": symbol, "reason": "already_signaled",
+                    "detail": "signal or open position exists today",
+                })
+                continue
 
             try:
                 # Step 2: Fetch OHLCV and compute features

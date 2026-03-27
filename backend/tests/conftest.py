@@ -232,6 +232,7 @@ def mock_db() -> AsyncMock:
         "approved_total_pnl": 0,
         "approved_avg_pnl": 0,
     })
+    db.get_todays_signaled_symbols = AsyncMock(return_value=set())
     db.get_all_quarantined_symbol_set = AsyncMock(return_value=set())
     db.get_quarantined_symbols = AsyncMock(return_value=[])
     db.record_fetch_failure = AsyncMock(return_value=False)

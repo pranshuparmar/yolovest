@@ -675,6 +675,25 @@ class Database:
         )
         await self.conn.commit()
 
+    async def get_todays_signaled_symbols(self) -> set[str]:
+        """Get symbols that already have a signal or open position today."""
+        today_start = now_ist().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
+        # Symbols with signals generated today
+        cursor = await self.conn.execute(
+            "SELECT DISTINCT symbol FROM signals WHERE created_at >= ?",
+            (today_start,),
+        )
+        signaled = {row[0] for row in await cursor.fetchall()}
+        # Symbols with open positions (regardless of when opened)
+        cursor = await self.conn.execute(
+            "SELECT DISTINCT symbol FROM trades "
+            "WHERE status IN ('open', 'partially_filled')"
+        )
+        positioned = {row[0] for row in await cursor.fetchall()}
+        return signaled | positioned
+
     # ------------------------------------------------------------------
     # Fundamentals (Phase 2, FR-2.4)
     # ------------------------------------------------------------------

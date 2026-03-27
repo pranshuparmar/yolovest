@@ -103,3 +103,29 @@ class TestGenerateSignalsDiagnostics:
         diag = result.data["diagnostics"]
         assert diag["filter_counts"]["passed"] == 1
         assert diag["filter_counts"]["hold_signal"] == 0
+
+    async def test_already_signaled_skipped(self, signal_skill):
+        """Symbols with existing signals or open positions today are skipped."""
+        signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
+            {"symbol": "RELIANCE"}, {"symbol": "TCS"}, {"symbol": "INFY"},
+        ])
+        signal_skill.ctx.db.get_todays_signaled_symbols = AsyncMock(
+            return_value={"RELIANCE", "TCS"},
+        )
+        signal_skill.ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        signal_skill.ctx.db.insert_signal = AsyncMock()
+        signal_skill.ctx.ml.predict_swing = AsyncMock(return_value=MLPrediction(
+            signal_type="BUY", entry_price=100.0, target_price=110.0,
+            stop_loss_price=95.0, position_size=1, holding_period="3d",
+            confidence=0.85, model_version="test-v1",
+        ))
+
+        with patch.object(signal_skill, "_should_use_intraday_model", return_value=False):
+            result = await signal_skill.execute()
+
+        assert result.success
+        # Only INFY should generate a signal (RELIANCE and TCS already signaled)
+        assert result.data["signals_generated"] == 1
+        diag = result.data["diagnostics"]
+        assert diag["filter_counts"]["already_signaled"] == 2
+        assert diag["filter_counts"]["passed"] == 1
