@@ -1255,6 +1255,16 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "universe_size": len(universe),
                 "shortlist_size": 0,
                 "signals": [],
+                "diagnostics": {
+                    "min_confidence_threshold": cfg.risk.min_confidence_score,
+                    "ml_available": ctx.ml is not None,
+                    "filter_counts": {
+                        "insufficient_bars": 0, "feature_computation_failed": 0,
+                        "ml_unavailable": 0, "hold_signal": 0,
+                        "low_confidence": 0, "error": 0, "passed": 0,
+                    },
+                    "rejection_details": [],
+                },
             }
 
         # Step 2: Generate signals from shortlisted stocks
@@ -1265,6 +1275,18 @@ def create_app(ctx: AppContext) -> FastAPI:
         if ml_unavailable:
             logger.warning("Dry-run: ML model not loaded — cannot generate signals. "
                            "Train a model first via the model-retrain skill.")
+
+        # Diagnostics: track why stocks get filtered out
+        filter_counts = {
+            "insufficient_bars": 0,
+            "feature_computation_failed": 0,
+            "ml_unavailable": 0,
+            "hold_signal": 0,
+            "low_confidence": 0,
+            "error": 0,
+            "passed": 0,
+        }
+        rejection_details: list[dict[str, str]] = []
 
         indicator_cfg = IndicatorConfig(
             ema_periods=cfg.strategy.ema_periods,
@@ -1283,22 +1305,53 @@ def create_app(ctx: AppContext) -> FastAPI:
             try:
                 bars = await ctx.db.get_ohlcv(symbol, "daily", days=365)
                 if len(bars) < 50:
+                    filter_counts["insufficient_bars"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "insufficient_bars",
+                        "detail": f"{len(bars)} bars < 50 required",
+                    })
                     continue
 
                 features = compute_features(bars, indicator_cfg)
                 if not features:
+                    filter_counts["feature_computation_failed"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "feature_computation_failed",
+                        "detail": "compute_features returned empty",
+                    })
                     continue
 
                 if ctx.ml is None:
+                    filter_counts["ml_unavailable"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "ml_unavailable",
+                        "detail": "ML model not loaded",
+                    })
                     continue
 
                 prediction = await ctx.ml.predict_swing(symbol, features)
                 if prediction.signal_type == "HOLD":
+                    filter_counts["hold_signal"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "hold_signal",
+                        "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
+                    })
                     continue
 
                 if prediction.confidence < min_confidence:
+                    filter_counts["low_confidence"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "low_confidence",
+                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {min_confidence}",
+                    })
                     continue
 
+                filter_counts["passed"] += 1
                 signals_out.append({
                     "symbol": symbol,
                     "signal_type": prediction.signal_type,
@@ -1315,7 +1368,20 @@ def create_app(ctx: AppContext) -> FastAPI:
                     "fundamental_score": stock.get("fundamental_score"),
                 })
             except Exception as e:
+                filter_counts["error"] += 1
+                rejection_details.append({
+                    "symbol": symbol,
+                    "reason": "error",
+                    "detail": str(e),
+                })
                 logger.warning("Dry-run signal failed for %s: %s", symbol, e)
+
+        # Log diagnostics summary
+        if not signals_out:
+            logger.info(
+                "Dry-run %s: 0 signals from %d shortlisted — %s",
+                run_id, len(shortlist), filter_counts,
+            )
 
         # Step 3: Persist for next-day comparison
         if signals_out:
@@ -1327,6 +1393,12 @@ def create_app(ctx: AppContext) -> FastAPI:
             "universe_size": len(universe),
             "shortlist_size": len(shortlist),
             "signals": signals_out,
+            "diagnostics": {
+                "min_confidence_threshold": min_confidence,
+                "ml_available": ctx.ml is not None,
+                "filter_counts": filter_counts,
+                "rejection_details": rejection_details,
+            },
         }
         if ml_unavailable:
             result["warning"] = (

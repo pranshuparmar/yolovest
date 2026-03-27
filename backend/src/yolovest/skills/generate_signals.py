@@ -37,6 +37,17 @@ class GenerateSignalsSkill(SkillBase):
         signals_generated = []
         min_confidence = self.ctx.config.risk.min_confidence_score
 
+        # Diagnostics: track why stocks get filtered out
+        filter_counts = {
+            "insufficient_bars": 0,
+            "feature_computation_failed": 0,
+            "hold_signal": 0,
+            "low_confidence": 0,
+            "error": 0,
+            "passed": 0,
+        }
+        rejection_details: list[dict[str, str]] = []
+
         if not watchlist:
             return SkillResult(
                 success=True,
@@ -82,11 +93,22 @@ class GenerateSignalsSkill(SkillBase):
                 daily_bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=365)
 
                 if len(daily_bars) < 50:
-                    logger.debug("Insufficient daily data for %s (%d bars)", symbol, len(daily_bars))
+                    filter_counts["insufficient_bars"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "insufficient_bars",
+                        "detail": f"{len(daily_bars)} bars < 50 required",
+                    })
+                    logger.info("Insufficient daily data for %s (%d bars)", symbol, len(daily_bars))
                     continue
 
                 features = compute_features(daily_bars, indicator_cfg)
                 if not features:
+                    filter_counts["feature_computation_failed"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "feature_computation_failed",
+                        "detail": "compute_features returned empty",
+                    })
+                    logger.info("Feature computation failed for %s", symbol)
                     continue
 
                 # Use latest intraday price if available during market hours
@@ -103,6 +125,12 @@ class GenerateSignalsSkill(SkillBase):
 
                 # Step 4: Skip HOLD signals
                 if prediction.signal_type == "HOLD":
+                    filter_counts["hold_signal"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "hold_signal",
+                        "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
+                    })
+                    logger.info("HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
                     continue
 
                 signal = {
@@ -120,6 +148,7 @@ class GenerateSignalsSkill(SkillBase):
 
                 # Step 5: Confidence filter (FR-4.8)
                 if signal["confidence_score"] >= min_confidence:
+                    filter_counts["passed"] += 1
                     await self.ctx.db.insert_signal(signal)
                     signals_generated.append(signal)
                     await self.broadcast("signal_generated", {
@@ -128,9 +157,29 @@ class GenerateSignalsSkill(SkillBase):
                         "confidence": prediction.confidence,
                         "entry_price": prediction.entry_price,
                     })
+                else:
+                    filter_counts["low_confidence"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "low_confidence",
+                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {min_confidence}",
+                    })
+                    logger.info(
+                        "Low confidence for %s: %s @ %.2f < %.2f",
+                        symbol, prediction.signal_type, prediction.confidence, min_confidence,
+                    )
 
             except Exception as e:
+                filter_counts["error"] += 1
+                rejection_details.append({
+                    "symbol": symbol, "reason": "error", "detail": str(e),
+                })
                 logger.warning("Signal generation failed for %s: %s", symbol, e)
+
+        if not signals_generated:
+            logger.info(
+                "generate-signals: 0 signals from %d watchlist stocks — %s",
+                len(watchlist), filter_counts,
+            )
 
         return SkillResult(
             success=True,
@@ -139,6 +188,11 @@ class GenerateSignalsSkill(SkillBase):
                 "watchlist_size": len(watchlist),
                 "signals_generated": len(signals_generated),
                 "signals": signals_generated,  # full signal dicts for downstream skills
+                "diagnostics": {
+                    "min_confidence_threshold": min_confidence,
+                    "filter_counts": filter_counts,
+                    "rejection_details": rejection_details,
+                },
             },
         )
 
