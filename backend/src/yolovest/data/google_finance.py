@@ -1,4 +1,4 @@
-"""Google Finance scraper for Indian market data and global cues (FR-2.12).
+"""Google Finance scraper for Indian market data and global cues.
 
 Fetches trending NSE stocks, Indian index performance (Nifty/Sensex),
 and global index context from Google Finance. Uses httpx for async HTTP.

@@ -1,4 +1,4 @@
-"""Trendlyne technical screener scraper (FR-2.5).
+"""Trendlyne technical screener scraper.
 
 Fetches momentum scores, volume breakouts, and technical signals from
 Trendlyne's public pages and API endpoints.

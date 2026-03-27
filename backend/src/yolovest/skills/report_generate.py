@@ -1,11 +1,10 @@
 """Skill: report-generate — Daily and weekly reports + Telegram delivery.
 
-Covers: FR-8.4, FR-8.5, FR-8.6
 Trigger: CRON — daily at reports.daily_report_time, weekly at reports.weekly_report_cron
 Pipeline position: Post-market, after square-off.
 
 Flow:
-Daily report (FR-8.4):
+Daily report:
 1. Aggregate today's trades: entries, exits, PnL per trade
 2. Compute daily PnL, win rate, avg slippage
 3. Prediction accuracy for today's signals
@@ -14,11 +13,11 @@ Daily report (FR-8.4):
 6. Store report in DB for dashboard access
 7. Send to Telegram (if notifications.telegram.alerts.daily_summary is true)
 
-Weekly report (FR-8.5):
+Weekly report:
 1. Cumulative PnL for the week
 2. Model performance trends (accuracy over time)
 3. Prediction accuracy trends
-4. Gemini review analysis: did LLM approvals/rejections help? (FR-7.8)
+4. Gemini review analysis: did LLM approvals/rejections help?
 5. Best/worst trades of the week
 6. Risk metrics: max drawdown, Sharpe for the period
 7. Store + send to Telegram (if weekly_summary alert enabled)
@@ -65,7 +64,7 @@ class ReportGenerateSkill(SkillBase):
             return await self._generate_weekly()
 
     async def _generate_daily(self) -> SkillResult:
-        """FR-8.4: Daily report at market close."""
+        """Daily report at market close."""
         trades = await self.ctx.db.get_todays_trades()
         predictions = await self.ctx.db.get_todays_predictions()
 
@@ -116,7 +115,7 @@ class ReportGenerateSkill(SkillBase):
         return SkillResult(success=True, skill_name=self.name, data=report)
 
     async def _generate_weekly(self) -> SkillResult:
-        """FR-8.5: Weekly cumulative report."""
+        """Weekly cumulative report."""
         trades = await self.ctx.db.get_weekly_trades()
         predictions = await self.ctx.db.get_weekly_predictions()
         llm_reviews = await self.ctx.db.get_weekly_llm_reviews()
@@ -130,7 +129,7 @@ class ReportGenerateSkill(SkillBase):
         best_trade = max(closed_trades, key=lambda t: t.get("pnl", 0)) if closed_trades else None
         worst_trade = min(closed_trades, key=lambda t: t.get("pnl", 0)) if closed_trades else None
 
-        # FR-7.8: LLM review accuracy
+        # LLM review accuracy
         llm_approved = [r for r in llm_reviews if r.get("decision") == "APPROVE"]
         llm_rejected = [r for r in llm_reviews if r.get("decision") == "REJECT"]
         llm_approve_pnl = sum(
@@ -148,14 +147,14 @@ class ReportGenerateSkill(SkillBase):
         # Prediction scoreboard snapshot
         scoreboard = await self.ctx.db.get_prediction_scoreboard("overall")
 
-        # FR-7.8: LLM review accuracy — compare decisions vs outcomes
+        # LLM review accuracy — compare decisions vs outcomes
         llm_accuracy = None
         try:
             llm_accuracy = await self.ctx.db.get_llm_review_accuracy(days=7)
         except Exception as e:
             logger.warning("LLM review accuracy fetch failed: %s", e)
 
-        # FR-6.7: Slippage analysis for the week
+        # Slippage analysis for the week
         slippage_stats = None
         try:
             slippage_stats = await self.ctx.db.get_slippage_stats(days=7)
@@ -236,14 +235,14 @@ class ReportGenerateSkill(SkillBase):
             lines.append(f"Best Trade: {best['symbol']} +{best['pnl']:,.2f}")
         if worst:
             lines.append(f"Worst Trade: {worst['symbol']} {worst['pnl']:,.2f}")
-        # FR-7.8: LLM review accuracy
+        # LLM review accuracy
         llm_acc = report.get("llm_review_accuracy")
         if llm_acc and llm_acc.get("approval_accuracy") is not None:
             lines.append(
                 f"LLM Approval Accuracy: {llm_acc['approval_accuracy']:.0%} "
                 f"({llm_acc['profitable_approvals']}/{llm_acc['approved_with_outcomes']})"
             )
-        # FR-6.7: Slippage summary
+        # Slippage summary
         slip = report.get("slippage_stats")
         if slip and slip.get("total_trades", 0) > 0:
             lines.append(

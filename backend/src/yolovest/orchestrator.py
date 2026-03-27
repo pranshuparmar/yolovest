@@ -1,6 +1,6 @@
 """Heartbeat orchestrator for YoloVest.
 
-Implements the heartbeat pipeline with error propagation per FR-1.3,
+Implements the heartbeat pipeline with error propagation,
 heartbeat mutex (skip-on-overrun), and consecutive skip alerting.
 """
 
@@ -28,7 +28,7 @@ class HeartbeatOrchestrator:
           -> [per signal]: risk-check -> llm-review -> trade-execute -> predict-track
           -> position-monitor
 
-    Error propagation policy (FR-1.3):
+    Error propagation policy:
         - health-check fails -> ABORT entire heartbeat
         - ingest-data fails -> SKIP scan+signals, run position-monitor
         - market-scan fails -> SKIP signals, run position-monitor
@@ -176,7 +176,7 @@ class HeartbeatOrchestrator:
         results["position-monitor"] = pm_result
         await self._alert_position_monitor(pm_result)
 
-        # FR-1.5: Persist heartbeat state for cross-restart continuity
+        # Persist heartbeat state for cross-restart continuity
         if self._ctx.memory:
             try:
                 summary = {

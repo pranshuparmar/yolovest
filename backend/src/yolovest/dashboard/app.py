@@ -1,8 +1,6 @@
 """FastAPI dashboard for YoloVest.
 
-Covers: FR-8.1 (portfolio overview), FR-8.2 (WebSocket), FR-8.3 (trade detail),
-FR-8.7 (historical reports), FR-8.9 (basic auth).
-
+REST API + WebSocket for portfolio overview, trade detail, reports, and auth.
 All endpoints read from the shared database via AppContext.
 """
 
@@ -170,7 +168,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             pass
 
     def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)) -> str:  # noqa: B008
-        """FR-8.9: Basic password protection."""
+        """Basic password protection."""
         correct = secrets.compare_digest(credentials.password, _password["current"])
         if not correct:
             raise HTTPException(
@@ -181,7 +179,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         return credentials.username
 
     # ------------------------------------------------------------------
-    # FR-8.1: Portfolio Overview
+    # Portfolio Overview
     # ------------------------------------------------------------------
 
     @app.get("/api/portfolio")
@@ -361,7 +359,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         return await ctx.db.get_equity_curve(days=days)
 
     # ------------------------------------------------------------------
-    # FR-8.3: Trade Detail View
+    # Trade Detail View
     # ------------------------------------------------------------------
 
     @app.get("/api/trades/{trade_id}")
@@ -387,7 +385,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         return await ctx.db.get_prediction_scoreboard(group_type)
 
     # ------------------------------------------------------------------
-    # FR-8.7: Historical Reports
+    # Historical Reports
     # ------------------------------------------------------------------
 
     @app.get("/api/reports")
@@ -476,7 +474,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         days: int = Query(30, ge=1, le=365),
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Slippage analysis (FR-6.7)."""
+        """Slippage analysis."""
         return await ctx.db.get_slippage_stats(symbol=symbol, days=days)
 
     @app.get("/api/llm-accuracy")
@@ -484,7 +482,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         days: int = Query(30, ge=1, le=365),
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """LLM review accuracy vs actual trade outcomes (FR-7.8)."""
+        """LLM review accuracy vs actual trade outcomes."""
         return await ctx.db.get_llm_review_accuracy(days=days)
 
     @app.get("/api/audit")
@@ -493,7 +491,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         action_type: str | None = Query(None),
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
-        """Recent audit log entries (FR-8.8)."""
+        """Recent audit log entries."""
         return await ctx.db.get_audit_log(limit=limit, action_type=action_type)
 
     @app.get("/api/logs")
@@ -1649,7 +1647,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         return {"success": True, "skill": skill_name, "status": "started"}
 
     # ------------------------------------------------------------------
-    # FR-8.2: WebSocket Live Updates
+    # WebSocket Live Updates
     # ------------------------------------------------------------------
 
     @app.websocket("/ws")

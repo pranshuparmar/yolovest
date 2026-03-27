@@ -1,4 +1,4 @@
-"""Bhavcopy CSV importer for deep historical backtesting (FR-2.1d).
+"""Bhavcopy CSV importer for deep historical backtesting.
 
 Bulk imports NSE Bhavcopy CSV files (daily EOD data, 2013+) into the OHLCV table.
 Designed as a one-time seed operation. Supports both old-format and new-format CSVs.

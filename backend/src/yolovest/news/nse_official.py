@@ -1,4 +1,4 @@
-"""NSE official data source (FR-2.2).
+"""NSE official data source.
 
 Fetches corporate actions, bulk/block deals, FII/DII activity, delivery data,
 and corporate announcements from NSE India's JSON APIs.
@@ -45,9 +45,9 @@ _RATE_LIMIT_DELAY = 0.34
 class NSEOfficialSource(NewsSource):
     """NSE official data source -- corporate actions, bulk deals, FII/DII data.
 
-    Implements the full FR-2.2 spec: corporate actions (dividends, splits,
-    bonuses), bulk/block deals, FII/DII activity, delivery percentages,
-    and corporate announcements as news headlines.
+    Provides corporate actions (dividends, splits, bonuses), bulk/block deals,
+    FII/DII activity, delivery percentages, and corporate announcements
+    as news headlines.
     """
 
     def __init__(self, session: aiohttp.ClientSession | None = None) -> None:
@@ -197,7 +197,7 @@ class NSEOfficialSource(NewsSource):
             return False
 
     # ------------------------------------------------------------------
-    # FR-2.2 extended methods
+    # Extended methods
     # ------------------------------------------------------------------
 
     async def fetch_corp_actions(self, symbol: str) -> list[dict[str, Any]]:

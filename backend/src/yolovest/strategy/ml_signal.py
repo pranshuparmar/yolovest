@@ -1,7 +1,7 @@
 """XGBoost-based ML signal model implementation.
 
 Uses XGBoost for classification (BUY/SELL/HOLD) with probability calibration
-via Platt scaling (PM G6). Supports intraday and swing model slots.
+via Platt scaling. Supports intraday and swing model slots.
 
 All blocking ML operations are offloaded via asyncio.to_thread.
 XGBoost and sklearn are lazily imported so tests can run without them.
@@ -246,7 +246,7 @@ class XGBoostSignalModel(MLBase):
         if len(y_arr) < min_samples:
             raise ValueError(
                 f"Insufficient training data: {len(y_arr)} samples "
-                f"(minimum {min_samples} required) — PM G5"
+                f"(minimum {min_samples} required)"
             )
 
         def _train_blocking() -> tuple[Any, Any, dict[str, Any]]:
@@ -320,7 +320,7 @@ class XGBoostSignalModel(MLBase):
             # Final model trained on all data
             model.fit(X_arr, y_arr, verbose=False)
 
-            # Calibrate probabilities (PM G6 — Platt scaling)
+            # Calibrate probabilities (Platt scaling)
             calibrator = CalibratedClassifierCV(
                 model, method="sigmoid", cv=min(3, len(y_arr) // 50 or 2)
             )

@@ -1,6 +1,6 @@
 """Configuration system for YoloVest.
 
-Nested Pydantic v2 models matching config.yaml from REQUIREMENTS.md Section 10.
+Nested Pydantic v2 models matching config.yaml structure.
 Supports environment variable expansion for secrets (${VAR_NAME}).
 """
 
@@ -85,7 +85,7 @@ class MarketDataConfig(BaseModel):
     daily_provider: str = "jugaad"
     daily_fallback: str = "yfinance"
     intraday_provider: str = "tvdatafeed"
-    kite_data_enabled: bool = False  # FR-2.1e: enable Kite Connect as data provider
+    kite_data_enabled: bool = False  # enable Kite Connect as data provider
     news_enabled: bool = True  # fetch news from MoneyControl, ET Markets, LiveMint
     scrapers_enabled: bool = True  # fetch from Screener.in, Trendlyne, Google Finance, NSE, economic calendar
     bhavcopy_dir: str = "./data/bhavcopy"
@@ -146,7 +146,7 @@ class StrategyConfig(BaseModel):
     default_trade_type: Literal["intraday", "swing"] = "intraday"
     backtest_min_sharpe: float = 1.0
     backtest_max_drawdown_pct: float = 0.20
-    min_training_samples: int = 200  # PM G5: guard against garbage models
+    min_training_samples: int = 200  # guard against garbage models
 
 
 class RiskConfig(BaseModel):
@@ -253,7 +253,7 @@ class ReportsConfig(BaseModel):
 class DashboardConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8080
-    password: str = "yolovest"  # FR-8.9: basic password auth
+    password: str = "yolovest"  # basic password auth
     public_url: str | None = None  # e.g. "https://yolovest.example.com/" — used in logs/Telegram
 
 

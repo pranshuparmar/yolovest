@@ -78,7 +78,7 @@ def setup_logging() -> None:
 
 
 class _StubDB:
-    """Minimal database stub for Phase 0 (no real DB yet)."""
+    """Minimal database stub when no real DB yet)."""
 
     async def health_check(self) -> bool:
         return True
@@ -91,7 +91,7 @@ class _StubDB:
 
 
 class _StubBroker:
-    """Minimal broker stub for Phase 0 (no real broker yet)."""
+    """Minimal broker stub when no real broker yet)."""
 
     async def authenticate(self, request_token: str) -> bool:
         return False
@@ -125,7 +125,7 @@ class _StubBroker:
 
 
 class _StubLLM:
-    """Minimal LLM stub for Phase 0 (no real LLM yet)."""
+    """Minimal LLM stub when no real LLM yet)."""
 
     async def ping(self) -> bool:
         return False
@@ -150,7 +150,7 @@ class _StubLLM:
 
 
 class _StubMarketData:
-    """Minimal market data stub for Phase 0 (no real providers yet)."""
+    """Minimal market data stub when no real providers yet)."""
 
     async def get_ohlcv(self, symbol: str, interval: str, days: int = 30) -> list[object]:
         return []
@@ -199,13 +199,13 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
     """Build market data ingester with provider fallback chain.
 
     If kite_data_enabled is True and broker API keys are set, Kite Connect
-    is added as the primary provider (FR-2.1e). Requires paid data plan.
+    is added as the primary provider. Requires paid data plan.
     """
     from yolovest.data.base import MarketDataBase
 
     daily_providers: list[MarketDataBase] = []
 
-    # FR-2.1e: Kite data plan as primary when enabled
+    # Kite data plan as primary when enabled
     if config.market_data.kite_data_enabled:
         api_key = config.broker.api_key
         if api_key and api_key != "${KITE_API_KEY}":
@@ -244,7 +244,7 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
 
 
 def _build_memory(db: Any) -> Any:
-    """Build agent memory persistence layer (FR-1.5)."""
+    """Build agent memory persistence layer."""
     try:
         from yolovest.memory import AgentMemory
 

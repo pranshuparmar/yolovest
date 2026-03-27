@@ -360,7 +360,7 @@ class MarketHoursChecker:
     def is_order_window(self, now: datetime | None = None) -> bool:
         """Check if the current time is within the order placement window.
 
-        On early close days (FR-11.2), the order window end is adjusted
+        On early close days, the order window end is adjusted
         to the early square-off time so no new orders are placed too late.
         """
         if now is None:
@@ -411,7 +411,7 @@ class MarketHoursChecker:
         return premarket_start <= current_time < market_open
 
     def is_square_off_window(self, now: datetime | None = None) -> bool:
-        """Check if now is within the square-off window (FR-5.9a).
+        """Check if now is within the square-off window.
 
         Square-off window: from square_off time to square_off + extension.
         """

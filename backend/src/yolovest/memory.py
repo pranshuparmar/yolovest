@@ -1,4 +1,4 @@
-"""Agent memory persistence for cross-restart state (FR-1.5).
+"""Agent memory persistence for cross-restart state.
 
 Provides a key-value store backed by SQLite for persisting:
 - Agent reasoning context (why trades were taken/avoided)

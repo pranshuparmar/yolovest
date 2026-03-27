@@ -1,7 +1,6 @@
 """jugaad-data market data provider (primary, daily/EOD).
 
 Scrapes NSE directly. Built-in caching. History from 2013+.
-See REQUIREMENTS.md FR-2.1a.
 """
 
 import asyncio

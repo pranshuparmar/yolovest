@@ -1,20 +1,19 @@
 """Skill: trade-execute — Place orders via broker.
 
-Covers: FR-6.1, FR-6.2, FR-6.4, FR-6.6, FR-6.7, FR-6.8
 Trigger: EVENT — called for each LLM-approved signal
 Pipeline position: After llm-review (final step in signal→trade pipeline).
 
 Flow:
-1. Check mode: paper vs live (FR-6.2)
+1. Check mode: paper vs live
 2. For paper mode: simulate order fill, log to DB
 3. For live mode:
    a. Build order params (symbol, qty, type, price, SL)
-   b. Place primary order via Kite API (FR-6.1)
+   b. Place primary order via Kite API
    c. Place stop-loss order simultaneously
-   d. Track order lifecycle: placed → open → filled/rejected (FR-6.4)
-   e. On failure: retry with exponential backoff (FR-6.6)
-   f. Record slippage: expected vs actual fill price (FR-6.7)
-4. Respect Kite rate limits: 10 req/s (FR-6.8)
+   d. Track order lifecycle: placed → open → filled/rejected
+   e. On failure: retry with exponential backoff
+   f. Record slippage: expected vs actual fill price
+4. Respect Kite rate limits: 10 req/s
 5. Log full execution details for audit trail
 6. Emit trade event for predict-track and position-monitor
 7. Send Telegram alert (trade_entry)
@@ -50,7 +49,7 @@ class TradeExecuteSkill(SkillBase):
             return await self._execute_live(signal)
 
     async def _execute_paper(self, signal: dict[str, Any]) -> SkillResult:
-        """Simulate order execution for paper trading (FR-6.2).
+        """Simulate order execution for paper trading.
 
         Applies configurable simulated slippage from execution.paper_slippage_pct.
         Uses fresh LTP when available for realistic fill simulation.
@@ -156,7 +155,7 @@ class TradeExecuteSkill(SkillBase):
                     product=product,
                 )
 
-                # FR-6.4: Track order status, handle partial fills
+                # Track order status, handle partial fills
                 await asyncio.sleep(0.5)  # brief wait for fill
                 order_status = await self.ctx.broker.get_order_status(order_id)
 
@@ -188,7 +187,7 @@ class TradeExecuteSkill(SkillBase):
 
                 actual_qty = filled_qty if filled_qty > 0 else signal["position_size"]
 
-                # Compute slippage (FR-6.7)
+                # Compute slippage
                 fill_price = order_status.get("average_price", signal["entry_price"])
                 slippage = abs(fill_price - signal["entry_price"])
 

@@ -1,7 +1,6 @@
 """yfinance market data provider (fallback, daily/EOD).
 
 Yahoo Finance via .NS suffix. 20 years history. Fragile rate limits.
-See REQUIREMENTS.md FR-2.1b.
 """
 
 import asyncio

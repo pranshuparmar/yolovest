@@ -2,7 +2,6 @@
 
 Implements all 7 LLMBase methods using the google-genai SDK.
 Uses structured JSON output with Pydantic schema parsing.
-See REQUIREMENTS.md Section 8 for method signatures.
 """
 
 import asyncio
@@ -27,7 +26,7 @@ logger = logging.getLogger(__name__)
 class GeminiLLM(LLMBase):
     """Concrete LLM using Google Gemini API.
 
-    Uses Pro model for complex analysis, Flash for routine checks (NFR-6).
+    Uses Pro model for complex analysis, Flash for routine checks.
     """
 
     def __init__(

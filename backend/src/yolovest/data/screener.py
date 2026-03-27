@@ -1,4 +1,4 @@
-"""Screener.in fundamental data scraper (FR-2.4).
+"""Screener.in fundamental data scraper.
 
 Fetches PE, PB, debt-to-equity, promoter holdings, and quarterly results
 for NSE stocks from Screener.in's public pages.

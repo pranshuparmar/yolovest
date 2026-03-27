@@ -1,7 +1,7 @@
 """SQLite database layer with WAL mode and migration support.
 
 Implements DatabaseProtocol from context.py. Uses aiosqlite for async access.
-Schema versioned via numbered SQL migration files in migrations/ directory (FR-10.1).
+Schema versioned via numbered SQL migration files in migrations/ directory.
 """
 
 import json
@@ -57,7 +57,7 @@ class Database:
         return self._conn
 
     # ------------------------------------------------------------------
-    # Migration Runner (FR-10.1)
+    # Migration Runner
     # ------------------------------------------------------------------
 
     async def _run_migrations(self) -> None:
@@ -375,7 +375,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
-    # Audit Log (NFR-5)
+    # Audit Log
     # ------------------------------------------------------------------
 
     async def log_audit(
@@ -414,7 +414,7 @@ class Database:
         await self.conn.commit()
 
     # ------------------------------------------------------------------
-    # Pre-market Data (Phase 2, FR-2.10)
+    # Pre-market Data
     # ------------------------------------------------------------------
 
     async def upsert_premarket(self, data: dict[str, Any]) -> None:
@@ -461,7 +461,7 @@ class Database:
         return dict[str, Any](row) if row else {}
 
     # ------------------------------------------------------------------
-    # Sentiment (Phase 2, FR-2.7)
+    # Sentiment
     # ------------------------------------------------------------------
 
     async def upsert_sentiment(self, symbol: str, result: SentimentResult) -> None:
@@ -499,7 +499,7 @@ class Database:
         )
 
     # ------------------------------------------------------------------
-    # News Articles (Phase 2, FR-2.13)
+    # News Articles
     # ------------------------------------------------------------------
 
     async def upsert_news_articles(self, articles: list[NewsArticle]) -> int:
@@ -570,7 +570,7 @@ class Database:
         return results
 
     # ------------------------------------------------------------------
-    # Economic Calendar (FR-2.6)
+    # Economic Calendar
     # ------------------------------------------------------------------
 
     async def upsert_economic_events(self, events: list[dict[str, Any]]) -> int:
@@ -652,7 +652,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
-    # Signals (Phase 2, FR-4.5)
+    # Signals
     # ------------------------------------------------------------------
 
     async def insert_signal(self, signal: dict[str, Any]) -> None:
@@ -712,7 +712,7 @@ class Database:
         return {row[0]: row[1] for row in rows}
 
     # ------------------------------------------------------------------
-    # Fundamentals (Phase 2, FR-2.4)
+    # Fundamentals
     # ------------------------------------------------------------------
 
     async def upsert_fundamentals(self, symbol: str, data: dict[str, Any]) -> None:
@@ -738,7 +738,7 @@ class Database:
         await self.conn.commit()
 
     # ------------------------------------------------------------------
-    # NSE Universe (Phase 2, FR-3.1)
+    # NSE Universe
     # ------------------------------------------------------------------
 
     async def get_nse_universe(self) -> list[dict[str, Any]]:
@@ -767,7 +767,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
-    # Model Versions (Phase 2, FR-7.7)
+    # Model Versions
     # ------------------------------------------------------------------
 
     async def save_model_version(
@@ -833,7 +833,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
-    # Training Data (Phase 2, FR-7.4)
+    # Training Data
     # ------------------------------------------------------------------
 
     async def get_training_dataset(self) -> dict[str, Any]:
@@ -854,7 +854,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
-    # Failure Analysis (Phase 2, FR-7.6)
+    # Failure Analysis
     # ------------------------------------------------------------------
 
     async def store_failure_analysis(self, analysis: object) -> None:
@@ -877,7 +877,7 @@ class Database:
         await self.conn.commit()
 
     # ------------------------------------------------------------------
-    # Portfolio State (Phase 3, FR-5.1)
+    # Portfolio State
     # ------------------------------------------------------------------
 
     async def get_portfolio_state(self) -> dict[str, Any]:
@@ -920,7 +920,7 @@ class Database:
             if sector:
                 sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
-        # FR-9.1: total_capital = initial + all realized PnL
+        # total_capital = initial + all realized PnL
         cursor = await self.conn.execute(
             "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE pnl IS NOT NULL"
         )
@@ -999,7 +999,7 @@ class Database:
         }
 
     # ------------------------------------------------------------------
-    # Stock Sector (Phase 3, FR-5.13)
+    # Stock Sector
     # ------------------------------------------------------------------
 
     async def get_stock_sector(self, symbol: str) -> str | None:
@@ -1011,7 +1011,7 @@ class Database:
         return row[0] if row and row[0] else None
 
     # ------------------------------------------------------------------
-    # LLM Review Log (Phase 3, FR-5.11)
+    # LLM Review Log
     # ------------------------------------------------------------------
 
     async def log_llm_review(
@@ -1021,7 +1021,7 @@ class Database:
         reasoning: str,
         adjusted_size: int | None = None,
     ) -> None:
-        """Log an LLM trade review for audit trail (FR-8.8)."""
+        """Log an LLM trade review for audit trail."""
         await self.conn.execute(
             "INSERT INTO llm_reviews (trade_id, decision, reasoning, adjusted_size) "
             "VALUES (?, ?, ?, ?)",
@@ -1035,7 +1035,7 @@ class Database:
         await self.conn.commit()
 
     # ------------------------------------------------------------------
-    # Sector Rotation (Phase 3, FR-3.5)
+    # Sector Rotation
     # ------------------------------------------------------------------
 
     async def get_sector_rotation(self) -> dict[str, Any]:
@@ -1063,7 +1063,7 @@ class Database:
         return {"strong": strong, "weak": weak, "sectors": sectors}
 
     # ------------------------------------------------------------------
-    # Today's Trades (Phase 3, FR-5)
+    # Today's Trades
     # ------------------------------------------------------------------
 
     async def get_todays_trades(self) -> list[dict[str, Any]]:
@@ -1091,7 +1091,7 @@ class Database:
         }
 
     # ------------------------------------------------------------------
-    # Trade Management (Phase 3, FR-6)
+    # Trade Management
     # ------------------------------------------------------------------
 
     async def insert_trade(self, trade: dict[str, Any]) -> str:
@@ -1161,7 +1161,7 @@ class Database:
         await self.conn.commit()
 
     # ------------------------------------------------------------------
-    # Predictions (Phase 4, FR-7.1)
+    # Predictions
     # ------------------------------------------------------------------
 
     async def insert_prediction(self, prediction: dict[str, Any]) -> str:
@@ -1257,7 +1257,7 @@ class Database:
         await self.conn.commit()
 
     async def refresh_prediction_scoreboard(self) -> None:
-        """Rebuild the prediction scoreboard (FR-7.3).
+        """Rebuild the prediction scoreboard.
 
         Aggregates prediction accuracy by symbol, model version, timeframe, and overall.
         """
@@ -1358,7 +1358,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
-    # Weekly Data (Phase 4, FR-8.5)
+    # Weekly Data
     # ------------------------------------------------------------------
 
     async def get_weekly_trades(self) -> list[dict[str, Any]]:
@@ -1416,7 +1416,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
-    # Reports (Phase 4, FR-8.4/8.5)
+    # Reports
     # ------------------------------------------------------------------
 
     async def store_report(self, report: dict[str, Any]) -> None:
@@ -1453,7 +1453,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
-    # Dashboard Queries (Phase 5, FR-8)
+    # Dashboard Queries
     # ------------------------------------------------------------------
 
     async def get_trades_history(
@@ -1463,7 +1463,7 @@ class Database:
         symbol: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Get trade history with optional filters (FR-8.7)."""
+        """Get trade history with optional filters."""
         query = "SELECT * FROM trades WHERE 1=1"
         params: list[Any] = []
 
@@ -1485,7 +1485,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     async def get_equity_curve(self, days: int = 30) -> list[dict[str, Any]]:
-        """Compute daily equity curve from closed trades (FR-8.1).
+        """Compute daily equity curve from closed trades.
 
         Returns a list of {date, cumulative_pnl, trade_count} entries.
         """
@@ -1517,7 +1517,7 @@ class Database:
         return curve
 
     async def get_trade_detail(self, trade_id: str) -> dict[str, Any] | None:
-        """Get full trade detail with reasoning chain (FR-8.3).
+        """Get full trade detail with reasoning chain.
 
         Returns trade + linked signal, LLM review, prediction, and audit entries.
         """
@@ -1576,7 +1576,7 @@ class Database:
         end_date: str | None = None,
         limit: int = 30,
     ) -> list[dict[str, Any]]:
-        """Get historical reports with optional filters (FR-8.7)."""
+        """Get historical reports with optional filters."""
         query = "SELECT * FROM reports WHERE 1=1"
         params: list[Any] = []
 
@@ -1609,11 +1609,11 @@ class Database:
         return result
 
     # ------------------------------------------------------------------
-    # Backup & Retention (FR-10.2, FR-10.3)
+    # Backup & Retention
     # ------------------------------------------------------------------
 
     async def backup(self, backup_dir: str, model_dir: str | None = None) -> str:
-        """Create a timestamped backup of the database and model artifacts (FR-10.2).
+        """Create a timestamped backup of the database and model artifacts.
 
         Args:
             backup_dir: Directory to store backup files.
@@ -1659,7 +1659,7 @@ class Database:
         news_days: int = 180,
         economic_events_days: int = 365,
     ) -> dict[str, Any]:
-        """Delete data older than retention periods (FR-10.3)."""
+        """Delete data older than retention periods."""
         from datetime import timedelta
 
         now = now_ist()
@@ -2158,7 +2158,7 @@ class Database:
         return backups
 
     # ------------------------------------------------------------------
-    # Slippage Stats (FR-6.7)
+    # Slippage Stats
     # ------------------------------------------------------------------
 
     async def get_slippage_stats(
@@ -2229,7 +2229,7 @@ class Database:
         }
 
     # ------------------------------------------------------------------
-    # LLM Review Accuracy (FR-7.8)
+    # LLM Review Accuracy
     # ------------------------------------------------------------------
 
     async def get_llm_review_accuracy(
@@ -2291,7 +2291,7 @@ class Database:
     async def get_audit_log(
         self, limit: int = 50, action_type: str | None = None
     ) -> list[dict[str, Any]]:
-        """Get recent audit log entries (FR-8.8)."""
+        """Get recent audit log entries."""
         if action_type:
             cursor = await self.conn.execute(
                 "SELECT * FROM audit_log WHERE action_type LIKE ? "
@@ -2307,7 +2307,7 @@ class Database:
         return [dict[str, Any](row) for row in rows]
 
     # ------------------------------------------------------------------
-    # Agent Memory Persistence (FR-1.5)
+    # Agent Memory Persistence
     # ------------------------------------------------------------------
 
     async def get_memory(self, namespace: str, key: str) -> dict[str, Any] | None:

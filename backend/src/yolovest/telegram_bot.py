@@ -1,9 +1,9 @@
 """Telegram bot for YoloVest.
 
 Handles:
-- Real-time trade alerts (FR-8.6)
-- Kill switch commands: /stop, /kill, /resume (FR-5.14)
-- Daily auth token flow: /auth <request_token> (FR-6.3)
+- Real-time trade alerts
+- Kill switch commands: /stop, /kill, /resume
+- Daily auth token flow: /auth <request_token>
 - Status commands: /status, /pnl, /positions
 
 Uses python-telegram-bot async API. Runs as a background task
@@ -247,7 +247,7 @@ class TelegramBot:
         await update.message.reply_html("\n".join(lines))
 
     async def _cmd_stop(self, update: Any, context: Any) -> None:
-        """Handle /stop — pause trading (FR-5.14)."""
+        """Handle /stop — pause trading."""
         from yolovest.skills.kill_switch import KillSwitchSkill
 
         skill = KillSwitchSkill(self._ctx)
@@ -261,7 +261,7 @@ class TelegramBot:
         )
 
     async def _cmd_kill(self, update: Any, context: Any) -> None:
-        """Handle /kill — square off everything (FR-5.14)."""
+        """Handle /kill — square off everything."""
         from yolovest.skills.kill_switch import KillSwitchSkill
 
         skill = KillSwitchSkill(self._ctx)
@@ -275,7 +275,7 @@ class TelegramBot:
         )
 
     async def _cmd_resume(self, update: Any, context: Any) -> None:
-        """Handle /resume — resume trading (FR-5.14)."""
+        """Handle /resume — resume trading."""
         from yolovest.skills.kill_switch import KillSwitchSkill
 
         skill = KillSwitchSkill(self._ctx)
@@ -286,7 +286,7 @@ class TelegramBot:
         await update.message.reply_html(f"<b>RESUMED</b>\n{status}")
 
     async def _cmd_auth(self, update: Any, context: Any) -> None:
-        """Handle /auth <request_token> — daily Kite authentication (FR-6.3)."""
+        """Handle /auth <request_token> — daily Kite authentication."""
         args = context.args
         if not args:
             await update.message.reply_text(

@@ -1,7 +1,6 @@
 """Zerodha Kite Connect broker implementation.
 
 Execution only (free tier, no market data). Supports paper + live modes.
-See REQUIREMENTS.md FR-6.1, FR-6.2, FR-6.3, FR-6.8.
 """
 
 import asyncio
@@ -39,7 +38,7 @@ class ZerodhaBroker(BrokerBase):
         self._access_token: str | None = None
         self._kite: Any = None
         self._db = db  # For persisting access token across restarts
-        # Rate limiter: 8 concurrent to stay under Kite's 10 req/s (FR-6.8)
+        # Rate limiter: 8 concurrent to stay under Kite's 10 req/s
         self._rate_limiter = asyncio.Semaphore(8)
         # Paper mode state
         self._paper_orders: dict[str, dict[str, Any]] = {}
@@ -50,7 +49,7 @@ class ZerodhaBroker(BrokerBase):
         return f"https://kite.zerodha.com/connect/login?v=3&api_key={self._api_key}"
 
     # ------------------------------------------------------------------
-    # Authentication (FR-6.3)
+    # Authentication
     # ------------------------------------------------------------------
 
     async def authenticate(self, request_token: str) -> bool:
@@ -132,7 +131,7 @@ class ZerodhaBroker(BrokerBase):
             return False
 
     # ------------------------------------------------------------------
-    # Order Placement (FR-6.1, FR-6.2, FR-6.6)
+    # Order Placement
     # ------------------------------------------------------------------
 
     async def place_order(
@@ -164,7 +163,7 @@ class ZerodhaBroker(BrokerBase):
         price: float | None,
         trigger_price: float | None,
     ) -> str:
-        """Simulate order placement in paper mode (FR-6.2)."""
+        """Simulate order placement in paper mode."""
         self._paper_order_counter += 1
         order_id = f"PAPER-{self._paper_order_counter}"
 
@@ -203,7 +202,7 @@ class ZerodhaBroker(BrokerBase):
         price: float | None,
         trigger_price: float | None,
     ) -> str:
-        """Place order via Kite API with retry (FR-6.6)."""
+        """Place order via Kite API with retry."""
         if self._kite is None:
             raise RuntimeError("Not authenticated")
 
@@ -306,7 +305,7 @@ class ZerodhaBroker(BrokerBase):
         return {"available": {"cash": 0}, "equity": {"available": {"cash": 0}}}
 
     # ------------------------------------------------------------------
-    # Modify SL Order (FR-5.8)
+    # Modify SL Order
     # ------------------------------------------------------------------
 
     async def modify_sl_order(
@@ -336,7 +335,7 @@ class ZerodhaBroker(BrokerBase):
         return True
 
     # ------------------------------------------------------------------
-    # Retry Helper (FR-6.6)
+    # Retry Helper
     # ------------------------------------------------------------------
 
     async def _retry_api_call(self, fn: Any) -> Any:

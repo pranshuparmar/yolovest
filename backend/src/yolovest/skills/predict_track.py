@@ -44,7 +44,7 @@ class PredictTrackSkill(SkillBase):
             return await self._score_elapsed_predictions()
 
     async def _run_failure_analysis(self) -> bool:
-        """FR-7.6: Use Gemini to analyze recent prediction failures."""
+        """Use Gemini to analyze recent prediction failures."""
         try:
             outcomes = await self.ctx.db.get_prediction_outcomes()
             failures = [p for p in outcomes if not p.get("direction_correct")]
@@ -64,7 +64,7 @@ class PredictTrackSkill(SkillBase):
             return False
 
     async def _log_prediction(self, signal: dict[str, Any], trade_id: str | None) -> SkillResult:
-        """FR-7.1: Log a new prediction."""
+        """Log a new prediction."""
         prediction = {
             "symbol": signal["symbol"],
             "predicted_direction": signal["signal_type"],
@@ -92,7 +92,7 @@ class PredictTrackSkill(SkillBase):
         )
 
     async def _score_elapsed_predictions(self) -> SkillResult:
-        """FR-7.2, FR-7.3: Score predictions whose timeframe has elapsed."""
+        """Score predictions whose timeframe has elapsed."""
         pending = await self.ctx.db.get_unscored_predictions()
         scored = 0
         correct = 0
@@ -150,11 +150,11 @@ class PredictTrackSkill(SkillBase):
             except Exception as e:
                 logger.warning("Failed to score prediction %s: %s", pred.get("id"), e)
 
-        # FR-7.3: Update scoreboard
+        # Update scoreboard
         if scored > 0:
             await self.ctx.db.refresh_prediction_scoreboard()
 
-        # FR-7.6: Trigger failure analysis when enough failures accumulate
+        # Trigger failure analysis when enough failures accumulate
         failure_analysis_run = False
         failures_count = scored - correct
         if failures_count >= 5:

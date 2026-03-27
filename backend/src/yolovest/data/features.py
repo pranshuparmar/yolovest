@@ -1,7 +1,7 @@
 """Feature engineering — technical indicator computation.
 
 Pure functions: list[OHLCVBar] → dict[str, float].
-All indicators from FR-4.1, toggleable via strategy.indicators config.
+All indicators toggleable via strategy.indicators config.
 No DB or network calls — easy to test.
 """
 

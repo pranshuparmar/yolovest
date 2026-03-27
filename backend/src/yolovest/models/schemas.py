@@ -1,7 +1,7 @@
 """Pydantic v2 data models for inter-skill data contracts.
 
 All data exchange between skills uses these typed models.
-No raw dicts between skills. See REQUIREMENTS.md Section 8.
+No raw dicts between skills.
 """
 
 from datetime import datetime, timedelta
@@ -95,7 +95,7 @@ class Position(BaseModel):
 class PortfolioState(BaseModel):
     """Current snapshot of the portfolio for risk checks."""
 
-    total_capital: float = Field(ge=0)  # cash + unrealized (FR-5.1 definition)
+    total_capital: float = Field(ge=0)  # cash + unrealized
     available_cash: float = Field(ge=0)
     exposure_pct: float = Field(ge=0.0, le=1.0)
     open_positions: int = Field(default=0, ge=0)
@@ -217,12 +217,12 @@ def _parse_holding_period(period_str: str) -> timedelta:
 
 
 # ---------------------------------------------------------------------------
-# News & Intelligence (Phase 2)
+# News & Intelligence
 # ---------------------------------------------------------------------------
 
 
 class EconomicEvent(BaseModel):
-    """An economic calendar event (FR-2.6): RBI/Fed policy, earnings, GDP."""
+    """An economic calendar event: RBI/Fed policy, earnings, GDP."""
 
     event_date: str  # YYYY-MM-DD
     event_type: str  # "monetary_policy", "earnings", "gdp", "trade_data"
@@ -244,7 +244,7 @@ class EconomicEvent(BaseModel):
 
 
 class NewsArticle(BaseModel):
-    """A single news article from any source, with dedup hash (FR-2.13)."""
+    """A single news article from any source, with dedup hash."""
 
     headline: str
     source: str  # "moneycontrol", "et_markets", "livemint", "nse", "google"
@@ -277,7 +277,7 @@ class MLPrediction(BaseModel):
 
 
 class BacktestResult(BaseModel):
-    """Results from walk-forward backtesting (FR-4.6)."""
+    """Results from walk-forward backtesting."""
 
     sharpe_ratio: float
     max_drawdown_pct: float

@@ -1,6 +1,5 @@
 """Skill: square-off — Auto square-off intraday positions at EOD.
 
-Covers: FR-5.9, FR-5.9a, FR-5.10
 Trigger: CRON at market_hours.square_off time (default 15:15 IST)
 Pipeline position: Runs near market close, independent of signal pipeline.
 
@@ -22,7 +21,7 @@ from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 
 def compute_transaction_costs(entry_price: float, exit_price: float, quantity: int) -> float:
-    """Compute Zerodha transaction costs for a round-trip trade (FR-9.2).
+    """Compute Zerodha transaction costs for a round-trip trade.
 
     Includes: brokerage (₹20 or 0.03% per leg), STT (0.025% sell side),
     stamp duty, GST, exchange fees (~0.01% combined).
@@ -87,7 +86,7 @@ class SquareOffSkill(SkillBase):
                 order_status = await self.ctx.broker.get_order_status(exit_order_id)
                 exit_price = order_status.get("average_price")
 
-                # Compute PnL with transaction costs (FR-9.2)
+                # Compute PnL with transaction costs
                 qty = pos["quantity"]
                 entry = pos["entry_price"]
                 if pos["signal_type"] == "BUY":

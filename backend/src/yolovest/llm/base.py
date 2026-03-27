@@ -1,7 +1,6 @@
 """Abstract LLM interface (ABC).
 
 All LLM implementations (Gemini, etc.) extend LLMBase.
-See REQUIREMENTS.md Section 8 for the 6 core methods + ping().
 """
 
 from abc import ABC, abstractmethod
