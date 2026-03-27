@@ -521,12 +521,13 @@ def create_app(ctx: AppContext) -> FastAPI:
         # --- Gemini LLM ---
         # Don't ping on page load (wastes quota and blocks for 20+s on 429).
         # Just report config status; user can click "Test Connection" to verify.
-        gemini_configured = bool(getattr(ctx.config.llm, "api_key", ""))
+        llm_enabled = getattr(ctx.config.llm, "enabled", False)
         gemini_api_key = getattr(ctx.config.llm, "api_key", "")
-        gemini_unexpanded = gemini_api_key.startswith("${")
+        gemini_configured = bool(gemini_api_key) and not gemini_api_key.startswith("${")
         results["gemini"] = {
-            "configured": gemini_configured and not gemini_unexpanded,
-            "connected": gemini_configured and not gemini_unexpanded,  # assume OK if configured
+            "enabled": llm_enabled,
+            "configured": gemini_configured,
+            "connected": llm_enabled and gemini_configured,
             "model": getattr(ctx.config.llm, "model", ""),
         }
 
