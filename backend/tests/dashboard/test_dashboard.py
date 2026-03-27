@@ -335,3 +335,15 @@ class TestDryRunDiagnostics:
         assert diag["ml_available"] is False
         assert diag["filter_counts"]["ml_unavailable"] == 1
         assert "warning" in data
+
+    def test_dry_run_delete(self, client, auth_headers, dashboard_ctx):
+        dashboard_ctx.db.delete_dry_run = AsyncMock(return_value=3)
+
+        resp = client.delete("/api/dry-run/abc123", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["run_id"] == "abc123"
+        assert data["deleted"] == 3
+        dashboard_ctx.db.delete_dry_run.assert_called_once_with("abc123")

@@ -1440,6 +1440,16 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Score a dry-run against actual next-day market data."""
         return await ctx.db.score_dry_run(run_id)
 
+    @app.delete("/api/dry-run/{run_id}")
+    async def delete_dry_run(
+        run_id: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete a dry-run and all its signals."""
+        deleted = await ctx.db.delete_dry_run(run_id)
+        logger.info("Dry-run %s deleted (%d signals removed)", run_id, deleted)
+        return {"success": True, "run_id": run_id, "deleted": deleted}
+
     def _model_dir() -> str:
         return getattr(ctx.config.strategy, "model_dir", "./models")
 

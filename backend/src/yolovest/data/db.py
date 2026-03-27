@@ -1801,6 +1801,15 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](r) for r in rows]
 
+    async def delete_dry_run(self, run_id: str) -> int:
+        """Delete all signals for a specific dry-run."""
+        cursor = await self.conn.execute(
+            "DELETE FROM dry_run_results WHERE run_id = ?",
+            (run_id,),
+        )
+        await self.conn.commit()
+        return cursor.rowcount
+
     async def score_dry_run(self, run_id: str) -> dict[str, Any]:
         """Score a dry-run against actual next-day OHLCV data.
 

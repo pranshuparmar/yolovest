@@ -323,6 +323,9 @@ export const api = {
   scoreDryRun: (runId: string) =>
     apiFetch<{ scored: number; not_found: number }>(`/api/dry-run/${runId}/score`, { method: "POST" }),
 
+  deleteDryRun: (runId: string) =>
+    apiFetch<{ success: boolean; deleted: number }>(`/api/dry-run/${runId}`, { method: "DELETE" }),
+
   listSkills: () =>
     apiFetch<{ name: string; description: string; trigger: string; schedule: string | null }[]>(
       "/api/skills",

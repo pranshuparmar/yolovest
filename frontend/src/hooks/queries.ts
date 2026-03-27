@@ -590,3 +590,13 @@ export function useScoreDryRun() {
     },
   });
 }
+
+export function useDeleteDryRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.deleteDryRun,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["dry-run-history"] });
+    },
+  });
+}

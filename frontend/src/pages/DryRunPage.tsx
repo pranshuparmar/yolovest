@@ -5,6 +5,7 @@ import {
   useRunDryRun,
   useRunSkill,
   useScoreDryRun,
+  useDeleteDryRun,
 } from "../hooks/queries";
 import clsx from "clsx";
 
@@ -34,6 +35,7 @@ export function DryRunPage() {
   const runDryRun = useRunDryRun();
   const runSkill = useRunSkill();
   const scoreDryRun = useScoreDryRun();
+  const deleteDryRun = useDeleteDryRun();
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const { data: signals, isLoading: detailLoading } =
     useDryRunDetail(selectedRun);
@@ -189,7 +191,7 @@ export function DryRunPage() {
                     <td className="py-2 px-4 text-right text-gray-400 text-xs">
                       {formatDate(run.created_at)}
                     </td>
-                    <td className="py-2 px-4 text-center">
+                    <td className="py-2 px-4 text-center space-x-1">
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -202,6 +204,18 @@ export function DryRunPage() {
                         className="px-2 py-1 rounded text-xs bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-30 transition-colors"
                       >
                         {scoreDryRun.isPending ? "..." : "Score"}
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (selectedRun === run.run_id) setSelectedRun(null);
+                          deleteDryRun.mutate(run.run_id);
+                        }}
+                        disabled={deleteDryRun.isPending}
+                        className="px-2 py-1 rounded text-xs bg-red-600 hover:bg-red-700 text-white disabled:opacity-30 transition-colors"
+                        title="Delete this dry run"
+                      >
+                        {deleteDryRun.isPending ? "..." : "Delete"}
                       </button>
                     </td>
                   </tr>
