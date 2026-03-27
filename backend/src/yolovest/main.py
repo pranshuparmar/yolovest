@@ -442,9 +442,11 @@ async def async_main(args: argparse.Namespace) -> None:
     cron_task = asyncio.create_task(_start_cron_scheduler(cron_scheduler))
 
     # Start
+    import os
+    domain = os.environ.get("DOMAIN")
     dashboard_url = (
-        config.dashboard.public_url
-        or f"http://{config.dashboard.host}:{config.dashboard.port}"
+        f"https://{domain}" if domain
+        else f"http://{config.dashboard.host}:{config.dashboard.port}"
     )
 
     await ctx.notify.send(

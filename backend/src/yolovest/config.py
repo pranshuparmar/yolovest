@@ -254,7 +254,6 @@ class DashboardConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8080
     password: str = "yolovest"  # basic password auth
-    public_url: str | None = None  # e.g. "https://yolovest.example.com/" — used in logs/Telegram
 
 
 class TelegramAlertsConfig(BaseModel):

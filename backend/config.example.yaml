@@ -128,7 +128,7 @@ reports:
 dashboard:
   host: "0.0.0.0"
   port: 8080                          # internal API port (nginx proxies to this in Docker)
-  # public_url: "https://yolovest.example.com/"  # shown in logs + Telegram (optional)
+  # Dashboard URL in logs/Telegram is derived from DOMAIN env var (e.g. DOMAIN=yolovest.example.com)
 
 notifications:
   telegram:
