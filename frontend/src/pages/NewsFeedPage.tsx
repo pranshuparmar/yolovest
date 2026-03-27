@@ -282,7 +282,7 @@ export function NewsFeedPage() {
                               href={article.url}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="text-xs text-gray-500 hover:text-emerald-400 transition-colors"
+                              className="text-xs text-gray-500 hover:text-blue-400 transition-colors"
                               title="Open original article"
                             >
                               &#8599;

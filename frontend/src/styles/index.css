@@ -2,185 +2,387 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Light theme overrides — proper contrast for readability */
+/* ============================================================
+   Light theme overrides — GitHub light-inspired
+   ============================================================ */
 html.light {
   --tw-bg-opacity: 1;
 }
 
 html.light body {
-  background-color: #f1f5f9;
-  color: #0f172a;
+  background-color: #f6f8fa;
+  color: #1f2328;
 }
 
+/* ---- Background surfaces ---- */
 html.light .bg-gray-950 {
-  background-color: #f1f5f9;
+  background-color: #f6f8fa;
 }
 
 html.light .bg-gray-900 {
   background-color: #ffffff;
 }
 
+html.light .bg-gray-850 {
+  background-color: #ffffff;
+}
+
+html.light .bg-gray-900\/50 {
+  background-color: rgba(255, 255, 255, 0.85);
+}
+
+/* Inputs & secondary buttons: white with visible border */
 html.light .bg-gray-800 {
-  background-color: #e2e8f0;
+  background-color: #ffffff;
+}
+
+html.light .bg-gray-700 {
+  background-color: #f6f8fa;
+  border: 1px solid #d0d7de;
 }
 
 html.light .bg-gray-800\/50 {
-  background-color: rgba(226, 232, 240, 0.5);
+  background-color: #f6f8fa;
 }
 
 html.light .bg-gray-800\/30 {
-  background-color: rgba(226, 232, 240, 0.3);
+  background-color: rgba(246, 248, 250, 0.6);
 }
 
+/* ---- Borders ---- */
 html.light .border-gray-800 {
-  border-color: #cbd5e1;
+  border-color: #d0d7de;
 }
 
 html.light .border-gray-800\/50 {
-  border-color: rgba(203, 213, 225, 0.5);
+  border-color: rgba(208, 215, 222, 0.6);
 }
 
 html.light .border-gray-700 {
-  border-color: #94a3b8;
+  border-color: #d0d7de;
 }
 
+html.light .border-emerald-800 {
+  border-color: rgba(26, 127, 55, 0.4);
+}
+
+html.light .border-red-800 {
+  border-color: rgba(207, 34, 46, 0.4);
+}
+
+html.light .border-amber-800 {
+  border-color: rgba(154, 103, 0, 0.4);
+}
+
+html.light .border-red-900\/50 {
+  border-color: rgba(207, 34, 46, 0.25);
+}
+
+/* ---- Text colors ---- */
 html.light .text-gray-100 {
-  color: #0f172a;
+  color: #1f2328;
 }
 
 html.light .text-gray-200 {
-  color: #1e293b;
+  color: #1f2328;
 }
 
 html.light .text-gray-300 {
-  color: #334155;
+  color: #32383f;
 }
 
 html.light .text-gray-400 {
-  color: #475569;
+  color: #59636e;
 }
 
 html.light .text-gray-500 {
-  color: #64748b;
+  color: #656d76;
 }
 
 html.light .text-gray-600 {
-  color: #94a3b8;
+  color: #8b949e;
 }
 
-/* Colored text needs stronger contrast in light mode */
+/* Colored text — stronger contrast for light backgrounds */
 html.light .text-emerald-400 {
-  color: #059669;
+  color: #1a7f37;
+}
+
+html.light .text-emerald-500 {
+  color: #1a7f37;
 }
 
 html.light .text-red-400 {
-  color: #dc2626;
+  color: #cf222e;
+}
+
+html.light .text-red-500 {
+  color: #cf222e;
 }
 
 html.light .text-amber-400 {
-  color: #d97706;
+  color: #9a6700;
 }
 
 html.light .text-blue-400 {
-  color: #2563eb;
+  color: #0969da;
+}
+
+html.light .text-blue-500 {
+  color: #0969da;
 }
 
 html.light .text-purple-400 {
-  color: #7c3aed;
+  color: #8250df;
 }
 
 html.light .text-cyan-400 {
-  color: #0891b2;
+  color: #1b7c83;
 }
 
-/* Colored backgrounds need adjustment for light mode */
+html.light .text-orange-400 {
+  color: #bc4c00;
+}
+
+html.light .text-pink-400 {
+  color: #bf3989;
+}
+
+/* ---- Colored badges & tinted backgrounds ---- */
 html.light .bg-emerald-900\/40 {
-  background-color: rgba(5, 150, 105, 0.12);
+  background-color: rgba(26, 127, 55, 0.08);
+}
+
+html.light .bg-emerald-900\/30 {
+  background-color: rgba(26, 127, 55, 0.07);
+}
+
+html.light .bg-emerald-900\/20 {
+  background-color: rgba(26, 127, 55, 0.06);
 }
 
 html.light .bg-red-900\/40 {
-  background-color: rgba(220, 38, 38, 0.12);
+  background-color: rgba(207, 34, 46, 0.08);
 }
 
-html.light .bg-amber-900\/40 {
-  background-color: rgba(217, 119, 6, 0.12);
+html.light .bg-red-900\/30 {
+  background-color: rgba(207, 34, 46, 0.07);
 }
 
-html.light .bg-blue-900\/40 {
-  background-color: rgba(37, 99, 235, 0.12);
-}
-
-html.light .bg-purple-900\/40 {
-  background-color: rgba(124, 58, 237, 0.12);
-}
-
-html.light .bg-cyan-900\/40 {
-  background-color: rgba(8, 145, 178, 0.12);
+html.light .bg-red-900\/20 {
+  background-color: rgba(207, 34, 46, 0.06);
 }
 
 html.light .bg-red-900\/60 {
-  background-color: rgba(220, 38, 38, 0.18);
+  background-color: rgba(207, 34, 46, 0.12);
 }
 
+html.light .bg-amber-900\/40 {
+  background-color: rgba(154, 103, 0, 0.08);
+}
+
+html.light .bg-amber-900\/20 {
+  background-color: rgba(154, 103, 0, 0.06);
+}
+
+html.light .bg-blue-900\/40 {
+  background-color: rgba(9, 105, 218, 0.08);
+}
+
+html.light .bg-blue-900\/30 {
+  background-color: rgba(9, 105, 218, 0.06);
+}
+
+html.light .bg-purple-900\/40 {
+  background-color: rgba(130, 80, 223, 0.08);
+}
+
+html.light .bg-cyan-900\/40 {
+  background-color: rgba(27, 124, 131, 0.08);
+}
+
+/* ---- Solid colored buttons ---- */
+html.light .bg-emerald-600 {
+  background-color: #1a7f37;
+}
+
+html.light .bg-emerald-400 {
+  background-color: #1a7f37;
+}
+
+html.light .bg-amber-600 {
+  background-color: #9a6700;
+}
+
+html.light .bg-amber-400 {
+  background-color: #9a6700;
+}
+
+html.light .bg-red-600 {
+  background-color: #cf222e;
+}
+
+html.light .bg-red-700 {
+  background-color: #a40e26;
+}
+
+html.light .bg-red-400 {
+  background-color: #cf222e;
+}
+
+html.light .bg-blue-500 {
+  background-color: #0969da;
+}
+
+/* ---- Form inputs ---- */
 html.light input,
 html.light select {
-  background-color: #f1f5f9;
-  border-color: #94a3b8;
-  color: #0f172a;
+  background-color: #ffffff;
+  border-color: #d0d7de;
+  color: #1f2328;
 }
 
 html.light input::placeholder {
-  color: #94a3b8;
+  color: #6e7781;
 }
 
+html.light .placeholder-gray-500::placeholder {
+  color: #6e7781;
+}
+
+/* ---- Hover states ---- */
 html.light .hover\:bg-gray-800:hover {
-  background-color: #cbd5e1;
+  background-color: #eaeef2;
 }
 
 html.light .hover\:bg-gray-800\/30:hover {
-  background-color: rgba(203, 213, 225, 0.3);
+  background-color: rgba(234, 238, 242, 0.5);
+}
+
+html.light .hover\:bg-gray-800\/50:hover {
+  background-color: rgba(234, 238, 242, 0.7);
 }
 
 html.light .hover\:bg-gray-700:hover {
-  background-color: #94a3b8;
+  background-color: #eaeef2;
+}
+
+html.light .hover\:bg-gray-600:hover {
+  background-color: #eaeef2;
+}
+
+html.light .hover\:bg-emerald-700:hover {
+  background-color: #116329;
+}
+
+html.light .hover\:bg-emerald-500:hover {
+  background-color: #1a7f37;
+}
+
+html.light .hover\:bg-emerald-800\/50:hover {
+  background-color: rgba(26, 127, 55, 0.1);
+}
+
+html.light .hover\:bg-emerald-800\/60:hover {
+  background-color: rgba(26, 127, 55, 0.12);
+}
+
+html.light .hover\:bg-red-700:hover {
+  background-color: #a40e26;
+}
+
+html.light .hover\:bg-red-800:hover {
+  background-color: #82071e;
+}
+
+html.light .hover\:bg-red-800\/50:hover {
+  background-color: rgba(207, 34, 46, 0.1);
+}
+
+html.light .hover\:bg-amber-700:hover {
+  background-color: #7a4f01;
 }
 
 html.light .hover\:text-gray-200:hover {
-  color: #1e293b;
+  color: #1f2328;
 }
 
 html.light .hover\:text-gray-300:hover {
-  color: #334155;
+  color: #32383f;
+}
+
+html.light .hover\:text-blue-400:hover {
+  color: #0969da;
 }
 
 html.light .hover\:text-emerald-400:hover {
-  color: #059669;
+  color: #1a7f37;
 }
 
 html.light .hover\:border-gray-700:hover {
-  border-color: #94a3b8;
+  border-color: #afb8c1;
 }
 
-/* Active nav in light mode */
-html.light .bg-emerald-900\/40.text-emerald-400 {
-  background-color: rgba(5, 150, 105, 0.12);
-  color: #059669;
+/* ---- Focus states ---- */
+html.light .focus\:border-blue-500:focus {
+  border-color: #0969da;
 }
 
-/* Recharts tooltip override for light mode */
+html.light .focus\:border-emerald-600:focus {
+  border-color: #1a7f37;
+}
+
+/* ---- Disabled states ---- */
+html.light .disabled\:bg-gray-700:disabled {
+  background-color: #eaeef2;
+  border-color: #d0d7de;
+}
+
+html.light .disabled\:text-gray-500:disabled {
+  color: #8b949e;
+}
+
+/* ---- Active nav ---- */
+html.light .bg-blue-900\/30.text-blue-400 {
+  background-color: rgba(9, 105, 218, 0.08);
+  color: #0969da;
+}
+
+/* ---- Recharts ---- */
 html.light .recharts-tooltip-wrapper .recharts-default-tooltip {
   background-color: #ffffff !important;
-  border-color: #cbd5e1 !important;
+  border-color: #d0d7de !important;
+  color: #1f2328 !important;
 }
 
-/* Dark mode form elements — ensure visibility */
+html.light .recharts-text {
+  fill: #656d76;
+}
+
+/* ---- Shadows ---- */
+html.light .shadow-xl {
+  --tw-shadow: 0 20px 25px -5px rgba(31, 35, 40, 0.08), 0 8px 10px -6px rgba(31, 35, 40, 0.06);
+}
+
+/* ---- Light mode form color scheme ---- */
+html.light select,
+html.light input[type="date"],
+html.light input[type="number"] {
+  color-scheme: light;
+}
+
+/* ============================================================
+   Dark mode
+   ============================================================ */
 html.dark select,
 html.dark input[type="date"],
 html.dark input[type="number"] {
   color-scheme: dark;
 }
 
-/* Scrollbar styling */
+/* ============================================================
+   Scrollbar
+   ============================================================ */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -191,14 +393,18 @@ html.dark input[type="number"] {
 }
 
 ::-webkit-scrollbar-thumb {
-  background-color: #2d2d2d;
+  background-color: #30363d;
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background-color: #555555;
+  background-color: #484f58;
 }
 
 html.light ::-webkit-scrollbar-thumb {
-  background-color: #94a3b8;
+  background-color: #afb8c1;
+}
+
+html.light ::-webkit-scrollbar-thumb:hover {
+  background-color: #8b949e;
 }

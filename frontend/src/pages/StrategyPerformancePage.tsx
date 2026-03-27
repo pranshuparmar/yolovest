@@ -4,6 +4,7 @@ import {
 } from "recharts";
 import clsx from "clsx";
 import type { PerformanceRow } from "../types/api";
+import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -55,6 +56,8 @@ function PerfTable({ rows, labelKey }: { rows: PerformanceRow[]; labelKey: strin
 
 export function StrategyPerformancePage() {
   const { data, isLoading } = useStrategyPerformance();
+  const ct = useChartTheme();
+  const tooltipStyle = useTooltipStyle();
 
   if (isLoading) return <div className="h-96 animate-pulse bg-gray-900 rounded-lg" />;
   if (!data) return <p className="text-gray-500">No performance data</p>;
@@ -76,13 +79,13 @@ export function StrategyPerformancePage() {
           <h3 className="text-sm font-medium text-gray-400 mb-3">PnL by Entry Hour</h3>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={hourData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2a2c37" />
-              <XAxis dataKey="hour" tick={{ fontSize: 10, fill: "#6e7288" }} />
-              <YAxis tick={{ fontSize: 10, fill: "#6e7288" }} />
-              <Tooltip contentStyle={{ backgroundColor: "#2a2c37", border: "1px solid #353847", borderRadius: "8px", fontSize: "12px" }} />
+              <CartesianGrid strokeDasharray="3 3" stroke={ct.grid} />
+              <XAxis dataKey="hour" tick={{ fontSize: 10, fill: ct.tick }} />
+              <YAxis tick={{ fontSize: 10, fill: ct.tick }} />
+              <Tooltip contentStyle={tooltipStyle} />
               <Bar dataKey="pnl" name="PnL">
                 {hourData.map((d, i) => (
-                  <Cell key={i} fill={d.pnl >= 0 ? "#a4cc78" : "#f38e82"} />
+                  <Cell key={i} fill={d.pnl >= 0 ? "#3fb950" : "#f85149"} />
                 ))}
               </Bar>
             </BarChart>

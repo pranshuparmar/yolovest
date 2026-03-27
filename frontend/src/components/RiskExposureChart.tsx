@@ -6,18 +6,19 @@ import {
   ResponsiveContainer,
   Tooltip,
 } from "recharts";
+import { useTooltipStyle } from "../hooks/useChartTheme";
 
 const COLORS = [
-  "#a4cc78",
-  "#78cfe2",
-  "#f9cc6c",
-  "#f38e82",
-  "#c7a4e0",
-  "#f9967b",
-  "#78cfe2",
-  "#f9967b",
-  "#78cfe2",
-  "#a4cc78",
+  "#58a6ff", // blue
+  "#3fb950", // green
+  "#d29922", // amber
+  "#f85149", // coral
+  "#bc8cff", // purple
+  "#f0883e", // orange
+  "#39d2c0", // teal
+  "#f778ba", // pink
+  "#79c0ff", // light blue
+  "#56d364", // light green
 ];
 
 function fmt(n: number, d = 2) {
@@ -29,6 +30,7 @@ function fmt(n: number, d = 2) {
 
 export function RiskExposureChart() {
   const { data, isLoading } = useRiskExposure();
+  const tooltipStyle = useTooltipStyle();
 
   if (isLoading || !data) {
     return (
@@ -103,12 +105,7 @@ export function RiskExposureChart() {
                   ))}
                 </Pie>
                 <Tooltip
-                  contentStyle={{
-                    backgroundColor: "#2a2c37",
-                    border: "1px solid #353847",
-                    borderRadius: "8px",
-                    fontSize: "12px",
-                  }}
+                  contentStyle={tooltipStyle}
                   formatter={(value: number) => `${value}%`}
                 />
               </PieChart>

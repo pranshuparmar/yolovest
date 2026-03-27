@@ -112,7 +112,7 @@ function GroupSection({
                 clsx(
                   "flex items-center gap-2 px-2.5 py-1.5 rounded text-sm",
                   isActive
-                    ? "bg-emerald-900/40 text-emerald-400"
+                    ? "bg-blue-900/30 text-blue-400"
                     : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
                 )
               }
@@ -169,7 +169,7 @@ export function Sidebar({
       <div className="p-3 border-b border-gray-800 flex items-center justify-between">
         {!collapsed && (
           <div>
-            <h1 className="text-base font-bold text-emerald-400">YoloVest</h1>
+            <h1 className="text-base font-bold text-blue-400">YoloVest</h1>
             <p className="text-xs text-gray-500">Trading Dashboard</p>
           </div>
         )}
@@ -220,7 +220,7 @@ export function Sidebar({
       >
         <div className="p-3 border-b border-gray-800 flex items-center justify-between">
           <div>
-            <h1 className="text-base font-bold text-emerald-400">YoloVest</h1>
+            <h1 className="text-base font-bold text-blue-400">YoloVest</h1>
             <p className="text-xs text-gray-500">Trading Dashboard</p>
           </div>
           <button

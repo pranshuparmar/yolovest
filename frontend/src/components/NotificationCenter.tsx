@@ -185,7 +185,7 @@ const typeColors: Record<string, string> = {
   report: "bg-purple-900/40 text-purple-400",
   signal: "bg-amber-900/40 text-amber-400",
   prediction: "bg-cyan-900/40 text-cyan-400",
-  skill: "bg-indigo-900/40 text-indigo-400",
+  skill: "bg-blue-900/40 text-blue-400",
   heartbeat: "bg-gray-800 text-gray-400",
   alert: "bg-red-900/40 text-red-400",
 };
@@ -201,9 +201,22 @@ export function NotificationCenter({
 }) {
   const [open, setOpen] = useState(false);
   const unread = notifications.length;
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
 
   return (
-    <div className="relative">
+    <div className="relative" ref={containerRef}>
       <button
         onClick={() => setOpen(!open)}
         className="relative text-gray-400 hover:text-gray-200 p-1"
@@ -222,7 +235,7 @@ export function NotificationCenter({
           />
         </svg>
         {unread > 0 && (
-          <span className="absolute -top-1 -right-1 w-4 h-4 bg-emerald-500 text-white text-xs rounded-full flex items-center justify-center">
+          <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 text-white text-xs rounded-full flex items-center justify-center">
             {unread > 9 ? "9+" : unread}
           </span>
         )}

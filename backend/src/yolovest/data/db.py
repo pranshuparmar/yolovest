@@ -542,8 +542,8 @@ class Database:
             query += " AND source = ?"
             params.append(source)
         if date_from:
-            query += " AND published_at >= ?"
-            params.append(date_from + "T00:00:00")
+            query += " AND DATE(SUBSTR(published_at, 1, 10)) >= ?"
+            params.append(date_from)
         query += " ORDER BY published_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         rows = await self.conn.execute_fetchall(query, tuple(params))
@@ -2150,9 +2150,9 @@ class Database:
         """Get recent audit log entries (FR-8.8)."""
         if action_type:
             cursor = await self.conn.execute(
-                "SELECT * FROM audit_log WHERE action_type = ? "
+                "SELECT * FROM audit_log WHERE action_type LIKE ? "
                 "ORDER BY timestamp_ist DESC LIMIT ?",
-                (action_type, limit),
+                (f"%{action_type}%", limit),
             )
         else:
             cursor = await self.conn.execute(

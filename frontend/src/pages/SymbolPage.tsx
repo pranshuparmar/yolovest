@@ -12,6 +12,7 @@ import {
   BarChart, Bar, CartesianGrid,
 } from "recharts";
 import clsx from "clsx";
+import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -28,6 +29,8 @@ export function SymbolPage() {
   const { data: predictions } = useSymbolPredictions(sym);
   const { data: sentiment } = useSentiment(sym);
   const { data: news } = useNews({ symbol: sym, limit: 10 });
+  const ct = useChartTheme();
+  const tooltipStyle = useTooltipStyle();
 
   const chartData = (ohlcv || []).map((b) => ({
     date: new Date(b.timestamp).toLocaleDateString("en-IN", { month: "short", day: "numeric" }),
@@ -84,15 +87,15 @@ export function SymbolPage() {
             <AreaChart data={chartData}>
               <defs>
                 <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#a4cc78" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#a4cc78" stopOpacity={0} />
+                  <stop offset="5%" stopColor="#3fb950" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#3fb950" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2a2c37" />
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#6e7288" }} />
-              <YAxis domain={["auto", "auto"]} tick={{ fontSize: 10, fill: "#6e7288" }} />
-              <Tooltip contentStyle={{ backgroundColor: "#2a2c37", border: "1px solid #353847", borderRadius: "8px", fontSize: "12px" }} />
-              <Area type="monotone" dataKey="close" stroke="#a4cc78" fill="url(#priceGrad)" strokeWidth={2} />
+              <CartesianGrid strokeDasharray="3 3" stroke={ct.grid} />
+              <XAxis dataKey="date" tick={{ fontSize: 10, fill: ct.tick }} />
+              <YAxis domain={["auto", "auto"]} tick={{ fontSize: 10, fill: ct.tick }} />
+              <Tooltip contentStyle={tooltipStyle} />
+              <Area type="monotone" dataKey="close" stroke="#3fb950" fill="url(#priceGrad)" strokeWidth={2} />
             </AreaChart>
           </ResponsiveContainer>
         )}
@@ -104,9 +107,9 @@ export function SymbolPage() {
           <h3 className="text-sm font-medium text-gray-400 mb-3">Volume</h3>
           <ResponsiveContainer width="100%" height={120}>
             <BarChart data={chartData}>
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#6e7288" }} />
-              <YAxis tick={{ fontSize: 10, fill: "#6e7288" }} />
-              <Bar dataKey="volume" fill="#78cfe2" opacity={0.6} />
+              <XAxis dataKey="date" tick={{ fontSize: 10, fill: ct.tick }} />
+              <YAxis tick={{ fontSize: 10, fill: ct.tick }} />
+              <Bar dataKey="volume" fill="#58a6ff" opacity={0.6} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -176,7 +179,7 @@ export function SymbolPage() {
           <div className="space-y-2">
             {news.map((a) => (
               <a key={a.content_hash} href={a.url} target="_blank" rel="noopener noreferrer"
-                className="block text-sm text-gray-300 hover:text-emerald-400 py-1 border-b border-gray-800/50 last:border-0">
+                className="block text-sm text-gray-300 hover:text-blue-400 py-1 border-b border-gray-800/50 last:border-0">
                 {a.headline}
                 <span className="text-xs text-gray-500 ml-2">{a.source}</span>
               </a>
@@ -192,7 +195,7 @@ export function SymbolPage() {
           <ul className="space-y-1 text-sm text-gray-300">
             {sentiment.key_drivers.map((d, i) => (
               <li key={i} className="flex items-start gap-2">
-                <span className="text-emerald-400 mt-0.5">•</span>
+                <span className="text-blue-400 mt-0.5">•</span>
                 {d}
               </li>
             ))}

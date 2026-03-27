@@ -79,7 +79,7 @@ function AuditTab() {
                   )}
                   {entry.duration_ms !== null && (
                     <span className="text-gray-600 text-xs ml-auto">
-                      {entry.duration_ms.toFixed(0)}ms
+                      {(entry.duration_ms / 1000).toFixed(1)}s
                     </span>
                   )}
                   <span className="text-gray-600 text-xs">
@@ -123,6 +123,7 @@ function ServerLogsTab() {
   const [lines, setLines] = useState(200);
   const [autoScroll, setAutoScroll] = useState(true);
   const [filter, setFilter] = useState("");
+  const [copied, setCopied] = useState(false);
   const scrollRef = useRef<HTMLPreElement>(null);
 
   const { data, isLoading } = useServerLogs(lines);
@@ -178,7 +179,25 @@ function ServerLogsTab() {
         </span>
       </div>
 
-      <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+      <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden relative">
+        {/* Copy button */}
+        {filtered.length > 0 && (
+          <button
+            onClick={() => {
+              navigator.clipboard.writeText(filtered.join("\n"));
+              setCopied(true);
+              setTimeout(() => setCopied(false), 2000);
+            }}
+            className="absolute top-2 right-2 z-10 px-2 py-1 rounded text-xs bg-gray-800 border border-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-700 transition-colors"
+            title="Copy logs to clipboard"
+          >
+            {copied ? "Copied!" : (
+              <svg className="w-3.5 h-3.5 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              </svg>
+            )}
+          </button>
+        )}
         {isLoading ? (
           <div className="h-96 animate-pulse bg-gray-800" />
         ) : (
