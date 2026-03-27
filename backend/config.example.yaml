@@ -1,6 +1,6 @@
 # YoloVest Configuration
 # Copy to config.yaml and set environment variables for secrets.
-# See REQUIREMENTS.md Section 10 for full documentation.
+# See CLAUDE.md for architecture overview and config documentation.
 
 mode: paper  # paper | live
 
