@@ -14,12 +14,16 @@ class MLBase(ABC):
     """Abstract ML model interface for trading signal generation."""
 
     @abstractmethod
-    async def predict_intraday(self, symbol: str, features: dict[str, Any]) -> MLPrediction:
+    async def predict_intraday(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction:
         """Generate an intraday trading signal for a symbol."""
         ...
 
     @abstractmethod
-    async def predict_swing(self, symbol: str, features: dict[str, Any]) -> MLPrediction:
+    async def predict_swing(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction:
         """Generate a swing trading signal for a symbol."""
         ...
 

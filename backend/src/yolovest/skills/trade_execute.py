@@ -53,8 +53,13 @@ class TradeExecuteSkill(SkillBase):
         """Simulate order execution for paper trading (FR-6.2).
 
         Applies configurable simulated slippage from execution.paper_slippage_pct.
+        Uses fresh LTP when available for realistic fill simulation.
         """
-        entry = signal["entry_price"]
+        # Use fresh LTP for realistic paper fills
+        try:
+            entry = await self.ctx.market_data.get_ltp(signal["symbol"])
+        except Exception:
+            entry = signal["entry_price"]
         slippage_pct = self.ctx.config.execution.paper_slippage_pct
         # BUY fills slightly higher, SELL fills slightly lower
         if signal["signal_type"] == "BUY":
@@ -107,6 +112,28 @@ class TradeExecuteSkill(SkillBase):
         last_error = None
         product = signal.get("product", "MIS")
 
+        # Use fresh LTP for order price
+        try:
+            order_price = await self.ctx.market_data.get_ltp(signal["symbol"])
+            drift = abs(order_price - signal["entry_price"]) / signal["entry_price"]
+            if drift > 0.02:
+                logger.warning(
+                    "trade-execute: price drift %.1f%% for %s (signal=%.2f, ltp=%.2f), rejecting",
+                    drift * 100, signal["symbol"], signal["entry_price"], order_price,
+                )
+                return SkillResult(
+                    success=True,
+                    skill_name=self.name,
+                    data={
+                        "rejected": True,
+                        "reason": f"price_drift_{drift:.1%}",
+                        "signal_price": signal["entry_price"],
+                        "current_price": order_price,
+                    },
+                )
+        except Exception:
+            order_price = signal["entry_price"]
+
         for attempt in range(cfg.max_order_retries + 1):
             try:
                 # Place primary order
@@ -115,7 +142,7 @@ class TradeExecuteSkill(SkillBase):
                     side="BUY" if signal["signal_type"] == "BUY" else "SELL",
                     quantity=signal["position_size"],
                     order_type="LIMIT",
-                    price=signal["entry_price"],
+                    price=order_price,
                     product=product,
                 )
 

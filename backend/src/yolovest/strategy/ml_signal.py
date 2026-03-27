@@ -112,16 +112,21 @@ class XGBoostSignalModel(MLBase):
     # Prediction
     # ------------------------------------------------------------------
 
-    async def predict_intraday(self, symbol: str, features: dict[str, Any]) -> MLPrediction:
+    async def predict_intraday(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction:
         """Generate intraday signal using the intraday model slot."""
-        return await self._predict(symbol, features, "intraday")
+        return await self._predict(symbol, features, "intraday", current_price=current_price)
 
-    async def predict_swing(self, symbol: str, features: dict[str, Any]) -> MLPrediction:
+    async def predict_swing(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction:
         """Generate swing signal using the swing model slot."""
-        return await self._predict(symbol, features, "swing")
+        return await self._predict(symbol, features, "swing", current_price=current_price)
 
     async def _predict(
-        self, symbol: str, features: dict[str, Any], model_type: str
+        self, symbol: str, features: dict[str, Any], model_type: str,
+        *, current_price: float | None = None,
     ) -> MLPrediction:
         model = self._get_model(model_type)
         if model is None:
@@ -174,8 +179,8 @@ class XGBoostSignalModel(MLBase):
 
         signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
 
-        # Use ATR from features for target/SL computation
-        entry_price = features.get("close", 100.0)
+        # Use fresh LTP for entry/target/SL when available, fall back to features
+        entry_price = current_price or features.get("close", 100.0)
         atr = features.get("atr_14", entry_price * 0.02)
 
         if signal_type_str == "BUY":

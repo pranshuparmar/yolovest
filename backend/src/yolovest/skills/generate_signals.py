@@ -111,17 +111,28 @@ class GenerateSignalsSkill(SkillBase):
                     logger.info("Feature computation failed for %s", symbol)
                     continue
 
-                # Use latest intraday price if available during market hours
+                # Fetch fresh LTP for accurate entry/target/SL pricing
+                current_price: float | None = None
+                try:
+                    current_price = await self.ctx.market_data.get_ltp(symbol)
+                except Exception:
+                    pass  # fall back to features["close"] in _predict()
+
+                # Use latest intraday price for feature close during market hours
                 if use_intraday:
                     intraday_bars = await self.ctx.db.get_ohlcv(symbol, "5minute", days=1)
                     if intraday_bars:
                         features["close"] = intraday_bars[-1].close
 
-                # Step 3: Run ML model
+                # Step 3: Run ML model (features for classification, current_price for entry/target/SL)
                 if use_intraday:
-                    prediction = await self.ctx.ml.predict_intraday(symbol, features)
+                    prediction = await self.ctx.ml.predict_intraday(
+                        symbol, features, current_price=current_price,
+                    )
                 else:
-                    prediction = await self.ctx.ml.predict_swing(symbol, features)
+                    prediction = await self.ctx.ml.predict_swing(
+                        symbol, features, current_price=current_price,
+                    )
 
                 # Step 4: Skip HOLD signals
                 if prediction.signal_type == "HOLD":

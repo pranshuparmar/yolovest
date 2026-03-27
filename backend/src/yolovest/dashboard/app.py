@@ -1334,7 +1334,16 @@ def create_app(ctx: AppContext) -> FastAPI:
                     })
                     continue
 
-                prediction = await ctx.ml.predict_swing(symbol, features)
+                # Fetch fresh LTP for realistic entry/target/SL
+                current_price: float | None = None
+                try:
+                    current_price = await ctx.market_data.get_ltp(symbol)
+                except Exception:
+                    pass  # fall back to features["close"] in _predict()
+
+                prediction = await ctx.ml.predict_swing(
+                    symbol, features, current_price=current_price,
+                )
                 if prediction.signal_type == "HOLD":
                     filter_counts["hold_signal"] += 1
                     rejection_details.append({

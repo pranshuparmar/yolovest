@@ -89,9 +89,13 @@ class MarketDataProtocol(Protocol):
 
 @runtime_checkable
 class MLProtocol(Protocol):
-    async def predict_intraday(self, symbol: str, features: dict[str, Any]) -> MLPrediction: ...
+    async def predict_intraday(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction: ...
 
-    async def predict_swing(self, symbol: str, features: dict[str, Any]) -> MLPrediction: ...
+    async def predict_swing(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction: ...
 
     async def train(
         self, model_type: str, x: Any, y: Any, params: dict[str, Any]

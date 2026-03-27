@@ -124,10 +124,28 @@ class RiskCheckSkill(SkillBase):
                 f"cash ₹{available_cash:,.0f} < min trade ₹{min_trade_value:,.0f}",
             )
 
-        # FR-5.1: Position sizing based on max risk per trade
-        risk_amount = capital * cfg.max_risk_per_trade_pct
+        # Validate entry price against fresh LTP
         entry = signal["entry_price"]
         sl = signal["stop_loss_price"]
+        try:
+            fresh_ltp = await self.ctx.market_data.get_ltp(signal["symbol"])
+            drift_pct = abs(fresh_ltp - entry) / entry if entry > 0 else 0
+            if drift_pct > 0.02:
+                return self._reject(
+                    signal,
+                    f"Entry price drift too high: signal=₹{entry:.2f}, "
+                    f"current=₹{fresh_ltp:.2f} ({drift_pct:.1%})",
+                )
+            if drift_pct > 0.005:
+                logger.info(
+                    "risk-check: price drift for %s: signal=%.2f, current=%.2f (%.1f%%)",
+                    signal["symbol"], entry, fresh_ltp, drift_pct * 100,
+                )
+        except Exception:
+            pass  # LTP unavailable — proceed with signal's entry_price
+
+        # FR-5.1: Position sizing based on max risk per trade
+        risk_amount = capital * cfg.max_risk_per_trade_pct
         risk_per_share = abs(entry - sl)
 
         if risk_per_share <= 0:
