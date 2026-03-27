@@ -124,7 +124,7 @@ reports:
 dashboard:
   host: "0.0.0.0"
   port: 8080                          # internal API port (nginx proxies to this in Docker)
-  # public_url: "https://yolovest.ddnsfree.com/"  # shown in logs + Telegram (optional)
+  # public_url: "https://yolovest.example.com/"  # shown in logs + Telegram (optional)
 
 notifications:
   telegram:

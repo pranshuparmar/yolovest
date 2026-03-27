@@ -72,8 +72,8 @@ services:
     networks:
       - yolovest
     environment:
-      - VIRTUAL_HOST=${DOMAIN:-yolovest.ddnsfree.com}
-      - LETSENCRYPT_HOST=${DOMAIN:-yolovest.ddnsfree.com}
+      - VIRTUAL_HOST=${DOMAIN:-yolovest.example.com}
+      - LETSENCRYPT_HOST=${DOMAIN:-yolovest.example.com}
       - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-}
     expose:
       - "80"
