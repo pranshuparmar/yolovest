@@ -1450,6 +1450,28 @@ def create_app(ctx: AppContext) -> FastAPI:
         logger.info("Dry-run %s deleted (%d signals removed)", run_id, deleted)
         return {"success": True, "run_id": run_id, "deleted": deleted}
 
+    # ------------------------------------------------------------------
+    # Symbol Quarantine
+    # ------------------------------------------------------------------
+
+    @app.get("/api/quarantined-symbols")
+    async def get_quarantined_symbols(
+        _user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Get all quarantined symbols (auto-blocked after repeated fetch failures)."""
+        return await ctx.db.get_quarantined_symbols()
+
+    @app.delete("/api/quarantined-symbols/{symbol}")
+    async def unquarantine_symbol(
+        symbol: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Remove a symbol from quarantine so it will be fetched again."""
+        removed = await ctx.db.unquarantine_symbol(symbol.upper())
+        if removed:
+            logger.info("Unquarantined symbol %s", symbol.upper())
+        return {"success": removed, "symbol": symbol.upper()}
+
     def _model_dir() -> str:
         return getattr(ctx.config.strategy, "model_dir", "./models")
 

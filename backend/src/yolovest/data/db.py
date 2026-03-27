@@ -355,6 +355,11 @@ class Database:
                     "source": "user",
                 })
 
+        # Exclude quarantined symbols
+        quarantined = await self.get_all_quarantined_symbol_set()
+        if quarantined:
+            combined = [s for s in combined if s["symbol"] not in quarantined]
+
         return combined
 
     # ------------------------------------------------------------------
@@ -716,6 +721,9 @@ class Database:
             "LEFT JOIN fundamentals f ON o.symbol = f.symbol "
             "LEFT JOIN watchlist w ON o.symbol = w.symbol "
             "WHERE o.interval = 'daily' "
+            "AND o.symbol NOT IN ("
+            "  SELECT symbol FROM quarantined_symbols WHERE quarantined_at IS NOT NULL"
+            ") "
             "GROUP BY o.symbol"
         )
         rows = await cursor.fetchall()
@@ -1741,6 +1749,96 @@ class Database:
         deleted = cursor.rowcount
         logger.info("Manual cleanup: deleted %d rows from %s (older than %d days)", deleted, table, older_than_days)
         return deleted
+
+    # ------------------------------------------------------------------
+    # Symbol Quarantine (auto-block after repeated fetch failures)
+    # ------------------------------------------------------------------
+
+    async def record_fetch_failure(self, symbol: str, error: str) -> bool:
+        """Record a data fetch failure. Returns True if symbol is now quarantined."""
+        row = await self.conn.execute(
+            "SELECT consecutive_failures FROM quarantined_symbols WHERE symbol = ?",
+            (symbol,),
+        )
+        existing = await row.fetchone()
+
+        threshold = 3
+        if existing:
+            new_count = existing[0] + 1
+            quarantined_at = (
+                "datetime('now')" if new_count >= threshold else None
+            )
+            if new_count >= threshold:
+                await self.conn.execute(
+                    "UPDATE quarantined_symbols SET "
+                    "consecutive_failures = ?, last_error = ?, "
+                    "quarantined_at = datetime('now'), updated_at = datetime('now') "
+                    "WHERE symbol = ?",
+                    (new_count, error, symbol),
+                )
+            else:
+                await self.conn.execute(
+                    "UPDATE quarantined_symbols SET "
+                    "consecutive_failures = ?, last_error = ?, "
+                    "updated_at = datetime('now') "
+                    "WHERE symbol = ?",
+                    (new_count, error, symbol),
+                )
+            await self.conn.commit()
+            return new_count >= threshold
+        else:
+            await self.conn.execute(
+                "INSERT INTO quarantined_symbols (symbol, consecutive_failures, last_error) "
+                "VALUES (?, 1, ?)",
+                (symbol, error),
+            )
+            await self.conn.commit()
+            return False
+
+    async def record_fetch_success(self, symbol: str) -> None:
+        """Reset failure counter on successful fetch."""
+        await self.conn.execute(
+            "DELETE FROM quarantined_symbols WHERE symbol = ?",
+            (symbol,),
+        )
+        await self.conn.commit()
+
+    async def is_quarantined(self, symbol: str) -> bool:
+        """Check if a symbol is quarantined."""
+        cursor = await self.conn.execute(
+            "SELECT 1 FROM quarantined_symbols "
+            "WHERE symbol = ? AND quarantined_at IS NOT NULL",
+            (symbol,),
+        )
+        return await cursor.fetchone() is not None
+
+    async def get_quarantined_symbols(self) -> list[dict[str, Any]]:
+        """Get all quarantined symbols."""
+        cursor = await self.conn.execute(
+            "SELECT symbol, consecutive_failures, last_error, "
+            "quarantined_at, updated_at "
+            "FROM quarantined_symbols WHERE quarantined_at IS NOT NULL "
+            "ORDER BY quarantined_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](r) for r in rows]
+
+    async def unquarantine_symbol(self, symbol: str) -> bool:
+        """Remove a symbol from quarantine."""
+        cursor = await self.conn.execute(
+            "DELETE FROM quarantined_symbols WHERE symbol = ?",
+            (symbol,),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def get_all_quarantined_symbol_set(self) -> set[str]:
+        """Get set of quarantined symbols for fast lookup."""
+        cursor = await self.conn.execute(
+            "SELECT symbol FROM quarantined_symbols WHERE quarantined_at IS NOT NULL"
+        )
+        rows = await cursor.fetchall()
+        return {r[0] for r in rows}
 
     # ------------------------------------------------------------------
     # Dry-Run Signal Preview

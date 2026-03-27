@@ -81,10 +81,24 @@ class IngestDataSkill(SkillBase):
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         symbols = kwargs.get("symbols") or await self._get_active_symbols()
-        results: dict[str, Any] = {"symbols_ingested": 0, "news_articles": 0, "errors": [], "cache_hits": 0}
+        results: dict[str, Any] = {
+            "symbols_ingested": 0, "news_articles": 0, "errors": [],
+            "cache_hits": 0, "quarantined": 0,
+        }
+
+        # Load quarantined symbols for fast skip
+        quarantined = await self.ctx.db.get_all_quarantined_symbol_set()
+        active_symbols = [s for s in symbols if s not in quarantined]
+        results["quarantined"] = len(symbols) - len(active_symbols)
+        if results["quarantined"] > 0:
+            logger.info(
+                "ingest-data: skipping %d quarantined symbols: %s",
+                results["quarantined"],
+                sorted(quarantined & set(symbols)),
+            )
 
         # --- OHLCV Data (primary + fallback) ---
-        for symbol in symbols:
+        for symbol in active_symbols:
             try:
                 # Skip external fetch if DB cache is fresh
                 if await self._is_cached_fresh(symbol, "daily"):
@@ -95,6 +109,8 @@ class IngestDataSkill(SkillBase):
                     daily = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=30)
                     await self.ctx.db.upsert_ohlcv(symbol, "daily", daily, "ingester")
                     results["symbols_ingested"] += 1
+                    # Reset failure counter on success
+                    await self.ctx.db.record_fetch_success(symbol)
 
                 # Intraday candles if market is open
                 if self.ctx.market_hours.is_market_hours():
@@ -110,6 +126,15 @@ class IngestDataSkill(SkillBase):
             except Exception as e:
                 results["errors"].append(f"{symbol}: {e}")
                 logger.warning("OHLCV fetch failed for %s: %s", symbol, e)
+                # Track failure — quarantine after 3 consecutive failures
+                now_quarantined = await self.ctx.db.record_fetch_failure(symbol, str(e))
+                if now_quarantined:
+                    logger.warning(
+                        "ingest-data: QUARANTINED %s after 3 consecutive failures — "
+                        "will be skipped in all pipelines until manually unblocked",
+                        symbol,
+                    )
+                    results["quarantined"] += 1
 
         # --- Check if expensive fetches should be skipped ---
         # News, fundamentals, Google Finance etc. don't change minute-to-minute.
