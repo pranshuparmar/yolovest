@@ -28,6 +28,14 @@ html.light .bg-gray-800 {
   background-color: #e2e8f0;
 }
 
+html.light .bg-gray-700 {
+  background-color: #e2e8f0;
+}
+
+html.light .bg-gray-900\/50 {
+  background-color: rgba(248, 250, 252, 0.8);
+}
+
 html.light .bg-gray-800\/50 {
   background-color: rgba(226, 232, 240, 0.5);
 }
@@ -162,6 +170,38 @@ html.light .border-red-800 {
   border-color: rgba(207, 34, 46, 0.3);
 }
 
+html.light .border-amber-800 {
+  border-color: rgba(154, 103, 0, 0.3);
+}
+
+html.light .border-red-900\/50 {
+  border-color: rgba(207, 34, 46, 0.2);
+}
+
+html.light .bg-amber-900\/20 {
+  background-color: rgba(154, 103, 0, 0.08);
+}
+
+html.light .bg-amber-600 {
+  background-color: #9a6700;
+}
+
+html.light .hover\:bg-amber-700:hover {
+  background-color: #7a4f01;
+}
+
+html.light .bg-red-700 {
+  background-color: #a40e26;
+}
+
+html.light .hover\:bg-red-800:hover {
+  background-color: #82071e;
+}
+
+html.light .focus\:border-emerald-600:focus {
+  border-color: #1a7f37;
+}
+
 html.light .bg-emerald-600 {
   background-color: #1a7f37;
 }
@@ -213,6 +253,10 @@ html.light input::placeholder {
   color: #94a3b8;
 }
 
+html.light .placeholder-gray-500::placeholder {
+  color: #94a3b8;
+}
+
 html.light .hover\:bg-gray-800:hover {
   background-color: #cbd5e1;
 }
@@ -222,7 +266,11 @@ html.light .hover\:bg-gray-800\/30:hover {
 }
 
 html.light .hover\:bg-gray-700:hover {
-  background-color: #94a3b8;
+  background-color: #cbd5e1;
+}
+
+html.light .hover\:bg-gray-600:hover {
+  background-color: #cbd5e1;
 }
 
 html.light .hover\:text-gray-200:hover {
