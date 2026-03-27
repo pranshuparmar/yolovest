@@ -14,11 +14,11 @@ Flow:
 """
 
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Any
 from yolovest.data.features import IndicatorConfig, compute_features
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
-from yolovest.timezone import IST
+from yolovest.timezone import IST, now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,16 @@ class GenerateSignalsSkill(SkillBase):
         if already_signaled:
             filter_counts["already_signaled"] = 0
 
+        # Load symbol cooldown/repeat data
+        cooldown_days = self.ctx.config.risk.symbol_cooldown_days
+        repeat_lookback = self.ctx.config.risk.symbol_repeat_lookback_days
+        repeat_min_conf = self.ctx.config.risk.symbol_repeat_min_confidence
+        recently_traded: dict[str, str] = {}
+        if repeat_lookback > 0:
+            recently_traded = await self.ctx.db.get_recently_traded_symbols(repeat_lookback)
+
+        now = now_ist()
+
         for stock in watchlist:
             symbol = stock["symbol"]
 
@@ -98,6 +108,29 @@ class GenerateSignalsSkill(SkillBase):
                     "detail": "signal or open position exists today",
                 })
                 continue
+
+            # Symbol cooldown: hard block if traded within cooldown_days
+            if symbol in recently_traded and cooldown_days > 0:
+                last_trade_str = recently_traded[symbol]
+                try:
+                    last_trade_dt = datetime.fromisoformat(last_trade_str)
+                    if last_trade_dt.tzinfo is None:
+                        last_trade_dt = last_trade_dt.replace(tzinfo=IST)
+                    days_since = (now - last_trade_dt).days
+                    if days_since < cooldown_days:
+                        filter_counts.setdefault("cooldown", 0)
+                        filter_counts["cooldown"] += 1
+                        rejection_details.append({
+                            "symbol": symbol, "reason": "cooldown",
+                            "detail": f"traded {days_since}d ago, cooldown={cooldown_days}d",
+                        })
+                        logger.info(
+                            "Cooldown for %s: traded %dd ago (cooldown=%dd)",
+                            symbol, days_since, cooldown_days,
+                        )
+                        continue
+                except (ValueError, TypeError):
+                    pass
 
             try:
                 # Step 2: Fetch OHLCV and compute features
@@ -172,7 +205,13 @@ class GenerateSignalsSkill(SkillBase):
                 }
 
                 # Step 5: Confidence filter (FR-4.8)
-                if signal["confidence_score"] >= min_confidence:
+                # Use elevated threshold for recently traded symbols
+                effective_min = min_confidence
+                is_repeat = symbol in recently_traded
+                if is_repeat and repeat_lookback > 0:
+                    effective_min = max(min_confidence, repeat_min_conf)
+
+                if signal["confidence_score"] >= effective_min:
                     filter_counts["passed"] += 1
                     await self.ctx.db.insert_signal(signal)
                     signals_generated.append(signal)
@@ -182,6 +221,22 @@ class GenerateSignalsSkill(SkillBase):
                         "confidence": prediction.confidence,
                         "entry_price": prediction.entry_price,
                     })
+                elif is_repeat and signal["confidence_score"] >= min_confidence:
+                    # Would have passed normal threshold but blocked by repeat rule
+                    filter_counts.setdefault("repeat_low_confidence", 0)
+                    filter_counts["repeat_low_confidence"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "repeat_low_confidence",
+                        "detail": (
+                            f"{prediction.signal_type} @ {prediction.confidence:.2f} "
+                            f"< {effective_min} (repeat threshold, normal={min_confidence})"
+                        ),
+                    })
+                    logger.info(
+                        "Repeat confidence filter for %s: %s @ %.2f < %.2f (repeat, normal=%.2f)",
+                        symbol, prediction.signal_type, prediction.confidence,
+                        effective_min, min_confidence,
+                    )
                 else:
                     filter_counts["low_confidence"] += 1
                     rejection_details.append({

@@ -166,6 +166,9 @@ class RiskConfig(BaseModel):
     min_confidence_score: float = Field(default=0.65, ge=0, le=1)
     max_trades_per_day: int = Field(default=10, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
+    symbol_cooldown_days: int = Field(default=1, ge=0)
+    symbol_repeat_lookback_days: int = Field(default=5, ge=0)
+    symbol_repeat_min_confidence: float = Field(default=0.80, ge=0, le=1)
     margin_usage_enabled: bool = False
     weekly_reset_day: str = "monday"
 

@@ -694,6 +694,23 @@ class Database:
         positioned = {row[0] for row in await cursor.fetchall()}
         return signaled | positioned
 
+    async def get_recently_traded_symbols(self, lookback_days: int) -> dict[str, str]:
+        """Get symbols traded in the last N days with their most recent trade date.
+
+        Returns {symbol: last_trade_date_iso} for symbols with closed trades
+        in the lookback window.
+        """
+        from datetime import timedelta
+        cutoff = (now_ist() - timedelta(days=lookback_days)).isoformat()
+        cursor = await self.conn.execute(
+            "SELECT symbol, MAX(created_at) as last_trade "
+            "FROM trades WHERE created_at >= ? "
+            "GROUP BY symbol",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        return {row[0]: row[1] for row in rows}
+
     # ------------------------------------------------------------------
     # Fundamentals (Phase 2, FR-2.4)
     # ------------------------------------------------------------------
