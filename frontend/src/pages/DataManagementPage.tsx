@@ -29,6 +29,7 @@ function formatDate(iso: string | null): string {
   if (!iso) return "--";
   try {
     return new Date(iso).toLocaleDateString("en-IN", {
+      timeZone: "Asia/Kolkata",
       day: "2-digit",
       month: "short",
       year: "numeric",
@@ -41,6 +42,7 @@ function formatDate(iso: string | null): string {
 function formatDateTime(iso: string): string {
   try {
     return new Date(iso).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
       day: "2-digit",
       month: "short",
       year: "numeric",

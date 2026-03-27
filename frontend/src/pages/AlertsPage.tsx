@@ -108,12 +108,12 @@ export function AlertsPage() {
                       {a.active ? (
                         <span className="text-emerald-400 text-xs">Active</span>
                       ) : a.triggered_at ? (
-                        <span className="text-amber-400 text-xs">Triggered {new Date(a.triggered_at).toLocaleDateString("en-IN")}</span>
+                        <span className="text-amber-400 text-xs">Triggered {new Date(a.triggered_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</span>
                       ) : (
                         <span className="text-gray-500 text-xs">Deleted</span>
                       )}
                     </td>
-                    <td className="py-2 pr-4 text-gray-500 text-xs">{new Date(a.created_at).toLocaleDateString("en-IN")}</td>
+                    <td className="py-2 pr-4 text-gray-500 text-xs">{new Date(a.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</td>
                     <td className="py-2">
                       <button onClick={() => deleteAlert.mutate(a.id)}
                         className="px-2 py-0.5 text-xs bg-gray-800 hover:bg-red-900/40 text-gray-400 hover:text-red-400 rounded transition-colors">

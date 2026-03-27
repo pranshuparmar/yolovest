@@ -280,7 +280,7 @@ export function NotificationCenter({
                       {n.message}
                     </p>
                     <p className="text-xs text-gray-600 mt-0.5">
-                      {n.timestamp.toLocaleTimeString("en-IN")}
+                      {n.timestamp.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}
                     </p>
                   </div>
                   <button

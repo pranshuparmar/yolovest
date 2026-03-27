@@ -70,6 +70,7 @@ function formatDateKey(iso: string): string {
   if (d.toDateString() === today.toDateString()) return "Today";
   if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
   return d.toLocaleDateString("en-IN", {
+    timeZone: "Asia/Kolkata",
     weekday: "short",
     day: "numeric",
     month: "short",
@@ -79,6 +80,7 @@ function formatDateKey(iso: string): string {
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
     hour: "2-digit",
     minute: "2-digit",
   });

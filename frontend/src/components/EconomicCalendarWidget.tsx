@@ -43,6 +43,7 @@ export function EconomicCalendarWidget() {
                 <p className="text-xs text-gray-500">
                   {evt.event_date
                     ? new Date(evt.event_date).toLocaleDateString("en-IN", {
+                        timeZone: "Asia/Kolkata",
                         month: "short",
                         day: "numeric",
                       })

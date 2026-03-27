@@ -20,6 +20,7 @@ function fmt(n: number | null | undefined, d = 2) {
 function formatDate(iso: string) {
   try {
     return new Date(iso).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
       day: "2-digit",
       month: "short",
       hour: "2-digit",
@@ -208,6 +209,7 @@ export function DryRunPage() {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
+                          if (!window.confirm(`Delete dry run ${run.run_id}? This cannot be undone.`)) return;
                           if (selectedRun === run.run_id) setSelectedRun(null);
                           deleteDryRun.mutate(run.run_id);
                         }}

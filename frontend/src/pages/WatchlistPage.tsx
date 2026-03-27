@@ -344,7 +344,7 @@ export function WatchlistPage() {
                         </td>
                         <td className="py-2 text-gray-500 text-xs">
                           {item.updated_at
-                            ? new Date(item.updated_at).toLocaleDateString("en-IN")
+                            ? new Date(item.updated_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })
                             : "--"}
                         </td>
                       </tr>
