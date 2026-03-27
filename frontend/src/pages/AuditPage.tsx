@@ -1,8 +1,9 @@
-import { useState } from "react";
-import { useAudit } from "../hooks/queries";
+import { useState, useRef, useEffect } from "react";
+import { useAudit, useServerLogs } from "../hooks/queries";
 import { CSVExportButton } from "../components/CSVExportButton";
+import clsx from "clsx";
 
-export function AuditPage() {
+function AuditTab() {
   const [actionType, setActionType] = useState<string | undefined>(undefined);
   const [limit, setLimit] = useState(50);
   const [expanded, setExpanded] = useState<number | null>(null);
@@ -13,15 +14,7 @@ export function AuditPage() {
   });
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Audit Log</h2>
-        <CSVExportButton
-          data={(data || []) as unknown as Record<string, unknown>[]}
-          filename={`audit-${new Date().toISOString().split("T")[0]}`}
-        />
-      </div>
-
+    <div className="space-y-4">
       <div className="flex flex-wrap gap-3 items-end">
         <div>
           <label className="block text-xs text-gray-500 mb-1">
@@ -48,6 +41,10 @@ export function AuditPage() {
             <option value={500}>500</option>
           </select>
         </div>
+        <CSVExportButton
+          data={(data || []) as unknown as Record<string, unknown>[]}
+          filename={`audit-${new Date().toISOString().split("T")[0]}`}
+        />
       </div>
 
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -118,6 +115,138 @@ export function AuditPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function ServerLogsTab() {
+  const [lines, setLines] = useState(200);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [filter, setFilter] = useState("");
+  const scrollRef = useRef<HTMLPreElement>(null);
+
+  const { data, isLoading } = useServerLogs(lines);
+
+  const logLines = data?.lines ?? [];
+  const filtered = filter
+    ? logLines.filter((l) => l.toLowerCase().includes(filter.toLowerCase()))
+    : logLines;
+
+  // Auto-scroll to bottom on new data
+  useEffect(() => {
+    if (autoScroll && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [filtered, autoScroll]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-3 items-end">
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Filter</label>
+          <input
+            type="text"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Search logs..."
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 w-full sm:w-48"
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Lines</label>
+          <select
+            value={lines}
+            onChange={(e) => setLines(Number(e.target.value))}
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100"
+          >
+            <option value={100}>100</option>
+            <option value={200}>200</option>
+            <option value={500}>500</option>
+          </select>
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={autoScroll}
+            onChange={(e) => setAutoScroll(e.target.checked)}
+            className="rounded"
+          />
+          Auto-scroll
+        </label>
+        <span className="text-xs text-gray-600">
+          {filtered.length} lines | refreshing every 5s
+        </span>
+      </div>
+
+      <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+        {isLoading ? (
+          <div className="h-96 animate-pulse bg-gray-800" />
+        ) : (
+          <pre
+            ref={scrollRef}
+            className="p-3 text-xs font-mono text-gray-400 overflow-auto max-h-[70vh] leading-relaxed"
+          >
+            {filtered.length === 0 ? (
+              <span className="text-gray-600">No log lines{filter ? " matching filter" : ""}</span>
+            ) : (
+              filtered.map((line, i) => {
+                const isWarning = line.includes("[WARNING]");
+                const isError = line.includes("[ERROR]") || line.includes("[CRITICAL]");
+                return (
+                  <div
+                    key={i}
+                    className={clsx(
+                      "py-0.5 hover:bg-gray-800/30",
+                      isError && "text-red-400",
+                      isWarning && !isError && "text-amber-400",
+                    )}
+                  >
+                    {line}
+                  </div>
+                );
+              })
+            )}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function AuditPage() {
+  const [tab, setTab] = useState<"audit" | "logs">("audit");
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-4">
+        <h2 className="text-lg font-semibold">Audit & Logs</h2>
+        <div className="flex gap-1 bg-gray-900 rounded-lg p-0.5">
+          <button
+            onClick={() => setTab("audit")}
+            className={clsx(
+              "px-3 py-1 rounded text-sm font-medium transition-colors",
+              tab === "audit"
+                ? "bg-gray-700 text-gray-100"
+                : "text-gray-500 hover:text-gray-300"
+            )}
+          >
+            Audit Log
+          </button>
+          <button
+            onClick={() => setTab("logs")}
+            className={clsx(
+              "px-3 py-1 rounded text-sm font-medium transition-colors",
+              tab === "logs"
+                ? "bg-gray-700 text-gray-100"
+                : "text-gray-500 hover:text-gray-300"
+            )}
+          >
+            Server Logs
+          </button>
+        </div>
+      </div>
+
+      {tab === "audit" ? <AuditTab /> : <ServerLogsTab />}
     </div>
   );
 }

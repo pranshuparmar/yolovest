@@ -5,7 +5,11 @@ import {
   useAuthenticateZerodha,
   useTestTelegram,
   useSendTelegram,
+  useChangePassword,
+  useUpdateCapital,
+  useSyncCapital,
 } from "../hooks/queries";
+import { useAuth } from "../hooks/useAuth";
 
 function StatusDot({ ok }: { ok: boolean }) {
   return (
@@ -72,13 +76,32 @@ export function IntegrationsPage() {
   const testTelegram = useTestTelegram();
   const sendTelegram = useSendTelegram();
 
+  const { login } = useAuth();
+  const changePassword = useChangePassword();
+  const updateCapital = useUpdateCapital();
+  const syncCapital = useSyncCapital();
+
   const [requestToken, setRequestToken] = useState("");
   const [telegramMsg, setTelegramMsg] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [capitalAmount, setCapitalAmount] = useState("");
+
+  // Check for OAuth callback result in URL params
+  const [authResult, setAuthResult] = useState<string | null>(null);
+  useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    const auth = params.get("zerodha_auth");
+    if (auth) {
+      setAuthResult(auth);
+      // Clean URL
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  });
 
   if (isLoading || !data) {
     return (
       <div className="p-6 space-y-4">
-        <h2 className="text-lg font-semibold text-gray-100">Integrations</h2>
+        <h2 className="text-lg font-semibold text-gray-100">Settings</h2>
         <div className="grid gap-4 md:grid-cols-3">
           {[1, 2, 3].map((i) => (
             <div key={i} className="h-56 bg-gray-900 rounded-lg animate-pulse" />
@@ -92,7 +115,27 @@ export function IntegrationsPage() {
 
   return (
     <div className="p-6 space-y-4">
-      <h2 className="text-lg font-semibold text-gray-100">Integrations</h2>
+      <h2 className="text-lg font-semibold text-gray-100">Settings</h2>
+
+      {authResult && (
+        <div
+          className={`rounded-lg p-3 text-sm ${
+            authResult === "success"
+              ? "bg-emerald-900/20 border border-emerald-800 text-emerald-400"
+              : "bg-red-900/20 border border-red-800 text-red-400"
+          }`}
+        >
+          {authResult === "success"
+            ? "Zerodha authenticated successfully! You can now trade."
+            : "Zerodha authentication failed. Please try again."}
+          <button
+            onClick={() => setAuthResult(null)}
+            className="ml-3 text-xs opacity-60 hover:opacity-100"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <div className="grid gap-4 md:grid-cols-3">
         {/* ---- Gemini LLM ---- */}
@@ -278,6 +321,80 @@ export function IntegrationsPage() {
               <ResultToast success={sendTelegram.data.success} error={sendTelegram.data.error} />
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Settings */}
+      <div className="grid gap-4 md:grid-cols-2">
+        {/* Password Change */}
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 flex flex-col gap-3">
+          <h3 className="font-medium text-gray-100">Dashboard Password</h3>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              placeholder="New password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-emerald-600"
+            />
+            <ActionButton
+              onClick={() => {
+                changePassword.mutate(newPassword, {
+                  onSuccess: () => {
+                    login(newPassword);
+                    setNewPassword("");
+                  },
+                });
+              }}
+              loading={changePassword.isPending}
+              variant="primary"
+            >
+              Update
+            </ActionButton>
+          </div>
+          {changePassword.data && (
+            <ResultToast success={changePassword.data.success} />
+          )}
+          {changePassword.error && (
+            <ResultToast success={false} error="Password must be at least 4 characters" />
+          )}
+        </div>
+
+        {/* Capital Management */}
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 flex flex-col gap-3">
+          <h3 className="font-medium text-gray-100">Capital</h3>
+          <div className="flex gap-2">
+            <input
+              type="number"
+              placeholder="Amount (INR)"
+              value={capitalAmount}
+              onChange={(e) => setCapitalAmount(e.target.value)}
+              className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-emerald-600"
+            />
+            <ActionButton
+              onClick={() => {
+                updateCapital.mutate(Number(capitalAmount), {
+                  onSuccess: () => setCapitalAmount(""),
+                });
+              }}
+              loading={updateCapital.isPending}
+              variant="primary"
+            >
+              Set
+            </ActionButton>
+          </div>
+          <ActionButton
+            onClick={() => syncCapital.mutate()}
+            loading={syncCapital.isPending}
+          >
+            Sync from Zerodha
+          </ActionButton>
+          {syncCapital.data && (
+            <ResultToast
+              success={syncCapital.data.success}
+              error={syncCapital.data.error}
+            />
+          )}
         </div>
       </div>
     </div>

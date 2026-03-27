@@ -100,6 +100,8 @@ export function useNotifications() {
             queryClient.invalidateQueries({ queryKey: ["watchlist"] });
             queryClient.invalidateQueries({ queryKey: ["ml-models"] });
             queryClient.invalidateQueries({ queryKey: ["storage-stats"] });
+            // Notify SkillsPage to update running state
+            window.dispatchEvent(new CustomEvent("yolovest-skill-completed", { detail: data }));
           } else if (type === "heartbeat_started") {
             addNotification("heartbeat", "Heartbeat started");
           } else if (type === "heartbeat_completed") {

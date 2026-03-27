@@ -21,6 +21,7 @@ const groups: NavGroup[] = [
       { to: "/positions", label: "Positions", icon: "P" },
       { to: "/trades", label: "Trades", icon: "T" },
       { to: "/watchlist", label: "Watchlist", icon: "W" },
+      { to: "/holdings", label: "Holdings", icon: "H" },
       { to: "/dry-run", label: "Dry Run", icon: ">" },
       { to: "/alerts", label: "Alerts", icon: "!" },
     ],
@@ -52,7 +53,7 @@ const groups: NavGroup[] = [
       { to: "/audit", label: "Audit Log", icon: "L" },
       { to: "/data", label: "Data Mgmt", icon: "B" },
       { to: "/skills", label: "Skills", icon: "K" },
-      { to: "/integrations", label: "Integrations", icon: "I" },
+      { to: "/integrations", label: "Settings", icon: "I" },
     ],
   },
 ];
@@ -159,7 +160,7 @@ export function Sidebar({
   const sidebarContent = (
     <aside
       className={clsx(
-        "bg-gray-900 border-r border-gray-800 flex flex-col h-screen transition-all duration-200 shrink-0",
+        "bg-gray-850 border-r border-gray-800 flex flex-col h-screen transition-all duration-200 shrink-0",
         // Desktop sizing
         "hidden md:flex",
         collapsed ? "md:w-14" : "md:w-52"

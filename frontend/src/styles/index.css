@@ -173,6 +173,13 @@ html.light .recharts-tooltip-wrapper .recharts-default-tooltip {
   border-color: #cbd5e1 !important;
 }
 
+/* Dark mode form elements — ensure visibility */
+html.dark select,
+html.dark input[type="date"],
+html.dark input[type="number"] {
+  color-scheme: dark;
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;
@@ -184,8 +191,12 @@ html.light .recharts-tooltip-wrapper .recharts-default-tooltip {
 }
 
 ::-webkit-scrollbar-thumb {
-  background-color: #353847;
+  background-color: #2d2d2d;
   border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #555555;
 }
 
 html.light ::-webkit-scrollbar-thumb {

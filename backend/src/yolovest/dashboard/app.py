@@ -15,7 +15,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
@@ -24,6 +24,49 @@ from yolovest.context import AppContext
 logger = logging.getLogger(__name__)
 
 security = HTTPBasic()
+
+
+def _extract_broker_capital(margins: dict[str, Any]) -> float:
+    """Extract total capital from Kite margins response.
+
+    Kite margins() returns different structures depending on the SDK version:
+    - {"equity": {"net": X, "available": {"cash": Y, ...}, "utilised": {...}}}
+    - Or a flat segment dict if called with segment="equity"
+    Handles all known variants.
+    """
+    # Try Kite's nested equity structure
+    equity = margins.get("equity", {})
+    if isinstance(equity, dict) and equity:
+        # Prefer "net" (total funds = available + used)
+        net = equity.get("net")
+        if net is not None:
+            return float(net)
+        # Fallback: available.cash + utilised.debits
+        avail = equity.get("available", {})
+        if isinstance(avail, dict):
+            cash = avail.get("cash") or avail.get("live_balance") or 0
+            used = equity.get("utilised", {}).get("debits", 0)
+            return float(cash) + float(used)
+
+    # Flat structure (segment-level response)
+    net = margins.get("net")
+    if net is not None:
+        return float(net)
+
+    avail = margins.get("available", {})
+    if isinstance(avail, dict):
+        cash = avail.get("cash") or avail.get("live_balance") or 0
+        return float(cash)
+
+    # Direct keys
+    for key in ("available_cash", "total_balance"):
+        val = margins.get(key)
+        if val is not None:
+            return float(val)
+
+    logger.warning("Could not extract capital from margins: %s", list(margins.keys()))
+    return 0.0
+
 
 # WebSocket connection manager
 _ws_clients: set[WebSocket] = set()
@@ -113,9 +156,22 @@ def create_app(ctx: AppContext) -> FastAPI:
         else "yolovest"
     )
 
+    # Mutable password container (allows runtime change)
+    # Check DB for a persisted password override (set via /api/change-password)
+    _password = {"current": dash_password}
+
+    @app.on_event("startup")
+    async def _load_persisted_password() -> None:
+        try:
+            saved_pw = await ctx.db.get_system_state("dashboard_password")
+            if saved_pw:
+                _password["current"] = saved_pw
+        except Exception:
+            pass
+
     def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)) -> str:  # noqa: B008
         """FR-8.9: Basic password protection."""
-        correct = secrets.compare_digest(credentials.password, dash_password)
+        correct = secrets.compare_digest(credentials.password, _password["current"])
         if not correct:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -130,14 +186,153 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.get("/api/portfolio")
     async def get_portfolio(user: str = Depends(verify_credentials)) -> dict[str, Any]:
-        """Portfolio overview: capital, exposure, open positions, PnL."""
+        """Portfolio overview: capital, exposure, open positions, PnL.
+
+        If broker is authenticated, syncs available funds from Zerodha.
+        """
+        # Sync capital from broker if authenticated
+        try:
+            if await ctx.broker.is_authenticated():
+                margins = await ctx.broker.get_margins()
+                if margins:
+                    broker_capital = _extract_broker_capital(margins)
+                    if broker_capital > 0:
+                        await ctx.db.set_system_state("initial_capital", str(broker_capital))
+        except Exception:
+            pass  # Broker not configured or API failed — use DB value
+
         portfolio = await ctx.db.get_portfolio_state()
         return portfolio
+
+    @app.post("/api/capital")
+    async def update_capital(
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Manually update the initial capital amount."""
+        amount = body.get("amount")
+        if amount is None or float(amount) <= 0:
+            raise HTTPException(status_code=400, detail="amount must be a positive number")
+        await ctx.db.set_system_state("initial_capital", str(float(amount)))
+        return {"success": True, "initial_capital": float(amount)}
+
+    @app.post("/api/capital/sync")
+    async def sync_capital_from_broker(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Sync capital from Zerodha broker account."""
+        try:
+            if not await ctx.broker.is_authenticated():
+                return {"success": False, "error": "Broker not authenticated"}
+            margins = await ctx.broker.get_margins()
+            if not margins:
+                return {"success": False, "error": "No margin data from broker"}
+            logger.info("Kite margins response: equity keys=%s",
+                        list(margins.get("equity", {}).keys()) if isinstance(margins.get("equity"), dict) else margins.get("equity"))
+            broker_capital = _extract_broker_capital(margins)
+            if broker_capital is None:
+                return {"success": False, "error": "Could not extract capital from margins data"}
+            await ctx.db.set_system_state("initial_capital", str(broker_capital))
+            return {"success": True, "initial_capital": broker_capital}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     @app.get("/api/positions")
     async def get_positions(user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
         """Current open positions."""
         return await ctx.db.get_open_positions()
+
+    @app.get("/api/holdings")
+    async def get_holdings(_user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
+        """Zerodha portfolio holdings (CNC/delivery stocks held overnight).
+
+        These are external holdings — may include stocks not traded by YoloVest.
+        Returns empty list if broker is not authenticated.
+        """
+        try:
+            if not await ctx.broker.is_authenticated():
+                return []
+            return await ctx.broker.get_holdings()
+        except Exception as e:
+            logger.warning("Failed to fetch holdings: %s", e)
+            return []
+
+    @app.post("/api/orders")
+    async def place_manual_order(
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Place a manual order (buy/sell) via the broker.
+
+        Required fields: symbol, side (BUY/SELL), quantity, order_type, product
+        Optional: price (for LIMIT orders), trigger_price (for SL orders)
+        """
+        symbol = body.get("symbol", "").strip().upper()
+        side = body.get("side", "").strip().upper()
+        quantity = int(body.get("quantity", 0))
+        order_type = body.get("order_type", "MARKET").strip().upper()
+        product = body.get("product", "CNC").strip().upper()
+        price = body.get("price")
+        trigger_price = body.get("trigger_price")
+
+        if not symbol:
+            raise HTTPException(status_code=400, detail="symbol is required")
+        if side not in ("BUY", "SELL"):
+            raise HTTPException(status_code=400, detail="side must be BUY or SELL")
+        if quantity <= 0:
+            raise HTTPException(status_code=400, detail="quantity must be > 0")
+        if product not in ("CNC", "MIS"):
+            raise HTTPException(status_code=400, detail="product must be CNC or MIS")
+        if order_type not in ("MARKET", "LIMIT", "SL", "SL-M"):
+            raise HTTPException(status_code=400, detail="order_type must be MARKET, LIMIT, SL, or SL-M")
+        if order_type == "LIMIT" and not price:
+            raise HTTPException(status_code=400, detail="price is required for LIMIT orders")
+
+        try:
+            order_id = await ctx.broker.place_order(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                order_type=order_type,
+                product=product,
+                price=float(price) if price else None,
+                trigger_price=float(trigger_price) if trigger_price else None,
+            )
+
+            # Record trade in DB
+            fill_price = float(price) if price else 0.0
+            trade = {
+                "symbol": symbol,
+                "signal_type": side,
+                "entry_price": fill_price,
+                "fill_price": fill_price,
+                "quantity": quantity,
+                "stop_loss_price": 0,
+                "target_price": 0,
+                "order_id": order_id,
+                "product": product,
+                "status": "filled" if order_type == "MARKET" else "placed",
+                "mode": ctx.config.mode,
+                "slippage": 0,
+            }
+            trade_id = await ctx.db.insert_trade(trade)
+
+            logger.info(
+                "Manual order placed: %s %s %s x%d @ %s (order_id: %s, trade_id: %s)",
+                side, symbol, order_type, quantity, price or "MARKET", order_id, trade_id,
+            )
+            await broadcast_ws("trade_executed", {
+                "symbol": symbol,
+                "signal_type": side,
+                "quantity": quantity,
+                "mode": ctx.config.mode,
+                "manual": True,
+                "trade_id": trade_id,
+            })
+            return {"success": True, "order_id": order_id, "trade_id": trade_id}
+        except Exception as e:
+            logger.warning("Manual order failed: %s", e)
+            return {"success": False, "error": str(e)}
 
     @app.get("/api/trades/today")
     async def get_todays_trades(user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
@@ -301,6 +496,19 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Recent audit log entries (FR-8.8)."""
         return await ctx.db.get_audit_log(limit=limit, action_type=action_type)
 
+    @app.get("/api/logs")
+    async def get_server_logs(
+        lines: int = Query(200, ge=1, le=500),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Recent server log lines from the in-memory buffer."""
+        from yolovest.log_buffer import get_log_buffer
+        buf = get_log_buffer()
+        if buf is None:
+            return {"lines": [], "total": 0}
+        log_lines = buf.get_lines(last_n=lines)
+        return {"lines": log_lines, "total": len(log_lines)}
+
     # ------------------------------------------------------------------
     # Integrations
     # ------------------------------------------------------------------
@@ -313,33 +521,24 @@ def create_app(ctx: AppContext) -> FastAPI:
         results: dict[str, Any] = {}
 
         # --- Gemini LLM ---
+        # Don't ping on page load (wastes quota and blocks for 20+s on 429).
+        # Just report config status; user can click "Test Connection" to verify.
         gemini_configured = bool(getattr(ctx.config.llm, "api_key", ""))
-        gemini_ok = False
-        if gemini_configured:
-            try:
-                gemini_ok = await ctx.llm.ping()
-            except Exception:
-                gemini_ok = False
+        gemini_api_key = getattr(ctx.config.llm, "api_key", "")
+        gemini_unexpanded = gemini_api_key.startswith("${")
         results["gemini"] = {
-            "configured": gemini_configured,
-            "connected": gemini_ok,
+            "configured": gemini_configured and not gemini_unexpanded,
+            "connected": gemini_configured and not gemini_unexpanded,  # assume OK if configured
             "model": getattr(ctx.config.llm, "model", ""),
         }
 
         # --- Zerodha Broker ---
         broker_configured = bool(getattr(ctx.config.broker, "api_key", ""))
-        broker_authenticated = False
+        # Quick local check — don't call kite.profile() on every page load
+        broker_authenticated = bool(
+            hasattr(ctx.broker, "_access_token") and ctx.broker._access_token
+        )
         broker_margins: dict[str, Any] | None = None
-        if broker_configured:
-            try:
-                broker_authenticated = await ctx.broker.is_authenticated()
-            except Exception:
-                broker_authenticated = False
-            if broker_authenticated:
-                try:
-                    broker_margins = await ctx.broker.get_margins()
-                except Exception:
-                    pass
         results["zerodha"] = {
             "configured": broker_configured,
             "connected": broker_authenticated,
@@ -411,6 +610,62 @@ def create_app(ctx: AppContext) -> FastAPI:
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
+    @app.get("/api/auth/zerodha/callback", response_model=None)
+    async def zerodha_oauth_callback(
+        request_token: str = Query(default=""),
+        status_param: str = Query(default="", alias="status"),
+    ) -> RedirectResponse | HTMLResponse:
+        """OAuth callback — Zerodha redirects here after user logs in.
+
+        No auth required (this is the redirect target from Kite login).
+        Extracts request_token from query params, exchanges for access_token,
+        then redirects user to the dashboard integrations page.
+        """
+        if not request_token or status_param != "success":
+            return HTMLResponse(
+                "<h3>Zerodha login failed or was cancelled.</h3>"
+                '<p><a href="/integrations">Back to Dashboard</a></p>',
+                status_code=400,
+            )
+
+        try:
+            ok = await ctx.broker.authenticate(request_token)
+            if ok:
+                logger.info("Zerodha authenticated via OAuth callback")
+                try:
+                    await ctx.notify.send("Kite authenticated successfully via dashboard.")
+                except Exception:
+                    pass
+                return RedirectResponse(url="/integrations?zerodha_auth=success")
+            else:
+                return RedirectResponse(url="/integrations?zerodha_auth=failed")
+        except Exception as e:
+            logger.warning("Zerodha OAuth callback failed: %s", e)
+            return RedirectResponse(url="/integrations?zerodha_auth=failed")
+
+    @app.post("/api/auth/zerodha/postback")
+    async def zerodha_postback(body: dict[str, Any]) -> dict[str, str]:
+        """Zerodha order postback — receives order status updates.
+
+        No auth required (called by Zerodha servers).
+        Logs the update and broadcasts to WebSocket clients.
+        """
+        order_id = body.get("order_id", "unknown")
+        order_status = body.get("status", "unknown")
+        logger.info("Zerodha postback: order=%s status=%s", order_id, order_status)
+
+        try:
+            await broadcast_ws("order_update", {
+                "order_id": order_id,
+                "status": order_status,
+                "symbol": body.get("tradingsymbol"),
+                "transaction_type": body.get("transaction_type"),
+            })
+        except Exception:
+            pass
+
+        return {"status": "ok"}
+
     @app.post("/api/integrations/telegram/test")
     async def test_telegram(
         user: str = Depends(verify_credentials),
@@ -469,12 +724,17 @@ def create_app(ctx: AppContext) -> FastAPI:
     @app.get("/api/news")
     async def get_news_feed(
         symbol: str | None = Query(None),
+        source: str | None = Query(None),
+        date_from: str | None = Query(None, description="YYYY-MM-DD"),
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Recent news articles with source attribution."""
-        articles = await ctx.db.get_news_articles(symbol=symbol, limit=limit, offset=offset)
+        articles = await ctx.db.get_news_articles(
+            symbol=symbol, source=source, date_from=date_from,
+            limit=limit, offset=offset,
+        )
         return articles
 
     @app.get("/api/sentiment/{symbol}")
@@ -1152,6 +1412,20 @@ def create_app(ctx: AppContext) -> FastAPI:
         )
         return {"success": True, **result}
 
+    @app.post("/api/change-password")
+    async def change_password(
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Change the dashboard password at runtime."""
+        new_password = body.get("new_password", "").strip()
+        if len(new_password) < 4:
+            raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+        _password["current"] = new_password
+        # Persist to DB so it survives restarts
+        await ctx.db.set_system_state("dashboard_password", new_password)
+        return {"success": True}
+
     # ------------------------------------------------------------------
     # Manual Skill Trigger
     # ------------------------------------------------------------------
@@ -1173,12 +1447,19 @@ def create_app(ctx: AppContext) -> FastAPI:
             })
         return out
 
+    # Track background skill tasks
+    _running_skills: dict[str, asyncio.Task[Any]] = {}
+
     @app.post("/api/skills/{skill_name}/run")
     async def run_skill(
         skill_name: str,
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Manually trigger a registered skill by name."""
+        """Manually trigger a registered skill by name.
+
+        Long-running skills run in the background and return immediately.
+        Results are broadcast via WebSocket when complete.
+        """
         from yolovest.skills import SKILL_REGISTRY
 
         if skill_name not in SKILL_REGISTRY:
@@ -1188,19 +1469,60 @@ def create_app(ctx: AppContext) -> FastAPI:
                 f"Available: {sorted(SKILL_REGISTRY.keys())}",
             )
 
+        # Check if already running
+        existing = _running_skills.get(skill_name)
+        if existing and not existing.done():
+            return {"success": True, "skill": skill_name, "status": "already_running"}
+
         skill_cls = SKILL_REGISTRY[skill_name]
         skill = skill_cls(ctx)
-        try:
-            result = await skill.execute()
-            return {
-                "success": result.success,
-                "skill": result.skill_name,
-                "data": result.data,
-                "error": result.error,
-            }
-        except Exception as e:
-            logger.exception("Manual skill run failed: %s", skill_name)
-            raise HTTPException(status_code=500, detail=str(e))
+
+        async def _run_in_background() -> None:
+            logger.info("Background skill started: %s", skill_name)
+            try:
+                result = await skill.safe_execute()
+                logger.info(
+                    "Background skill %s completed: success=%s, duration=%.1fms",
+                    skill_name, result.success, result.duration_ms,
+                )
+                # Audit log
+                try:
+                    await ctx.db.log_audit(
+                        action_type="manual_skill_execution",
+                        skill_name=skill_name,
+                        output_summary={
+                            "success": result.success,
+                            "duration_ms": round(result.duration_ms, 1),
+                            "error": result.error,
+                        },
+                        duration_ms=result.duration_ms,
+                    )
+                except Exception:
+                    pass
+                await broadcast_ws("skill_completed", {
+                    "skill": skill_name,
+                    "success": result.success,
+                    "duration_ms": round(result.duration_ms, 1),
+                    "error": result.error,
+                    "data": {k: v for k, v in result.data.items()
+                             if isinstance(v, (str, int, float, bool, type(None)))}
+                    if result.data else {},
+                })
+            except Exception as e:
+                logger.exception("Background skill run failed: %s", skill_name)
+                await broadcast_ws("skill_completed", {
+                    "skill": skill_name,
+                    "success": False,
+                    "error": str(e),
+                })
+            finally:
+                _running_skills.pop(skill_name, None)
+
+        import asyncio
+        task = asyncio.create_task(_run_in_background())
+        _running_skills[skill_name] = task
+
+        return {"success": True, "skill": skill_name, "status": "started"}
 
     # ------------------------------------------------------------------
     # FR-8.2: WebSocket Live Updates

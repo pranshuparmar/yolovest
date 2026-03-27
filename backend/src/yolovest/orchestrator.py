@@ -319,6 +319,21 @@ class HeartbeatOrchestrator:
             result.duration_ms,
         )
 
+        # Log to audit trail
+        try:
+            await self._ctx.db.log_audit(
+                action_type="skill_execution",
+                skill_name=name,
+                output_summary={
+                    "success": result.success,
+                    "duration_ms": round(result.duration_ms, 1),
+                    "error": result.error,
+                },
+                duration_ms=result.duration_ms,
+            )
+        except Exception:
+            pass
+
         # Broadcast skill completion to WebSocket clients
         if self._on_skill_complete is not None:
             try:
@@ -349,6 +364,9 @@ class HeartbeatOrchestrator:
         self._running = True
         self._stop_event = asyncio.Event()
         logger.info("Heartbeat orchestrator started")
+
+        # Let dashboard and other async services start before first heartbeat
+        await asyncio.sleep(2)
 
         while self._running:
             start = time.monotonic()

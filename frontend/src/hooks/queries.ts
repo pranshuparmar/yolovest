@@ -52,6 +52,26 @@ export function useTrades(params?: {
   });
 }
 
+export function useHoldings() {
+  return useQuery({
+    queryKey: ["holdings"],
+    queryFn: api.holdings,
+    staleTime: STALE_30S,
+  });
+}
+
+export function usePlaceOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.placeOrder,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["holdings"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["portfolio"] });
+    },
+  });
+}
+
 export function useTradeDetail(tradeId: string) {
   return useQuery({
     queryKey: ["trade", tradeId],
@@ -153,6 +173,14 @@ export function useAudit(params?: { limit?: number; action_type?: string }) {
   });
 }
 
+export function useServerLogs(lines = 200) {
+  return useQuery({
+    queryKey: ["server-logs", lines],
+    queryFn: () => api.serverLogs(lines),
+    refetchInterval: 5000,
+  });
+}
+
 export function useIntegrations() {
   return useQuery({
     queryKey: ["integrations"],
@@ -219,11 +247,11 @@ export function useNews(params?: { symbol?: string; limit?: number }) {
 
 const NEWS_PAGE_SIZE = 50;
 
-export function useNewsInfinite(params?: { symbol?: string }) {
+export function useNewsInfinite(params?: { symbol?: string; source?: string; date_from?: string }) {
   return useInfiniteQuery({
     queryKey: ["news-infinite", params],
     queryFn: ({ pageParam = 0 }) =>
-      api.news({ symbol: params?.symbol, limit: NEWS_PAGE_SIZE, offset: pageParam }),
+      api.news({ symbol: params?.symbol, source: params?.source, date_from: params?.date_from, limit: NEWS_PAGE_SIZE, offset: pageParam }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, _allPages, lastPageParam) =>
       lastPage.length < NEWS_PAGE_SIZE ? undefined : lastPageParam + NEWS_PAGE_SIZE,
@@ -476,6 +504,28 @@ export function useRestoreBackup() {
       qc.invalidateQueries({ queryKey: ["storage-stats"] });
       qc.invalidateQueries({ queryKey: ["ml-models"] });
     },
+  });
+}
+
+export function useChangePassword() {
+  return useMutation({
+    mutationFn: (newPassword: string) => api.changePassword(newPassword),
+  });
+}
+
+export function useUpdateCapital() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (amount: number) => api.updateCapital(amount),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["portfolio"] }),
+  });
+}
+
+export function useSyncCapital() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.syncCapital,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["portfolio"] }),
   });
 }
 

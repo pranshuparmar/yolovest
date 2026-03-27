@@ -41,6 +41,8 @@ import type {
   DryRunResult,
   DryRunSummary,
   DryRunSignal,
+  HoldingEntry,
+  ManualOrder,
 } from "../types/api";
 
 export const api = {
@@ -51,6 +53,14 @@ export const api = {
   positions: () => apiFetch<Trade[]>("/api/positions"),
 
   tradesToday: () => apiFetch<Trade[]>("/api/trades/today"),
+
+  holdings: () => apiFetch<HoldingEntry[]>("/api/holdings"),
+
+  placeOrder: (order: ManualOrder) =>
+    apiFetch<{ success: boolean; order_id?: string; error?: string }>("/api/orders", {
+      method: "POST",
+      body: JSON.stringify(order),
+    }),
 
   trades: (params?: {
     start?: string;
@@ -127,6 +137,9 @@ export const api = {
     return apiFetch<AuditEntry[]>(`/api/audit${qs ? "?" + qs : ""}`);
   },
 
+  serverLogs: (lines = 200) =>
+    apiFetch<{ lines: string[]; total: number }>(`/api/logs?lines=${lines}`),
+
   integrations: () => apiFetch<IntegrationsStatus>("/api/integrations"),
 
   pingGemini: () =>
@@ -166,9 +179,11 @@ export const api = {
     return apiFetch<EarningsEvent[]>(`/api/earnings${qs ? "?" + qs : ""}`);
   },
 
-  news: (params?: { symbol?: string; limit?: number; offset?: number }) => {
+  news: (params?: { symbol?: string; source?: string; date_from?: string; limit?: number; offset?: number }) => {
     const q = new URLSearchParams();
     if (params?.symbol) q.set("symbol", params.symbol);
+    if (params?.source) q.set("source", params.source);
+    if (params?.date_from) q.set("date_from", params.date_from);
     if (params?.limit) q.set("limit", String(params.limit));
     if (params?.offset) q.set("offset", String(params.offset));
     const qs = q.toString();
@@ -276,6 +291,23 @@ export const api = {
       `/api/restore/${filename}`,
       { method: "POST" },
     ),
+
+  changePassword: (newPassword: string) =>
+    apiFetch<{ success: boolean }>("/api/change-password", {
+      method: "POST",
+      body: JSON.stringify({ new_password: newPassword }),
+    }),
+
+  updateCapital: (amount: number) =>
+    apiFetch<{ success: boolean; initial_capital: number }>("/api/capital", {
+      method: "POST",
+      body: JSON.stringify({ amount }),
+    }),
+
+  syncCapital: () =>
+    apiFetch<{ success: boolean; initial_capital?: number; error?: string }>("/api/capital/sync", {
+      method: "POST",
+    }),
 
   resetAllData: () => apiFetch<ResetResult>("/api/reset", { method: "POST" }),
 

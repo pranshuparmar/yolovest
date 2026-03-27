@@ -4,64 +4,67 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Monokai Pro Dimmed gray scale
         gray: {
-          950: "#16171e", // page background (deepest)
-          900: "#1d1e26", // card/panel background
-          800: "#2a2c37", // borders, elevated surfaces
-          700: "#353847", // subtle hover, dividers
-          600: "#4a4e5e", // muted UI elements
-          500: "#6e7288", // comments, tertiary text
-          400: "#908e96", // secondary text
-          300: "#b0aea8", // stronger secondary text
-          200: "#c3c0bb", // primary text
-          100: "#d5d3cd", // headings, bright text
+          950: "#0a0a0a", // page background (near-black)
+          900: "#171717", // card/panel background (visible lift)
+          850: "#1f1f1f", // sidebar/header background (distinct from both)
+          800: "#2e2e2e", // borders (clearly visible)
+          700: "#404040", // hover states, dividers
+          600: "#525252", // muted UI elements
+          500: "#737373", // tertiary text
+          400: "#a3a3a3", // secondary text
+          300: "#d4d4d4", // primary text
+          200: "#e5e5e5", // headings
+          100: "#f5f5f5", // bright text
         },
-        // Monokai Pro Dimmed accent colors
         emerald: {
-          400: "#a4cc78", // green (strings) — BUY, success
-          500: "#8fb865",
-          600: "#7da352",
-          700: "#5c7a3c",
-          800: "#3a4f28",
-          900: "#2a3a1e",
+          400: "#34d399",
+          500: "#10b981",
+          600: "#059669",
+          700: "#047857",
+          800: "#065f46",
+          900: "#064e3b",
         },
         red: {
-          400: "#f38e82", // red (keywords) — SELL, error
-          500: "#e06050",
-          600: "#c44840",
-          800: "#6b2a24",
-          900: "#4a1e1a",
+          400: "#f87171",
+          500: "#ef4444",
+          600: "#dc2626",
+          800: "#991b1b",
+          900: "#7f1d1d",
         },
         amber: {
-          400: "#f9cc6c", // yellow (classes) — warning
-          500: "#e0b550",
-          600: "#c8a035",
-          800: "#5e4c1e",
-          900: "#3e3216",
+          400: "#fbbf24",
+          500: "#f59e0b",
+          600: "#d97706",
+          800: "#92400e",
+          900: "#78350f",
         },
         blue: {
-          400: "#78cfe2", // cyan/blue (functions) — info
-          600: "#4a9db3",
-          800: "#28505e",
-          900: "#1c3840",
+          400: "#60a5fa",
+          600: "#2563eb",
+          800: "#1e40af",
+          900: "#1e3a5f",
         },
         purple: {
-          400: "#c7a4e0", // purple (constants) — reports
-          600: "#9470ad",
-          800: "#4a3758",
-          900: "#352842",
+          400: "#c084fc",
+          600: "#9333ea",
+          800: "#6b21a8",
+          900: "#581c87",
         },
         cyan: {
-          400: "#78cfe2", // same as blue for Monokai coherence
-          600: "#4a9db3",
-          800: "#28505e",
-          900: "#1c3840",
+          400: "#22d3ee",
+          600: "#0891b2",
+          800: "#155e75",
+          900: "#164e63",
         },
         orange: {
-          400: "#f9967b", // orange (operators)
-          600: "#c46a50",
-          900: "#4a2a1e",
+          400: "#fb923c",
+          600: "#ea580c",
+          900: "#7c2d12",
+        },
+        indigo: {
+          400: "#818cf8",
+          900: "#312e81",
         },
       },
     },

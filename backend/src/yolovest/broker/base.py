@@ -71,6 +71,11 @@ class BrokerBase(ABC):
         """Modify the trigger price of an existing stop-loss order."""
         ...
 
+    @abstractmethod
+    async def get_holdings(self) -> list[dict[str, Any]]:
+        """Get all CNC holdings from the broker (delivery stocks held overnight)."""
+        ...
+
     def get_login_url(self) -> str:
         """Get the broker login URL for daily re-authentication."""
         return ""

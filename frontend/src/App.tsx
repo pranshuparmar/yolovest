@@ -11,6 +11,7 @@ import { PositionsPage } from "./pages/PositionsPage";
 import { TradesPage } from "./pages/TradesPage";
 import { TradeDetailPage } from "./pages/TradeDetailPage";
 import { WatchlistPage } from "./pages/WatchlistPage";
+import { HoldingsPage } from "./pages/HoldingsPage";
 import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AuditPage } from "./pages/AuditPage";
@@ -70,6 +71,7 @@ function AppRoutes() {
         <Route path="/trades" element={<TradesPage />} />
         <Route path="/trades/:tradeId" element={<TradeDetailPage />} />
         <Route path="/watchlist" element={<WatchlistPage />} />
+        <Route path="/holdings" element={<HoldingsPage />} />
         <Route path="/news" element={<NewsFeedPage />} />
         <Route path="/calendar" element={<EconomicCalendarPage />} />
         <Route path="/predictions" element={<PredictionsPage />} />

@@ -62,6 +62,19 @@ def setup_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    # Suppress verbose httpx request logs (they leak Telegram tokens and API keys)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Suppress google_genai internal logs
+    logging.getLogger("google_genai").setLevel(logging.WARNING)
+
+    # Add in-memory ring buffer for live log viewing from dashboard
+    from yolovest.log_buffer import LogBuffer
+    buffer_handler = LogBuffer(maxlen=500)
+    buffer_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logging.getLogger().addHandler(buffer_handler)
 
 
 class _StubDB:
@@ -280,10 +293,14 @@ def build_context(config: AppConfig) -> AppContext:
     )
 
     db = _build_db(config)
+    broker = _build_broker(config)
+    # Pass DB to broker for token persistence (if real broker)
+    if isinstance(broker, ZerodhaBroker):
+        broker._db = db
     return AppContext(
         config=config,
         db=cast(DatabaseProtocol, db),
-        broker=cast(BrokerProtocol, _build_broker(config)),
+        broker=cast(BrokerProtocol, broker),
         llm=cast(LLMProtocol, _build_llm(config)),
         market_data=cast(MarketDataProtocol, _build_market_data(config)),
         notify=cast(NotifierProtocol, Notifier(config)),
@@ -319,6 +336,32 @@ async def async_main(args: argparse.Namespace) -> None:
     # Initialize database if real (not stub)
     if isinstance(ctx.db, Database):
         await ctx.db.initialize()
+
+    # Restore Zerodha session from persisted access token
+    if isinstance(ctx.broker, ZerodhaBroker):
+        restored = await ctx.broker.restore_session()
+
+        # Sync capital from Zerodha if session was restored
+        if restored:
+            try:
+                margins = await ctx.broker.get_margins()
+                if margins:
+                    from yolovest.dashboard.app import _extract_broker_capital
+                    broker_capital = _extract_broker_capital(margins)
+                    if broker_capital > 0:
+                        await ctx.db.set_system_state("initial_capital", str(broker_capital))
+                        logger.info("Synced capital from Zerodha: %.2f", broker_capital)
+            except Exception as e:
+                logger.info("Could not sync capital from Zerodha: %s", e)
+
+    # Sync initial capital from config → DB (so portfolio reads the configured value)
+    if isinstance(ctx.db, Database):
+        existing = await ctx.db.get_system_state("initial_capital")
+        if not existing:
+            await ctx.db.set_system_state(
+                "initial_capital", str(ctx.config.capital.initial_amount)
+            )
+            logger.info("Set initial capital to %.0f from config", ctx.config.capital.initial_amount)
 
     # Load production ML models from disk (if any exist)
     if ctx.ml is not None:

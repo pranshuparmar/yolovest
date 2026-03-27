@@ -28,6 +28,7 @@ class ZerodhaBroker(BrokerBase):
         paper_slippage_pct: float = 0.001,
         max_retries: int = 3,
         retry_base_delay: float = 2.0,
+        db: Any = None,
     ) -> None:
         self._api_key = api_key
         self._api_secret = api_secret
@@ -37,6 +38,7 @@ class ZerodhaBroker(BrokerBase):
         self._retry_base_delay = retry_base_delay
         self._access_token: str | None = None
         self._kite: Any = None
+        self._db = db  # For persisting access token across restarts
         # Rate limiter: 8 concurrent to stay under Kite's 10 req/s (FR-6.8)
         self._rate_limiter = asyncio.Semaphore(8)
         # Paper mode state
@@ -52,21 +54,59 @@ class ZerodhaBroker(BrokerBase):
     # ------------------------------------------------------------------
 
     async def authenticate(self, request_token: str) -> bool:
-        """Exchange request_token for access_token (daily re-auth)."""
-        if self._mode == "paper":
-            self._access_token = "paper_token"
-            logger.info("Paper mode: authentication simulated")
-            return True
+        """Exchange request_token for access_token (daily re-auth).
 
+        In paper mode, tries real Kite auth first (for holdings/margins),
+        falls back to simulated auth if Kite is unavailable.
+        """
         try:
             self._kite = await asyncio.to_thread(
                 self._create_kite_session, request_token
             )
             self._access_token = self._kite.access_token
+            # Persist token for restart recovery
+            if self._db:
+                try:
+                    await self._db.set_system_state("kite_access_token", self._access_token)
+                except Exception:
+                    pass
             logger.info("Kite Connect authenticated successfully")
             return True
         except Exception:
+            if self._mode == "paper":
+                # Paper mode: Kite auth failed (no API keys or no kiteconnect),
+                # fall back to simulated auth for order simulation
+                self._access_token = "paper_token"
+                logger.info("Paper mode: using simulated auth (Kite unavailable)")
+                return True
             logger.exception("Kite authentication failed")
+            return False
+
+    async def restore_session(self) -> bool:
+        """Restore Kite session from persisted access token (after restart)."""
+        if not self._db or not self._api_key:
+            return False
+        try:
+            token = await self._db.get_system_state("kite_access_token")
+            if not token:
+                return False
+            from kiteconnect import KiteConnect
+            kite = KiteConnect(api_key=self._api_key)
+            kite.set_access_token(token)
+            # Verify the token is still valid
+            await asyncio.to_thread(kite.profile)
+            self._kite = kite
+            self._access_token = token
+            logger.info("Kite session restored from persisted token")
+            return True
+        except Exception as e:
+            logger.info("Could not restore Kite session (re-login needed): %s", e)
+            # Clear stale token
+            if self._db:
+                try:
+                    await self._db.set_system_state("kite_access_token", "")
+                except Exception:
+                    pass
             return False
 
     def _create_kite_session(self, request_token: str) -> Any:
@@ -79,11 +119,11 @@ class ZerodhaBroker(BrokerBase):
         return kite
 
     async def is_authenticated(self) -> bool:
-        if self._mode == "paper":
-            return self._access_token is not None
-
-        if self._kite is None or self._access_token is None:
+        if self._access_token is None:
             return False
+        # Paper-only mode (no real broker connection)
+        if self._kite is None:
+            return self._access_token == "paper_token"
         try:
             async with self._rate_limiter:
                 await asyncio.to_thread(self._kite.profile)
@@ -236,12 +276,34 @@ class ZerodhaBroker(BrokerBase):
             orders = await asyncio.to_thread(self._kite.orders)
         return [o for o in orders if o.get("status") in ("OPEN", "PENDING")]
 
-    async def get_margins(self) -> dict[str, Any]:
-        if self._mode == "paper":
-            return {"available": {"cash": 100_000}, "used": {"cash": 0}}
+    async def get_holdings(self) -> list[dict[str, Any]]:
+        """Get all CNC/delivery holdings from Kite.
+
+        Works in both paper and live mode — paper mode simulates trades
+        but your real Zerodha holdings are still visible.
+        """
+        if self._kite is None:
+            return []
 
         async with self._rate_limiter:
-            return await asyncio.to_thread(self._kite.margins)
+            holdings = await asyncio.to_thread(self._kite.holdings)
+        return [dict[str, Any](h) for h in holdings]
+
+    async def get_margins(self) -> dict[str, Any]:
+        """Get available margins/funds.
+
+        Uses real Kite API when authenticated (even in paper mode),
+        falls back to paper defaults when not authenticated.
+        """
+        if self._kite is not None:
+            try:
+                async with self._rate_limiter:
+                    margins = await asyncio.to_thread(self._kite.margins)
+                return margins
+            except Exception:
+                pass
+        # Fallback for unauthenticated or paper-only
+        return {"available": {"cash": 0}, "equity": {"available": {"cash": 0}}}
 
     # ------------------------------------------------------------------
     # Modify SL Order (FR-5.8)

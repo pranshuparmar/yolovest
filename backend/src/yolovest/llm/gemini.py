@@ -44,6 +44,7 @@ class GeminiLLM(LLMBase):
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._client: Any = None
+        self._rate_limited_until: float = 0  # monotonic time when rate limit expires
 
     def _get_client(self) -> Any:
         """Lazy-init Gemini client."""
@@ -64,6 +65,14 @@ class GeminiLLM(LLMBase):
         if json_mode:
             config["response_mime_type"] = "application/json"
 
+        import time as _time
+
+        # Skip immediately if we know we're rate limited
+        if _time.monotonic() < self._rate_limited_until:
+            wait = self._rate_limited_until - _time.monotonic()
+            logger.info("Gemini rate limited, skipping (%.0fs remaining)", wait)
+            raise RuntimeError(f"Gemini rate limited for {wait:.0f}s more")
+
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
             try:
@@ -76,6 +85,18 @@ class GeminiLLM(LLMBase):
                 return str(response.text)
             except Exception as e:
                 last_error = e
+                err_str = str(e)
+                # Detect 429 rate limit and extract retry delay
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    # Parse retryDelay from error message if available
+                    import re
+                    match = re.search(r"retryDelay.*?(\d+)", err_str)
+                    cooldown = int(match.group(1)) if match else 60
+                    self._rate_limited_until = _time.monotonic() + cooldown
+                    logger.warning(
+                        "Gemini 429 rate limited, cooling off for %ds", cooldown,
+                    )
+                    raise  # Don't retry 429s — waste of quota
                 delay = self._retry_base_delay * (2 ** attempt)
                 logger.warning(
                     "Gemini call failed (attempt %d/%d), retrying in %.1fs: %s",
@@ -121,8 +142,9 @@ class GeminiLLM(LLMBase):
                 model=self._flash_model,
             )
             return "ok" in result.lower()
-        except Exception:
-            logger.exception("Gemini ping failed")
+        except Exception as e:
+            # Use warning not exception to avoid noisy tracebacks on 429
+            logger.warning("Gemini ping failed: %s", type(e).__name__)
             return False
 
     # ------------------------------------------------------------------
