@@ -143,20 +143,34 @@ class XGBoostSignalModel(MLBase):
             confidence = float(probas[pred_label])
             return pred_label, confidence
 
-        pred_label, confidence = await asyncio.to_thread(_run_inference)
+        pred_label, raw_confidence = await asyncio.to_thread(_run_inference)
+        confidence = raw_confidence
 
         # Calibrate if calibrator available
         calibrator = self._get_calibrator(model_type)
         if calibrator is not None:
 
-            def _calibrate() -> float:
+            def _calibrate() -> tuple[int, float]:
                 import numpy as np
 
                 X = np.array(feature_vector)  # noqa: N806
+                cal_label = int(calibrator.predict(X)[0])
                 cal_probas = calibrator.predict_proba(X)[0]
-                return float(cal_probas[pred_label])
+                cal_confidence = float(cal_probas[cal_label])
+                return cal_label, cal_confidence
 
-            confidence = await asyncio.to_thread(_calibrate)
+            cal_label, cal_confidence = await asyncio.to_thread(_calibrate)
+
+            if cal_confidence > raw_confidence:
+                # Calibration improved confidence — use calibrated values
+                pred_label = cal_label
+                confidence = cal_confidence
+            else:
+                # Calibration compressed confidence — keep raw model output
+                logger.debug(
+                    "Calibration compressed %s confidence from %.4f to %.4f, using raw",
+                    symbol, raw_confidence, cal_confidence,
+                )
 
         signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
 

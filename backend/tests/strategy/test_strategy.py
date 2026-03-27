@@ -112,16 +112,47 @@ class TestPredictIntraday:
         with pytest.raises(RuntimeError, match="No intraday model loaded"):
             await sm.predict_intraday("RELIANCE", {"close": 100.0})
 
-    async def test_predict_with_calibrator(self, signal_model):
+    async def test_predict_with_calibrator_improving(self, signal_model):
+        """When calibrator gives higher confidence, use calibrated values."""
         mock_calibrator = MagicMock()
+        mock_calibrator.predict.return_value = np.array([2])  # BUY
         mock_calibrator.predict_proba.return_value = np.array([[0.05, 0.05, 0.90]])
         signal_model._intraday_calibrator = mock_calibrator
 
         features = {"close": 100.0, "atr": 5.0, "rsi": 55.0}
         result = await signal_model.predict_intraday("RELIANCE", features)
 
-        # Calibrated confidence should be used
+        # Calibrated confidence (0.9) > raw (0.8) — calibrated used
         assert result.confidence == 0.9
+        assert result.signal_type == "BUY"
+
+    async def test_predict_with_calibrator_compressing(self, signal_model):
+        """When calibrator compresses confidence, fall back to raw model."""
+        mock_calibrator = MagicMock()
+        mock_calibrator.predict.return_value = np.array([2])  # BUY
+        mock_calibrator.predict_proba.return_value = np.array([[0.33, 0.34, 0.33]])
+        signal_model._intraday_calibrator = mock_calibrator
+
+        features = {"close": 100.0, "atr": 5.0, "rsi": 55.0}
+        result = await signal_model.predict_intraday("RELIANCE", features)
+
+        # Calibrated confidence (0.34) < raw (0.8) — raw used
+        assert result.confidence == 0.8
+        assert result.signal_type == "BUY"
+
+    async def test_predict_calibrator_different_label(self, signal_model):
+        """When calibrator improves confidence with a different label, use calibrator's label."""
+        mock_calibrator = MagicMock()
+        mock_calibrator.predict.return_value = np.array([0])  # SELL (different from raw BUY)
+        mock_calibrator.predict_proba.return_value = np.array([[0.85, 0.05, 0.10]])
+        signal_model._intraday_calibrator = mock_calibrator
+
+        features = {"close": 100.0, "atr": 5.0, "rsi": 55.0}
+        result = await signal_model.predict_intraday("RELIANCE", features)
+
+        # Calibrated confidence (0.85) > raw (0.8) — calibrated label+confidence used
+        assert result.confidence == 0.85
+        assert result.signal_type == "SELL"
 
 
 class TestPredictSwing:

@@ -1311,6 +1311,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                         "reason": "insufficient_bars",
                         "detail": f"{len(bars)} bars < 50 required",
                     })
+                    logger.info("Dry-run: Insufficient data for %s (%d bars)", symbol, len(bars))
                     continue
 
                 features = compute_features(bars, indicator_cfg)
@@ -1321,6 +1322,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                         "reason": "feature_computation_failed",
                         "detail": "compute_features returned empty",
                     })
+                    logger.info("Dry-run: Feature computation failed for %s", symbol)
                     continue
 
                 if ctx.ml is None:
@@ -1340,6 +1342,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                         "reason": "hold_signal",
                         "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
                     })
+                    logger.info("Dry-run: HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
                     continue
 
                 if prediction.confidence < min_confidence:
@@ -1349,6 +1352,10 @@ def create_app(ctx: AppContext) -> FastAPI:
                         "reason": "low_confidence",
                         "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {min_confidence}",
                     })
+                    logger.info(
+                        "Dry-run: Low confidence for %s: %s @ %.2f < %.2f",
+                        symbol, prediction.signal_type, prediction.confidence, min_confidence,
+                    )
                     continue
 
                 filter_counts["passed"] += 1
