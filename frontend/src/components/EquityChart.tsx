@@ -8,9 +8,12 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { useEquityCurve } from "../hooks/queries";
+import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 
 export function EquityChart({ days = 30 }: { days?: number }) {
   const { data, isLoading } = useEquityCurve(days);
+  const ct = useChartTheme();
+  const tooltipStyle = useTooltipStyle();
 
   if (isLoading) {
     return (
@@ -33,21 +36,14 @@ export function EquityChart({ days = 30 }: { days?: number }) {
       </h3>
       <ResponsiveContainer width="100%" height={240}>
         <LineChart data={data}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+          <CartesianGrid strokeDasharray="3 3" stroke={ct.grid} />
           <XAxis
             dataKey="date"
-            tick={{ fill: "#8b949e", fontSize: 11 }}
+            tick={{ fill: ct.tick, fontSize: 11 }}
             tickFormatter={(v: string) => v.slice(5)}
           />
-          <YAxis tick={{ fill: "#8b949e", fontSize: 11 }} />
-          <Tooltip
-            contentStyle={{
-              backgroundColor: "#161b22",
-              border: "1px solid #30363d",
-              borderRadius: 8,
-              color: "#e6edf3",
-            }}
-          />
+          <YAxis tick={{ fill: ct.tick, fontSize: 11 }} />
+          <Tooltip contentStyle={tooltipStyle} />
           <Line
             type="monotone"
             dataKey="cumulative_pnl"

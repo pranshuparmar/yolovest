@@ -138,6 +138,70 @@ html.light .bg-blue-900\/30 {
   background-color: rgba(9, 105, 218, 0.08);
 }
 
+html.light .bg-emerald-900\/20 {
+  background-color: rgba(26, 127, 55, 0.08);
+}
+
+html.light .bg-emerald-900\/30 {
+  background-color: rgba(26, 127, 55, 0.1);
+}
+
+html.light .bg-red-900\/20 {
+  background-color: rgba(207, 34, 46, 0.08);
+}
+
+html.light .bg-red-900\/30 {
+  background-color: rgba(207, 34, 46, 0.1);
+}
+
+html.light .border-emerald-800 {
+  border-color: rgba(26, 127, 55, 0.3);
+}
+
+html.light .border-red-800 {
+  border-color: rgba(207, 34, 46, 0.3);
+}
+
+html.light .bg-emerald-600 {
+  background-color: #1a7f37;
+}
+
+html.light .hover\:bg-emerald-700:hover {
+  background-color: #116329;
+}
+
+html.light .hover\:bg-emerald-500:hover {
+  background-color: #1a7f37;
+}
+
+html.light .bg-red-600 {
+  background-color: #cf222e;
+}
+
+html.light .hover\:bg-red-700:hover {
+  background-color: #a40e26;
+}
+
+html.light .bg-blue-500 {
+  background-color: #0969da;
+}
+
+html.light .focus\:border-blue-500:focus {
+  border-color: #0969da;
+}
+
+html.light .bg-emerald-400 {
+  background-color: #1a7f37;
+}
+
+html.light .bg-red-400 {
+  background-color: #cf222e;
+}
+
+html.light .bg-amber-400 {
+  background-color: #9a6700;
+}
+
 html.light input,
 html.light select {
   background-color: #f1f5f9;
@@ -181,6 +245,42 @@ html.light .hover\:border-gray-700:hover {
   border-color: #94a3b8;
 }
 
+html.light .hover\:bg-gray-800\/50:hover {
+  background-color: rgba(226, 232, 240, 0.5);
+}
+
+html.light .disabled\:bg-gray-700:disabled {
+  background-color: #e2e8f0;
+}
+
+html.light .disabled\:text-gray-500:disabled {
+  color: #94a3b8;
+}
+
+html.light .hover\:bg-emerald-800\/50:hover {
+  background-color: rgba(26, 127, 55, 0.12);
+}
+
+html.light .hover\:bg-red-800\/50:hover {
+  background-color: rgba(207, 34, 46, 0.12);
+}
+
+html.light .hover\:bg-emerald-800\/60:hover {
+  background-color: rgba(26, 127, 55, 0.15);
+}
+
+html.light .text-emerald-500 {
+  color: #1a7f37;
+}
+
+html.light .text-red-500 {
+  color: #cf222e;
+}
+
+html.light .text-blue-500 {
+  color: #0969da;
+}
+
 /* Active nav in light mode */
 html.light .bg-blue-900\/30.text-blue-400 {
   background-color: rgba(9, 105, 218, 0.1);
@@ -191,6 +291,24 @@ html.light .bg-blue-900\/30.text-blue-400 {
 html.light .recharts-tooltip-wrapper .recharts-default-tooltip {
   background-color: #ffffff !important;
   border-color: #cbd5e1 !important;
+  color: #1f2328 !important;
+}
+
+/* Recharts label text in light mode */
+html.light .recharts-text {
+  fill: #656d76;
+}
+
+/* Shadows for light mode — more visible */
+html.light .shadow-xl {
+  --tw-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+}
+
+/* Light mode color scheme for form controls */
+html.light select,
+html.light input[type="date"],
+html.light input[type="number"] {
+  color-scheme: light;
 }
 
 /* Dark mode form elements — ensure visibility */

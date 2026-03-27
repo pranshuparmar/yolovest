@@ -8,8 +8,12 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import type { SlippageStats } from "../types/api";
+import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 
 export function SlippageChart({ data }: { data: SlippageStats }) {
+  const ct = useChartTheme();
+  const tooltipStyle = useTooltipStyle();
+
   const chartData = Object.entries(data.by_symbol).map(([symbol, stats]) => ({
     symbol,
     avg: stats.avg_slippage,
@@ -43,23 +47,16 @@ export function SlippageChart({ data }: { data: SlippageStats }) {
       {chartData.length > 0 && (
         <ResponsiveContainer width="100%" height={200}>
           <BarChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+            <CartesianGrid strokeDasharray="3 3" stroke={ct.grid} />
             <XAxis
               dataKey="symbol"
-              tick={{ fill: "#8b949e", fontSize: 10 }}
+              tick={{ fill: ct.tick, fontSize: 10 }}
               angle={-45}
               textAnchor="end"
               height={60}
             />
-            <YAxis tick={{ fill: "#8b949e", fontSize: 11 }} />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: "#161b22",
-                border: "1px solid #30363d",
-                borderRadius: 8,
-                color: "#e6edf3",
-              }}
-            />
+            <YAxis tick={{ fill: ct.tick, fontSize: 11 }} />
+            <Tooltip contentStyle={tooltipStyle} />
             <Bar dataKey="avg" fill="#d29922" name="Avg Slippage" />
           </BarChart>
         </ResponsiveContainer>

@@ -12,6 +12,7 @@ import {
   BarChart, Bar, CartesianGrid,
 } from "recharts";
 import clsx from "clsx";
+import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -28,6 +29,8 @@ export function SymbolPage() {
   const { data: predictions } = useSymbolPredictions(sym);
   const { data: sentiment } = useSentiment(sym);
   const { data: news } = useNews({ symbol: sym, limit: 10 });
+  const ct = useChartTheme();
+  const tooltipStyle = useTooltipStyle();
 
   const chartData = (ohlcv || []).map((b) => ({
     date: new Date(b.timestamp).toLocaleDateString("en-IN", { month: "short", day: "numeric" }),
@@ -88,10 +91,10 @@ export function SymbolPage() {
                   <stop offset="95%" stopColor="#3fb950" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#8b949e" }} />
-              <YAxis domain={["auto", "auto"]} tick={{ fontSize: 10, fill: "#8b949e" }} />
-              <Tooltip contentStyle={{ backgroundColor: "#161b22", border: "1px solid #30363d", borderRadius: "8px", fontSize: "12px" }} />
+              <CartesianGrid strokeDasharray="3 3" stroke={ct.grid} />
+              <XAxis dataKey="date" tick={{ fontSize: 10, fill: ct.tick }} />
+              <YAxis domain={["auto", "auto"]} tick={{ fontSize: 10, fill: ct.tick }} />
+              <Tooltip contentStyle={tooltipStyle} />
               <Area type="monotone" dataKey="close" stroke="#3fb950" fill="url(#priceGrad)" strokeWidth={2} />
             </AreaChart>
           </ResponsiveContainer>
@@ -104,8 +107,8 @@ export function SymbolPage() {
           <h3 className="text-sm font-medium text-gray-400 mb-3">Volume</h3>
           <ResponsiveContainer width="100%" height={120}>
             <BarChart data={chartData}>
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#8b949e" }} />
-              <YAxis tick={{ fontSize: 10, fill: "#8b949e" }} />
+              <XAxis dataKey="date" tick={{ fontSize: 10, fill: ct.tick }} />
+              <YAxis tick={{ fontSize: 10, fill: ct.tick }} />
               <Bar dataKey="volume" fill="#58a6ff" opacity={0.6} />
             </BarChart>
           </ResponsiveContainer>

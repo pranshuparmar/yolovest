@@ -4,6 +4,7 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import clsx from "clsx";
+import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 
 function fmt(n: number | null | undefined, d = 2) {
   if (n == null) return "0";
@@ -13,6 +14,8 @@ function fmt(n: number | null | undefined, d = 2) {
 export function ExecutionQualityPage() {
   const [days, setDays] = useState(30);
   const { data, isLoading } = useExecutionQuality(days);
+  const ct = useChartTheme();
+  const tooltipStyle = useTooltipStyle();
 
   if (isLoading) return <div className="h-96 animate-pulse bg-gray-900 rounded-lg" />;
   if (!data) return <p className="text-gray-500">No execution data</p>;
@@ -64,10 +67,10 @@ export function ExecutionQualityPage() {
           <h3 className="text-sm font-medium text-gray-400 mb-3">Avg Slippage by Entry Hour</h3>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={hourData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
-              <XAxis dataKey="hour" tick={{ fontSize: 10, fill: "#8b949e" }} />
-              <YAxis tick={{ fontSize: 10, fill: "#8b949e" }} />
-              <Tooltip contentStyle={{ backgroundColor: "#161b22", border: "1px solid #30363d", borderRadius: "8px", fontSize: "12px" }} />
+              <CartesianGrid strokeDasharray="3 3" stroke={ct.grid} />
+              <XAxis dataKey="hour" tick={{ fontSize: 10, fill: ct.tick }} />
+              <YAxis tick={{ fontSize: 10, fill: ct.tick }} />
+              <Tooltip contentStyle={tooltipStyle} />
               <Bar dataKey="avg" name="Avg Slippage" fill="#d29922" />
             </BarChart>
           </ResponsiveContainer>
