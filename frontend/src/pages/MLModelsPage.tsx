@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useMLModels, usePromoteModel } from "../hooks/queries";
 import clsx from "clsx";
 import type { MLModelInfo } from "../types/api";
@@ -191,6 +192,7 @@ function ComparisonRow({ shadow, production }: { shadow: MLModelInfo; production
 export function MLModelsPage() {
   const { data, isLoading } = useMLModels();
   const promote = usePromoteModel();
+  const [promotingVersion, setPromotingVersion] = useState<string | null>(null);
 
   const productionModels = data?.production || {};
   const shadowModels = data?.shadow || [];
@@ -250,15 +252,16 @@ export function MLModelsPage() {
                 type={model.model_type || "unknown"}
                 isShadow
                 prodModel={productionModels[model.model_type || ""]}
-                onPromote={() =>
-                  model.model_type &&
-                  model.version &&
-                  promote.mutate({
-                    modelType: model.model_type,
-                    version: model.version,
-                  })
-                }
-                isPromoting={promote.isPending}
+                onPromote={() => {
+                  if (model.model_type && model.version) {
+                    setPromotingVersion(model.version);
+                    promote.mutate(
+                      { modelType: model.model_type, version: model.version },
+                      { onSettled: () => setPromotingVersion(null) }
+                    );
+                  }
+                }}
+                isPromoting={promote.isPending && promotingVersion === model.version}
               />
             ))}
           </div>

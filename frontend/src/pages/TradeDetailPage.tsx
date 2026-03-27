@@ -207,7 +207,7 @@ export function TradeDetailPage() {
                 </span>
                 <span className="text-gray-400 font-medium">{entry.action_type}</span>
                 {entry.skill_name && <span className="text-gray-600">[{entry.skill_name}]</span>}
-                {entry.duration_ms !== null && <span className="text-gray-600">{entry.duration_ms.toFixed(0)}ms</span>}
+                {entry.duration_ms !== null && <span className="text-gray-600">{(entry.duration_ms / 1000).toFixed(1)}s</span>}
               </div>
             ))}
           </div>
