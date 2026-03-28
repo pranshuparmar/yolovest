@@ -35,14 +35,48 @@ class Database:
     # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
-        """Open connection, run migrations, enable WAL mode."""
+        """Open connection, run migrations, enable WAL mode with hardened settings."""
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._db_path)
         self._conn.row_factory = aiosqlite.Row
+
+        # -- Durability & concurrency hardening --
+        # WAL mode: concurrent reads during writes, crash-safe journal
         await self._conn.execute("PRAGMA journal_mode=WAL")
+        # Sync WAL to disk on every commit (FULL = safest, ~2x slower than NORMAL)
+        await self._conn.execute("PRAGMA synchronous=FULL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
+        # Wait up to 5s for locks instead of failing immediately with SQLITE_BUSY
+        await self._conn.execute("PRAGMA busy_timeout=5000")
+
+        # -- Integrity check on startup (fast check, not full page scan) --
+        await self._check_integrity()
+
         await self._run_migrations()
         logger.info("Database initialized at %s", self._db_path)
+
+    async def _check_integrity(self) -> None:
+        """Run a quick integrity check on startup.
+
+        Uses `PRAGMA quick_check` (checks B-tree structure without scanning
+        every page) which is much faster than `PRAGMA integrity_check`.
+        Logs a critical warning if corruption is detected but does NOT
+        abort — allows the app to start so backups can be taken.
+        """
+        try:
+            cursor = await self._conn.execute("PRAGMA quick_check")
+            row = await cursor.fetchone()
+            result = row[0] if row else "unknown"
+            if result != "ok":
+                logger.critical(
+                    "DATABASE INTEGRITY CHECK FAILED: %s — "
+                    "data may be corrupted. Take a backup immediately.",
+                    result,
+                )
+            else:
+                logger.debug("Database integrity check passed")
+        except Exception as e:
+            logger.warning("Database integrity check could not run: %s", e)
 
     async def close(self) -> None:
         """Close the database connection."""
@@ -1142,36 +1176,63 @@ class Database:
     # ------------------------------------------------------------------
 
     async def insert_trade(self, trade: dict[str, Any]) -> str:
-        """Insert a new trade record. Returns the generated trade_id."""
+        """Insert a new trade record atomically with audit log.
+
+        Uses a savepoint so the trade insert + audit entry either both
+        succeed or both roll back — no orphaned records on crash.
+        """
         import uuid
 
         trade_id = trade.get("trade_id") or f"T-{uuid.uuid4().hex[:8]}"
         ts_now = now_ist().isoformat()
 
-        await self.conn.execute(
-            "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
-            "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
-            "mode, status, slippage, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                trade_id,
-                trade["symbol"],
-                trade["signal_type"],
-                trade["entry_price"],
-                trade.get("fill_price", trade["entry_price"]),
-                trade["quantity"],
-                trade["stop_loss_price"],
-                trade["target_price"],
-                trade.get("order_id"),
-                trade.get("sl_order_id"),
-                trade.get("product", "MIS"),
-                trade.get("mode", "paper"),
-                trade.get("status", "open"),
-                trade.get("slippage", 0.0),
-                ts_now,
-            ),
-        )
-        await self.conn.commit()
+        await self.conn.execute("SAVEPOINT insert_trade")
+        try:
+            await self.conn.execute(
+                "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
+                "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
+                "mode, status, slippage, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    trade_id,
+                    trade["symbol"],
+                    trade["signal_type"],
+                    trade["entry_price"],
+                    trade.get("fill_price", trade["entry_price"]),
+                    trade["quantity"],
+                    trade["stop_loss_price"],
+                    trade["target_price"],
+                    trade.get("order_id"),
+                    trade.get("sl_order_id"),
+                    trade.get("product", "MIS"),
+                    trade.get("mode", "paper"),
+                    trade.get("status", "open"),
+                    trade.get("slippage", 0.0),
+                    ts_now,
+                ),
+            )
+            await self.conn.execute(
+                "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
+                "input_summary, output_summary) VALUES (?, ?, ?, ?, ?)",
+                (
+                    ts_now, "trade_inserted", "trade-execute",
+                    json.dumps({
+                        "trade_id": trade_id, "symbol": trade["symbol"],
+                        "signal_type": trade["signal_type"],
+                        "mode": trade.get("mode", "paper"),
+                    }),
+                    json.dumps({
+                        "fill_price": trade.get("fill_price"),
+                        "quantity": trade["quantity"],
+                        "slippage": trade.get("slippage", 0.0),
+                    }),
+                ),
+            )
+            await self.conn.execute("RELEASE SAVEPOINT insert_trade")
+            await self.conn.commit()
+        except Exception:
+            await self.conn.execute("ROLLBACK TO SAVEPOINT insert_trade")
+            raise
         return trade_id
 
     async def update_position_sl(self, position_id: int | str, new_sl: float) -> None:
@@ -1782,6 +1843,11 @@ class Database:
     async def backup(self, backup_dir: str, model_dir: str | None = None) -> str:
         """Create a timestamped backup of the database and model artifacts.
 
+        Uses SQLite's online backup API (via VACUUM INTO) which produces a
+        consistent, self-contained backup even while the database is being
+        written to. This is safer than checkpoint + file copy, which can
+        produce corrupt backups if writes happen between the two operations.
+
         Args:
             backup_dir: Directory to store backup files.
             model_dir: Optional path to ML model artifacts (.pkl files).
@@ -1792,10 +1858,21 @@ class Database:
         Path(backup_dir).mkdir(parents=True, exist_ok=True)
         timestamp = now_ist().strftime("%Y%m%d_%H%M%S")
         backup_path = str(Path(backup_dir) / f"yolovest_{timestamp}.db")
-        # Use SQLite backup API via a checkpoint first
-        await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        shutil.copy2(self._db_path, backup_path)
-        logger.info("Database backup created: %s", backup_path)
+
+        # VACUUM INTO creates a clean, defragmented copy atomically.
+        # It holds a read lock during the copy, so no writes can sneak in.
+        # The result is a standalone DB file (no WAL/SHM needed).
+        try:
+            await self.conn.execute("VACUUM INTO ?", (backup_path,))
+            logger.info("Database backup created (VACUUM INTO): %s", backup_path)
+        except Exception as e:
+            # Fallback: checkpoint + copy (older SQLite without VACUUM INTO)
+            logger.warning(
+                "VACUUM INTO failed (%s), falling back to checkpoint + copy", e,
+            )
+            await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            shutil.copy2(self._db_path, backup_path)
+            logger.info("Database backup created (file copy): %s", backup_path)
 
         # Backup ML model artifacts alongside the DB
         models_backed_up = 0
