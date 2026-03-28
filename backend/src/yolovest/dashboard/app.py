@@ -654,8 +654,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         # Don't ping on page load (wastes quota and blocks for 20+s on 429).
         # Just report config status; user can click "Test Connection" to verify.
         llm_enabled = getattr(ctx.config.llm, "enabled", False)
-        gemini_api_key = getattr(ctx.config.llm, "api_key", "")
-        gemini_configured = bool(gemini_api_key) and not gemini_api_key.startswith("${")
+        _llm_key_raw = ctx.config.llm.api_key.get_secret_value() if hasattr(ctx.config.llm.api_key, "get_secret_value") else str(ctx.config.llm.api_key)
+        gemini_configured = bool(_llm_key_raw) and not _llm_key_raw.startswith("${")
         results["gemini"] = {
             "enabled": llm_enabled,
             "configured": gemini_configured,
@@ -664,7 +664,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         }
 
         # --- Zerodha Broker ---
-        broker_configured = bool(getattr(ctx.config.broker, "api_key", ""))
+        _broker_key_raw = ctx.config.broker.api_key.get_secret_value() if hasattr(ctx.config.broker.api_key, "get_secret_value") else str(ctx.config.broker.api_key)
+        broker_configured = bool(_broker_key_raw) and not _broker_key_raw.startswith("${")
         # Verify token is actually valid (catches expired tokens)
         broker_authenticated = False
         if broker_configured:

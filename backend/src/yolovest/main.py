@@ -547,8 +547,43 @@ async def async_main(args: argparse.Namespace) -> None:
         orchestrator.stop()
         cron_scheduler.stop()
 
+    def reload_handler() -> None:
+        """SIGHUP handler: reload config.yaml without restart.
+
+        Only reloads settings that are safe to change at runtime.
+        Structural changes (broker, DB, LLM provider) require restart.
+        """
+        logger.info("SIGHUP received — reloading config from %s", args.config)
+        try:
+            new_config = load_config(args.config)
+            # Safe to hot-reload: risk params, scanning weights, heartbeat timing,
+            # market hours, execution params, transaction costs, alert toggles
+            ctx.config.risk = new_config.risk
+            ctx.config.scanning = new_config.scanning
+            ctx.config.heartbeat = new_config.heartbeat
+            ctx.config.market_hours = new_config.market_hours
+            ctx.config.execution = new_config.execution
+            ctx.config.transaction_costs = new_config.transaction_costs
+            ctx.config.strategy = new_config.strategy
+            ctx.config.notifications = new_config.notifications
+            ctx.config.reports = new_config.reports
+            ctx.config.retraining = new_config.retraining
+            # Update market hours checker with new config
+            ctx.market_hours = MarketHoursChecker(ctx.config)
+            logger.info(
+                "Config reloaded: risk, scanning, heartbeat, market_hours, "
+                "execution, notifications, strategy updated"
+            )
+        except Exception:
+            logger.exception("Config reload failed — keeping previous config")
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, shutdown_handler)
+    # SIGHUP for config reload (Unix only)
+    try:
+        loop.add_signal_handler(signal.SIGHUP, reload_handler)
+    except (ValueError, OSError):
+        pass  # SIGHUP not available on Windows
 
     # Start Telegram bot if enabled
     telegram_task = None
