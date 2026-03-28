@@ -47,11 +47,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Trading mode override (default: from config file)",
     )
-    parser.add_argument(
-        "--no-dashboard",
-        action="store_true",
-        help="Disable the web dashboard",
-    )
     return parser.parse_args()
 
 
@@ -511,10 +506,8 @@ async def async_main(args: argparse.Namespace) -> None:
             ctx.notify.set_telegram_bot(telegram_bot)
         telegram_task = asyncio.create_task(_start_telegram(telegram_bot))
 
-    # Start dashboard if enabled
-    dashboard_task = None
-    if not args.no_dashboard:
-        dashboard_task = asyncio.create_task(_start_dashboard(ctx))
+    # Start dashboard
+    dashboard_task = asyncio.create_task(_start_dashboard(ctx))
 
     # Start CRON scheduler as background task
     cron_task = asyncio.create_task(_start_cron_scheduler(cron_scheduler))
@@ -531,8 +524,7 @@ async def async_main(args: argparse.Namespace) -> None:
         f"YoloVest started in {config.mode} mode. "
         f"Heartbeat interval: {config.heartbeat.market_hours_interval_min}min (market hours), "
         f"{config.heartbeat.off_hours_interval_min}min (off hours)."
-        + (f"\nDashboard: {dashboard_url}"
-           if not args.no_dashboard else "")
+        + f"\nDashboard: {dashboard_url}"
     )
 
     try:
