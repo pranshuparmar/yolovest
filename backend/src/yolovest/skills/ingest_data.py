@@ -108,8 +108,34 @@ class IngestDataSkill(SkillBase):
                     daily = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=30)
                     await self.ctx.db.upsert_ohlcv(symbol, "daily", daily, "ingester")
                     results["symbols_ingested"] += 1
-                    # Reset failure counter on success
-                    await self.ctx.db.record_fetch_success(symbol)
+
+                    # Check if data is actually fresh — the ingester may have
+                    # returned stale fallback data (e.g. delisted symbols where
+                    # Jugaad returns old bars but yfinance fails). Count stale
+                    # returns as failures for quarantine purposes.
+                    if daily:
+                        latest = daily[-1].timestamp
+                        if latest.tzinfo is None:
+                            latest = latest.replace(tzinfo=IST)
+                        days_old = (now_ist() - latest).days
+                        if days_old > 5:
+                            logger.warning(
+                                "Stale data for %s: latest bar is %dd old",
+                                symbol, days_old,
+                            )
+                            now_quarantined = await self.ctx.db.record_fetch_failure(
+                                symbol, f"data {days_old}d stale",
+                            )
+                            if now_quarantined:
+                                logger.warning(
+                                    "ingest-data: QUARANTINED %s — data consistently stale (%dd old)",
+                                    symbol, days_old,
+                                )
+                                results["quarantined"] += 1
+                        else:
+                            await self.ctx.db.record_fetch_success(symbol)
+                    else:
+                        await self.ctx.db.record_fetch_success(symbol)
 
                 # Intraday candles if market is open
                 if self.ctx.market_hours.is_market_hours():
