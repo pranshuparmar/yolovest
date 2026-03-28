@@ -57,6 +57,8 @@ class SquareOffSkill(SkillBase):
 
         After this, the broker will auto-square at market price with
         potentially terrible slippage. We must finish before this.
+        If we're already past market close (e.g. force=True from kill switch,
+        or running outside market hours), set deadline 5 minutes from now.
         """
         now = now_ist()
         close_str = self.ctx.config.market_hours.close  # e.g. "15:30"
@@ -64,7 +66,11 @@ class SquareOffSkill(SkillBase):
         close_time = now.replace(
             hour=int(parts[0]), minute=int(parts[1]), second=0, microsecond=0,
         )
-        return close_time - timedelta(minutes=1)
+        deadline = close_time - timedelta(minutes=1)
+        if deadline <= now:
+            # Already past market close — give a reasonable window
+            deadline = now + timedelta(minutes=5)
+        return deadline
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         force = kwargs.get("force", False)  # True when called from kill-switch

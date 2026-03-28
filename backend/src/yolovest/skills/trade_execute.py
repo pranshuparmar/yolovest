@@ -227,10 +227,30 @@ class TradeExecuteSkill(SkillBase):
                     "order_id": order_id,
                     "sl_order_id": sl_order_id,
                     "product": product,
-                    "status": order_status.get("status", "filled"),
+                    "status": order_status.get("status", "open"),
                     "mode": "live",
                     "slippage": slippage,
                 }
+
+                # Final fill verification: confirm order is in a terminal state
+                verified_status = await self._verify_fill(order_id, timeout_sec=5)
+                if verified_status in ("REJECTED", "CANCELLED"):
+                    logger.error(
+                        "trade-execute: order %s was %s after placement for %s — "
+                        "cancelling SL order",
+                        order_id, verified_status, signal["symbol"],
+                    )
+                    await self.ctx.broker.cancel_order(sl_order_id)
+                    await self.ctx.notify.send(
+                        f"Order REJECTED/CANCELLED for {signal['symbol']} "
+                        f"(order={order_id}, status={verified_status})",
+                        alert_type="errors",
+                    )
+                    raise RuntimeError(
+                        f"Order {order_id} {verified_status} by exchange"
+                    )
+
+                trade["status"] = verified_status.lower() if verified_status else "filled"
 
                 trade_id = await self.ctx.db.insert_trade(trade)
                 trade["trade_id"] = trade_id
@@ -247,9 +267,10 @@ class TradeExecuteSkill(SkillBase):
 
                 logger.info(
                     "trade-execute: LIVE %s %s qty=%d fill=%.2f slippage=%.2f "
-                    "attempt=%d (id=%s, order=%s)",
+                    "attempt=%d status=%s (id=%s, order=%s)",
                     trade["signal_type"], trade["symbol"], actual_qty,
-                    fill_price, slippage, attempt + 1, trade_id, order_id,
+                    fill_price, slippage, attempt + 1, trade["status"],
+                    trade_id, order_id,
                 )
 
                 return SkillResult(
@@ -279,3 +300,25 @@ class TradeExecuteSkill(SkillBase):
             skill_name=self.name,
             error=f"Order failed after {cfg.max_order_retries + 1} attempts: {last_error}",
         )
+
+    async def _verify_fill(self, order_id: str, timeout_sec: int = 5) -> str:
+        """Poll order status until it reaches a terminal state.
+
+        Terminal states: COMPLETE, CANCELLED, REJECTED.
+        Non-terminal: OPEN, PENDING, PUT ORDER REQ RECEIVED, etc.
+
+        Returns the terminal status string, or "COMPLETE" if timeout reached
+        (assume filled — broker reconciliation will catch mismatches).
+        """
+        terminal = {"COMPLETE", "CANCELLED", "REJECTED", "filled"}
+        for _ in range(timeout_sec):
+            try:
+                status = await self.ctx.broker.get_order_status(order_id)
+                order_state = status.get("status", "").upper()
+                if order_state in terminal:
+                    return order_state
+            except Exception as e:
+                logger.warning("Fill verification poll failed for %s: %s", order_id, e)
+            await asyncio.sleep(1)
+        # Timeout — assume filled; ghost recovery will catch mismatches
+        return "COMPLETE"
