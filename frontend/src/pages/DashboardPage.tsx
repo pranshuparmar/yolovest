@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { PortfolioCards } from "../components/PortfolioCards";
 import { EquityChart } from "../components/EquityChart";
 import { TradesTable } from "../components/TradesTable";
@@ -10,6 +11,7 @@ import { useTradesToday, useSystemState } from "../hooks/queries";
 export function DashboardPage() {
   const { data: todaysTrades, isLoading } = useTradesToday();
   const { data: systemState } = useSystemState();
+  const [degradedDismissed, setDegradedDismissed] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -25,8 +27,15 @@ export function DashboardPage() {
       <PendingTradesBanner />
 
       {/* Degraded mode banner */}
-      {systemState?.is_degraded && (
-        <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg p-4">
+      {systemState?.is_degraded && !degradedDismissed && (
+        <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg p-4 relative">
+          <button
+            onClick={() => setDegradedDismissed(true)}
+            className="absolute top-2 right-2 text-yellow-600 hover:text-yellow-400 text-lg leading-none px-1"
+            aria-label="Dismiss"
+          >
+            x
+          </button>
           <div className="flex items-center gap-2 mb-2">
             <span className="text-yellow-400 font-semibold text-sm">Degraded Mode</span>
             {(systemState.auto_approved_today ?? 0) > 0 && (
