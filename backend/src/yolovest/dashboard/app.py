@@ -811,8 +811,8 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def get_unscored_predictions(
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
-        """Predictions awaiting scoring (holding period not yet elapsed)."""
-        return await ctx.db.get_unscored_predictions()
+        """All predictions awaiting scoring (including those still within holding period)."""
+        return await ctx.db.get_all_awaiting_predictions()
 
     @app.get("/api/predictions/outcomes")
     async def get_prediction_outcomes(

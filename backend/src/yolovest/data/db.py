@@ -1214,7 +1214,10 @@ class Database:
         return pred_id
 
     async def get_unscored_predictions(self) -> list[dict[str, Any]]:
-        """Get predictions whose holding period has elapsed but haven't been scored."""
+        """Get predictions whose holding period has elapsed but haven't been scored.
+
+        Used by the predict-track skill to know which predictions are ready to score.
+        """
         ts_now = now_ist().isoformat()
         cursor = await self.conn.execute(
             "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
@@ -1230,6 +1233,24 @@ class Database:
             "AND p.prediction_end_time <= ? "
             "ORDER BY p.created_at",
             (ts_now,),
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](row) for row in rows]
+
+    async def get_all_awaiting_predictions(self) -> list[dict[str, Any]]:
+        """Get ALL unscored predictions for UI display (regardless of end time)."""
+        cursor = await self.conn.execute(
+            "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
+            "p.prediction_end_time, "
+            "s.symbol, s.signal_type as predicted_direction, "
+            "s.entry_price, s.target_price as predicted_target, "
+            "s.stop_loss_price as predicted_stop_loss, "
+            "s.confidence_score as confidence, "
+            "s.model_version "
+            "FROM predictions p "
+            "LEFT JOIN signals s ON p.signal_id = s.id "
+            "WHERE p.actual_price IS NULL "
+            "ORDER BY p.created_at DESC",
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
