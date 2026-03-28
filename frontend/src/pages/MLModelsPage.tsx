@@ -271,6 +271,7 @@ export function MLModelsPage() {
   const [promotingVersion, setPromotingVersion] = useState<string | null>(null);
   const [deletingVersion, setDeletingVersion] = useState<string | null>(null);
   const [reshadowingVersion, setReshadowingVersion] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const productionModels = data?.production || {};
   const shadowModels = data?.shadow || [];
@@ -286,10 +287,18 @@ export function MLModelsPage() {
   };
 
   const handleReshadow = (modelType: string, version: string) => {
+    setActionError(null);
     setReshadowingVersion(version);
     reshadow.mutate(
       { modelType, version },
-      { onSettled: () => setReshadowingVersion(null) },
+      {
+        onSuccess: (result) => {
+          if (result && !result.reshadowed && "error" in result) {
+            setActionError(String((result as Record<string, unknown>).error));
+          }
+        },
+        onSettled: () => setReshadowingVersion(null),
+      },
     );
   };
 
@@ -304,6 +313,13 @@ export function MLModelsPage() {
   return (
     <div className="space-y-6">
       <h2 className="text-lg font-semibold">ML Models</h2>
+
+      {actionError && (
+        <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-sm text-red-400 flex items-center justify-between">
+          <span>{actionError}</span>
+          <button onClick={() => setActionError(null)} className="text-gray-500 hover:text-gray-300 text-xs">Dismiss</button>
+        </div>
+      )}
 
       {/* Production models */}
       <div>

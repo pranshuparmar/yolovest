@@ -405,6 +405,13 @@ async def async_main(args: argparse.Namespace) -> None:
                     await ctx.ml.load_shadow_model(
                         shadow["model_type"], shadow["version"],
                     )
+                except FileNotFoundError:
+                    # .pkl file missing — revert to retired
+                    logger.warning(
+                        "Shadow %s model %s has no .pkl file — reverting to retired",
+                        shadow["model_type"], shadow["version"],
+                    )
+                    await ctx.db.retire_model(shadow["model_type"], shadow["version"])
                 except Exception as e:
                     logger.warning(
                         "Failed to load shadow %s model %s: %s",

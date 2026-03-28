@@ -808,12 +808,27 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Move a retired model back to shadow for re-evaluation."""
+        # Check if .pkl file exists before changing status
+        model_dir = _model_dir()
+        pkl_path = Path(model_dir) / f"{version}.pkl"
+        if not pkl_path.exists():
+            return {
+                "reshadowed": False,
+                "error": f"Model file {version}.pkl not found — it was already deleted. Cannot re-shadow.",
+            }
+
         ok = await ctx.db.reshadow_model(model_type, version)
         if ok and ctx.ml:
             try:
                 await ctx.ml.load_shadow_model(model_type, version)
             except Exception as e:
+                # Revert to retired if load fails
+                await ctx.db.retire_model(model_type, version)
                 logger.warning("Failed to load re-shadowed model %s/%s: %s", model_type, version, e)
+                return {
+                    "reshadowed": False,
+                    "error": f"Model file exists but failed to load: {e}",
+                }
         return {"reshadowed": ok, "model_type": model_type, "version": version}
 
     @app.get("/api/ml-models/{model_type}/shadow-comparison")
