@@ -600,3 +600,21 @@ export function useDeleteDryRun() {
     },
   });
 }
+
+export function useQuarantinedSymbols() {
+  return useQuery({
+    queryKey: ["quarantined-symbols"],
+    queryFn: api.quarantinedSymbols,
+    staleTime: 60_000,
+  });
+}
+
+export function useUnquarantineSymbol() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.unquarantineSymbol,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["quarantined-symbols"] });
+    },
+  });
+}

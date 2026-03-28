@@ -6,6 +6,8 @@ import {
   useCreateBackup,
   useRestoreBackup,
   useResetAllData,
+  useQuarantinedSymbols,
+  useUnquarantineSymbol,
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
 
@@ -135,6 +137,75 @@ function TableRow({
         </div>
       </td>
     </tr>
+  );
+}
+
+function QuarantinedSymbolsSection() {
+  const { data: symbols, isLoading } = useQuarantinedSymbols();
+  const unquarantine = useUnquarantineSymbol();
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-800">
+        <h3 className="text-sm font-semibold text-gray-300">Quarantined Symbols</h3>
+        <p className="text-xs text-gray-500 mt-0.5">
+          Symbols auto-blocked after 3 consecutive data fetch failures. Excluded from all pipelines until manually unblocked.
+        </p>
+      </div>
+      {isLoading ? (
+        <div className="h-20 animate-pulse bg-gray-800 m-4 rounded" />
+      ) : !symbols || symbols.length === 0 ? (
+        <div className="px-4 py-6 text-center text-sm text-gray-500">
+          No quarantined symbols.
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                <th className="py-2 px-4 text-left">Symbol</th>
+                <th className="py-2 px-4 text-right">Failures</th>
+                <th className="py-2 px-4 text-left">Last Error</th>
+                <th className="py-2 px-4 text-right">Quarantined</th>
+                <th className="py-2 px-4 text-center">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {symbols.map((s) => (
+                <tr key={s.symbol} className="border-b border-gray-800 hover:bg-gray-800/30">
+                  <td className="py-2 px-4 font-medium text-gray-200">{s.symbol}</td>
+                  <td className="py-2 px-4 text-right text-red-400">{s.consecutive_failures}</td>
+                  <td className="py-2 px-4 text-gray-400 text-xs max-w-xs truncate">{s.last_error}</td>
+                  <td className="py-2 px-4 text-right text-gray-400 text-xs">
+                    {s.quarantined_at
+                      ? new Date(s.quarantined_at).toLocaleString("en-IN", {
+                          timeZone: "Asia/Kolkata",
+                          day: "2-digit",
+                          month: "short",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })
+                      : "--"}
+                  </td>
+                  <td className="py-2 px-4 text-center">
+                    <button
+                      onClick={() => {
+                        if (!window.confirm(`Unquarantine ${s.symbol}? It will be included in the next scan.`)) return;
+                        unquarantine.mutate(s.symbol);
+                      }}
+                      disabled={unquarantine.isPending}
+                      className="px-2 py-1 rounded text-xs bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-30 transition-colors"
+                    >
+                      {unquarantine.isPending ? "..." : "Unblock"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -413,6 +484,9 @@ export function DataManagementPage() {
           </div>
         </div>
       )}
+
+      {/* Quarantined Symbols */}
+      <QuarantinedSymbolsSection />
 
       {/* Factory Reset - Danger Zone */}
       <div className="bg-gray-900 border border-red-900/50 rounded-lg overflow-hidden">

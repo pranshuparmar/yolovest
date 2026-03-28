@@ -326,6 +326,12 @@ export const api = {
   deleteDryRun: (runId: string) =>
     apiFetch<{ success: boolean; deleted: number }>(`/api/dry-run/${runId}`, { method: "DELETE" }),
 
+  quarantinedSymbols: () =>
+    apiFetch<{ symbol: string; consecutive_failures: number; last_error: string; quarantined_at: string; updated_at: string }[]>("/api/quarantined-symbols"),
+
+  unquarantineSymbol: (symbol: string) =>
+    apiFetch<{ success: boolean; symbol: string }>(`/api/quarantined-symbols/${symbol}`, { method: "DELETE" }),
+
   listSkills: () =>
     apiFetch<{ name: string; description: string; trigger: string; schedule: string | null }[]>(
       "/api/skills",
