@@ -8,20 +8,19 @@ capital:
   initial_amount: 100000              # starting capital in INR
 
 broker:
-  name: zerodha
   api_key: ${KITE_API_KEY}            # from environment
   api_secret: ${KITE_API_SECRET}
 
 llm:
   enabled: false                      # set true to activate Gemini (sentiment, trade review, analysis)
-  provider: gemini
-  model: gemini-2.5-pro               # or gemini-2.5-flash for lower latency
+  model: gemini-2.5-flash             # or gemini-2.5-pro for better quality
   api_key: ${GEMINI_API_KEY}
 
 market_data:
   daily_provider: jugaad              # jugaad | yfinance
   daily_fallback: yfinance            # fallback if primary fails
   intraday_provider: tvdatafeed       # tvdatafeed | kite (paid)
+  kite_data_enabled: false            # enable Kite Connect as premium data provider
   news_enabled: true                  # fetch news from MoneyControl, ET Markets, LiveMint
   scrapers_enabled: true              # fetch from Screener.in, Trendlyne, Google Finance, NSE, economic calendar
   bhavcopy_dir: ./data/bhavcopy       # path to downloaded NSE Bhavcopy CSVs
@@ -47,8 +46,6 @@ scanning:
     fundamental: 0.15
 
 strategy:
-  exchange: NSE
-  interval: "5minute"                 # default candle interval
   ema_periods: [9, 21, 50, 200]       # moving average periods
   indicators:                         # toggle individual indicators
     rsi: true
@@ -60,8 +57,7 @@ strategy:
     obv: true
     supertrend: true
   default_trade_type: "intraday"      # intraday | swing
-  backtest_min_sharpe: 1.0            # minimum Sharpe ratio for model deployment
-  backtest_max_drawdown_pct: 0.20     # maximum drawdown % for model deployment
+  min_training_samples: 200           # minimum data points to train a model
 
 risk:
   max_risk_per_trade_pct: 0.02        # 2% of capital per trade
@@ -86,8 +82,6 @@ risk:
   symbol_cooldown_days: 1             # hard block on symbol after last trade (days)
   symbol_repeat_lookback_days: 5      # elevated confidence window for repeat symbols
   symbol_repeat_min_confidence: 0.80  # confidence required for repeat symbols (vs 0.65 normal)
-  margin_usage_enabled: false         # MIS leverage disabled unless explicitly enabled
-  weekly_reset_day: "monday"          # day when weekly circuit breaker resets
 
 market_hours:
   open: "09:15"
@@ -103,12 +97,12 @@ market_hours:
 execution:
   max_order_retries: 3                # retry failed orders this many times
   retry_base_delay_sec: 2             # exponential backoff base (2s, 4s, 8s)
-  max_pipeline_latency_sec: 2         # signal->risk->order must complete within this
   paper_slippage_pct: 0.001           # simulated slippage for paper trading (0.1%)
   order_timeout_sec: 30               # cancel unfilled remainder after this many seconds
   price_drift_max_pct: 0.02           # reject signal if LTP drifted >2% from entry price
 
 database:
+  path: ./data/yolovest.db            # SQLite database path
   backup_enabled: true                # enable daily DB backups
   backup_cron: "0 18 * * *"           # backup schedule (daily 6 PM)
   backup_dir: ./backups               # backup directory
@@ -116,6 +110,8 @@ database:
     ohlcv_days: 730                   # OHLCV data retention (2 years)
     audit_log_days: 365               # audit log retention (1 financial year)
     predictions_days: 365             # prediction data retention (1 year)
+    news_days: 180                    # news article retention
+    economic_events_days: 365         # economic calendar event retention
 
 retraining:
   schedule_cron: "0 6 * * 6"          # retrain schedule (Saturday 6 AM)
@@ -130,6 +126,7 @@ reports:
 dashboard:
   host: "0.0.0.0"
   port: 8080                          # internal API port (nginx proxies to this in Docker)
+  password: yolovest                  # basic auth password (change in production!)
   # Dashboard URL in logs/Telegram is derived from DOMAIN env var (e.g. DOMAIN=yolovest.example.com)
 
 notifications:

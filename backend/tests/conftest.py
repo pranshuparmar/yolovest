@@ -25,8 +25,8 @@ def sample_config() -> AppConfig:
     return AppConfig(
         mode="paper",
         capital={"initial_amount": 100000},
-        broker={"name": "zerodha", "api_key": "test_key", "api_secret": "test_secret"},
-        llm={"provider": "gemini", "model": "gemini-2.5-flash", "api_key": "test_key"},
+        broker={"api_key": "test_key", "api_secret": "test_secret"},
+        llm={"model": "gemini-2.5-flash", "api_key": "test_key"},
         market_data={"daily_provider": "jugaad", "stale_threshold_minutes": 30},
         heartbeat={
             "market_hours_interval_min": 15,

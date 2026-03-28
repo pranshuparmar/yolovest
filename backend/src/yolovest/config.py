@@ -69,14 +69,12 @@ class CapitalConfig(BaseModel):
 
 
 class BrokerConfig(BaseModel):
-    name: str = "zerodha"
     api_key: str = ""
     api_secret: str = ""
 
 
 class LLMConfig(BaseModel):
-    enabled: bool = False  # set true + api_key to activate Gemini
-    provider: str = "gemini"
+    enabled: bool = False
     model: str = "gemini-2.5-pro"
     api_key: str = ""
 
@@ -139,14 +137,10 @@ class IndicatorsConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
-    exchange: str = "NSE"
-    interval: str = "5minute"
     ema_periods: list[int] = Field(default_factory=lambda: [9, 21, 50, 200])
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     default_trade_type: Literal["intraday", "swing"] = "intraday"
-    backtest_min_sharpe: float = 1.0
-    backtest_max_drawdown_pct: float = 0.20
-    min_training_samples: int = 200  # guard against garbage models
+    min_training_samples: int = 200
 
 
 class RiskConfig(BaseModel):
@@ -172,8 +166,6 @@ class RiskConfig(BaseModel):
     symbol_cooldown_days: int = Field(default=1, ge=0)
     symbol_repeat_lookback_days: int = Field(default=5, ge=0)
     symbol_repeat_min_confidence: float = Field(default=0.80, ge=0, le=1)
-    margin_usage_enabled: bool = False
-    weekly_reset_day: str = "monday"
 
 
 class MarketHoursConfig(BaseModel):
@@ -218,10 +210,9 @@ class MarketHoursConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     max_order_retries: int = 3
     retry_base_delay_sec: int = 2
-    max_pipeline_latency_sec: int = 2
     paper_slippage_pct: float = Field(default=0.001, ge=0)
     order_timeout_sec: int = 30
-    price_drift_max_pct: float = Field(default=0.02, gt=0, lt=1)  # reject if LTP drifted >2% from signal
+    price_drift_max_pct: float = Field(default=0.02, gt=0, lt=1)
 
 
 class RetentionConfig(BaseModel):

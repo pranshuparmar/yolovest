@@ -133,8 +133,8 @@ class TestEarlyCloseHandling:
         return AppConfig(
             mode="paper",
             capital={"initial_amount": 100000},
-            broker={"name": "zerodha", "api_key": "test", "api_secret": "test"},
-            llm={"provider": "gemini", "model": "gemini-2.5-flash", "api_key": "test"},
+            broker={"api_key": "test", "api_secret": "test"},
+            llm={"model": "gemini-2.5-flash", "api_key": "test"},
             market_data={"daily_provider": "jugaad", "stale_threshold_minutes": 30},
             heartbeat={"market_hours_interval_min": 15, "off_hours_interval_min": 60},
             scanning={"seed_symbols": ["RELIANCE"]},
