@@ -2711,7 +2711,7 @@ class Database:
         for symbol in symbols:
             cursor = await self.conn.execute(
                 "SELECT timestamp, close FROM ohlcv "
-                "WHERE symbol = ? AND interval = '1d' AND timestamp >= ? "
+                "WHERE symbol = ? AND interval = 'daily' AND timestamp >= ? "
                 "ORDER BY timestamp ASC",
                 (symbol, cutoff),
             )
