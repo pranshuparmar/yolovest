@@ -21,6 +21,7 @@ Flow:
 import logging
 from typing import Any
 
+from yolovest.costs import compute_transaction_costs
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 logger = logging.getLogger(__name__)
@@ -47,8 +48,8 @@ class PositionMonitorSkill(SkillBase):
             )
 
         trails_modified = 0
-        targets_hit = []
-        stops_hit = []
+        targets_hit: list[dict[str, Any]] = []
+        stops_hit: list[dict[str, Any]] = []
 
         for pos in local_positions:
             symbol = pos["symbol"]
@@ -62,14 +63,38 @@ class PositionMonitorSkill(SkillBase):
             if (pos["signal_type"] == "BUY" and current_price >= target) or (
                 pos["signal_type"] == "SELL" and current_price <= target
             ):
-                targets_hit.append(symbol)
+                qty = pos.get("quantity", 0)
+                if pos["signal_type"] == "BUY":
+                    gross_pnl = (current_price - entry) * qty
+                else:
+                    gross_pnl = (entry - current_price) * qty
+                costs = compute_transaction_costs(entry, current_price, qty)
+                pnl = round(gross_pnl - costs, 2)
+                await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+                targets_hit.append({"symbol": symbol, "pnl": pnl})
+                logger.info(
+                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
+                    symbol, current_price, pnl, costs,
+                )
                 continue
 
             # SL hit?
             if (pos["signal_type"] == "BUY" and current_price <= sl) or (
                 pos["signal_type"] == "SELL" and current_price >= sl
             ):
-                stops_hit.append(symbol)
+                qty = pos.get("quantity", 0)
+                if pos["signal_type"] == "BUY":
+                    gross_pnl = (current_price - entry) * qty
+                else:
+                    gross_pnl = (entry - current_price) * qty
+                costs = compute_transaction_costs(entry, current_price, qty)
+                pnl = round(gross_pnl - costs, 2)
+                await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+                stops_hit.append({"symbol": symbol, "pnl": pnl})
+                logger.info(
+                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
+                    symbol, current_price, pnl, costs,
+                )
                 continue
 
             # Trailing SL
@@ -96,15 +121,21 @@ class PositionMonitorSkill(SkillBase):
             # Update unrealized PnL
             await self.ctx.db.update_unrealized_pnl(pos["trade_id"], current_price)
 
-        # Broadcast target/stop hits as trade exits
-        for sym in targets_hit:
+        # Broadcast and notify target/stop hits
+        for hit in targets_hit:
             await self.broadcast("trade_exit", {
-                "symbol": sym, "reason": "target_hit",
+                "symbol": hit["symbol"], "reason": "target_hit",
             })
-        for sym in stops_hit:
+            await self.ctx.notify.send_exit_alert(
+                hit["symbol"], "Target hit", hit["pnl"],
+            )
+        for hit in stops_hit:
             await self.broadcast("trade_exit", {
-                "symbol": sym, "reason": "stop_loss_hit",
+                "symbol": hit["symbol"], "reason": "stop_loss_hit",
             })
+            await self.ctx.notify.send_exit_alert(
+                hit["symbol"], "Stop loss hit", hit["pnl"],
+            )
 
         # Broadcast portfolio PnL summary
         if local_positions:
@@ -115,10 +146,12 @@ class PositionMonitorSkill(SkillBase):
                 "trails_modified": trails_modified,
             })
 
+        target_syms = [h["symbol"] for h in targets_hit]
+        stop_syms = [h["symbol"] for h in stops_hit]
         logger.info(
             "position-monitor: %d positions — targets_hit=%s, stops_hit=%s, "
             "trails_modified=%d, discrepancies=%d",
-            len(local_positions), targets_hit or "none", stops_hit or "none",
+            len(local_positions), target_syms or "none", stop_syms or "none",
             trails_modified, len(discrepancies) if discrepancies else 0,
         )
 
@@ -128,8 +161,8 @@ class PositionMonitorSkill(SkillBase):
             data={
                 "positions_monitored": len(local_positions),
                 "trails_modified": trails_modified,
-                "targets_hit": targets_hit,
-                "stops_hit": stops_hit,
+                "targets_hit": target_syms,
+                "stops_hit": stop_syms,
                 "discrepancies": len(discrepancies) if discrepancies else 0,
             },
         )

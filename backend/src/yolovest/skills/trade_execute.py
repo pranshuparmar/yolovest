@@ -23,6 +23,7 @@ import asyncio
 import logging
 from typing import Any
 
+from yolovest.costs import compute_transaction_costs
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,11 @@ class TradeExecuteSkill(SkillBase):
             fill_price = entry * (1 - slippage_pct)
         slippage = abs(fill_price - entry)
 
+        # Estimate transaction costs for realistic paper PnL
+        est_costs = compute_transaction_costs(
+            fill_price, signal["target_price"], signal["position_size"],
+        )
+
         trade = {
             "symbol": signal["symbol"],
             "signal_type": signal["signal_type"],
@@ -79,6 +85,7 @@ class TradeExecuteSkill(SkillBase):
             "status": "filled",
             "mode": "paper",
             "slippage": round(slippage, 2),
+            "estimated_costs": est_costs,
         }
 
         trade_id = await self.ctx.db.insert_trade(trade)
@@ -170,11 +177,27 @@ class TradeExecuteSkill(SkillBase):
                         if filled_qty >= signal["position_size"]:
                             break
 
-                    # Cancel remainder if still partially filled
-                    if filled_qty < signal["position_size"] and filled_qty > 0:
+                    if filled_qty < signal["position_size"]:
                         await self.ctx.broker.cancel_order(order_id)
-                        # Adjust SL order to filled quantity only
-                        if filled_qty != signal["position_size"]:
+
+                        if filled_qty == 0:
+                            # Zero fills — retry with MARKET order for guaranteed execution
+                            logger.warning(
+                                "trade-execute: LIMIT order unfilled for %s, retrying with MARKET",
+                                signal["symbol"],
+                            )
+                            order_id = await self.ctx.broker.place_order(
+                                symbol=signal["symbol"],
+                                side="BUY" if signal["signal_type"] == "BUY" else "SELL",
+                                quantity=signal["position_size"],
+                                order_type="MARKET",
+                                product=product,
+                            )
+                            await asyncio.sleep(1)
+                            order_status = await self.ctx.broker.get_order_status(order_id)
+                            filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                        else:
+                            # Partial fill — adjust SL order to match filled quantity
                             await self.ctx.broker.cancel_order(sl_order_id)
                             sl_order_id = await self.ctx.broker.place_order(
                                 symbol=signal["symbol"],

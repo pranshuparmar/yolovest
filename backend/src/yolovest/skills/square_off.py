@@ -17,22 +17,8 @@ Flow:
 
 from typing import Any
 
+from yolovest.costs import compute_transaction_costs
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
-
-
-def compute_transaction_costs(entry_price: float, exit_price: float, quantity: int) -> float:
-    """Compute Zerodha transaction costs for a round-trip trade.
-
-    Includes: brokerage (₹20 or 0.03% per leg), STT (0.025% sell side),
-    stamp duty, GST, exchange fees (~0.01% combined).
-    """
-    entry_value = entry_price * quantity
-    exit_value = exit_price * quantity
-    entry_brokerage = min(20, entry_value * 0.0003)
-    exit_brokerage = min(20, exit_value * 0.0003)
-    stt = exit_value * 0.00025  # STT on sell side
-    other = (entry_value + exit_value) * 0.0001  # stamp, GST, exchange
-    return entry_brokerage + exit_brokerage + stt + other
 
 
 class SquareOffSkill(SkillBase):
