@@ -82,6 +82,8 @@ risk:
   symbol_cooldown_days: 1             # hard block on symbol after last trade (days)
   symbol_repeat_lookback_days: 5      # elevated confidence window for repeat symbols
   symbol_repeat_min_confidence: 0.80  # confidence required for repeat symbols (vs 0.65 normal)
+  margin_usage_enabled: false         # false = position value capped by available cash (no leverage)
+  weekly_reset_day: "monday"          # day when weekly circuit breaker PnL resets
 
 market_hours:
   open: "09:15"

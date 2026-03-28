@@ -43,7 +43,9 @@ class RiskCheckSkill(SkillBase):
     async def execute(self, **kwargs: Any) -> SkillResult:
         signal = kwargs["signal"]
         cfg = self.ctx.config.risk
-        portfolio = await self.ctx.db.get_portfolio_state()
+        portfolio = await self.ctx.db.get_portfolio_state(
+            weekly_reset_day=cfg.weekly_reset_day,
+        )
 
         # Kill switch
         if cfg.kill_switch_enabled and await self.ctx.db.is_kill_switch_active():
@@ -160,6 +162,16 @@ class RiskCheckSkill(SkillBase):
         # Cap by single stock exposure limit
         max_by_exposure = int((cfg.max_single_stock_pct * capital) / entry)
         position_size = min(position_size, max_by_exposure)
+
+        # Margin enforcement — when disabled, total trade value must fit in available cash
+        if not cfg.margin_usage_enabled and entry > 0:
+            max_by_cash = int(available_cash / entry)
+            if position_size > max_by_cash:
+                logger.info(
+                    "risk-check: margin disabled — capping %s size from %d to %d (cash=₹%.0f)",
+                    signal["symbol"], position_size, max_by_cash, available_cash,
+                )
+                position_size = max_by_cash
 
         # Slippage feedback — reduce sizing for high-slippage symbols
         slippage_penalty = await self._get_slippage_penalty(signal["symbol"])

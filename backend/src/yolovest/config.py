@@ -166,6 +166,8 @@ class RiskConfig(BaseModel):
     symbol_cooldown_days: int = Field(default=1, ge=0)
     symbol_repeat_lookback_days: int = Field(default=5, ge=0)
     symbol_repeat_min_confidence: float = Field(default=0.80, ge=0, le=1)
+    margin_usage_enabled: bool = False  # when False, position value capped by available cash (no leverage)
+    weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
 
 
 class MarketHoursConfig(BaseModel):

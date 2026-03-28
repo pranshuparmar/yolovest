@@ -919,11 +919,14 @@ class Database:
     # Portfolio State
     # ------------------------------------------------------------------
 
-    async def get_portfolio_state(self) -> dict[str, Any]:
+    async def get_portfolio_state(self, weekly_reset_day: str = "monday") -> dict[str, Any]:
         """Build portfolio state dict[str, Any] for risk checks.
 
         Computes total capital, exposure, per-stock/sector counts,
         daily/weekly PnL, trades today, and time since last loss.
+
+        Args:
+            weekly_reset_day: Day name when weekly PnL resets (e.g. "monday").
         """
         from datetime import timedelta
 
@@ -995,15 +998,20 @@ class Database:
         daily_pnl = row[0] if row else 0
         daily_pnl_pct = daily_pnl / total_capital if total_capital > 0 else 0
 
-        # Weekly realized PnL (since Monday 9:15 AM)
-        days_since_monday = now.weekday()  # 0=Monday
-        monday = (now - timedelta(days=days_since_monday)).replace(
+        # Weekly realized PnL (since configured reset day at market open)
+        _day_map = {
+            "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+            "friday": 4, "saturday": 5, "sunday": 6,
+        }
+        reset_weekday = _day_map.get(weekly_reset_day.lower(), 0)
+        days_since_reset = (now.weekday() - reset_weekday) % 7
+        week_start = (now - timedelta(days=days_since_reset)).replace(
             hour=9, minute=15, second=0, microsecond=0
         )
         cursor = await self.conn.execute(
             "SELECT COALESCE(SUM(pnl), 0) FROM trades "
             "WHERE closed_at >= ? AND pnl IS NOT NULL",
-            (monday.isoformat(),),
+            (week_start.isoformat(),),
         )
         row = await cursor.fetchone()
         weekly_pnl = row[0] if row else 0
