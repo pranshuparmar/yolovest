@@ -607,6 +607,9 @@ def create_app(ctx: AppContext) -> FastAPI:
             ok = await ctx.broker.authenticate(request_token)
             margins = None
             if ok:
+                # Sync token to Kite data provider if enabled
+                from yolovest.main import _sync_kite_data_token
+                _sync_kite_data_token(ctx)
                 try:
                     margins = await ctx.broker.get_margins()
                 except Exception:
@@ -637,6 +640,8 @@ def create_app(ctx: AppContext) -> FastAPI:
             ok = await ctx.broker.authenticate(request_token)
             if ok:
                 logger.info("Zerodha authenticated via OAuth callback")
+                from yolovest.main import _sync_kite_data_token
+                _sync_kite_data_token(ctx)
                 try:
                     await ctx.notify.send("Kite authenticated successfully via dashboard.")
                 except Exception:

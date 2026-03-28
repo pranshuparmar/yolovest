@@ -335,6 +335,42 @@ def build_context(config: AppConfig) -> AppContext:
     )
 
 
+def _sync_kite_data_token(ctx: "AppContext") -> None:
+    """Sync broker's access token to KiteDataProvider if enabled.
+
+    Called after broker auth/restore so the data provider can make API calls.
+    """
+    from yolovest.broker.zerodha import ZerodhaBroker
+
+    if not isinstance(ctx.broker, ZerodhaBroker):
+        return
+    token = getattr(ctx.broker, "_access_token", None)
+    if not token or token == "paper_token":
+        return
+
+    # Find KiteDataProvider in the ingester's provider chain
+    ingester = ctx.market_data
+    if not hasattr(ingester, "_daily_providers"):
+        return
+    for provider in ingester._daily_providers:
+        try:
+            from yolovest.data.kite_data import KiteDataProvider
+            if isinstance(provider, KiteDataProvider):
+                provider.set_access_token(token)
+                logger.info("Synced broker access token to Kite data provider")
+                break
+        except ImportError:
+            break
+    # Also sync to intraday provider if it's the same Kite instance
+    if hasattr(ingester, "_intraday_provider") and ingester._intraday_provider is not None:
+        try:
+            from yolovest.data.kite_data import KiteDataProvider
+            if isinstance(ingester._intraday_provider, KiteDataProvider):
+                ingester._intraday_provider.set_access_token(token)
+        except ImportError:
+            pass
+
+
 async def async_main(args: argparse.Namespace) -> None:
     """Async entry point: load config, build context, run orchestrator."""
     # Load config
@@ -363,6 +399,9 @@ async def async_main(args: argparse.Namespace) -> None:
     # Restore Zerodha session from persisted access token
     if isinstance(ctx.broker, ZerodhaBroker):
         restored = await ctx.broker.restore_session()
+
+        # Sync Kite data provider with broker's access token
+        _sync_kite_data_token(ctx)
 
         # Sync capital from Zerodha if session was restored
         if restored:

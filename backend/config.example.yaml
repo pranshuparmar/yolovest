@@ -102,7 +102,6 @@ execution:
   price_drift_max_pct: 0.02           # reject signal if LTP drifted >2% from entry price
 
 database:
-  path: ./data/yolovest.db            # SQLite database path
   backup_enabled: true                # enable daily DB backups
   backup_cron: "0 18 * * *"           # backup schedule (daily 6 PM)
   backup_dir: ./backups               # backup directory
@@ -110,7 +109,7 @@ database:
     ohlcv_days: 730                   # OHLCV data retention (2 years)
     audit_log_days: 365               # audit log retention (1 financial year)
     predictions_days: 365             # prediction data retention (1 year)
-    news_days: 180                    # news article retention
+    news_days: 30                     # news article retention
     economic_events_days: 365         # economic calendar event retention
 
 retraining:

@@ -219,7 +219,7 @@ class RetentionConfig(BaseModel):
     ohlcv_days: int = 730
     audit_log_days: int = 365
     predictions_days: int = 365
-    news_days: int = 180
+    news_days: int = 30
     economic_events_days: int = 365
 
 
