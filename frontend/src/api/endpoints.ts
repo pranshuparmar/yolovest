@@ -200,6 +200,11 @@ export const api = {
       method: "POST",
     }),
 
+  deleteModel: (modelType: string, version: string) =>
+    apiFetch<{ db_deleted: boolean; file_deleted: boolean }>(`/api/ml-models/${modelType}/${version}`, {
+      method: "DELETE",
+    }),
+
   predictionsToday: () =>
     apiFetch<PredictionDetail[]>("/api/predictions/today"),
 

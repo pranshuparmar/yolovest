@@ -832,6 +832,15 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
+    async def get_retired_models(self) -> list[dict[str, Any]]:
+        """Get all retired models (previously production or rejected shadow)."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM model_versions WHERE status = 'retired' "
+            "ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](row) for row in rows]
+
     # ------------------------------------------------------------------
     # Training Data
     # ------------------------------------------------------------------

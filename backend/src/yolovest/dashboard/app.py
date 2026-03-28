@@ -765,8 +765,8 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def get_ml_models(
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """ML model information: production models and shadow candidates."""
-        result: dict[str, Any] = {"production": {}, "shadow": []}
+        """ML model information: production, shadow, and retired models."""
+        result: dict[str, Any] = {"production": {}, "shadow": [], "retired": []}
         for model_type in ["intraday", "swing"]:
             try:
                 model = await ctx.db.get_production_model(model_type)
@@ -777,6 +777,11 @@ def create_app(ctx: AppContext) -> FastAPI:
         try:
             shadow_models = await ctx.db.get_all_shadow_models()
             result["shadow"] = shadow_models
+        except Exception:
+            pass
+        try:
+            retired_models = await ctx.db.get_retired_models()
+            result["retired"] = retired_models
         except Exception:
             pass
         return result

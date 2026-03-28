@@ -287,6 +287,17 @@ export function usePromoteModel() {
   });
 }
 
+export function useDeleteModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ modelType, version }: { modelType: string; version: string }) =>
+      api.deleteModel(modelType, version),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ml-models"] });
+    },
+  });
+}
+
 export function usePredictionsToday() {
   return useQuery({
     queryKey: ["predictions", "today"],
