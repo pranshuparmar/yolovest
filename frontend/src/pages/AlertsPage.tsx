@@ -38,7 +38,7 @@ export function AlertsPage() {
           <div>
             <label className="block text-xs text-gray-500 mb-1">Symbol</label>
             <input type="text" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-              placeholder="RELIANCE" className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-32" />
+              placeholder="RELIANCE" className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full sm:w-32" />
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">Direction</label>
@@ -51,12 +51,12 @@ export function AlertsPage() {
           <div>
             <label className="block text-xs text-gray-500 mb-1">Price</label>
             <input type="number" step="0.05" value={price} onChange={(e) => setPrice(e.target.value)}
-              placeholder="2500.00" className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-32" />
+              placeholder="2500.00" className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full sm:w-32" />
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">Note</label>
             <input type="text" value={note} onChange={(e) => setNote(e.target.value)}
-              placeholder="Optional note..." className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-48" />
+              placeholder="Optional note..." className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full sm:w-48" />
           </div>
           <button onClick={handleCreate} disabled={!symbol.trim() || !price || createAlert.isPending}
             className="px-4 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded transition-colors">
