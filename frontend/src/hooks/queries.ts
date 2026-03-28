@@ -571,6 +571,37 @@ export function useSyncCapital() {
   });
 }
 
+export function usePendingTrades() {
+  return useQuery({
+    queryKey: ["pending-trades"],
+    queryFn: api.pendingTrades,
+    staleTime: 10_000,
+    refetchInterval: 10_000,
+  });
+}
+
+export function useApprovePendingTrade() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.approvePendingTrade,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pending-trades"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+    },
+  });
+}
+
+export function useRejectPendingTrade() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.rejectPendingTrade,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pending-trades"] });
+    },
+  });
+}
+
 export function useResetAllData() {
   const qc = useQueryClient();
   return useMutation({

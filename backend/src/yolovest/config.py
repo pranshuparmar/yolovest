@@ -215,6 +215,7 @@ class ExecutionConfig(BaseModel):
     paper_slippage_pct: float = Field(default=0.001, ge=0)
     order_timeout_sec: int = 30
     price_drift_max_pct: float = Field(default=0.02, gt=0, lt=1)
+    transaction_mode: Literal["auto", "manual"] = "auto"  # manual = require approval before execution
 
 
 class TransactionCostConfig(BaseModel):

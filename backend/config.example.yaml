@@ -102,6 +102,7 @@ execution:
   paper_slippage_pct: 0.001           # simulated slippage for paper trading (0.1%)
   order_timeout_sec: 30               # cancel unfilled remainder after this many seconds
   price_drift_max_pct: 0.02           # reject signal if LTP drifted >2% from entry price
+  transaction_mode: auto              # auto = execute immediately | manual = require approval via Telegram/UI
 
 transaction_costs:                    # Zerodha defaults — adjust for other brokers
   brokerage_per_leg_pct: 0.0003       # 0.03% per order leg

@@ -329,6 +329,16 @@ export const api = {
 
   resetAllData: () => apiFetch<ResetResult>("/api/reset", { method: "POST" }),
 
+  // Pending Trades (manual approval)
+  pendingTrades: () =>
+    apiFetch<{ id: number; symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; position_size: number; confidence_score: number; product: string; created_at: string }[]>("/api/pending-trades"),
+
+  approvePendingTrade: (tradeId: number) =>
+    apiFetch<{ success: boolean; trade?: Record<string, unknown> }>(`/api/pending-trades/${tradeId}/approve`, { method: "POST" }),
+
+  rejectPendingTrade: (tradeId: number) =>
+    apiFetch<{ success: boolean }>(`/api/pending-trades/${tradeId}/reject`, { method: "POST" }),
+
   // Dry-Run Signal Preview
   runDryRun: () => apiFetch<DryRunResult>("/api/dry-run", { method: "POST" }),
 

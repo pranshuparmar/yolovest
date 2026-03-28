@@ -1608,6 +1608,53 @@ def create_app(ctx: AppContext) -> FastAPI:
         )
         return {"success": True, **result}
 
+    # ------------------------------------------------------------------
+    # Pending Trades (manual approval)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/pending-trades")
+    async def get_pending_trades(
+        _user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Get all trades awaiting manual approval."""
+        # Expire old pending trades first
+        expired = await ctx.db.expire_pending_trades(max_age_minutes=30)
+        if expired:
+            logger.info("Expired %d stale pending trades", expired)
+        return await ctx.db.get_pending_trades()
+
+    @app.post("/api/pending-trades/{trade_id}/approve")
+    async def approve_pending_trade(
+        trade_id: int,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Approve a pending trade for execution."""
+        signal = await ctx.db.decide_pending_trade(trade_id, "approved", "dashboard")
+        if signal is None:
+            raise HTTPException(status_code=404, detail="Trade not found or already decided")
+
+        # Execute the trade
+        from yolovest.skills.trade_execute import TradeExecuteSkill
+        skill = TradeExecuteSkill(ctx)
+        result = await skill.execute(signal=signal)
+
+        if result.success:
+            trade = result.data.get("trade", {}) if result.data else {}
+            logger.info("Approved and executed pending trade #%d: %s %s",
+                        trade_id, trade.get("signal_type"), trade.get("symbol"))
+            return {"success": True, "trade": trade}
+        return {"success": False, "error": result.error}
+
+    @app.post("/api/pending-trades/{trade_id}/reject")
+    async def reject_pending_trade(
+        trade_id: int,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Reject a pending trade."""
+        await ctx.db.decide_pending_trade(trade_id, "rejected", "dashboard")
+        logger.info("Rejected pending trade #%d", trade_id)
+        return {"success": True}
+
     @app.post("/api/change-password")
     async def change_password(
         body: dict[str, Any],

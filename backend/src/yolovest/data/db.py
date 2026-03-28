@@ -1852,6 +1852,80 @@ class Database:
         return deleted
 
     # ------------------------------------------------------------------
+    # Pending Trades (manual approval queue)
+    # ------------------------------------------------------------------
+
+    async def insert_pending_trade(self, signal: dict[str, Any]) -> int:
+        """Queue a trade signal for manual approval. Returns the pending trade ID."""
+        import json
+        cursor = await self.conn.execute(
+            "INSERT INTO pending_trades "
+            "(symbol, signal_type, entry_price, target_price, stop_loss_price, "
+            "position_size, confidence_score, model_version, product, signal_data) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                signal.get("symbol"),
+                signal.get("signal_type"),
+                signal.get("entry_price"),
+                signal.get("target_price"),
+                signal.get("stop_loss_price"),
+                signal.get("position_size"),
+                signal.get("confidence_score", signal.get("confidence")),
+                signal.get("model_version"),
+                signal.get("product", "MIS"),
+                json.dumps(signal),
+            ),
+        )
+        await self.conn.commit()
+        return cursor.lastrowid or 0
+
+    async def get_pending_trades(self) -> list[dict[str, Any]]:
+        """Get all pending trades awaiting approval."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM pending_trades WHERE status = 'pending' "
+            "ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](r) for r in rows]
+
+    async def decide_pending_trade(
+        self, trade_id: int, decision: str, decided_by: str,
+    ) -> dict[str, Any] | None:
+        """Approve or reject a pending trade. Returns the signal data if approved."""
+        import json
+        cursor = await self.conn.execute(
+            "SELECT * FROM pending_trades WHERE id = ? AND status = 'pending'",
+            (trade_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+
+        await self.conn.execute(
+            "UPDATE pending_trades SET status = ?, decided_by = ?, "
+            "decided_at = datetime('now') WHERE id = ?",
+            (decision, decided_by, trade_id),
+        )
+        await self.conn.commit()
+
+        if decision == "approved":
+            signal_data = row["signal_data"]
+            return json.loads(signal_data) if signal_data else dict[str, Any](row)
+        return None
+
+    async def expire_pending_trades(self, max_age_minutes: int = 30) -> int:
+        """Expire pending trades older than max_age_minutes."""
+        from datetime import timedelta
+        cutoff = (now_ist() - timedelta(minutes=max_age_minutes)).isoformat()
+        cursor = await self.conn.execute(
+            "UPDATE pending_trades SET status = 'expired' "
+            "WHERE status = 'pending' AND created_at < ?",
+            (cutoff,),
+        )
+        await self.conn.commit()
+        return cursor.rowcount
+
+    # ------------------------------------------------------------------
     # Storage Stats & Manual Cleanup
     # ------------------------------------------------------------------
 
