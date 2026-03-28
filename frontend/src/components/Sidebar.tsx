@@ -160,19 +160,13 @@ export function Sidebar({
   const sidebarContent = (
     <aside
       className={clsx(
-        "bg-gray-850 border-r border-gray-800 flex flex-col h-screen transition-all duration-200 shrink-0",
+        "bg-gray-900 border-r border-gray-800 flex flex-col transition-all duration-200 shrink-0",
         // Desktop sizing
         "hidden md:flex",
         collapsed ? "md:w-14" : "md:w-52"
       )}
     >
-      <div className="p-3 border-b border-gray-800 flex items-center justify-between">
-        {!collapsed && (
-          <div>
-            <h1 className="text-base font-bold text-blue-400">YoloVest</h1>
-            <p className="text-xs text-gray-500">Trading Dashboard</p>
-          </div>
-        )}
+      <div className="p-1.5 flex items-center justify-end">
         <button
           onClick={onToggle}
           className="text-gray-500 hover:text-gray-300 p-1"
