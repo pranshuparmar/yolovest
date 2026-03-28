@@ -8,9 +8,14 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
+from collections import deque
+
 from yolovest.config import AppConfig
 
 logger = logging.getLogger(__name__)
+
+# Max messages retained in memory (prevents unbounded growth over days/weeks)
+_MAX_SENT_MESSAGES = 1000
 
 
 class NotifierBase(ABC):
@@ -57,7 +62,7 @@ class Notifier:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._enabled = True
-        self._sent_messages: list[str] = []
+        self._sent_messages: deque[str] = deque(maxlen=_MAX_SENT_MESSAGES)
         self._telegram_bot: object | None = None  # set by main.py after bot creation
 
     @property
