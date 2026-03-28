@@ -291,10 +291,20 @@ export interface PremarketData {
   llm_summary?: string | null;
 }
 
+export interface DegradedFeature {
+  feature: string;
+  status: string;
+  impact: string;
+}
+
 export interface SystemState {
   kill_switch_active: boolean;
   orchestrator: string | null;
   mode: "paper" | "live";
+  degraded_features?: DegradedFeature[];
+  is_degraded?: boolean;
+  auto_approved_today?: number;
+  llm_reviewed_today?: number;
 }
 
 export interface NSESymbol {

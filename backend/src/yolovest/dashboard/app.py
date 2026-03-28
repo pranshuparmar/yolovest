@@ -981,13 +981,91 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def get_system_state(
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """System state including kill switch and orchestrator status."""
+        """System state including kill switch, degraded features, and auto-approvals."""
         kill_switch = await ctx.db.is_kill_switch_active()
         orchestrator_state = await ctx.db.get_system_state("orchestrator")
+
+        # Build degraded mode report: which features are running with fallbacks
+        degraded: list[dict[str, str]] = []
+
+        if not ctx.config.llm.enabled:
+            degraded.append({
+                "feature": "LLM (Gemini)",
+                "status": "disabled",
+                "impact": "Sentiment analysis off, trade review auto-approves, "
+                          "market summaries unavailable",
+            })
+        elif not ctx.config.llm.api_key.get_secret_value():
+            degraded.append({
+                "feature": "LLM (Gemini)",
+                "status": "no_api_key",
+                "impact": "LLM enabled but no API key — all LLM calls use stub defaults",
+            })
+
+        if not ctx.config.market_data.news_enabled:
+            degraded.append({
+                "feature": "News sources",
+                "status": "disabled",
+                "impact": "No sentiment data from MoneyControl, ET Markets, LiveMint",
+            })
+
+        if not ctx.config.market_data.scrapers_enabled:
+            degraded.append({
+                "feature": "Scrapers",
+                "status": "disabled",
+                "impact": "No fundamentals (Screener.in), technicals (Trendlyne), "
+                          "economic calendar, or Google Finance data",
+            })
+
+        if not ctx.config.notifications.telegram.enabled:
+            degraded.append({
+                "feature": "Telegram",
+                "status": "disabled",
+                "impact": "No Telegram alerts — console/dashboard only",
+            })
+
+        if not ctx.config.risk.llm_review_enabled:
+            degraded.append({
+                "feature": "LLM trade review",
+                "status": "disabled",
+                "impact": "All trades auto-approved without AI review",
+            })
+        elif not ctx.config.llm.enabled:
+            degraded.append({
+                "feature": "LLM trade review",
+                "status": "fallback",
+                "impact": "LLM review enabled but LLM disabled — "
+                          "trades auto-approved via rules-only fallback",
+            })
+
+        # Count today's auto-approved trades (no LLM review)
+        auto_approved_today = 0
+        llm_reviewed_today = 0
+        try:
+            cursor = await ctx.db.conn.execute(
+                "SELECT decision, COUNT(*) as cnt FROM llm_reviews "
+                "WHERE created_at >= date('now', 'start of day') "
+                "GROUP BY decision"
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                decision = (dict(row).get("decision") or "").upper()
+                cnt = dict(row).get("cnt", 0)
+                if decision == "AUTO_APPROVE":
+                    auto_approved_today += cnt
+                else:
+                    llm_reviewed_today += cnt
+        except Exception:
+            pass
+
         return {
             "kill_switch_active": kill_switch,
             "orchestrator": orchestrator_state,
             "mode": ctx.config.mode,
+            "degraded_features": degraded,
+            "is_degraded": len(degraded) > 0,
+            "auto_approved_today": auto_approved_today,
+            "llm_reviewed_today": llm_reviewed_today,
         }
 
     # ------------------------------------------------------------------

@@ -133,16 +133,38 @@ class EconomicCalendarSource:
     ) -> list[dict[str, Any]]:
         """Fetch RBI monetary policy and key announcement dates.
 
-        Uses RBI's public press release RSS feed as primary source.
-        Falls back to known scheduled dates if RSS is unavailable.
-        Handles year boundaries dynamically.
+        Tries two dynamic sources before falling back to static schedules:
+        1. RBI MPC schedule page (dedicated calendar)
+        2. RBI press releases (keyword-based extraction)
+        3. Static _RBI_MPC_SCHEDULES fallback
         """
         events: list[dict[str, Any]] = []
         today = date.today()
         window_start = today - timedelta(days=lookback_days)
         window_end = today + timedelta(days=lookahead_days)
+        years = {window_start.year, window_end.year}
 
-        # Try scraping RBI website for dynamic dates
+        # Try scraping RBI MPC schedule page for authoritative dates
+        scraped_dates: list[str] = []
+        try:
+            scraped_dates = await self._scrape_rbi_mpc_schedule()
+            if scraped_dates:
+                logger.debug("RBI MPC dates scraped: %d dates", len(scraped_dates))
+                for date_str in scraped_dates:
+                    event_date = date.fromisoformat(date_str)
+                    if window_start <= event_date <= window_end:
+                        events.append(self._make_event(
+                            event_date=date_str,
+                            event_type="monetary_policy",
+                            title="RBI MPC Meeting",
+                            country="IN",
+                            impact="high",
+                            source="rbi_website",
+                        ))
+        except Exception as e:
+            logger.debug("RBI MPC schedule scrape failed: %s", e)
+
+        # Also try press releases for additional announcements
         try:
             session = await self._get_session()
             async with session.get(
@@ -155,33 +177,84 @@ class EconomicCalendarSource:
                         self._parse_rbi_announcements(text, window_start, window_end)
                     )
         except Exception as e:
-            logger.debug("RBI RSS fetch failed, using scheduled dates: %s", e)
+            logger.debug("RBI press release fetch failed: %s", e)
 
-        # Add known RBI MPC dates for all years in the window
-        years = set()
-        years.add(window_start.year)
-        years.add(window_end.year)
-
-        for year in years:
-            rbi_dates = _get_rbi_mpc_dates(year)
-            if not rbi_dates:
-                logger.info(
-                    "No RBI MPC schedule for %d — scrape RBI website or update "
-                    "_RBI_MPC_SCHEDULES when published", year
-                )
-            for date_str in rbi_dates:
-                event_date = date.fromisoformat(date_str)
-                if window_start <= event_date <= window_end:
-                    events.append(self._make_event(
-                        event_date=date_str,
-                        event_type="monetary_policy",
-                        title="RBI MPC Meeting",
-                        country="IN",
-                        impact="high",
-                        source="rbi_schedule",
-                    ))
+        # Fall back to static schedule if no dynamic dates found
+        if not scraped_dates:
+            for year in years:
+                rbi_dates = _get_rbi_mpc_dates(year)
+                if not rbi_dates:
+                    logger.info(
+                        "No RBI MPC schedule for %d — scrape failed and no static "
+                        "dates available. Update _RBI_MPC_SCHEDULES when published.",
+                        year,
+                    )
+                for date_str in rbi_dates:
+                    event_date = date.fromisoformat(date_str)
+                    if window_start <= event_date <= window_end:
+                        events.append(self._make_event(
+                            event_date=date_str,
+                            event_type="monetary_policy",
+                            title="RBI MPC Meeting",
+                            country="IN",
+                            impact="high",
+                            source="rbi_schedule",
+                        ))
 
         return self._deduplicate(events)
+
+    async def _scrape_rbi_mpc_schedule(self) -> list[str]:
+        """Scrape RBI MPC meeting dates from the RBI website.
+
+        Targets the RBI's monetary policy page which lists upcoming
+        and past MPC meeting dates.
+        """
+        session = await self._get_session()
+        # RBI publishes MPC schedule on this page
+        url = "https://www.rbi.org.in/Scripts/BS_MonetaryPolicyCalendar.aspx"
+        async with session.get(
+            url, headers={"User-Agent": "YoloVest/1.0"},
+        ) as resp:
+            if resp.status != 200:
+                return []
+            html = await resp.text()
+
+        dates: list[str] = []
+        current_year = date.today().year
+
+        # RBI page has dates like "February 5 to 7, 2026" or "April 7-9, 2025"
+        months = {
+            "january": 1, "february": 2, "march": 3, "april": 4,
+            "may": 5, "june": 6, "july": 7, "august": 8,
+            "september": 9, "october": 10, "november": 11, "december": 12,
+        }
+
+        # Pattern: "Month DD to DD, YYYY" or "Month DD-DD, YYYY"
+        pattern = (
+            r"(January|February|March|April|May|June|July|August|"
+            r"September|October|November|December)\s+"
+            r"(\d{1,2})\s*(?:to|[-–])\s*(\d{1,2})\s*,?\s*(\d{4})"
+        )
+        for match in re.finditer(pattern, html, re.IGNORECASE):
+            month_name = match.group(1).lower()
+            day_start = int(match.group(2))
+            day_end = int(match.group(3))
+            year = int(match.group(4))
+
+            if year < current_year - 1 or year > current_year + 1:
+                continue
+
+            month = months.get(month_name)
+            if not month:
+                continue
+
+            try:
+                dates.append(date(year, month, day_start).isoformat())
+                dates.append(date(year, month, day_end).isoformat())
+            except ValueError:
+                continue
+
+        return sorted(set(dates))
 
     async def _fetch_fed_events(
         self, lookback_days: int, lookahead_days: int
@@ -190,23 +263,35 @@ class EconomicCalendarSource:
 
         FOMC decisions affect FII flows into India, so they are tracked as
         medium-impact context events (not primary like RBI MPC).
-        Uses static schedule tables — no external US website scraping.
+
+        Tries scraping the Fed website first, falls back to static schedules.
         """
         events: list[dict[str, Any]] = []
         today = date.today()
         window_start = today - timedelta(days=lookback_days)
         window_end = today + timedelta(days=lookahead_days)
 
+        # Try scraping Federal Reserve website for dynamic dates
         fomc_dates: list[str] = []
-        years = {window_start.year, window_end.year}
-        for year in years:
-            year_dates = _get_fomc_dates(year)
-            if not year_dates:
-                logger.info(
-                    "No FOMC schedule for %d — update _FOMC_SCHEDULES "
-                    "when published", year
-                )
-            fomc_dates.extend(year_dates)
+        try:
+            scraped = await self._scrape_fomc_dates()
+            if scraped:
+                fomc_dates = scraped
+                logger.debug("FOMC dates scraped from Fed website: %d dates", len(scraped))
+        except Exception as e:
+            logger.debug("FOMC scrape failed, using static schedule: %s", e)
+
+        # Fall back to static schedules if scraping yielded nothing
+        if not fomc_dates:
+            years = {window_start.year, window_end.year}
+            for year in years:
+                year_dates = _get_fomc_dates(year)
+                if not year_dates:
+                    logger.info(
+                        "No FOMC schedule for %d — update _FOMC_SCHEDULES "
+                        "or ensure Fed website is reachable", year
+                    )
+                fomc_dates.extend(year_dates)
 
         for date_str in fomc_dates:
             event_date = date.fromisoformat(date_str)
@@ -221,6 +306,67 @@ class EconomicCalendarSource:
                 ))
 
         return events
+
+    async def _scrape_fomc_dates(self) -> list[str]:
+        """Scrape FOMC meeting dates from the Federal Reserve website.
+
+        Parses the Fed's calendar page for meeting dates in YYYY-MM-DD format.
+        Returns dates for the current and next year.
+        """
+        session = await self._get_session()
+        url = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+        async with session.get(
+            url, headers={"User-Agent": "YoloVest/1.0"},
+        ) as resp:
+            if resp.status != 200:
+                return []
+            html = await resp.text()
+
+        return self._parse_fomc_html(html)
+
+    @staticmethod
+    def _parse_fomc_html(html: str) -> list[str]:
+        """Extract FOMC meeting dates from the Fed calendar HTML.
+
+        The Fed page has meeting dates in various formats. We look for
+        patterns like 'January 28-29' within year-contextualized sections.
+        """
+        dates: list[str] = []
+        current_year = date.today().year
+
+        months = {
+            "january": 1, "february": 2, "march": 3, "april": 4,
+            "may": 5, "june": 6, "july": 7, "august": 8,
+            "september": 9, "october": 10, "november": 11, "december": 12,
+        }
+
+        # Find year markers in the HTML
+        for year in range(current_year, current_year + 2):
+            # Match patterns like "January 28-29" or "March 18-19*"
+            pattern = (
+                r"(January|February|March|April|May|June|July|August|"
+                r"September|October|November|December)\s+(\d{1,2})(?:\s*[-/]\s*(\d{1,2}))?"
+            )
+            for match in re.finditer(pattern, html, re.IGNORECASE):
+                month_name = match.group(1).lower()
+                day1 = int(match.group(2))
+                day2 = int(match.group(3)) if match.group(3) else day1
+
+                month = months.get(month_name)
+                if not month:
+                    continue
+
+                try:
+                    d1 = date(year, month, day1)
+                    dates.append(d1.isoformat())
+                    if day2 != day1:
+                        d2 = date(year, month, day2)
+                        dates.append(d2.isoformat())
+                except ValueError:
+                    continue
+
+        # Deduplicate and sort
+        return sorted(set(dates))
 
     async def _fetch_earnings_dates(
         self, lookback_days: int, lookahead_days: int

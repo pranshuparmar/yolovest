@@ -24,6 +24,33 @@ export function DashboardPage() {
 
       <PendingTradesBanner />
 
+      {/* Degraded mode banner */}
+      {systemState?.is_degraded && (
+        <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-yellow-400 font-semibold text-sm">Degraded Mode</span>
+            {(systemState.auto_approved_today ?? 0) > 0 && (
+              <span className="px-2 py-0.5 rounded text-xs bg-yellow-800/60 text-yellow-300">
+                {systemState.auto_approved_today} auto-approved today
+              </span>
+            )}
+          </div>
+          <div className="space-y-1">
+            {systemState.degraded_features?.map((f) => (
+              <div key={f.feature} className="flex items-start gap-2 text-xs">
+                <span className="text-yellow-500 shrink-0 mt-0.5">
+                  {f.status === "disabled" ? "[OFF]" : "[!]"}
+                </span>
+                <span className="text-gray-300">
+                  <span className="font-medium text-yellow-300">{f.feature}:</span>{" "}
+                  {f.impact}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <PortfolioCards />
 
       {/* Pre-market + Calendar row */}
