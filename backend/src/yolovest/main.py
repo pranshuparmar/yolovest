@@ -408,6 +408,17 @@ async def async_main(args: argparse.Namespace) -> None:
         config.mode = args.mode
 
     logger.info("YoloVest starting in %s mode", config.mode)
+    logger.info(
+        "Config toggles: llm.enabled=%s, telegram.enabled=%s, "
+        "news_enabled=%s, scrapers_enabled=%s, kite_data_enabled=%s, "
+        "llm_review_enabled=%s",
+        config.llm.enabled,
+        config.notifications.telegram.enabled,
+        config.market_data.news_enabled,
+        config.market_data.scrapers_enabled,
+        config.market_data.kite_data_enabled,
+        config.risk.llm_review_enabled,
+    )
 
     # Build context
     ctx = build_context(config)

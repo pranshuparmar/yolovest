@@ -84,12 +84,13 @@ class ReportGenerateSkill(SkillBase):
             else None
         )
 
-        # Gemini market summary (best effort)
+        # Gemini market summary (best effort, skip if LLM disabled)
         market_summary = None
-        try:
-            market_summary = await self.ctx.llm.summarize_market_day()
-        except Exception as e:
-            logger.warning("Market summary generation failed: %s", e)
+        if self.ctx.config.llm.enabled:
+            try:
+                market_summary = await self.ctx.llm.summarize_market_day()
+            except Exception as e:
+                logger.warning("Market summary generation failed: %s", e)
 
         report = {
             "type": "daily",

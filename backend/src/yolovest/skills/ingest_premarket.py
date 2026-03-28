@@ -55,19 +55,22 @@ class IngestPremarketSkill(SkillBase):
             else:
                 premarket[key] = result
 
-        # Gemini web grounding summary
-        try:
-            premarket["llm_summary"] = await self.ctx.llm.summarize_with_web_grounding(
-                "Summarize key overnight market developments affecting "
-                "Indian stock markets today. "
-                "Include: US market close, Asian market opens, "
-                "GIFT Nifty, crude oil, any major "
-                "global news that could impact Nifty/Sensex direction."
-            )
-        except Exception as e:
-            logger.warning("LLM web grounding failed: %s", e)
-            errors.append(f"llm_summary: {e}")
+        # Gemini web grounding summary (skip if LLM disabled)
+        if not self.ctx.config.llm.enabled:
             premarket["llm_summary"] = {}
+        else:
+            try:
+                premarket["llm_summary"] = await self.ctx.llm.summarize_with_web_grounding(
+                    "Summarize key overnight market developments affecting "
+                    "Indian stock markets today. "
+                    "Include: US market close, Asian market opens, "
+                    "GIFT Nifty, crude oil, any major "
+                    "global news that could impact Nifty/Sensex direction."
+                )
+            except Exception as e:
+                logger.warning("LLM web grounding failed: %s", e)
+                errors.append(f"llm_summary: {e}")
+                premarket["llm_summary"] = {}
 
         await self.ctx.db.upsert_premarket(premarket)
 

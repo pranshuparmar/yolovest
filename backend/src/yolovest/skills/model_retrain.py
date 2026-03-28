@@ -131,7 +131,7 @@ class ModelRetrainSkill(SkillBase):
 
         # Step 9: Gemini failure analysis
         failure_analysis = None
-        if predictions_vs_actual:
+        if predictions_vs_actual and self.ctx.config.llm.enabled:
             failures = [p for p in predictions_vs_actual if not p.get("direction_correct")]
             if failures:
                 try:

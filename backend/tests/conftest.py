@@ -26,7 +26,7 @@ def sample_config() -> AppConfig:
         mode="paper",
         capital={"initial_amount": 100000},
         broker={"api_key": "test_key", "api_secret": "test_secret"},
-        llm={"model": "gemini-2.5-flash", "api_key": "test_key"},
+        llm={"enabled": True, "model": "gemini-2.5-flash", "api_key": "test_key"},
         market_data={"daily_provider": "jugaad", "stale_threshold_minutes": 30},
         heartbeat={
             "market_hours_interval_min": 15,

@@ -78,7 +78,7 @@ class MarketScanSkill(SkillBase):
         sector_analysis = self._analyze_sector_rotation(scored)
 
         # Step 7: Gemini cross-validation
-        if self.ctx.config.risk.llm_review_enabled and shortlist:
+        if self.ctx.config.llm.enabled and self.ctx.config.risk.llm_review_enabled and shortlist:
             try:
                 llm_validation = await self.ctx.llm.validate_watchlist(
                     shortlist=shortlist,
