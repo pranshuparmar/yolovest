@@ -1,19 +1,18 @@
 """Skill: model-retrain — Retrain ML models and manage versioning.
 
-Covers: FR-7.4, FR-7.5, FR-7.6, FR-7.7
 Trigger: CRON — configurable via retraining.schedule_cron (default: Saturday 6 AM)
 Pipeline position: Offline — runs outside market hours.
 
 Flow:
 1. Load accumulated prediction vs actual data from DB
 2. Load latest OHLCV + features data
-3. Retrain both intraday and swing models (FR-7.4)
-4. Version the new model artifacts with metrics (FR-7.7)
+3. Retrain both intraday and swing models
+4. Version the new model artifacts with metrics
 5. Compare new model metrics vs current production model
-6. If improved: deploy to shadow mode for retraining.shadow_mode_days (FR-7.5)
+6. If improved: deploy to shadow mode for retraining.shadow_mode_days
 7. If shadow model outperforms after N days: promote to production
 8. If shadow model underperforms: rollback to previous version
-9. Use Gemini to analyze prediction failures (FR-7.6)
+9. Use Gemini to analyze prediction failures
 10. Store analysis for dashboard display
 """
 
@@ -55,7 +54,7 @@ class ModelRetrainSkill(SkillBase):
         training_data = await self.ctx.db.get_training_dataset()
         predictions_vs_actual = await self.ctx.db.get_prediction_outcomes()
 
-        # Guard: minimum training data (PM G5)
+        # Guard: minimum training data
         bar_count = len(training_data.get("bars", []))
         if bar_count < min_samples:
             logger.warning(
@@ -130,7 +129,7 @@ class ModelRetrainSkill(SkillBase):
         # Step 7: Check shadow promotions
         promotions = await self._check_shadow_promotions()
 
-        # Step 9: Gemini failure analysis (FR-7.6)
+        # Step 9: Gemini failure analysis
         failure_analysis = None
         if predictions_vs_actual:
             failures = [p for p in predictions_vs_actual if not p.get("direction_correct")]
@@ -240,7 +239,7 @@ class ModelRetrainSkill(SkillBase):
         return X, y, feature_names
 
     async def _check_shadow_promotions(self) -> list[dict[str, Any]]:
-        """Check if shadow models have completed trial period. FR-7.5.
+        """Check if shadow models have completed trial period.
 
         Shadow models that have run for >= shadow_mode_days are evaluated:
         - If shadow metrics (Sharpe, win_rate) >= production metrics: promote

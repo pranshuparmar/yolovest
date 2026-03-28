@@ -1,9 +1,9 @@
 """Telegram bot for YoloVest.
 
 Handles:
-- Real-time trade alerts (FR-8.6)
-- Kill switch commands: /stop, /kill, /resume (FR-5.14)
-- Daily auth token flow: /auth <request_token> (FR-6.3)
+- Real-time trade alerts
+- Kill switch commands: /stop, /kill, /resume
+- Daily auth token flow: /auth <request_token>
 - Status commands: /status, /pnl, /positions
 
 Uses python-telegram-bot async API. Runs as a background task
@@ -90,6 +90,9 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("resume", self._cmd_resume))
         self._app.add_handler(CommandHandler("auth", self._cmd_auth))
         self._app.add_handler(CommandHandler("dashboard", self._cmd_dashboard))
+        self._app.add_handler(CommandHandler("pending", self._cmd_pending))
+        self._app.add_handler(CommandHandler("approve", self._cmd_approve))
+        self._app.add_handler(CommandHandler("reject", self._cmd_reject))
 
         logger.info("Telegram bot starting (polling)")
         await self._app.initialize()
@@ -247,7 +250,7 @@ class TelegramBot:
         await update.message.reply_html("\n".join(lines))
 
     async def _cmd_stop(self, update: Any, context: Any) -> None:
-        """Handle /stop — pause trading (FR-5.14)."""
+        """Handle /stop — pause trading."""
         from yolovest.skills.kill_switch import KillSwitchSkill
 
         skill = KillSwitchSkill(self._ctx)
@@ -261,7 +264,7 @@ class TelegramBot:
         )
 
     async def _cmd_kill(self, update: Any, context: Any) -> None:
-        """Handle /kill — square off everything (FR-5.14)."""
+        """Handle /kill — square off everything."""
         from yolovest.skills.kill_switch import KillSwitchSkill
 
         skill = KillSwitchSkill(self._ctx)
@@ -275,7 +278,7 @@ class TelegramBot:
         )
 
     async def _cmd_resume(self, update: Any, context: Any) -> None:
-        """Handle /resume — resume trading (FR-5.14)."""
+        """Handle /resume — resume trading."""
         from yolovest.skills.kill_switch import KillSwitchSkill
 
         skill = KillSwitchSkill(self._ctx)
@@ -286,7 +289,7 @@ class TelegramBot:
         await update.message.reply_html(f"<b>RESUMED</b>\n{status}")
 
     async def _cmd_auth(self, update: Any, context: Any) -> None:
-        """Handle /auth <request_token> — daily Kite authentication (FR-6.3)."""
+        """Handle /auth <request_token> — daily Kite authentication."""
         args = context.args
         if not args:
             await update.message.reply_text(
@@ -360,3 +363,77 @@ class TelegramBot:
             msg += "\n".join(pos_lines)
 
         await update.message.reply_html(msg)
+
+    async def _cmd_pending(self, update: Any, context: Any) -> None:
+        """Handle /pending — show trades awaiting manual approval."""
+        pending = await self._ctx.db.get_pending_trades()
+        if not pending:
+            await update.message.reply_text("No pending trades.")
+            return
+
+        lines = []
+        for t in pending:
+            lines.append(
+                f"#{t['id']} {t['signal_type']} {t['symbol']} "
+                f"@ ₹{t['entry_price']:.2f} "
+                f"(conf {(t.get('confidence_score') or 0):.0%})"
+            )
+        msg = "<b>Pending Trades</b>\n\n" + "\n".join(lines)
+        msg += "\n\n/approve <id> or /reject <id>"
+        await update.message.reply_html(msg)
+
+    async def _cmd_approve(self, update: Any, context: Any) -> None:
+        """Handle /approve <id> — approve a pending trade for execution."""
+        args = context.args
+        if not args:
+            await update.message.reply_text("Usage: /approve <id>")
+            return
+
+        try:
+            trade_id = int(args[0])
+        except ValueError:
+            await update.message.reply_text("Invalid trade ID.")
+            return
+
+        signal = await self._ctx.db.decide_pending_trade(
+            trade_id, "approved", "telegram",
+        )
+        if signal is None:
+            await update.message.reply_text(f"Trade #{trade_id} not found or already decided.")
+            return
+
+        # Execute the approved trade
+        from yolovest.skills.trade_execute import TradeExecuteSkill
+        skill = TradeExecuteSkill(self._ctx)
+        result = await skill.execute(signal=signal)
+
+        if result.success:
+            trade = result.data.get("trade", {}) if result.data else {}
+            await update.message.reply_html(
+                f"Approved & executed: {trade.get('signal_type')} {trade.get('symbol')} "
+                f"qty={trade.get('quantity')} @ ₹{trade.get('fill_price', 0):.2f}"
+            )
+        else:
+            await update.message.reply_text(f"Approved but execution failed: {result.error}")
+
+    async def _cmd_reject(self, update: Any, context: Any) -> None:
+        """Handle /reject <id> — reject a pending trade."""
+        args = context.args
+        if not args:
+            await update.message.reply_text("Usage: /reject <id>")
+            return
+
+        try:
+            trade_id = int(args[0])
+        except ValueError:
+            await update.message.reply_text("Invalid trade ID.")
+            return
+
+        # Check if trade exists and is pending before deciding
+        pending = await self._ctx.db.get_pending_trades()
+        if not any(t["id"] == trade_id for t in pending):
+            await update.message.reply_text(f"Trade #{trade_id} not found or already decided.")
+            return
+
+        await self._ctx.db.decide_pending_trade(trade_id, "rejected", "telegram")
+        await update.message.reply_text(f"Rejected trade #{trade_id}.")

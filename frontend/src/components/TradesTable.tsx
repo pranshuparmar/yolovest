@@ -79,6 +79,7 @@ export function TradesTable({
               </td>
               <td className="py-2 text-gray-500 text-xs">
                 {new Date(t.created_at).toLocaleTimeString("en-IN", {
+                  timeZone: "Asia/Kolkata",
                   hour: "2-digit",
                   minute: "2-digit",
                 })}

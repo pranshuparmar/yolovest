@@ -1,7 +1,6 @@
 """Skill: market-scan — Dynamic stock scanning and ranking.
 
-Covers: FR-3.1 to FR-3.6
-Trigger: HEARTBEAT during market hours (FR-3.4: refreshes each heartbeat)
+Trigger: HEARTBEAT during market hours (refreshes each heartbeat)
 Pipeline position: After ingest-data/ingest-premarket, before generate-signals.
 
 Flow:
@@ -14,9 +13,9 @@ Flow:
    - News sentiment (default 20%): Gemini sentiment from ingest-data
    - Fundamental quality (default 15%): PE, debt ratio, promoter holding
 5. Rank and shortlist top N stocks (scanning.shortlist_size)
-6. Track sector rotation — flag sectors showing strength/weakness (FR-3.5)
-7. Use Gemini to cross-validate shortlist against market narrative (FR-3.6)
-8. Update dynamic watchlist in DB (FR-3.4)
+6. Track sector rotation — flag sectors showing strength/weakness
+7. Use Gemini to cross-validate shortlist against market narrative
+8. Update dynamic watchlist in DB
 """
 
 import logging
@@ -34,7 +33,7 @@ class MarketScanSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        return bool(self.ctx.market_hours.is_market_hours())  # FR-11.3
+        return bool(self.ctx.market_hours.is_market_hours())
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         cfg = self.ctx.config.scanning
@@ -68,13 +67,17 @@ class MarketScanSkill(SkillBase):
             scored.append({**stock, **sub, "composite_score": composite})
 
         # Step 5: Rank and shortlist
-        scored.sort(key=lambda s: s["composite_score"], reverse=True)
+        # Sort by composite score, break ties by volume (avoids alphabetical bias)
+        scored.sort(
+            key=lambda s: (s["composite_score"], s.get("avg_daily_volume") or 0),
+            reverse=True,
+        )
         shortlist = scored[: cfg.shortlist_size]
 
-        # Step 6: Sector rotation analysis (FR-3.5)
+        # Step 6: Sector rotation analysis
         sector_analysis = self._analyze_sector_rotation(scored)
 
-        # Step 7: Gemini cross-validation (FR-3.6)
+        # Step 7: Gemini cross-validation
         if self.ctx.config.risk.llm_review_enabled and shortlist:
             try:
                 llm_validation = await self.ctx.llm.validate_watchlist(
@@ -89,8 +92,16 @@ class MarketScanSkill(SkillBase):
             except Exception as e:
                 logger.warning("LLM watchlist validation failed, using rules-only: %s", e)
 
-        # Step 8: Persist watchlist (FR-3.4: updates each heartbeat)
+        # Step 8: Persist watchlist (updates each heartbeat)
         await self.ctx.db.upsert_watchlist(shortlist)
+
+        logger.info(
+            "market-scan: universe=%d, liquid=%d, shortlisted=%d — top: %s | sectors strong=%s weak=%s",
+            len(universe), len(filtered), len(shortlist),
+            [s["symbol"] for s in shortlist[:5]],
+            sector_analysis.get("strong", []),
+            sector_analysis.get("weak", []),
+        )
 
         return SkillResult(
             success=True,
@@ -106,13 +117,13 @@ class MarketScanSkill(SkillBase):
         )
 
     def _apply_exclusion_filters(self, stocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Remove F&O banned stocks, pending corporate actions, etc. (FR-3.3)"""
+        """Remove F&O banned stocks, pending corporate actions, etc."""
         # F&O ban list and corp actions would be fetched from NSE in production.
         # For now, pass through — the volume filter already removes illiquid stocks.
         return stocks
 
     def _compute_sub_scores(self, stock: dict[str, Any]) -> dict[str, Any]:
-        """Compute normalized [0, 1] sub-scores from raw data (PM G7)."""
+        """Compute normalized [0, 1] sub-scores from raw data."""
         # Technical score: derive from available indicator data (RSI, MACD, SuperTrend)
         tech = self._compute_technical_score(stock)
 
@@ -191,7 +202,7 @@ class MarketScanSkill(SkillBase):
         return round(sum(signals) / len(signals), 4)
 
     def _analyze_sector_rotation(self, scored_stocks: list[dict[str, Any]]) -> dict[str, Any]:
-        """Group by sector, compute avg scores, identify rotation. FR-3.5."""
+        """Group by sector, compute avg scores, identify rotation."""
         sectors: dict[str, list[float]] = {}
         for stock in scored_stocks:
             sector = stock.get("sector") or "Unknown"

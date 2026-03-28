@@ -1,4 +1,4 @@
-"""Tests for the economic calendar module (FR-2.6)."""
+"""Tests for the economic calendar module."""
 
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock

@@ -4,6 +4,7 @@ import { TradesTable } from "../components/TradesTable";
 import { RiskExposureChart } from "../components/RiskExposureChart";
 import { EconomicCalendarWidget } from "../components/EconomicCalendarWidget";
 import { PremarketCard } from "../components/PremarketCard";
+import { PendingTradesBanner } from "../components/PendingTradesBanner";
 import { useTradesToday, useSystemState } from "../hooks/queries";
 
 export function DashboardPage() {
@@ -20,6 +21,8 @@ export function DashboardPage() {
           </span>
         )}
       </div>
+
+      <PendingTradesBanner />
 
       <PortfolioCards />
 

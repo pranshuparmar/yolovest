@@ -1,6 +1,6 @@
 """Configuration system for YoloVest.
 
-Nested Pydantic v2 models matching config.yaml from REQUIREMENTS.md Section 10.
+Nested Pydantic v2 models matching config.yaml structure.
 Supports environment variable expansion for secrets (${VAR_NAME}).
 """
 
@@ -69,13 +69,12 @@ class CapitalConfig(BaseModel):
 
 
 class BrokerConfig(BaseModel):
-    name: str = "zerodha"
     api_key: str = ""
     api_secret: str = ""
 
 
 class LLMConfig(BaseModel):
-    provider: str = "gemini"
+    enabled: bool = False
     model: str = "gemini-2.5-pro"
     api_key: str = ""
 
@@ -84,7 +83,9 @@ class MarketDataConfig(BaseModel):
     daily_provider: str = "jugaad"
     daily_fallback: str = "yfinance"
     intraday_provider: str = "tvdatafeed"
-    kite_data_enabled: bool = False  # FR-2.1e: enable Kite Connect as data provider
+    kite_data_enabled: bool = False  # enable Kite Connect as data provider
+    news_enabled: bool = True  # fetch news from MoneyControl, ET Markets, LiveMint
+    scrapers_enabled: bool = True  # fetch from Screener.in, Trendlyne, Google Finance, NSE, economic calendar
     bhavcopy_dir: str = "./data/bhavcopy"
     cache_ttl_minutes: int = 15
     stale_threshold_minutes: int = 30
@@ -136,14 +137,10 @@ class IndicatorsConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
-    exchange: str = "NSE"
-    interval: str = "5minute"
     ema_periods: list[int] = Field(default_factory=lambda: [9, 21, 50, 200])
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     default_trade_type: Literal["intraday", "swing"] = "intraday"
-    backtest_min_sharpe: float = 1.0
-    backtest_max_drawdown_pct: float = 0.20
-    min_training_samples: int = 200  # PM G5: guard against garbage models
+    min_training_samples: int = 200
 
 
 class RiskConfig(BaseModel):
@@ -166,8 +163,11 @@ class RiskConfig(BaseModel):
     min_confidence_score: float = Field(default=0.65, ge=0, le=1)
     max_trades_per_day: int = Field(default=10, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
-    margin_usage_enabled: bool = False
-    weekly_reset_day: str = "monday"
+    symbol_cooldown_days: int = Field(default=1, ge=0)
+    symbol_repeat_lookback_days: int = Field(default=5, ge=0)
+    symbol_repeat_min_confidence: float = Field(default=0.80, ge=0, le=1)
+    margin_usage_enabled: bool = False  # when False, position value capped by available cash (no leverage)
+    weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
 
 
 class MarketHoursConfig(BaseModel):
@@ -212,16 +212,25 @@ class MarketHoursConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     max_order_retries: int = 3
     retry_base_delay_sec: int = 2
-    max_pipeline_latency_sec: int = 2
     paper_slippage_pct: float = Field(default=0.001, ge=0)
     order_timeout_sec: int = 30
+    price_drift_max_pct: float = Field(default=0.02, gt=0, lt=1)
+    transaction_mode: Literal["auto", "manual"] = "auto"  # manual = require approval before execution
+
+
+class TransactionCostConfig(BaseModel):
+    brokerage_per_leg_pct: float = 0.0003  # 0.03% or ₹20 cap
+    brokerage_cap_per_leg: float = 20.0  # ₹20 max brokerage per order
+    stt_intraday_pct: float = 0.00025  # 0.025% on sell side (MIS)
+    stt_delivery_pct: float = 0.001  # 0.1% on sell side (CNC)
+    other_charges_pct: float = 0.0001  # stamp duty + GST + exchange (~0.01%)
 
 
 class RetentionConfig(BaseModel):
     ohlcv_days: int = 730
     audit_log_days: int = 365
     predictions_days: int = 365
-    news_days: int = 180
+    news_days: int = 30
     economic_events_days: int = 365
 
 
@@ -236,6 +245,8 @@ class DatabaseConfig(BaseModel):
 class RetrainingConfig(BaseModel):
     schedule_cron: str = "0 6 * * 6"
     shadow_mode_days: int = 7
+    shadow_min_predictions: int = 10
+    retired_model_cleanup_days: int = 30
 
 
 class ReportsConfig(BaseModel):
@@ -243,10 +254,18 @@ class ReportsConfig(BaseModel):
     weekly_report_cron: str = "0 10 * * 6"
 
 
+class LoggingConfig(BaseModel):
+    level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
+    file_level: str = "INFO"  # log file can have a different level
+    log_dir: str = "./logs"
+    max_bytes: int = 10 * 1024 * 1024  # 10 MB per log file
+    backup_count: int = 5  # number of rotated files to keep
+
+
 class DashboardConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8080
-    password: str = "yolovest"  # FR-8.9: basic password auth
+    password: str = "yolovest"  # basic password auth
 
 
 class TelegramAlertsConfig(BaseModel):
@@ -288,10 +307,12 @@ class AppConfig(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     market_hours: MarketHoursConfig = Field(default_factory=MarketHoursConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    transaction_costs: TransactionCostConfig = Field(default_factory=TransactionCostConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     retraining: RetrainingConfig = Field(default_factory=RetrainingConfig)
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
+    log: LoggingConfig = Field(default_factory=LoggingConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
 
     @classmethod

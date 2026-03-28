@@ -52,6 +52,7 @@ export function CorrelationPage() {
             Add symbols to watchlist and ensure market data is ingested.
           </p>
         ) : (
+          <div className="overflow-x-auto">
           <table className="text-xs">
             <thead>
               <tr>
@@ -76,6 +77,7 @@ export function CorrelationPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
     </div>

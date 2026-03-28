@@ -47,38 +47,71 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Trading mode override (default: from config file)",
     )
-    parser.add_argument(
-        "--no-dashboard",
-        action="store_true",
-        help="Disable the web dashboard",
-    )
     return parser.parse_args()
 
 
-def setup_logging() -> None:
-    """Configure logging for the application."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    # Suppress verbose httpx request logs (they leak Telegram tokens and API keys)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    # Suppress google_genai internal logs
-    logging.getLogger("google_genai").setLevel(logging.WARNING)
+def setup_logging(config: "AppConfig | None" = None) -> None:
+    """Configure logging for the application.
 
-    # Add in-memory ring buffer for live log viewing from dashboard
-    from yolovest.log_buffer import LogBuffer
-    buffer_handler = LogBuffer(maxlen=500)
-    buffer_handler.setFormatter(logging.Formatter(
+    Called twice: once at startup with defaults (before config loads),
+    then again after config loads to apply configured levels.
+    """
+    from pathlib import Path
+    from logging.handlers import RotatingFileHandler
+    from yolovest.config import LoggingConfig
+
+    cfg = config.log if config else LoggingConfig()
+    level = getattr(logging, cfg.level.upper(), logging.INFO)
+    file_level = getattr(logging, cfg.file_level.upper(), logging.INFO)
+
+    log_fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-    ))
-    logging.getLogger().addHandler(buffer_handler)
+    )
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    # Only add handlers on first call (avoid duplicates on reconfigure)
+    if not root.handlers:
+        # Console handler
+        console = logging.StreamHandler()
+        console.setFormatter(log_fmt)
+        console.setLevel(level)
+        root.addHandler(console)
+
+        # File handler
+        log_dir = Path(cfg.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_dir / "yolovest.log",
+            maxBytes=cfg.max_bytes,
+            backupCount=cfg.backup_count,
+        )
+        file_handler.setFormatter(log_fmt)
+        file_handler.setLevel(file_level)
+        root.addHandler(file_handler)
+
+        # In-memory ring buffer for live log viewing from dashboard
+        from yolovest.log_buffer import LogBuffer
+        buffer_handler = LogBuffer(maxlen=500)
+        buffer_handler.setFormatter(log_fmt)
+        root.addHandler(buffer_handler)
+    else:
+        # Reconfigure: update levels on existing handlers
+        for handler in root.handlers:
+            if isinstance(handler, RotatingFileHandler):
+                handler.setLevel(file_level)
+            elif isinstance(handler, logging.StreamHandler):
+                handler.setLevel(level)
+
+    # Suppress verbose third-party logs (leak tokens and API keys)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("google_genai").setLevel(logging.WARNING)
 
 
 class _StubDB:
-    """Minimal database stub for Phase 0 (no real DB yet)."""
+    """Minimal database stub when no real DB yet)."""
 
     async def health_check(self) -> bool:
         return True
@@ -91,7 +124,7 @@ class _StubDB:
 
 
 class _StubBroker:
-    """Minimal broker stub for Phase 0 (no real broker yet)."""
+    """Minimal broker stub when no real broker yet)."""
 
     async def authenticate(self, request_token: str) -> bool:
         return False
@@ -125,7 +158,7 @@ class _StubBroker:
 
 
 class _StubLLM:
-    """Minimal LLM stub for Phase 0 (no real LLM yet)."""
+    """Minimal LLM stub when no real LLM yet)."""
 
     async def ping(self) -> bool:
         return False
@@ -150,7 +183,7 @@ class _StubLLM:
 
 
 class _StubMarketData:
-    """Minimal market data stub for Phase 0 (no real providers yet)."""
+    """Minimal market data stub when no real providers yet)."""
 
     async def get_ohlcv(self, symbol: str, interval: str, days: int = 30) -> list[object]:
         return []
@@ -185,9 +218,13 @@ def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
 
 
 def _build_llm(config: AppConfig) -> GeminiLLM | _StubLLM:
-    """Build LLM — real if API key set, stub otherwise."""
-    if config.llm.api_key and config.llm.api_key != "${GEMINI_API_KEY}":
+    """Build LLM — real if enabled + API key set, stub otherwise."""
+    if (config.llm.enabled
+            and config.llm.api_key
+            and config.llm.api_key != "${GEMINI_API_KEY}"):
         return GeminiLLM(api_key=config.llm.api_key, model=config.llm.model)
+    if not config.llm.enabled:
+        logger.info("LLM disabled via config (llm.enabled=false)")
     return _StubLLM()
 
 
@@ -195,13 +232,13 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
     """Build market data ingester with provider fallback chain.
 
     If kite_data_enabled is True and broker API keys are set, Kite Connect
-    is added as the primary provider (FR-2.1e). Requires paid data plan.
+    is added as the primary provider. Requires paid data plan.
     """
     from yolovest.data.base import MarketDataBase
 
     daily_providers: list[MarketDataBase] = []
 
-    # FR-2.1e: Kite data plan as primary when enabled
+    # Kite data plan as primary when enabled
     if config.market_data.kite_data_enabled:
         api_key = config.broker.api_key
         if api_key and api_key != "${KITE_API_KEY}":
@@ -240,7 +277,7 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
 
 
 def _build_memory(db: Any) -> Any:
-    """Build agent memory persistence layer (FR-1.5)."""
+    """Build agent memory persistence layer."""
     try:
         from yolovest.memory import AgentMemory
 
@@ -262,8 +299,11 @@ def _build_ml(config: AppConfig, db: Any) -> Any:
         return None
 
 
-def _build_news_aggregator() -> Any:
+def _build_news_aggregator(config: AppConfig) -> Any:
     """Build news aggregator with all available news sources."""
+    if not config.market_data.news_enabled:
+        logger.info("News sources disabled via config (market_data.news_enabled=false)")
+        return None
     try:
         from yolovest.news.aggregator import NewsAggregator
         from yolovest.news.et_markets import ETMarketsSource
@@ -307,9 +347,45 @@ def build_context(config: AppConfig) -> AppContext:
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
         ml=_build_ml(config, db),
-        news_aggregator=_build_news_aggregator(),
+        news_aggregator=_build_news_aggregator(config),
         memory=_build_memory(db),
     )
+
+
+def _sync_kite_data_token(ctx: "AppContext") -> None:
+    """Sync broker's access token to KiteDataProvider if enabled.
+
+    Called after broker auth/restore so the data provider can make API calls.
+    """
+    from yolovest.broker.zerodha import ZerodhaBroker
+
+    if not isinstance(ctx.broker, ZerodhaBroker):
+        return
+    token = getattr(ctx.broker, "_access_token", None)
+    if not token or token == "paper_token":
+        return
+
+    # Find KiteDataProvider in the ingester's provider chain
+    ingester = ctx.market_data
+    if not hasattr(ingester, "_daily_providers"):
+        return
+    for provider in ingester._daily_providers:
+        try:
+            from yolovest.data.kite_data import KiteDataProvider
+            if isinstance(provider, KiteDataProvider):
+                provider.set_access_token(token)
+                logger.info("Synced broker access token to Kite data provider")
+                break
+        except ImportError:
+            break
+    # Also sync to intraday provider if it's the same Kite instance
+    if hasattr(ingester, "_intraday_provider") and ingester._intraday_provider is not None:
+        try:
+            from yolovest.data.kite_data import KiteDataProvider
+            if isinstance(ingester._intraday_provider, KiteDataProvider):
+                ingester._intraday_provider.set_access_token(token)
+        except ImportError:
+            pass
 
 
 async def async_main(args: argparse.Namespace) -> None:
@@ -323,6 +399,9 @@ async def async_main(args: argparse.Namespace) -> None:
     except Exception:
         logger.exception("Failed to load config from %s", args.config)
         sys.exit(1)
+
+    # Reconfigure logging with config-based levels
+    setup_logging(config)
 
     # CLI mode override
     if args.mode is not None:
@@ -340,6 +419,9 @@ async def async_main(args: argparse.Namespace) -> None:
     # Restore Zerodha session from persisted access token
     if isinstance(ctx.broker, ZerodhaBroker):
         restored = await ctx.broker.restore_session()
+
+        # Sync Kite data provider with broker's access token
+        _sync_kite_data_token(ctx)
 
         # Sync capital from Zerodha if session was restored
         if restored:
@@ -373,6 +455,29 @@ async def async_main(args: argparse.Namespace) -> None:
                 logger.info("No saved %s model found, will be available after model-retrain", model_type)
             except Exception as e:
                 logger.warning("Failed to load %s model at startup: %s", model_type, e)
+
+        # Load shadow models (if any are in shadow status in DB)
+        try:
+            shadow_models = await ctx.db.get_all_shadow_models()
+            for shadow in shadow_models:
+                try:
+                    await ctx.ml.load_shadow_model(
+                        shadow["model_type"], shadow["version"],
+                    )
+                except FileNotFoundError:
+                    # .pkl file missing — revert to retired
+                    logger.warning(
+                        "Shadow %s model %s has no .pkl file — reverting to retired",
+                        shadow["model_type"], shadow["version"],
+                    )
+                    await ctx.db.retire_model(shadow["model_type"], shadow["version"])
+                except Exception as e:
+                    logger.warning(
+                        "Failed to load shadow %s model %s: %s",
+                        shadow["model_type"], shadow["version"], e,
+                    )
+        except Exception:
+            pass
 
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
@@ -426,21 +531,25 @@ async def async_main(args: argparse.Namespace) -> None:
             ctx.notify.set_telegram_bot(telegram_bot)
         telegram_task = asyncio.create_task(_start_telegram(telegram_bot))
 
-    # Start dashboard if enabled
-    dashboard_task = None
-    if not args.no_dashboard:
-        dashboard_task = asyncio.create_task(_start_dashboard(ctx))
+    # Start dashboard
+    dashboard_task = asyncio.create_task(_start_dashboard(ctx))
 
     # Start CRON scheduler as background task
     cron_task = asyncio.create_task(_start_cron_scheduler(cron_scheduler))
 
     # Start
+    import os
+    domain = os.environ.get("DOMAIN")
+    dashboard_url = (
+        f"https://{domain}" if domain
+        else f"http://{config.dashboard.host}:{config.dashboard.port}"
+    )
+
     await ctx.notify.send(
         f"YoloVest started in {config.mode} mode. "
         f"Heartbeat interval: {config.heartbeat.market_hours_interval_min}min (market hours), "
         f"{config.heartbeat.off_hours_interval_min}min (off hours)."
-        + (f"\nDashboard: http://{config.dashboard.host}:{config.dashboard.port}"
-           if not args.no_dashboard else "")
+        + f"\nDashboard: {dashboard_url}"
     )
 
     try:

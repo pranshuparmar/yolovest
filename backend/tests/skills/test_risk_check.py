@@ -1,4 +1,4 @@
-"""Tests for risk-check skill (Phase 3, FR-5.1 to FR-5.18)."""
+"""Tests for risk-check skill."""
 
 from unittest.mock import AsyncMock
 
@@ -213,6 +213,7 @@ class TestRiskCheckWeeklyBreaker:
         healthy_portfolio["weekly_pnl_pct"] = -0.06  # exceeds 5% weekly limit
         risk_skill.ctx.db.get_portfolio_state = AsyncMock(return_value=healthy_portfolio)
         risk_skill.ctx.market_hours.is_order_window = lambda: True
+        risk_skill.ctx.market_data.get_ltp = AsyncMock(return_value=10.0)
 
         result = await risk_skill.execute(signal=signal)
 

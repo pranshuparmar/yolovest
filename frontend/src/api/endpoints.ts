@@ -200,6 +200,24 @@ export const api = {
       method: "POST",
     }),
 
+  deleteModel: (modelType: string, version: string) =>
+    apiFetch<{ db_deleted: boolean; file_deleted: boolean }>(`/api/ml-models/${modelType}/${version}`, {
+      method: "DELETE",
+    }),
+
+  reshadowModel: (modelType: string, version: string) =>
+    apiFetch<{ reshadowed: boolean }>(`/api/ml-models/${modelType}/${version}/reshadow`, {
+      method: "POST",
+    }),
+
+  retireModel: (modelType: string, version: string) =>
+    apiFetch<{ retired: boolean }>(`/api/ml-models/${modelType}/${version}/retire`, {
+      method: "POST",
+    }),
+
+  shadowComparison: (modelType: string) =>
+    apiFetch<{ shadow: Record<string, number>; production: Record<string, number> }>(`/api/ml-models/${modelType}/shadow-comparison`),
+
   predictionsToday: () =>
     apiFetch<PredictionDetail[]>("/api/predictions/today"),
 
@@ -311,6 +329,16 @@ export const api = {
 
   resetAllData: () => apiFetch<ResetResult>("/api/reset", { method: "POST" }),
 
+  // Pending Trades (manual approval)
+  pendingTrades: () =>
+    apiFetch<{ id: number; symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; position_size: number; confidence_score: number; product: string; created_at: string }[]>("/api/pending-trades"),
+
+  approvePendingTrade: (tradeId: number) =>
+    apiFetch<{ success: boolean; trade?: Record<string, unknown> }>(`/api/pending-trades/${tradeId}/approve`, { method: "POST" }),
+
+  rejectPendingTrade: (tradeId: number) =>
+    apiFetch<{ success: boolean }>(`/api/pending-trades/${tradeId}/reject`, { method: "POST" }),
+
   // Dry-Run Signal Preview
   runDryRun: () => apiFetch<DryRunResult>("/api/dry-run", { method: "POST" }),
 
@@ -322,6 +350,15 @@ export const api = {
 
   scoreDryRun: (runId: string) =>
     apiFetch<{ scored: number; not_found: number }>(`/api/dry-run/${runId}/score`, { method: "POST" }),
+
+  deleteDryRun: (runId: string) =>
+    apiFetch<{ success: boolean; deleted: number }>(`/api/dry-run/${runId}`, { method: "DELETE" }),
+
+  quarantinedSymbols: () =>
+    apiFetch<{ symbol: string; consecutive_failures: number; last_error: string; quarantined_at: string; updated_at: string }[]>("/api/quarantined-symbols"),
+
+  unquarantineSymbol: (symbol: string) =>
+    apiFetch<{ success: boolean; symbol: string }>(`/api/quarantined-symbols/${symbol}`, { method: "DELETE" }),
 
   listSkills: () =>
     apiFetch<{ name: string; description: string; trigger: string; schedule: string | null }[]>(

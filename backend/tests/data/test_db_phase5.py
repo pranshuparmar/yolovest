@@ -1,4 +1,4 @@
-"""Tests for Phase 5 database methods (dashboard queries)."""
+"""Tests for database methods (dashboard queries)."""
 
 import pytest
 

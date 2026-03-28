@@ -1,7 +1,6 @@
 """tvDatafeed market data provider (intraday, 5min/15min).
 
 Unofficial TradingView API. Free tier: 5min bars, last 15 days.
-See REQUIREMENTS.md FR-2.1c.
 """
 
 import asyncio

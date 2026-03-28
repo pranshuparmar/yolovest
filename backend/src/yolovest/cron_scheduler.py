@@ -3,8 +3,6 @@
 Discovers CRON-triggered skills from the registry and fires them
 on their defined schedules. Runs as a background async loop alongside
 the heartbeat orchestrator.
-
-Implements FR-1.2 (cron-triggered skills) and FR-1.3 (error propagation).
 """
 
 import asyncio

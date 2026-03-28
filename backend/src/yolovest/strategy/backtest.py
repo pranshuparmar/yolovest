@@ -1,6 +1,6 @@
-"""Walk-forward backtesting engine (FR-4.6, FR-4.7).
+"""Walk-forward backtesting engine.
 
-Simulates trading on historical data with transaction costs (FR-9.2, PM G4).
+Simulates trading on historical data with transaction costs.
 Uses a rolling train/test window approach for realistic performance estimation.
 """
 
@@ -28,7 +28,7 @@ class Backtester:
 
         Args:
             transaction_cost_pct: Round-trip transaction cost as fraction
-                                  of trade value (FR-9.2). Default 0.1%.
+                                  of trade value. Default 0.1%.
         """
         self.transaction_cost_pct = transaction_cost_pct
 
@@ -116,7 +116,7 @@ class Backtester:
                 else:  # SELL
                     raw_return = (entry_price - exit_price) / entry_price
 
-                # Deduct transaction costs (PM G4)
+                # Deduct transaction costs
                 net_return = raw_return - self.transaction_cost_pct
 
                 all_returns.append(net_return)

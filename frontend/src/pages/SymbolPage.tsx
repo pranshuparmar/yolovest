@@ -33,7 +33,7 @@ export function SymbolPage() {
   const tooltipStyle = useTooltipStyle();
 
   const chartData = (ohlcv || []).map((b) => ({
-    date: new Date(b.timestamp).toLocaleDateString("en-IN", { month: "short", day: "numeric" }),
+    date: new Date(b.timestamp).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" }),
     close: b.close,
     volume: b.volume,
     high: b.high,
@@ -130,7 +130,7 @@ export function SymbolPage() {
                   className="flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-800/50 text-sm">
                   <div className="flex items-center gap-2">
                     <span className={clsx("text-xs px-1 rounded", t.signal_type === "BUY" ? "bg-emerald-900/40 text-emerald-400" : "bg-red-900/40 text-red-400")}>{t.signal_type}</span>
-                    <span className="text-gray-400 text-xs">{new Date(t.created_at).toLocaleDateString("en-IN")}</span>
+                    <span className="text-gray-400 text-xs">{new Date(t.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</span>
                   </div>
                   <span className={clsx("text-sm", t.pnl != null && t.pnl >= 0 ? "text-emerald-400" : "text-red-400")}>
                     {t.pnl != null ? `₹${fmt(t.pnl)}` : "Open"}
@@ -151,7 +151,7 @@ export function SymbolPage() {
               {predictions.map((p) => (
                 <div key={p.prediction_id} className="flex items-center justify-between py-1.5 px-2 text-sm">
                   <div className="flex items-center gap-2">
-                    <span className="text-gray-400 text-xs">{new Date(p.created_at).toLocaleDateString("en-IN")}</span>
+                    <span className="text-gray-400 text-xs">{new Date(p.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</span>
                     {p.direction_correct != null && (
                       <span className={p.direction_correct ? "text-emerald-400 text-xs" : "text-red-400 text-xs"}>
                         {p.direction_correct ? "Correct" : "Wrong"}

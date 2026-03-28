@@ -1,4 +1,4 @@
-"""Economic calendar ingestion for Indian market events (FR-2.6).
+"""Economic calendar ingestion for Indian market events.
 
 Ingests macroeconomic events relevant to Indian stock markets from:
 1. RBI MPC — scraped from RBI website RSS/announcements (primary)

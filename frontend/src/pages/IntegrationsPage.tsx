@@ -215,11 +215,9 @@ export function IntegrationsPage() {
             {zerodha.login_url && (
               <a
                 href={zerodha.login_url}
-                target="_blank"
-                rel="noopener noreferrer"
                 className="block text-center px-3 py-1.5 rounded text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
               >
-                Open Kite Login
+                {zerodha.connected ? "Re-authenticate Kite" : "Login to Kite"}
               </a>
             )}
             <div className="flex gap-2">

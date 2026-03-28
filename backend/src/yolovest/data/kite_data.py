@@ -1,4 +1,4 @@
-"""Kite Connect market data provider (FR-2.1e).
+"""Kite Connect market data provider.
 
 Optional drop-in provider for users with the ₹500/month Kite data plan.
 Provides real-time streaming quotes and full historical data via

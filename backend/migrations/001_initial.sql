@@ -1,7 +1,5 @@
--- Migration 001: Initial schema for YoloVest Phase 1
+-- Migration 001: Initial schema for YoloVest
 -- All tables created upfront for forward compatibility.
--- Phase 1 actively uses: ohlcv, watchlist, system_state, audit_log
--- Later phases populate: trades, signals, predictions, sentiment, premarket, llm_reviews
 
 -- OHLCV candle data (daily + intraday)
 CREATE TABLE ohlcv (
@@ -123,7 +121,7 @@ CREATE TABLE llm_reviews (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Audit log (NFR-5)
+-- Audit log
 CREATE TABLE audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp_ist TEXT NOT NULL,

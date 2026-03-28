@@ -1,7 +1,6 @@
 """Abstract market data provider interface (ABC).
 
 All data providers (jugaad-data, yfinance, tvDatafeed, etc.) extend MarketDataBase.
-See REQUIREMENTS.md FR-2.1 for the data source abstraction layer.
 """
 
 from abc import ABC, abstractmethod

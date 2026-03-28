@@ -2,11 +2,9 @@
 
 Wraps multiple MarketDataBase providers with:
 - Automatic failover (primary → fallback → error)
-- Data staleness validation (FR-10.4)
+- Data staleness validation
 - Data quality validation (high >= low, close in range)
 - Implements MarketDataProtocol so it can be used as ctx.market_data
-
-See REQUIREMENTS.md FR-2.1 for the fallback chain design.
 """
 
 import logging
@@ -35,7 +33,7 @@ class MarketDataIngester(MarketDataBase):
         Args:
             daily_providers: Ordered list — first is primary, rest are fallbacks.
             intraday_provider: Separate provider for intraday intervals (e.g., tvDatafeed).
-            stale_threshold_minutes: Reject data older than this (FR-10.4).
+            stale_threshold_minutes: Reject data older than this.
         """
         if not daily_providers:
             raise ValueError("At least one daily provider is required")
@@ -155,7 +153,7 @@ class MarketDataIngester(MarketDataBase):
         return providers
 
     def _is_stale(self, bars: list[OHLCVBar], interval: str) -> bool:
-        """Check if the most recent bar is too old (FR-10.4).
+        """Check if the most recent bar is too old.
 
         Uses IST-aware comparison. Naive timestamps from providers are
         treated as IST (Indian market data convention).

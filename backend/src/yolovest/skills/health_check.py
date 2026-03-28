@@ -1,6 +1,5 @@
 """Skill: health-check — System health monitoring and heartbeat.
 
-Covers: FR-1.2, FR-1.6
 Trigger: HEARTBEAT — every heartbeat (market hours: 15min, off hours: 60min)
 Pipeline position: Runs first every heartbeat, gates all other skills.
 
@@ -14,7 +13,7 @@ Flow:
 7. Check kill switch state — if active, skip all trading skills
 8. If any critical check fails:
    a. Send Telegram alert (errors alert type)
-   b. If positions are at risk (FR-1.6), trigger protective square-off
+   b. If positions are at risk, trigger protective square-off
    c. Log failure for dashboard display
 9. Return health status for orchestrator to decide which skills to run
 """
@@ -73,7 +72,7 @@ class HealthCheckSkill(SkillBase):
                     from yolovest.timezone import now_ist
                     await self.ctx.db.set_system_state("last_llm_ping_ok", now_ist().isoformat())
         except Exception:
-            checks["llm"] = False  # non-critical per FR-5.12
+            checks["llm"] = False  # non-critical, fallback exists
 
         # Check 4: Market data (at least one provider up)
         try:
@@ -91,7 +90,7 @@ class HealthCheckSkill(SkillBase):
         # Check 7: Kill switch state
         checks["kill_switch_active"] = await self.ctx.db.is_kill_switch_active()
 
-        # FR-1.6: Graceful degradation — protect positions on critical failure
+        # Graceful degradation — protect positions on critical failure
         if critical_failures and self.ctx.market_hours.is_market_hours():
             open_positions = await self.ctx.db.get_open_positions()
             if open_positions:

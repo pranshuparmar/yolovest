@@ -255,6 +255,7 @@ export interface MLModelInfo {
 export interface MLModelsResponse {
   production: Record<string, MLModelInfo>;
   shadow: MLModelInfo[];
+  retired: MLModelInfo[];
 }
 
 export interface PredictionDetail {

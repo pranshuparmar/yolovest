@@ -287,6 +287,48 @@ export function usePromoteModel() {
   });
 }
 
+export function useDeleteModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ modelType, version }: { modelType: string; version: string }) =>
+      api.deleteModel(modelType, version),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ml-models"] });
+    },
+  });
+}
+
+export function useReshadowModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ modelType, version }: { modelType: string; version: string }) =>
+      api.reshadowModel(modelType, version),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ml-models"] });
+    },
+  });
+}
+
+export function useRetireModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ modelType, version }: { modelType: string; version: string }) =>
+      api.retireModel(modelType, version),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ml-models"] });
+    },
+  });
+}
+
+export function useShadowComparison(modelType: string | null) {
+  return useQuery({
+    queryKey: ["shadow-comparison", modelType],
+    queryFn: () => api.shadowComparison(modelType!),
+    enabled: !!modelType,
+    staleTime: 60_000,
+  });
+}
+
 export function usePredictionsToday() {
   return useQuery({
     queryKey: ["predictions", "today"],
@@ -529,6 +571,37 @@ export function useSyncCapital() {
   });
 }
 
+export function usePendingTrades() {
+  return useQuery({
+    queryKey: ["pending-trades"],
+    queryFn: api.pendingTrades,
+    staleTime: 10_000,
+    refetchInterval: 10_000,
+  });
+}
+
+export function useApprovePendingTrade() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.approvePendingTrade,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pending-trades"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+    },
+  });
+}
+
+export function useRejectPendingTrade() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.rejectPendingTrade,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pending-trades"] });
+    },
+  });
+}
+
 export function useResetAllData() {
   const qc = useQueryClient();
   return useMutation({
@@ -587,6 +660,34 @@ export function useScoreDryRun() {
     onSuccess: (_data, runId) => {
       qc.invalidateQueries({ queryKey: ["dry-run-history"] });
       qc.invalidateQueries({ queryKey: ["dry-run-detail", runId] });
+    },
+  });
+}
+
+export function useDeleteDryRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.deleteDryRun,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["dry-run-history"] });
+    },
+  });
+}
+
+export function useQuarantinedSymbols() {
+  return useQuery({
+    queryKey: ["quarantined-symbols"],
+    queryFn: api.quarantinedSymbols,
+    staleTime: 60_000,
+  });
+}
+
+export function useUnquarantineSymbol() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.unquarantineSymbol,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["quarantined-symbols"] });
     },
   });
 }

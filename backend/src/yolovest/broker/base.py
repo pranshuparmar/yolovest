@@ -1,7 +1,6 @@
 """Abstract broker interface (ABC).
 
 All broker implementations (Zerodha, paper, etc.) extend BrokerBase.
-See REQUIREMENTS.md FR-6 for order execution requirements.
 """
 
 from abc import ABC, abstractmethod

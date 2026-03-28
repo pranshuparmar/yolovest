@@ -1,6 +1,5 @@
 """Skill: ingest-data — Market data ingestion from all sources.
 
-Covers: FR-2.1 to FR-2.9, FR-2.12, FR-2.13, FR-2.6 (economic calendar)
 Trigger: HEARTBEAT — every heartbeat during market hours
 Pipeline position: Feeds into market-scan and generate-signals.
 
@@ -14,9 +13,9 @@ Flow:
 7. Fetch economic calendar events
 8. Fetch Google Finance data for global cues
 9. Run Gemini sentiment analysis on aggregated news
-10. Deduplicate news across sources (FR-2.13)
+10. Deduplicate news across sources
 11. Persist everything to SQLite with timestamps
-12. Respect rate limits for all sources (FR-2.9)
+12. Respect rate limits for all sources
 """
 
 import logging
@@ -81,10 +80,24 @@ class IngestDataSkill(SkillBase):
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         symbols = kwargs.get("symbols") or await self._get_active_symbols()
-        results: dict[str, Any] = {"symbols_ingested": 0, "news_articles": 0, "errors": [], "cache_hits": 0}
+        results: dict[str, Any] = {
+            "symbols_ingested": 0, "news_articles": 0, "errors": [],
+            "cache_hits": 0, "quarantined": 0,
+        }
+
+        # Load quarantined symbols for fast skip
+        quarantined = await self.ctx.db.get_all_quarantined_symbol_set()
+        active_symbols = [s for s in symbols if s not in quarantined]
+        results["quarantined"] = len(symbols) - len(active_symbols)
+        if results["quarantined"] > 0:
+            logger.info(
+                "ingest-data: skipping %d quarantined symbols: %s",
+                results["quarantined"],
+                sorted(quarantined & set(symbols)),
+            )
 
         # --- OHLCV Data (primary + fallback) ---
-        for symbol in symbols:
+        for symbol in active_symbols:
             try:
                 # Skip external fetch if DB cache is fresh
                 if await self._is_cached_fresh(symbol, "daily"):
@@ -95,6 +108,34 @@ class IngestDataSkill(SkillBase):
                     daily = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=30)
                     await self.ctx.db.upsert_ohlcv(symbol, "daily", daily, "ingester")
                     results["symbols_ingested"] += 1
+
+                    # Check if data is actually fresh — the ingester may have
+                    # returned stale fallback data (e.g. delisted symbols where
+                    # Jugaad returns old bars but yfinance fails). Count stale
+                    # returns as failures for quarantine purposes.
+                    if daily:
+                        latest = daily[-1].timestamp
+                        if latest.tzinfo is None:
+                            latest = latest.replace(tzinfo=IST)
+                        days_old = (now_ist() - latest).days
+                        if days_old > 5:
+                            logger.warning(
+                                "Stale data for %s: latest bar is %dd old",
+                                symbol, days_old,
+                            )
+                            now_quarantined = await self.ctx.db.record_fetch_failure(
+                                symbol, f"data {days_old}d stale",
+                            )
+                            if now_quarantined:
+                                logger.warning(
+                                    "ingest-data: QUARANTINED %s — data consistently stale (%dd old)",
+                                    symbol, days_old,
+                                )
+                                results["quarantined"] += 1
+                        else:
+                            await self.ctx.db.record_fetch_success(symbol)
+                    else:
+                        await self.ctx.db.record_fetch_success(symbol)
 
                 # Intraday candles if market is open
                 if self.ctx.market_hours.is_market_hours():
@@ -110,6 +151,15 @@ class IngestDataSkill(SkillBase):
             except Exception as e:
                 results["errors"].append(f"{symbol}: {e}")
                 logger.warning("OHLCV fetch failed for %s: %s", symbol, e)
+                # Track failure — quarantine after 3 consecutive failures
+                now_quarantined = await self.ctx.db.record_fetch_failure(symbol, str(e))
+                if now_quarantined:
+                    logger.warning(
+                        "ingest-data: QUARANTINED %s after 3 consecutive failures — "
+                        "will be skipped in all pipelines until manually unblocked",
+                        symbol,
+                    )
+                    results["quarantined"] += 1
 
         # --- Check if expensive fetches should be skipped ---
         # News, fundamentals, Google Finance etc. don't change minute-to-minute.
@@ -133,7 +183,8 @@ class IngestDataSkill(SkillBase):
             pass
 
         # --- News Aggregation + Dedup ---
-        if skip_expensive:
+        news_enabled = self.ctx.config.market_data.news_enabled
+        if skip_expensive or not news_enabled:
             raw_news = []
             deduped = []
         else:
@@ -145,22 +196,24 @@ class IngestDataSkill(SkillBase):
         if deduped:
             await self.ctx.db.upsert_news_articles(deduped)
 
-        # --- Gemini Sentiment Analysis (FR-2.7) ---
-        for symbol in symbols:
-            symbol_headlines = [
-                n.headline for n in deduped
-                if symbol.lower() in " ".join(n.symbols).lower()
-                or symbol.lower() in n.headline.lower()
-            ]
-            if symbol_headlines:
-                try:
-                    sentiment = await self.ctx.llm.analyze_sentiment(symbol, symbol_headlines)
-                    await self.ctx.db.upsert_sentiment(symbol, sentiment)
-                except Exception as e:
-                    logger.warning("Sentiment analysis failed for %s: %s", symbol, e)
+        # --- Gemini Sentiment Analysis ---
+        if self.ctx.config.llm.enabled and deduped:
+            for symbol in active_symbols:
+                symbol_headlines = [
+                    n.headline for n in deduped
+                    if symbol.lower() in " ".join(n.symbols).lower()
+                    or symbol.lower() in n.headline.lower()
+                ]
+                if symbol_headlines:
+                    try:
+                        sentiment = await self.ctx.llm.analyze_sentiment(symbol, symbol_headlines)
+                        await self.ctx.db.upsert_sentiment(symbol, sentiment)
+                    except Exception as e:
+                        logger.warning("Sentiment analysis failed for %s: %s", symbol, e)
 
-        if not skip_expensive:
-            # --- NSE Official Data (FR-2.2) ---
+        scrapers_enabled = self.ctx.config.market_data.scrapers_enabled
+        if not skip_expensive and scrapers_enabled:
+            # --- NSE Official Data ---
             try:
                 nse_data = await self._fetch_nse_data()
                 if nse_data:
@@ -168,7 +221,7 @@ class IngestDataSkill(SkillBase):
             except Exception as e:
                 logger.warning("NSE data fetch failed: %s", e)
 
-            # --- Economic Calendar (FR-2.6) ---
+            # --- Economic Calendar ---
             try:
                 econ_events = await self._fetch_economic_calendar()
                 if econ_events:
@@ -178,21 +231,21 @@ class IngestDataSkill(SkillBase):
             except Exception as e:
                 logger.warning("Economic calendar fetch failed: %s", e)
 
-            # --- Fundamentals from Screener.in (FR-2.4) ---
+            # --- Fundamentals from Screener.in ---
             try:
                 fundamentals_count = await self._fetch_fundamentals(symbols)
                 results["fundamentals_updated"] = fundamentals_count
             except Exception as e:
                 logger.warning("Fundamentals fetch failed: %s", e)
 
-            # --- Technicals from Trendlyne (FR-2.5) ---
+            # --- Technicals from Trendlyne ---
             try:
                 technicals_count = await self._fetch_technicals(symbols)
                 results["technicals_updated"] = technicals_count
             except Exception as e:
                 logger.warning("Technicals fetch failed: %s", e)
 
-            # --- Google Finance (FR-2.12) ---
+            # --- Google Finance ---
             try:
                 gf_data = await self._fetch_google_finance(symbols)
                 if gf_data:
@@ -219,6 +272,15 @@ class IngestDataSkill(SkillBase):
 
         # Partial success: only fail if ALL symbols failed OHLCV
         all_failed = results["symbols_ingested"] == 0 and len(results["errors"]) > 0
+
+        logger.info(
+            "ingest-data: %d/%d symbols ingested (cache_hits=%d), "
+            "news=%d articles, errors=%d%s",
+            results["symbols_ingested"], len(symbols), results["cache_hits"],
+            results["news_articles"], len(results["errors"]),
+            " [SKIPPED expensive fetches]" if skip_expensive else "",
+        )
+
         return SkillResult(
             success=not all_failed,
             skill_name=self.name,
@@ -228,7 +290,7 @@ class IngestDataSkill(SkillBase):
     async def _fetch_nse_data(self) -> dict[str, Any]:
         """Fetch corp announcements, bulk/block deals, FII/DII, delivery data.
 
-        Uses NSEOfficialSource for all NSE API interactions (FR-2.2).
+        Uses NSEOfficialSource for all NSE API interactions.
         Failures are caught per-category so partial data is still returned.
         """
         from yolovest.news.nse_official import NSEOfficialSource
@@ -293,7 +355,7 @@ class IngestDataSkill(SkillBase):
         return all_articles
 
     def _deduplicate_news(self, articles: list[Any]) -> list[Any]:
-        """Merge duplicate news across sources. FR-2.13."""
+        """Merge duplicate news across sources."""
         if not articles:
             return []
 
@@ -311,7 +373,7 @@ class IngestDataSkill(SkillBase):
         return list(seen.values())
 
     async def _fetch_google_finance(self, symbols: list[str]) -> dict[str, Any] | None:
-        """Fetch market data from Google Finance (FR-2.12)."""
+        """Fetch market data from Google Finance."""
         from yolovest.data.google_finance import GoogleFinanceScraper
 
         scraper = GoogleFinanceScraper()
@@ -321,7 +383,7 @@ class IngestDataSkill(SkillBase):
             await scraper.close()
 
     async def _fetch_economic_calendar(self) -> list[dict[str, Any]]:
-        """Fetch economic calendar events (FR-2.6): RBI, Fed, earnings."""
+        """Fetch economic calendar events: RBI, Fed, earnings."""
         from yolovest.data.economic_calendar import EconomicCalendarSource
 
         source = EconomicCalendarSource()
@@ -331,7 +393,7 @@ class IngestDataSkill(SkillBase):
             await source.close()
 
     async def _fetch_fundamentals(self, symbols: list[str]) -> int:
-        """Fetch fundamental data from Screener.in (FR-2.4)."""
+        """Fetch fundamental data from Screener.in."""
         from yolovest.data.screener import ScreenerScraper
 
         scraper = ScreenerScraper()
@@ -348,7 +410,7 @@ class IngestDataSkill(SkillBase):
         return count
 
     async def _fetch_technicals(self, symbols: list[str]) -> int:
-        """Fetch technical screener data from Trendlyne (FR-2.5)."""
+        """Fetch technical screener data from Trendlyne."""
         from yolovest.data.trendlyne import TrendlyneScraper
 
         scraper = TrendlyneScraper()

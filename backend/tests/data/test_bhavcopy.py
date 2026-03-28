@@ -1,4 +1,4 @@
-"""Tests for the Bhavcopy CSV importer (FR-2.1d)."""
+"""Tests for the Bhavcopy CSV importer."""
 
 import csv
 from datetime import datetime

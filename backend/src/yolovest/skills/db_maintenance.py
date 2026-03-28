@@ -1,4 +1,4 @@
-"""Skill: database-maintenance — Automated backup and data retention (FR-10.2, FR-10.3).
+"""Skill: database-maintenance — Automated backup and data retention.
 
 Trigger: CRON — daily at configured time (default 18:00 IST).
 Runs backup first, then retention cleanup, then prunes old backups.
@@ -30,7 +30,7 @@ class DatabaseMaintenanceSkill(SkillBase):
     async def execute(self, **kwargs: Any) -> SkillResult:
         results: dict[str, Any] = {}
 
-        # --- Step 1: Backup (FR-10.2) ---
+        # --- Step 1: Backup ---
         try:
             backup_dir = self.ctx.config.database.backup_dir
             model_dir = getattr(self.ctx.config.strategy, "model_dir", "./models")
@@ -54,7 +54,7 @@ class DatabaseMaintenanceSkill(SkillBase):
             with contextlib.suppress(Exception):
                 await self.ctx.notify.send(f"DB backup FAILED: {e}")
 
-        # --- Step 2: Retention Cleanup (FR-10.3) ---
+        # --- Step 2: Retention Cleanup ---
         try:
             retention = self.ctx.config.database.retention
             deleted = await self.ctx.db.run_retention_cleanup(
@@ -91,6 +91,17 @@ class DatabaseMaintenanceSkill(SkillBase):
             self._prune_old_model_backups(backup_dir, keep=7)
         except Exception as e:
             logger.warning("Model backup pruning failed: %s", e)
+
+        # --- Step 4: Auto-delete old retired models ---
+        try:
+            cleanup_days = self.ctx.config.retraining.retired_model_cleanup_days
+            if cleanup_days > 0:
+                deleted_models = await self.ctx.db.cleanup_retired_models(cleanup_days)
+                results["retired_models_deleted"] = deleted_models
+                if deleted_models > 0:
+                    logger.info("Auto-deleted %d retired models older than %dd", deleted_models, cleanup_days)
+        except Exception as e:
+            logger.warning("Retired model cleanup failed: %s", e)
 
         # --- Audit log ---
         with contextlib.suppress(Exception):

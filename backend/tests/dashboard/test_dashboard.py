@@ -1,6 +1,7 @@
-"""Tests for FastAPI dashboard (Phase 5, FR-8)."""
+"""Tests for FastAPI dashboard."""
 
 import base64
+from datetime import datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 from yolovest.context import AppContext, MarketHoursChecker
 from yolovest.dashboard.app import create_app
 from yolovest.events import EventBus
+from yolovest.models.schemas import MLPrediction, OHLCVBar
 
 
 @pytest.fixture
@@ -193,3 +195,155 @@ class TestAuditLog:
 
         assert resp.status_code == 200
         assert len(resp.json()) == 1
+
+
+def _make_bars(n: int) -> list[OHLCVBar]:
+    """Create n dummy OHLCV bars for testing."""
+    return [
+        OHLCVBar(
+            timestamp=datetime(2026, 1, 1 + i % 28 + 1),
+            open=100.0, high=105.0, low=95.0, close=102.0, volume=10000,
+        )
+        for i in range(n)
+    ]
+
+
+def _hold_prediction(*_args, **_kwargs) -> MLPrediction:
+    return MLPrediction(
+        signal_type="HOLD", entry_price=100.0, target_price=105.0,
+        stop_loss_price=95.0, position_size=1, holding_period="3d",
+        confidence=0.45, model_version="test-v1",
+    )
+
+
+def _low_confidence_prediction(*_args, **_kwargs) -> MLPrediction:
+    return MLPrediction(
+        signal_type="BUY", entry_price=100.0, target_price=110.0,
+        stop_loss_price=95.0, position_size=1, holding_period="3d",
+        confidence=0.50, model_version="test-v1",
+    )
+
+
+def _high_confidence_prediction(*_args, **_kwargs) -> MLPrediction:
+    return MLPrediction(
+        signal_type="BUY", entry_price=100.0, target_price=110.0,
+        stop_loss_price=95.0, position_size=1, holding_period="3d",
+        confidence=0.85, model_version="test-v1",
+    )
+
+
+class TestDryRunDiagnostics:
+    """Tests for dry-run signal diagnostics (filter_counts + rejection_details)."""
+
+    def _setup_universe(self, dashboard_ctx, symbols: list[str]):
+        """Configure mock DB to return stocks in the universe."""
+        dashboard_ctx.db.get_nse_universe = AsyncMock(return_value=[
+            {"symbol": s, "avg_daily_volume": 500_000} for s in symbols
+        ])
+
+    def test_dry_run_all_hold_shows_diagnostics(self, client, auth_headers, dashboard_ctx):
+        symbols = ["RELIANCE", "TCS", "INFY"]
+        self._setup_universe(dashboard_ctx, symbols)
+        dashboard_ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        dashboard_ctx.ml = AsyncMock()
+        dashboard_ctx.ml.predict_swing = AsyncMock(side_effect=_hold_prediction)
+        dashboard_ctx.db.insert_dry_run_results = AsyncMock()
+
+        resp = client.post("/api/dry-run", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        diag = data["diagnostics"]
+        assert diag["filter_counts"]["hold_signal"] == 3
+        assert diag["filter_counts"]["passed"] == 0
+        assert len(diag["rejection_details"]) == 3
+        assert all(r["reason"] == "hold_signal" for r in diag["rejection_details"])
+
+    def test_dry_run_low_confidence_shows_diagnostics(self, client, auth_headers, dashboard_ctx):
+        symbols = ["RELIANCE", "TCS"]
+        self._setup_universe(dashboard_ctx, symbols)
+        dashboard_ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        dashboard_ctx.ml = AsyncMock()
+        dashboard_ctx.ml.predict_swing = AsyncMock(side_effect=_low_confidence_prediction)
+        dashboard_ctx.db.insert_dry_run_results = AsyncMock()
+
+        resp = client.post("/api/dry-run", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        diag = data["diagnostics"]
+        assert diag["filter_counts"]["low_confidence"] == 2
+        assert diag["filter_counts"]["passed"] == 0
+        assert diag["min_confidence_threshold"] == 0.65
+        assert all(r["reason"] == "low_confidence" for r in diag["rejection_details"])
+
+    def test_dry_run_insufficient_bars_shows_diagnostics(self, client, auth_headers, dashboard_ctx):
+        symbols = ["RELIANCE", "TCS"]
+        self._setup_universe(dashboard_ctx, symbols)
+        dashboard_ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(30))
+        dashboard_ctx.ml = AsyncMock()
+        dashboard_ctx.db.insert_dry_run_results = AsyncMock()
+
+        resp = client.post("/api/dry-run", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        diag = data["diagnostics"]
+        assert diag["filter_counts"]["insufficient_bars"] == 2
+        assert diag["filter_counts"]["passed"] == 0
+
+    def test_dry_run_signals_pass_through_with_diagnostics(self, client, auth_headers, dashboard_ctx):
+        symbols = ["RELIANCE"]
+        self._setup_universe(dashboard_ctx, symbols)
+        dashboard_ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        dashboard_ctx.ml = AsyncMock()
+        dashboard_ctx.ml.predict_swing = AsyncMock(side_effect=_high_confidence_prediction)
+        dashboard_ctx.db.insert_dry_run_results = AsyncMock()
+
+        resp = client.post("/api/dry-run", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["signals"]) == 1
+        diag = data["diagnostics"]
+        assert diag["filter_counts"]["passed"] == 1
+        assert diag["filter_counts"]["hold_signal"] == 0
+        assert diag["ml_available"] is True
+
+    def test_dry_run_empty_shortlist_has_diagnostics(self, client, auth_headers, dashboard_ctx):
+        dashboard_ctx.db.get_nse_universe = AsyncMock(return_value=[])
+
+        resp = client.post("/api/dry-run", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "diagnostics" in data
+        assert data["diagnostics"]["filter_counts"]["passed"] == 0
+
+    def test_dry_run_ml_unavailable_shows_diagnostics(self, client, auth_headers, dashboard_ctx):
+        symbols = ["RELIANCE"]
+        self._setup_universe(dashboard_ctx, symbols)
+        dashboard_ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        dashboard_ctx.ml = None
+        dashboard_ctx.db.insert_dry_run_results = AsyncMock()
+
+        resp = client.post("/api/dry-run", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        diag = data["diagnostics"]
+        assert diag["ml_available"] is False
+        assert diag["filter_counts"]["ml_unavailable"] == 1
+        assert "warning" in data
+
+    def test_dry_run_delete(self, client, auth_headers, dashboard_ctx):
+        dashboard_ctx.db.delete_dry_run = AsyncMock(return_value=3)
+
+        resp = client.delete("/api/dry-run/abc123", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["run_id"] == "abc123"
+        assert data["deleted"] == 3
+        dashboard_ctx.db.delete_dry_run.assert_called_once_with("abc123")

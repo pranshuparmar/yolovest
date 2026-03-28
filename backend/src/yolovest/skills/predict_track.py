@@ -1,16 +1,15 @@
 """Skill: predict-track — Log predictions and score outcomes.
 
-Covers: FR-7.1, FR-7.2, FR-7.3
 Trigger: EVENT (post-trade) + HEARTBEAT (check elapsed predictions)
 Pipeline position: Runs after trade-execute (to log) and on heartbeat (to score).
 
 Flow:
-Phase A — Logging (EVENT trigger, post-trade):
+Logging (EVENT trigger, post-trade):
 1. Log every prediction: symbol, predicted direction, confidence,
    predicted target, predicted timeframe, model version
 2. Store with trade_id linkage for full traceability
 
-Phase B — Scoring (HEARTBEAT trigger):
+Scoring (HEARTBEAT trigger):
 1. Query predictions whose timeframe has elapsed
 2. For each: fetch actual price at prediction end time
 3. Compute: was direction correct? did it hit target? actual PnL?
@@ -45,7 +44,7 @@ class PredictTrackSkill(SkillBase):
             return await self._score_elapsed_predictions()
 
     async def _run_failure_analysis(self) -> bool:
-        """FR-7.6: Use Gemini to analyze recent prediction failures."""
+        """Use Gemini to analyze recent prediction failures."""
         try:
             outcomes = await self.ctx.db.get_prediction_outcomes()
             failures = [p for p in outcomes if not p.get("direction_correct")]
@@ -65,7 +64,7 @@ class PredictTrackSkill(SkillBase):
             return False
 
     async def _log_prediction(self, signal: dict[str, Any], trade_id: str | None) -> SkillResult:
-        """FR-7.1: Log a new prediction."""
+        """Log a new prediction."""
         prediction = {
             "symbol": signal["symbol"],
             "predicted_direction": signal["signal_type"],
@@ -79,6 +78,13 @@ class PredictTrackSkill(SkillBase):
         }
         pred_id = await self.ctx.db.insert_prediction(prediction)
 
+        logger.info(
+            "predict-track: logged %s %s conf=%.2f target=%.2f (pred=%s, trade=%s)",
+            signal["signal_type"], signal["symbol"],
+            prediction["confidence"], prediction["predicted_target"],
+            pred_id, trade_id,
+        )
+
         return SkillResult(
             success=True,
             skill_name=self.name,
@@ -86,7 +92,7 @@ class PredictTrackSkill(SkillBase):
         )
 
     async def _score_elapsed_predictions(self) -> SkillResult:
-        """FR-7.2, FR-7.3: Score predictions whose timeframe has elapsed."""
+        """Score predictions whose timeframe has elapsed."""
         pending = await self.ctx.db.get_unscored_predictions()
         scored = 0
         correct = 0
@@ -144,15 +150,23 @@ class PredictTrackSkill(SkillBase):
             except Exception as e:
                 logger.warning("Failed to score prediction %s: %s", pred.get("id"), e)
 
-        # FR-7.3: Update scoreboard
+        # Update scoreboard
         if scored > 0:
             await self.ctx.db.refresh_prediction_scoreboard()
 
-        # FR-7.6: Trigger failure analysis when enough failures accumulate
+        # Trigger failure analysis when enough failures accumulate
         failure_analysis_run = False
         failures_count = scored - correct
         if failures_count >= 5:
             failure_analysis_run = await self._run_failure_analysis()
+
+        if scored > 0 or pending:
+            logger.info(
+                "predict-track: scored %d/%d predictions, accuracy=%.0f%%%s",
+                correct, scored,
+                (correct / scored * 100) if scored > 0 else 0,
+                ", failure analysis triggered" if failure_analysis_run else "",
+            )
 
         return SkillResult(
             success=True,

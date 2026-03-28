@@ -1,4 +1,4 @@
-"""Tests for Phase 4 database methods (predictions, scoreboard, reports)."""
+"""Tests for database methods (predictions, scoreboard, reports)."""
 
 import pytest
 

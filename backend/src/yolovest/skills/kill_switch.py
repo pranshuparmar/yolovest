@@ -1,12 +1,11 @@
 """Skill: kill-switch — Emergency stop, kill, and resume.
 
-Covers: FR-5.14, FR-5.15
 Trigger: MANUAL — via Telegram commands (/stop, /kill, /resume) or dashboard button
 Pipeline position: Overrides all other skills when active.
 
 Commands:
 - /stop  → Pause all trading. Cancel all pending/open orders. Keep positions.
-           State persists across restarts (FR-5.15).
+           State persists across restarts.
 - /kill  → Square off EVERYTHING at market price + pause trading.
            Calls square-off skill with force=True.
 - /resume → Resume trading. Only works after explicit /stop or /kill.
@@ -61,7 +60,7 @@ class KillSwitchSkill(SkillBase):
 
     async def _execute_stop(self) -> SkillResult:
         """Pause trading, cancel pending orders, keep positions."""
-        # Persist kill switch state (FR-5.15)
+        # Persist kill switch state
         await self.ctx.db.set_system_state("kill_switch", "active")
 
         # Cancel all pending orders

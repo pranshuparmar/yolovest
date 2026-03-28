@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMLModels, usePromoteModel } from "../hooks/queries";
+import { useMLModels, usePromoteModel, useDeleteModel, useReshadowModel, useRetireModel, useShadowComparison } from "../hooks/queries";
 import clsx from "clsx";
 import type { MLModelInfo } from "../types/api";
 
@@ -36,25 +36,39 @@ function MetricCard({
 function ModelCard({
   model,
   type,
-  isShadow,
+  status,
   onPromote,
   isPromoting,
+  onDelete,
+  isDeleting,
+  onReshadow,
+  isReshadowing,
+  onRetire,
+  isRetiring,
   prodModel,
 }: {
   model: MLModelInfo;
   type: string;
-  isShadow?: boolean;
+  status: "production" | "shadow" | "retired";
   onPromote?: () => void;
   isPromoting?: boolean;
+  onDelete?: () => void;
+  isDeleting?: boolean;
+  onReshadow?: () => void;
+  isReshadowing?: boolean;
+  onRetire?: () => void;
+  isRetiring?: boolean;
   prodModel?: MLModelInfo;
 }) {
+  const statusConfig = {
+    production: { border: "border-gray-800", badge: "bg-emerald-900/40 text-emerald-400", label: "Production" },
+    shadow: { border: "border-amber-800/50", badge: "bg-amber-900/40 text-amber-400", label: "Shadow" },
+    retired: { border: "border-gray-800/50", badge: "bg-gray-800 text-gray-500", label: "Retired" },
+  };
+  const cfg = statusConfig[status];
+
   return (
-    <div
-      className={clsx(
-        "bg-gray-900 border rounded-lg p-5",
-        isShadow ? "border-amber-800/50" : "border-gray-800"
-      )}
-    >
+    <div className={clsx("bg-gray-900 border rounded-lg p-5", cfg.border, status === "retired" && "opacity-75")}>
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-sm font-medium text-gray-200 capitalize">
@@ -65,7 +79,7 @@ function ModelCard({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {isShadow && onPromote && (
+          {onPromote && (
             <button
               onClick={onPromote}
               disabled={isPromoting}
@@ -76,21 +90,36 @@ function ModelCard({
                   : "bg-emerald-900/40 text-emerald-400 hover:bg-emerald-800/60"
               )}
             >
-              {isPromoting ? "Promoting…" : "Promote to Production"}
+              {isPromoting ? "Promoting…" : status === "retired" ? "Restore to Production" : "Promote to Production"}
             </button>
           )}
-          <span
-            className={clsx(
-              "px-2 py-0.5 rounded text-xs font-medium",
-              isShadow
-                ? "bg-amber-900/40 text-amber-400"
-                : model.status === "production"
-                  ? "bg-emerald-900/40 text-emerald-400"
-                  : "bg-gray-800 text-gray-400"
-            )}
-          >
-            {isShadow ? "Shadow" : model.status || "Production"}
-          </span>
+          {onReshadow && (
+            <button
+              onClick={onReshadow}
+              disabled={isReshadowing}
+              className="px-2.5 py-1 rounded text-xs font-medium bg-amber-900/30 text-amber-400 hover:bg-amber-800/50 transition-colors disabled:opacity-30"
+            >
+              {isReshadowing ? "..." : "Re-shadow"}
+            </button>
+          )}
+          {onRetire && (
+            <button
+              onClick={onRetire}
+              disabled={isRetiring}
+              className="px-2.5 py-1 rounded text-xs font-medium bg-gray-700 text-gray-400 hover:bg-gray-600 transition-colors disabled:opacity-30"
+            >
+              {isRetiring ? "..." : "Retire"}
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={onDelete}
+              disabled={isDeleting}
+              className="px-2.5 py-1 rounded text-xs font-medium bg-red-900/30 text-red-400 hover:bg-red-800/50 transition-colors disabled:opacity-30"
+            >
+              {isDeleting ? "..." : "Delete"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -108,9 +137,7 @@ function ModelCard({
         />
         <MetricCard
           label="Win Rate"
-          value={
-            model.win_rate != null ? model.win_rate * 100 : undefined
-          }
+          value={model.win_rate != null ? model.win_rate * 100 : undefined}
           suffix="%"
           color={
             model.win_rate != null && model.win_rate > 0.5
@@ -136,7 +163,7 @@ function ModelCard({
       </div>
 
       {/* Comparison vs production */}
-      {isShadow && prodModel && (
+      {status === "shadow" && prodModel && (
         <ComparisonRow shadow={model} production={prodModel} />
       )}
     </div>
@@ -189,17 +216,130 @@ function ComparisonRow({ shadow, production }: { shadow: MLModelInfo; production
   );
 }
 
+function ShadowLiveMetrics({ modelType }: { modelType: string }) {
+  const { data } = useShadowComparison(modelType);
+  if (!data || (!data.shadow?.total && !data.production?.total)) return null;
+
+  const s = data.shadow || {};
+  const p = data.production || {};
+
+  return (
+    <div className="bg-gray-900 border border-amber-800/30 rounded-lg p-4">
+      <h4 className="text-xs font-medium text-amber-400 mb-3">
+        Live Shadow vs Production — {modelType}
+      </h4>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-gray-500 border-b border-gray-800">
+              <th className="py-1 px-2 text-left">Metric</th>
+              <th className="py-1 px-2 text-right">Production</th>
+              <th className="py-1 px-2 text-right">Shadow</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 px-2 text-gray-400">Predictions</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{p.total ?? 0}</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{s.total ?? 0}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 px-2 text-gray-400">Direction Accuracy</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{p.direction_accuracy != null ? `${(p.direction_accuracy * 100).toFixed(1)}%` : "—"}</td>
+              <td className={clsx("py-1.5 px-2 text-right font-medium",
+                s.direction_accuracy != null && p.direction_accuracy != null
+                  ? s.direction_accuracy > p.direction_accuracy ? "text-emerald-400" : s.direction_accuracy < p.direction_accuracy ? "text-red-400" : "text-gray-300"
+                  : "text-gray-300"
+              )}>{s.direction_accuracy != null ? `${(s.direction_accuracy * 100).toFixed(1)}%` : "—"}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 px-2 text-gray-400">Target Hit Rate</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{p.target_hit_rate != null ? `${(p.target_hit_rate * 100).toFixed(1)}%` : "—"}</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{s.target_hit_rate != null ? `${(s.target_hit_rate * 100).toFixed(1)}%` : "—"}</td>
+            </tr>
+            <tr>
+              <td className="py-1.5 px-2 text-gray-400">Avg PnL %</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{p.avg_pnl_pct != null ? `${(p.avg_pnl_pct * 100).toFixed(2)}%` : "—"}</td>
+              <td className={clsx("py-1.5 px-2 text-right font-medium",
+                s.avg_pnl_pct != null && p.avg_pnl_pct != null
+                  ? s.avg_pnl_pct > p.avg_pnl_pct ? "text-emerald-400" : s.avg_pnl_pct < p.avg_pnl_pct ? "text-red-400" : "text-gray-300"
+                  : "text-gray-300"
+              )}>{s.avg_pnl_pct != null ? `${(s.avg_pnl_pct * 100).toFixed(2)}%` : "—"}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function MLModelsPage() {
   const { data, isLoading } = useMLModels();
   const promote = usePromoteModel();
+  const deleteModel = useDeleteModel();
+  const reshadow = useReshadowModel();
+  const retire = useRetireModel();
   const [promotingVersion, setPromotingVersion] = useState<string | null>(null);
+  const [deletingVersion, setDeletingVersion] = useState<string | null>(null);
+  const [reshadowingVersion, setReshadowingVersion] = useState<string | null>(null);
+  const [retiringVersion, setRetiringVersion] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const productionModels = data?.production || {};
   const shadowModels = data?.shadow || [];
+  const retiredModels = data?.retired || [];
+
+  const handleDelete = (modelType: string, version: string) => {
+    if (!window.confirm(`Delete model ${version}? The .pkl file will also be removed. This cannot be undone.`)) return;
+    setDeletingVersion(version);
+    deleteModel.mutate(
+      { modelType, version },
+      { onSettled: () => setDeletingVersion(null) },
+    );
+  };
+
+  const handleReshadow = (modelType: string, version: string) => {
+    setActionError(null);
+    setReshadowingVersion(version);
+    reshadow.mutate(
+      { modelType, version },
+      {
+        onSuccess: (result) => {
+          if (result && !result.reshadowed && "error" in result) {
+            setActionError(String((result as Record<string, unknown>).error));
+          }
+        },
+        onSettled: () => setReshadowingVersion(null),
+      },
+    );
+  };
+
+  const handleRetire = (modelType: string, version: string) => {
+    setRetiringVersion(version);
+    retire.mutate(
+      { modelType, version },
+      { onSettled: () => setRetiringVersion(null) },
+    );
+  };
+
+  const handlePromote = (modelType: string, version: string) => {
+    setPromotingVersion(version);
+    promote.mutate(
+      { modelType, version },
+      { onSettled: () => setPromotingVersion(null) },
+    );
+  };
 
   return (
     <div className="space-y-6">
       <h2 className="text-lg font-semibold">ML Models</h2>
+
+      {actionError && (
+        <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-sm text-red-400 flex items-center justify-between">
+          <span>{actionError}</span>
+          <button onClick={() => setActionError(null)} className="text-gray-500 hover:text-gray-300 text-xs">Dismiss</button>
+        </div>
+      )}
 
       {/* Production models */}
       <div>
@@ -209,22 +349,17 @@ export function MLModelsPage() {
         {isLoading ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {[0, 1].map((i) => (
-              <div
-                key={i}
-                className="h-48 animate-pulse bg-gray-900 rounded-lg"
-              />
+              <div key={i} className="h-48 animate-pulse bg-gray-900 rounded-lg" />
             ))}
           </div>
         ) : Object.keys(productionModels).length === 0 ? (
           <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
-            <p className="text-gray-500 text-sm">
-              No production models deployed yet
-            </p>
+            <p className="text-gray-500 text-sm">No production models deployed yet</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Object.entries(productionModels).map(([type, model]) => (
-              <ModelCard key={type} model={model} type={type} />
+              <ModelCard key={type} model={model} type={type} status="production" />
             ))}
           </div>
         )}
@@ -239,9 +374,7 @@ export function MLModelsPage() {
           <div className="h-32 animate-pulse bg-gray-900 rounded-lg" />
         ) : shadowModels.length === 0 ? (
           <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
-            <p className="text-gray-500 text-sm">
-              No shadow models in trial period
-            </p>
+            <p className="text-gray-500 text-sm">No shadow models in trial period</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -250,18 +383,54 @@ export function MLModelsPage() {
                 key={i}
                 model={model}
                 type={model.model_type || "unknown"}
-                isShadow
+                status="shadow"
                 prodModel={productionModels[model.model_type || ""]}
-                onPromote={() => {
-                  if (model.model_type && model.version) {
-                    setPromotingVersion(model.version);
-                    promote.mutate(
-                      { modelType: model.model_type, version: model.version },
-                      { onSettled: () => setPromotingVersion(null) }
-                    );
-                  }
-                }}
+                onPromote={() => model.model_type && model.version && handlePromote(model.model_type, model.version)}
                 isPromoting={promote.isPending && promotingVersion === model.version}
+                onRetire={() => model.model_type && model.version && handleRetire(model.model_type, model.version)}
+                isRetiring={retire.isPending && retiringVersion === model.version}
+                onDelete={() => model.model_type && model.version && handleDelete(model.model_type, model.version)}
+                isDeleting={deleteModel.isPending && deletingVersion === model.version}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Shadow live performance comparison */}
+      {shadowModels.length > 0 && (
+        <div className="space-y-4">
+          {[...new Set(shadowModels.map((m) => m.model_type).filter(Boolean))].map((mt) => (
+            <ShadowLiveMetrics key={mt} modelType={mt!} />
+          ))}
+        </div>
+      )}
+
+      {/* Retired models */}
+      <div>
+        <h3 className="text-sm font-medium text-gray-400 mb-3">
+          Retired Models
+        </h3>
+        {isLoading ? (
+          <div className="h-32 animate-pulse bg-gray-900 rounded-lg" />
+        ) : retiredModels.length === 0 ? (
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+            <p className="text-gray-500 text-sm">No retired models</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {retiredModels.map((model, i) => (
+              <ModelCard
+                key={i}
+                model={model}
+                type={model.model_type || "unknown"}
+                status="retired"
+                onPromote={() => model.model_type && model.version && handlePromote(model.model_type, model.version)}
+                isPromoting={promote.isPending && promotingVersion === model.version}
+                onReshadow={() => model.model_type && model.version && handleReshadow(model.model_type, model.version)}
+                isReshadowing={reshadow.isPending && reshadowingVersion === model.version}
+                onDelete={() => model.model_type && model.version && handleDelete(model.model_type, model.version)}
+                isDeleting={deleteModel.isPending && deletingVersion === model.version}
               />
             ))}
           </div>
@@ -298,7 +467,7 @@ export function MLModelsPage() {
             </span>
             <span>
               <strong className="text-gray-300">Promote</strong> — If shadow
-              outperforms production, it gets promoted automatically
+              outperforms production, it gets promoted (auto or manual)
             </span>
           </div>
           <div className="flex items-start gap-2">
@@ -307,7 +476,7 @@ export function MLModelsPage() {
             </span>
             <span>
               <strong className="text-gray-300">Retire</strong> — Old models
-              retired, predictions tracked for continuous improvement
+              kept for rollback. Delete when no longer needed.
             </span>
           </div>
         </div>

@@ -38,7 +38,7 @@ export function AlertsPage() {
           <div>
             <label className="block text-xs text-gray-500 mb-1">Symbol</label>
             <input type="text" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-              placeholder="RELIANCE" className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-32" />
+              placeholder="RELIANCE" className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full sm:w-32" />
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">Direction</label>
@@ -51,12 +51,12 @@ export function AlertsPage() {
           <div>
             <label className="block text-xs text-gray-500 mb-1">Price</label>
             <input type="number" step="0.05" value={price} onChange={(e) => setPrice(e.target.value)}
-              placeholder="2500.00" className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-32" />
+              placeholder="2500.00" className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full sm:w-32" />
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">Note</label>
             <input type="text" value={note} onChange={(e) => setNote(e.target.value)}
-              placeholder="Optional note..." className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-48" />
+              placeholder="Optional note..." className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full sm:w-48" />
           </div>
           <button onClick={handleCreate} disabled={!symbol.trim() || !price || createAlert.isPending}
             className="px-4 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded transition-colors">
@@ -108,12 +108,12 @@ export function AlertsPage() {
                       {a.active ? (
                         <span className="text-emerald-400 text-xs">Active</span>
                       ) : a.triggered_at ? (
-                        <span className="text-amber-400 text-xs">Triggered {new Date(a.triggered_at).toLocaleDateString("en-IN")}</span>
+                        <span className="text-amber-400 text-xs">Triggered {new Date(a.triggered_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</span>
                       ) : (
                         <span className="text-gray-500 text-xs">Deleted</span>
                       )}
                     </td>
-                    <td className="py-2 pr-4 text-gray-500 text-xs">{new Date(a.created_at).toLocaleDateString("en-IN")}</td>
+                    <td className="py-2 pr-4 text-gray-500 text-xs">{new Date(a.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</td>
                     <td className="py-2">
                       <button onClick={() => deleteAlert.mutate(a.id)}
                         className="px-2 py-0.5 text-xs bg-gray-800 hover:bg-red-900/40 text-gray-400 hover:text-red-400 rounded transition-colors">

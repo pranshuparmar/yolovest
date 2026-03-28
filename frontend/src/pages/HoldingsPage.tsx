@@ -64,7 +64,7 @@ function OrderForm({
         </button>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
         <div>
           <label className="block text-xs text-gray-500 mb-1">Symbol</label>
           <input
@@ -178,7 +178,7 @@ function OrderForm({
 }
 
 export function HoldingsPage() {
-  const { data: holdings, isLoading, refetch, isFetching } = useHoldings();
+  const { data: holdings, isLoading, isError, error, refetch, isFetching } = useHoldings();
   const [orderForm, setOrderForm] = useState<{
     symbol?: string;
     side?: "BUY" | "SELL";
@@ -262,7 +262,12 @@ export function HoldingsPage() {
       )}
 
       {/* Holdings table */}
-      {isLoading ? (
+      {isError ? (
+        <div className="bg-red-900/20 border border-red-800 rounded-lg p-4 text-sm text-red-400">
+          Failed to fetch holdings{error instanceof Error ? `: ${error.message}` : ""}. Zerodha token may be expired — re-authenticate on the{" "}
+          <a href="/integrations" className="underline text-red-300 hover:text-red-200">Settings</a> page.
+        </div>
+      ) : isLoading ? (
         <div className="h-48 animate-pulse bg-gray-900 rounded-lg" />
       ) : !holdings || holdings.length === 0 ? (
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">

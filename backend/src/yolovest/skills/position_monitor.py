@@ -1,27 +1,30 @@
 """Skill: position-monitor — Monitor open positions, trail SLs, reconcile.
 
-Covers: FR-6.5, FR-5.8, FR-5.8a, FR-5.8b, FR-6.7
 Trigger: HEARTBEAT during market hours
 Pipeline position: Runs continuously alongside generate-signals.
 
 Flow:
-1. Fetch current positions from broker (FR-6.5)
+1. Fetch current positions from broker
 2. Reconcile broker state with local DB state — flag discrepancies
 3. For each open position:
    a. Check if target hit → emit exit signal
    b. Check if SL hit → record loss
-   c. Check trailing SL logic (FR-5.8):
+   c. Check trailing SL logic:
       - If profit >= trailing_sl_trigger_multiple x risk -> move SL to breakeven
       - Continue trailing SL upward in trailing_sl_step_pct increments
    d. Modify SL order on broker if trail triggered
 4. Track unrealized PnL for portfolio state
-5. Update slippage records (FR-6.7)
+5. Update slippage records
 6. Alert on any discrepancies between local and broker state
 """
 
+import logging
 from typing import Any
 
+from yolovest.costs import compute_transaction_costs
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
 
 
 class PositionMonitorSkill(SkillBase):
@@ -45,8 +48,8 @@ class PositionMonitorSkill(SkillBase):
             )
 
         trails_modified = 0
-        targets_hit = []
-        stops_hit = []
+        targets_hit: list[dict[str, Any]] = []
+        stops_hit: list[dict[str, Any]] = []
 
         for pos in local_positions:
             symbol = pos["symbol"]
@@ -60,17 +63,49 @@ class PositionMonitorSkill(SkillBase):
             if (pos["signal_type"] == "BUY" and current_price >= target) or (
                 pos["signal_type"] == "SELL" and current_price <= target
             ):
-                targets_hit.append(symbol)
+                qty = pos.get("quantity", 0)
+                if pos["signal_type"] == "BUY":
+                    gross_pnl = (current_price - entry) * qty
+                else:
+                    gross_pnl = (entry - current_price) * qty
+                product = pos.get("product", "MIS")
+                costs = compute_transaction_costs(
+                    entry, current_price, qty, product=product,
+                    cost_config=self.ctx.config.transaction_costs,
+                )
+                pnl = round(gross_pnl - costs, 2)
+                await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+                targets_hit.append({"symbol": symbol, "pnl": pnl})
+                logger.info(
+                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
+                    symbol, current_price, pnl, costs,
+                )
                 continue
 
             # SL hit?
             if (pos["signal_type"] == "BUY" and current_price <= sl) or (
                 pos["signal_type"] == "SELL" and current_price >= sl
             ):
-                stops_hit.append(symbol)
+                qty = pos.get("quantity", 0)
+                if pos["signal_type"] == "BUY":
+                    gross_pnl = (current_price - entry) * qty
+                else:
+                    gross_pnl = (entry - current_price) * qty
+                product = pos.get("product", "MIS")
+                costs = compute_transaction_costs(
+                    entry, current_price, qty, product=product,
+                    cost_config=self.ctx.config.transaction_costs,
+                )
+                pnl = round(gross_pnl - costs, 2)
+                await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+                stops_hit.append({"symbol": symbol, "pnl": pnl})
+                logger.info(
+                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
+                    symbol, current_price, pnl, costs,
+                )
                 continue
 
-            # Trailing SL (FR-5.8)
+            # Trailing SL
             if cfg.trailing_sl_enabled and risk_per_share > 0:
                 if pos["signal_type"] == "BUY":
                     profit = current_price - entry
@@ -94,15 +129,21 @@ class PositionMonitorSkill(SkillBase):
             # Update unrealized PnL
             await self.ctx.db.update_unrealized_pnl(pos["trade_id"], current_price)
 
-        # Broadcast target/stop hits as trade exits
-        for sym in targets_hit:
+        # Broadcast and notify target/stop hits
+        for hit in targets_hit:
             await self.broadcast("trade_exit", {
-                "symbol": sym, "reason": "target_hit",
+                "symbol": hit["symbol"], "reason": "target_hit",
             })
-        for sym in stops_hit:
+            await self.ctx.notify.send_exit_alert(
+                hit["symbol"], "Target hit", hit["pnl"],
+            )
+        for hit in stops_hit:
             await self.broadcast("trade_exit", {
-                "symbol": sym, "reason": "stop_loss_hit",
+                "symbol": hit["symbol"], "reason": "stop_loss_hit",
             })
+            await self.ctx.notify.send_exit_alert(
+                hit["symbol"], "Stop loss hit", hit["pnl"],
+            )
 
         # Broadcast portfolio PnL summary
         if local_positions:
@@ -113,20 +154,29 @@ class PositionMonitorSkill(SkillBase):
                 "trails_modified": trails_modified,
             })
 
+        target_syms = [h["symbol"] for h in targets_hit]
+        stop_syms = [h["symbol"] for h in stops_hit]
+        logger.info(
+            "position-monitor: %d positions — targets_hit=%s, stops_hit=%s, "
+            "trails_modified=%d, discrepancies=%d",
+            len(local_positions), target_syms or "none", stop_syms or "none",
+            trails_modified, len(discrepancies) if discrepancies else 0,
+        )
+
         return SkillResult(
             success=True,
             skill_name=self.name,
             data={
                 "positions_monitored": len(local_positions),
                 "trails_modified": trails_modified,
-                "targets_hit": targets_hit,
-                "stops_hit": stops_hit,
+                "targets_hit": target_syms,
+                "stops_hit": stop_syms,
                 "discrepancies": len(discrepancies) if discrepancies else 0,
             },
         )
 
     def _reconcile(self, local: list[dict[str, Any]], broker: list[dict[str, Any]]) -> list[str]:
-        """Compare local DB positions with broker positions. FR-6.5."""
+        """Compare local DB positions with broker positions."""
         discrepancies = []
 
         # Build lookup by symbol for broker positions

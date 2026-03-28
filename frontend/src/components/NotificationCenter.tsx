@@ -235,8 +235,8 @@ export function NotificationCenter({
           />
         </svg>
         {unread > 0 && (
-          <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 text-white text-xs rounded-full flex items-center justify-center">
-            {unread > 9 ? "9+" : unread}
+          <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 bg-blue-500 text-white text-[10px] font-medium leading-4 rounded-full flex items-center justify-center">
+            {unread > 99 ? "99" : unread}
           </span>
         )}
       </button>
@@ -280,7 +280,7 @@ export function NotificationCenter({
                       {n.message}
                     </p>
                     <p className="text-xs text-gray-600 mt-0.5">
-                      {n.timestamp.toLocaleTimeString("en-IN")}
+                      {n.timestamp.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}
                     </p>
                   </div>
                   <button

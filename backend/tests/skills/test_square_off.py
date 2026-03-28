@@ -1,4 +1,4 @@
-"""Tests for square-off skill (Phase 3, FR-5.9, FR-5.10)."""
+"""Tests for square-off skill."""
 
 from unittest.mock import AsyncMock
 
@@ -103,7 +103,7 @@ class TestSquareOff:
 
         result = await square_off_skill.execute()
 
-        # Gross PnL = (2500 - 2480) * 10 = 200, minus transaction costs (FR-9.2)
+        # Gross PnL = (2500 - 2480) * 10 = 200, minus transaction costs
         pnl = result.data["squared_off"][0]["pnl"]
         assert pnl < 200.0
         assert pnl > 150.0  # costs ~₹25 on ₹25k trade

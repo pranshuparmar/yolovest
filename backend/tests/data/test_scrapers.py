@@ -1,4 +1,4 @@
-"""Tests for Screener.in and Trendlyne scrapers (FR-2.4, FR-2.5)."""
+"""Tests for Screener.in and Trendlyne scrapers."""
 
 from unittest.mock import AsyncMock, MagicMock
 

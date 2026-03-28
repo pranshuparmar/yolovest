@@ -1,6 +1,6 @@
 """Heartbeat orchestrator for YoloVest.
 
-Implements the heartbeat pipeline with error propagation per FR-1.3,
+Implements the heartbeat pipeline with error propagation,
 heartbeat mutex (skip-on-overrun), and consecutive skip alerting.
 """
 
@@ -28,7 +28,7 @@ class HeartbeatOrchestrator:
           -> [per signal]: risk-check -> llm-review -> trade-execute -> predict-track
           -> position-monitor
 
-    Error propagation policy (FR-1.3):
+    Error propagation policy:
         - health-check fails -> ABORT entire heartbeat
         - ingest-data fails -> SKIP scan+signals, run position-monitor
         - market-scan fails -> SKIP signals, run position-monitor
@@ -176,7 +176,7 @@ class HeartbeatOrchestrator:
         results["position-monitor"] = pm_result
         await self._alert_position_monitor(pm_result)
 
-        # FR-1.5: Persist heartbeat state for cross-restart continuity
+        # Persist heartbeat state for cross-restart continuity
         if self._ctx.memory:
             try:
                 summary = {
@@ -268,7 +268,30 @@ class HeartbeatOrchestrator:
             if llm_result.data.get("signal"):
                 signal = llm_result.data["signal"]
 
-        # trade-execute
+        # Manual approval mode — queue instead of executing
+        if self._ctx.config.execution.transaction_mode == "manual":
+            pending_id = await self._ctx.db.insert_pending_trade(signal)
+            symbol = signal.get("symbol", "?") if isinstance(signal, dict) else "?"
+            sig_type = signal.get("signal_type", "?") if isinstance(signal, dict) else "?"
+            conf = signal.get("confidence_score", 0) if isinstance(signal, dict) else 0
+            entry = signal.get("entry_price", 0) if isinstance(signal, dict) else 0
+            logger.info(
+                "Manual mode: queued %s %s @ %.2f conf=%.0f%% (pending_id=%d)",
+                sig_type, symbol, entry, conf * 100, pending_id,
+            )
+            await self._ctx.notify.send(
+                f"Pending approval: {sig_type} {symbol} @ ₹{entry:.2f} "
+                f"(conf {conf:.0%})\n"
+                f"Approve: /approve {pending_id}\n"
+                f"Reject: /reject {pending_id}"
+            )
+            results[f"{prefix}/pending"] = SkillResult(
+                success=True, skill_name="pending-approval",
+                data={"pending_id": pending_id, "symbol": symbol},
+            )
+            return results
+
+        # trade-execute (auto mode)
         trade_result = await self._run_skill("trade-execute", signal=signal)
         results[f"{prefix}/trade-execute"] = trade_result
         if not trade_result.success:
@@ -276,7 +299,6 @@ class HeartbeatOrchestrator:
             await self._ctx.notify.send(
                 f"Trade execution failed for signal {index}: {trade_result.error}"
             )
-            # Continue to next signal (don't run predict-track for failed trade)
             return results
 
         # predict-track — log the prediction with trade linkage

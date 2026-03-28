@@ -1,7 +1,7 @@
 """Feature engineering — technical indicator computation.
 
 Pure functions: list[OHLCVBar] → dict[str, float].
-All indicators from FR-4.1, toggleable via strategy.indicators config.
+All indicators toggleable via strategy.indicators config.
 No DB or network calls — easy to test.
 """
 
@@ -49,6 +49,12 @@ def compute_features(
     opens = [b.open for b in bars]
 
     features: dict[str, float] = {}
+
+    # Always include latest price data — needed for entry/target/SL computation
+    features["close"] = closes[-1]
+    features["open"] = opens[-1]
+    features["high"] = highs[-1]
+    features["low"] = lows[-1]
 
     if cfg.rsi:
         rsi = compute_rsi(closes, period=14)

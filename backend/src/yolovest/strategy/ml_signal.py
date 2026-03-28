@@ -1,7 +1,7 @@
 """XGBoost-based ML signal model implementation.
 
 Uses XGBoost for classification (BUY/SELL/HOLD) with probability calibration
-via Platt scaling (PM G6). Supports intraday and swing model slots.
+via Platt scaling. Supports intraday and swing model slots.
 
 All blocking ML operations are offloaded via asyncio.to_thread.
 XGBoost and sklearn are lazily imported so tests can run without them.
@@ -48,6 +48,16 @@ class XGBoostSignalModel(MLBase):
         # Feature names used during training (for consistent inference)
         self._intraday_features: list[str] | None = None
         self._swing_features: list[str] | None = None
+
+        # Shadow model slots (for A/B testing against production)
+        self._shadow_intraday_model: Any | None = None
+        self._shadow_swing_model: Any | None = None
+        self._shadow_intraday_calibrator: Any | None = None
+        self._shadow_swing_calibrator: Any | None = None
+        self._shadow_intraday_version: str | None = None
+        self._shadow_swing_version: str | None = None
+        self._shadow_intraday_features: list[str] | None = None
+        self._shadow_swing_features: list[str] | None = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -112,16 +122,181 @@ class XGBoostSignalModel(MLBase):
     # Prediction
     # ------------------------------------------------------------------
 
-    async def predict_intraday(self, symbol: str, features: dict[str, Any]) -> MLPrediction:
+    async def predict_intraday(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction:
         """Generate intraday signal using the intraday model slot."""
-        return await self._predict(symbol, features, "intraday")
+        return await self._predict(symbol, features, "intraday", current_price=current_price)
 
-    async def predict_swing(self, symbol: str, features: dict[str, Any]) -> MLPrediction:
+    async def predict_swing(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction:
         """Generate swing signal using the swing model slot."""
-        return await self._predict(symbol, features, "swing")
+        return await self._predict(symbol, features, "swing", current_price=current_price)
+
+    # ------------------------------------------------------------------
+    # Shadow prediction (A/B testing)
+    # ------------------------------------------------------------------
+
+    def has_shadow(self, model_type: str) -> bool:
+        """Check if a shadow model is loaded for this model_type."""
+        if model_type == "intraday":
+            return self._shadow_intraday_model is not None
+        elif model_type == "swing":
+            return self._shadow_swing_model is not None
+        return False
+
+    def clear_shadow(self, model_type: str) -> None:
+        """Unload shadow model after promotion or retirement."""
+        if model_type == "intraday":
+            self._shadow_intraday_model = None
+            self._shadow_intraday_calibrator = None
+            self._shadow_intraday_version = None
+            self._shadow_intraday_features = None
+        elif model_type == "swing":
+            self._shadow_swing_model = None
+            self._shadow_swing_calibrator = None
+            self._shadow_swing_version = None
+            self._shadow_swing_features = None
+
+    async def load_shadow_model(
+        self, model_type: str, version: str | None = None,
+    ) -> None:
+        """Load a model into the shadow slot for A/B testing."""
+        def _load() -> dict[str, Any]:
+            import joblib
+
+            if version:
+                filepath = self.model_dir / f"{version}.pkl"
+            else:
+                pattern = f"{model_type}_v*.pkl"
+                matches = sorted(self.model_dir.glob(pattern))
+                if not matches:
+                    raise FileNotFoundError(
+                        f"No saved {model_type} model found in {self.model_dir}"
+                    )
+                filepath = matches[-1]
+            return dict[str, Any](joblib.load(filepath))
+
+        artifact = await asyncio.to_thread(_load)
+
+        if model_type == "intraday":
+            self._shadow_intraday_model = artifact["model"]
+            self._shadow_intraday_calibrator = artifact.get("calibrator")
+            self._shadow_intraday_version = artifact.get("version", "unknown")
+            self._shadow_intraday_features = artifact.get("feature_names")
+        elif model_type == "swing":
+            self._shadow_swing_model = artifact["model"]
+            self._shadow_swing_calibrator = artifact.get("calibrator")
+            self._shadow_swing_version = artifact.get("version", "unknown")
+            self._shadow_swing_features = artifact.get("feature_names")
+
+        logger.info("Loaded shadow %s model version %s",
+                     model_type, artifact.get("version", "unknown"))
+
+    async def predict_shadow_intraday(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction | None:
+        """Run shadow intraday model. Returns None if no shadow loaded."""
+        if not self.has_shadow("intraday"):
+            return None
+        return await self._predict_shadow(symbol, features, "intraday", current_price=current_price)
+
+    async def predict_shadow_swing(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction | None:
+        """Run shadow swing model. Returns None if no shadow loaded."""
+        if not self.has_shadow("swing"):
+            return None
+        return await self._predict_shadow(symbol, features, "swing", current_price=current_price)
+
+    async def _predict_shadow(
+        self, symbol: str, features: dict[str, Any], model_type: str,
+        *, current_price: float | None = None,
+    ) -> MLPrediction:
+        """Run inference on the shadow model slot."""
+        if model_type == "intraday":
+            model = self._shadow_intraday_model
+            calibrator = self._shadow_intraday_calibrator
+            expected = self._shadow_intraday_features
+            version = self._shadow_intraday_version or "unknown"
+        else:
+            model = self._shadow_swing_model
+            calibrator = self._shadow_swing_calibrator
+            expected = self._shadow_swing_features
+            version = self._shadow_swing_version or "unknown"
+
+        if model is None:
+            raise RuntimeError(f"No shadow {model_type} model loaded")
+
+        # Reuse the same inference logic as production
+        feature_vector = self._build_feature_vector(features, expected)
+
+        def _run_inference() -> tuple[int, float]:
+            import numpy as np
+            X = np.array(feature_vector)
+            pred_label = int(model.predict(X)[0])
+            probas = model.predict_proba(X)[0]
+            confidence = float(probas[pred_label])
+            return pred_label, confidence
+
+        pred_label, raw_confidence = await asyncio.to_thread(_run_inference)
+        confidence = raw_confidence
+
+        if calibrator is not None:
+            def _calibrate() -> tuple[int, float]:
+                import numpy as np
+                X = np.array(feature_vector)
+                cal_label = int(calibrator.predict(X)[0])
+                cal_probas = calibrator.predict_proba(X)[0]
+                return cal_label, float(cal_probas[cal_label])
+
+            cal_label, cal_confidence = await asyncio.to_thread(_calibrate)
+            if cal_confidence > raw_confidence:
+                pred_label = cal_label
+                confidence = cal_confidence
+
+        signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
+        entry_price = current_price or features.get("close", 100.0)
+        atr = features.get("atr_14", entry_price * 0.02)
+
+        if signal_type_str == "BUY":
+            target_price = entry_price + 2 * atr
+            stop_loss_price = entry_price - 1 * atr
+        elif signal_type_str == "SELL":
+            target_price = entry_price - 2 * atr
+            stop_loss_price = entry_price + 1 * atr
+        else:
+            target_price = entry_price + 1 * atr
+            stop_loss_price = entry_price - 1 * atr
+
+        target_price = max(target_price, 0.01)
+        stop_loss_price = max(stop_loss_price, 0.01)
+        entry_price = max(entry_price, 0.01)
+
+        holding_period = "intraday" if model_type == "intraday" else "3d"
+
+        from typing import Literal, cast
+        signal_type = cast(Literal["BUY", "SELL", "HOLD"], signal_type_str)
+
+        return MLPrediction(
+            signal_type=signal_type,
+            entry_price=round(entry_price, 2),
+            target_price=round(target_price, 2),
+            stop_loss_price=round(stop_loss_price, 2),
+            position_size=1,
+            holding_period=holding_period,
+            confidence=round(confidence, 4),
+            model_version=version,
+        )
+
+    # ------------------------------------------------------------------
+    # Core prediction
+    # ------------------------------------------------------------------
 
     async def _predict(
-        self, symbol: str, features: dict[str, Any], model_type: str
+        self, symbol: str, features: dict[str, Any], model_type: str,
+        *, current_price: float | None = None,
     ) -> MLPrediction:
         model = self._get_model(model_type)
         if model is None:
@@ -143,26 +318,40 @@ class XGBoostSignalModel(MLBase):
             confidence = float(probas[pred_label])
             return pred_label, confidence
 
-        pred_label, confidence = await asyncio.to_thread(_run_inference)
+        pred_label, raw_confidence = await asyncio.to_thread(_run_inference)
+        confidence = raw_confidence
 
         # Calibrate if calibrator available
         calibrator = self._get_calibrator(model_type)
         if calibrator is not None:
 
-            def _calibrate() -> float:
+            def _calibrate() -> tuple[int, float]:
                 import numpy as np
 
                 X = np.array(feature_vector)  # noqa: N806
+                cal_label = int(calibrator.predict(X)[0])
                 cal_probas = calibrator.predict_proba(X)[0]
-                return float(cal_probas[pred_label])
+                cal_confidence = float(cal_probas[cal_label])
+                return cal_label, cal_confidence
 
-            confidence = await asyncio.to_thread(_calibrate)
+            cal_label, cal_confidence = await asyncio.to_thread(_calibrate)
+
+            if cal_confidence > raw_confidence:
+                # Calibration improved confidence — use calibrated values
+                pred_label = cal_label
+                confidence = cal_confidence
+            else:
+                # Calibration compressed confidence — keep raw model output
+                logger.debug(
+                    "Calibration compressed %s confidence from %.4f to %.4f, using raw",
+                    symbol, raw_confidence, cal_confidence,
+                )
 
         signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
 
-        # Use ATR from features for target/SL computation
-        entry_price = features.get("close", features.get("ltp", 100.0))
-        atr = features.get("atr", entry_price * 0.02)  # fallback: 2% of price
+        # Use fresh LTP for entry/target/SL when available, fall back to features
+        entry_price = current_price or features.get("close", 100.0)
+        atr = features.get("atr_14", entry_price * 0.02)
 
         if signal_type_str == "BUY":
             target_price = entry_price + 2 * atr
@@ -227,7 +416,7 @@ class XGBoostSignalModel(MLBase):
         if len(y_arr) < min_samples:
             raise ValueError(
                 f"Insufficient training data: {len(y_arr)} samples "
-                f"(minimum {min_samples} required) — PM G5"
+                f"(minimum {min_samples} required)"
             )
 
         def _train_blocking() -> tuple[Any, Any, dict[str, Any]]:
@@ -301,7 +490,7 @@ class XGBoostSignalModel(MLBase):
             # Final model trained on all data
             model.fit(X_arr, y_arr, verbose=False)
 
-            # Calibrate probabilities (PM G6 — Platt scaling)
+            # Calibrate probabilities (Platt scaling)
             calibrator = CalibratedClassifierCV(
                 model, method="sigmoid", cv=min(3, len(y_arr) // 50 or 2)
             )

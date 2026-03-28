@@ -1,4 +1,4 @@
-"""Tests for model-retrain shadow promotion (Phase 4, FR-7.5)."""
+"""Tests for model-retrain shadow promotion."""
 
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock

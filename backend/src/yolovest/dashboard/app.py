@@ -1,8 +1,6 @@
 """FastAPI dashboard for YoloVest.
 
-Covers: FR-8.1 (portfolio overview), FR-8.2 (WebSocket), FR-8.3 (trade detail),
-FR-8.7 (historical reports), FR-8.9 (basic auth).
-
+REST API + WebSocket for portfolio overview, trade detail, reports, and auth.
 All endpoints read from the shared database via AppContext.
 """
 
@@ -170,7 +168,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             pass
 
     def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)) -> str:  # noqa: B008
-        """FR-8.9: Basic password protection."""
+        """Basic password protection."""
         correct = secrets.compare_digest(credentials.password, _password["current"])
         if not correct:
             raise HTTPException(
@@ -181,7 +179,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         return credentials.username
 
     # ------------------------------------------------------------------
-    # FR-8.1: Portfolio Overview
+    # Portfolio Overview
     # ------------------------------------------------------------------
 
     @app.get("/api/portfolio")
@@ -255,7 +253,10 @@ def create_app(ctx: AppContext) -> FastAPI:
             return await ctx.broker.get_holdings()
         except Exception as e:
             logger.warning("Failed to fetch holdings: %s", e)
-            return []
+            raise HTTPException(
+                status_code=502,
+                detail=f"Broker error: {e}. Token may be expired — re-authenticate via Settings.",
+            )
 
     @app.post("/api/orders")
     async def place_manual_order(
@@ -361,7 +362,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         return await ctx.db.get_equity_curve(days=days)
 
     # ------------------------------------------------------------------
-    # FR-8.3: Trade Detail View
+    # Trade Detail View
     # ------------------------------------------------------------------
 
     @app.get("/api/trades/{trade_id}")
@@ -387,7 +388,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         return await ctx.db.get_prediction_scoreboard(group_type)
 
     # ------------------------------------------------------------------
-    # FR-8.7: Historical Reports
+    # Historical Reports
     # ------------------------------------------------------------------
 
     @app.get("/api/reports")
@@ -476,7 +477,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         days: int = Query(30, ge=1, le=365),
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Slippage analysis (FR-6.7)."""
+        """Slippage analysis."""
         return await ctx.db.get_slippage_stats(symbol=symbol, days=days)
 
     @app.get("/api/llm-accuracy")
@@ -484,7 +485,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         days: int = Query(30, ge=1, le=365),
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """LLM review accuracy vs actual trade outcomes (FR-7.8)."""
+        """LLM review accuracy vs actual trade outcomes."""
         return await ctx.db.get_llm_review_accuracy(days=days)
 
     @app.get("/api/audit")
@@ -493,7 +494,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         action_type: str | None = Query(None),
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
-        """Recent audit log entries (FR-8.8)."""
+        """Recent audit log entries."""
         return await ctx.db.get_audit_log(limit=limit, action_type=action_type)
 
     @app.get("/api/logs")
@@ -523,21 +524,25 @@ def create_app(ctx: AppContext) -> FastAPI:
         # --- Gemini LLM ---
         # Don't ping on page load (wastes quota and blocks for 20+s on 429).
         # Just report config status; user can click "Test Connection" to verify.
-        gemini_configured = bool(getattr(ctx.config.llm, "api_key", ""))
+        llm_enabled = getattr(ctx.config.llm, "enabled", False)
         gemini_api_key = getattr(ctx.config.llm, "api_key", "")
-        gemini_unexpanded = gemini_api_key.startswith("${")
+        gemini_configured = bool(gemini_api_key) and not gemini_api_key.startswith("${")
         results["gemini"] = {
-            "configured": gemini_configured and not gemini_unexpanded,
-            "connected": gemini_configured and not gemini_unexpanded,  # assume OK if configured
+            "enabled": llm_enabled,
+            "configured": gemini_configured,
+            "connected": llm_enabled and gemini_configured,
             "model": getattr(ctx.config.llm, "model", ""),
         }
 
         # --- Zerodha Broker ---
         broker_configured = bool(getattr(ctx.config.broker, "api_key", ""))
-        # Quick local check — don't call kite.profile() on every page load
-        broker_authenticated = bool(
-            hasattr(ctx.broker, "_access_token") and ctx.broker._access_token
-        )
+        # Verify token is actually valid (catches expired tokens)
+        broker_authenticated = False
+        if broker_configured:
+            try:
+                broker_authenticated = await ctx.broker.is_authenticated()
+            except Exception:
+                pass
         broker_margins: dict[str, Any] | None = None
         results["zerodha"] = {
             "configured": broker_configured,
@@ -602,6 +607,9 @@ def create_app(ctx: AppContext) -> FastAPI:
             ok = await ctx.broker.authenticate(request_token)
             margins = None
             if ok:
+                # Sync token to Kite data provider if enabled
+                from yolovest.main import _sync_kite_data_token
+                _sync_kite_data_token(ctx)
                 try:
                     margins = await ctx.broker.get_margins()
                 except Exception:
@@ -632,6 +640,8 @@ def create_app(ctx: AppContext) -> FastAPI:
             ok = await ctx.broker.authenticate(request_token)
             if ok:
                 logger.info("Zerodha authenticated via OAuth callback")
+                from yolovest.main import _sync_kite_data_token
+                _sync_kite_data_token(ctx)
                 try:
                     await ctx.notify.send("Kite authenticated successfully via dashboard.")
                 except Exception:
@@ -760,8 +770,8 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def get_ml_models(
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """ML model information: production models and shadow candidates."""
-        result: dict[str, Any] = {"production": {}, "shadow": []}
+        """ML model information: production, shadow, and retired models."""
+        result: dict[str, Any] = {"production": {}, "shadow": [], "retired": []}
         for model_type in ["intraday", "swing"]:
             try:
                 model = await ctx.db.get_production_model(model_type)
@@ -772,6 +782,11 @@ def create_app(ctx: AppContext) -> FastAPI:
         try:
             shadow_models = await ctx.db.get_all_shadow_models()
             result["shadow"] = shadow_models
+        except Exception:
+            pass
+        try:
+            retired_models = await ctx.db.get_retired_models()
+            result["retired"] = retired_models
         except Exception:
             pass
         return result
@@ -791,6 +806,63 @@ def create_app(ctx: AppContext) -> FastAPI:
                 logger.warning("Failed to load promoted model %s/%s: %s", model_type, version, e)
         return {"promoted": True, "model_type": model_type, "version": version}
 
+    @app.post("/api/ml-models/{model_type}/{version}/reshadow")
+    async def reshadow_model(
+        model_type: str,
+        version: str,
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Move a retired model back to shadow for re-evaluation."""
+        # Check if .pkl file exists before changing status
+        model_dir = _model_dir()
+        pkl_path = Path(model_dir) / f"{version}.pkl"
+        if not pkl_path.exists():
+            return {
+                "reshadowed": False,
+                "error": f"Model file {version}.pkl not found — it was already deleted. Cannot re-shadow.",
+            }
+
+        ok = await ctx.db.reshadow_model(model_type, version)
+        if ok and ctx.ml:
+            try:
+                await ctx.ml.load_shadow_model(model_type, version)
+            except Exception as e:
+                # Revert to retired if load fails
+                await ctx.db.retire_model(model_type, version)
+                logger.warning("Failed to load re-shadowed model %s/%s: %s", model_type, version, e)
+                return {
+                    "reshadowed": False,
+                    "error": f"Model file exists but failed to load: {e}",
+                }
+        return {"reshadowed": ok, "model_type": model_type, "version": version}
+
+    @app.post("/api/ml-models/{model_type}/{version}/retire")
+    async def retire_model_endpoint(
+        model_type: str,
+        version: str,
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Retire a shadow model (stop A/B testing, move to retired)."""
+        await ctx.db.retire_model(model_type, version)
+        if ctx.ml:
+            ctx.ml.clear_shadow(model_type)
+        logger.info("Retired %s model %s", model_type, version)
+        return {"retired": True, "model_type": model_type, "version": version}
+
+    @app.get("/api/ml-models/{model_type}/shadow-comparison")
+    async def get_shadow_comparison(
+        model_type: str,
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Head-to-head shadow vs production prediction metrics."""
+        shadow_models = await ctx.db.get_all_shadow_models()
+        shadow = next((s for s in shadow_models if s["model_type"] == model_type), None)
+        if not shadow:
+            return {"shadow": {}, "production": {}}
+        return await ctx.db.get_shadow_vs_production_metrics(
+            model_type, since_date=shadow.get("shadow_start_date", "2000-01-01"),
+        )
+
     # ------------------------------------------------------------------
     # Predictions Detail & Failures
     # ------------------------------------------------------------------
@@ -806,8 +878,8 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def get_unscored_predictions(
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
-        """Predictions awaiting scoring (holding period not yet elapsed)."""
-        return await ctx.db.get_unscored_predictions()
+        """All predictions awaiting scoring (including those still within holding period)."""
+        return await ctx.db.get_all_awaiting_predictions()
 
     @app.get("/api/predictions/outcomes")
     async def get_prediction_outcomes(
@@ -1245,7 +1317,10 @@ def create_app(ctx: AppContext) -> FastAPI:
             )
             scored.append({**stock, **sub, "composite_score": composite})
 
-        scored.sort(key=lambda s: s["composite_score"], reverse=True)
+        scored.sort(
+            key=lambda s: (s["composite_score"], s.get("avg_daily_volume") or 0),
+            reverse=True,
+        )
         shortlist = scored[: cfg.scanning.shortlist_size]
 
         if not shortlist:
@@ -1255,6 +1330,16 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "universe_size": len(universe),
                 "shortlist_size": 0,
                 "signals": [],
+                "diagnostics": {
+                    "min_confidence_threshold": cfg.risk.min_confidence_score,
+                    "ml_available": ctx.ml is not None,
+                    "filter_counts": {
+                        "insufficient_bars": 0, "feature_computation_failed": 0,
+                        "ml_unavailable": 0, "hold_signal": 0,
+                        "low_confidence": 0, "error": 0, "passed": 0,
+                    },
+                    "rejection_details": [],
+                },
             }
 
         # Step 2: Generate signals from shortlisted stocks
@@ -1265,6 +1350,18 @@ def create_app(ctx: AppContext) -> FastAPI:
         if ml_unavailable:
             logger.warning("Dry-run: ML model not loaded — cannot generate signals. "
                            "Train a model first via the model-retrain skill.")
+
+        # Diagnostics: track why stocks get filtered out
+        filter_counts = {
+            "insufficient_bars": 0,
+            "feature_computation_failed": 0,
+            "ml_unavailable": 0,
+            "hold_signal": 0,
+            "low_confidence": 0,
+            "error": 0,
+            "passed": 0,
+        }
+        rejection_details: list[dict[str, str]] = []
 
         indicator_cfg = IndicatorConfig(
             ema_periods=cfg.strategy.ema_periods,
@@ -1283,22 +1380,69 @@ def create_app(ctx: AppContext) -> FastAPI:
             try:
                 bars = await ctx.db.get_ohlcv(symbol, "daily", days=365)
                 if len(bars) < 50:
+                    filter_counts["insufficient_bars"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "insufficient_bars",
+                        "detail": f"{len(bars)} bars < 50 required",
+                    })
+                    logger.info("Dry-run: Insufficient data for %s (%d bars)", symbol, len(bars))
                     continue
 
                 features = compute_features(bars, indicator_cfg)
                 if not features:
+                    filter_counts["feature_computation_failed"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "feature_computation_failed",
+                        "detail": "compute_features returned empty",
+                    })
+                    logger.info("Dry-run: Feature computation failed for %s", symbol)
                     continue
 
                 if ctx.ml is None:
+                    filter_counts["ml_unavailable"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "ml_unavailable",
+                        "detail": "ML model not loaded",
+                    })
                     continue
 
-                prediction = await ctx.ml.predict_swing(symbol, features)
+                # Fetch fresh LTP for realistic entry/target/SL
+                current_price: float | None = None
+                try:
+                    current_price = await ctx.market_data.get_ltp(symbol)
+                except Exception:
+                    pass  # fall back to features["close"] in _predict()
+
+                prediction = await ctx.ml.predict_swing(
+                    symbol, features, current_price=current_price,
+                )
                 if prediction.signal_type == "HOLD":
+                    filter_counts["hold_signal"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "hold_signal",
+                        "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
+                    })
+                    logger.info("Dry-run: HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
                     continue
 
                 if prediction.confidence < min_confidence:
+                    filter_counts["low_confidence"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "low_confidence",
+                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {min_confidence}",
+                    })
+                    logger.info(
+                        "Dry-run: Low confidence for %s: %s @ %.2f < %.2f",
+                        symbol, prediction.signal_type, prediction.confidence, min_confidence,
+                    )
                     continue
 
+                filter_counts["passed"] += 1
                 signals_out.append({
                     "symbol": symbol,
                     "signal_type": prediction.signal_type,
@@ -1315,7 +1459,21 @@ def create_app(ctx: AppContext) -> FastAPI:
                     "fundamental_score": stock.get("fundamental_score"),
                 })
             except Exception as e:
+                filter_counts["error"] += 1
+                rejection_details.append({
+                    "symbol": symbol,
+                    "reason": "error",
+                    "detail": str(e),
+                })
                 logger.warning("Dry-run signal failed for %s: %s", symbol, e)
+
+        # Log diagnostics summary (always, not just on 0 signals)
+        logger.info(
+            "Dry-run %s complete: scanned %d stocks, shortlisted %d, "
+            "generated %d signals — %s",
+            run_id, len(universe), len(shortlist),
+            len(signals_out), filter_counts,
+        )
 
         # Step 3: Persist for next-day comparison
         if signals_out:
@@ -1327,6 +1485,12 @@ def create_app(ctx: AppContext) -> FastAPI:
             "universe_size": len(universe),
             "shortlist_size": len(shortlist),
             "signals": signals_out,
+            "diagnostics": {
+                "min_confidence_threshold": min_confidence,
+                "ml_available": ctx.ml is not None,
+                "filter_counts": filter_counts,
+                "rejection_details": rejection_details,
+            },
         }
         if ml_unavailable:
             result["warning"] = (
@@ -1359,6 +1523,38 @@ def create_app(ctx: AppContext) -> FastAPI:
     ) -> dict[str, Any]:
         """Score a dry-run against actual next-day market data."""
         return await ctx.db.score_dry_run(run_id)
+
+    @app.delete("/api/dry-run/{run_id}")
+    async def delete_dry_run(
+        run_id: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete a dry-run and all its signals."""
+        deleted = await ctx.db.delete_dry_run(run_id)
+        logger.info("Dry-run %s deleted (%d signals removed)", run_id, deleted)
+        return {"success": True, "run_id": run_id, "deleted": deleted}
+
+    # ------------------------------------------------------------------
+    # Symbol Quarantine
+    # ------------------------------------------------------------------
+
+    @app.get("/api/quarantined-symbols")
+    async def get_quarantined_symbols(
+        _user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Get all quarantined symbols (auto-blocked after repeated fetch failures)."""
+        return await ctx.db.get_quarantined_symbols()
+
+    @app.delete("/api/quarantined-symbols/{symbol}")
+    async def unquarantine_symbol(
+        symbol: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Remove a symbol from quarantine so it will be fetched again."""
+        removed = await ctx.db.unquarantine_symbol(symbol.upper())
+        if removed:
+            logger.info("Unquarantined symbol %s", symbol.upper())
+        return {"success": removed, "symbol": symbol.upper()}
 
     def _model_dir() -> str:
         return getattr(ctx.config.strategy, "model_dir", "./models")
@@ -1411,6 +1607,53 @@ def create_app(ctx: AppContext) -> FastAPI:
             model_type, version, model_dir=_model_dir(),
         )
         return {"success": True, **result}
+
+    # ------------------------------------------------------------------
+    # Pending Trades (manual approval)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/pending-trades")
+    async def get_pending_trades(
+        _user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Get all trades awaiting manual approval."""
+        # Expire old pending trades first
+        expired = await ctx.db.expire_pending_trades(max_age_minutes=30)
+        if expired:
+            logger.info("Expired %d stale pending trades", expired)
+        return await ctx.db.get_pending_trades()
+
+    @app.post("/api/pending-trades/{trade_id}/approve")
+    async def approve_pending_trade(
+        trade_id: int,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Approve a pending trade for execution."""
+        signal = await ctx.db.decide_pending_trade(trade_id, "approved", "dashboard")
+        if signal is None:
+            raise HTTPException(status_code=404, detail="Trade not found or already decided")
+
+        # Execute the trade
+        from yolovest.skills.trade_execute import TradeExecuteSkill
+        skill = TradeExecuteSkill(ctx)
+        result = await skill.execute(signal=signal)
+
+        if result.success:
+            trade = result.data.get("trade", {}) if result.data else {}
+            logger.info("Approved and executed pending trade #%d: %s %s",
+                        trade_id, trade.get("signal_type"), trade.get("symbol"))
+            return {"success": True, "trade": trade}
+        return {"success": False, "error": result.error}
+
+    @app.post("/api/pending-trades/{trade_id}/reject")
+    async def reject_pending_trade(
+        trade_id: int,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Reject a pending trade."""
+        await ctx.db.decide_pending_trade(trade_id, "rejected", "dashboard")
+        logger.info("Rejected pending trade #%d", trade_id)
+        return {"success": True}
 
     @app.post("/api/change-password")
     async def change_password(
@@ -1525,7 +1768,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         return {"success": True, "skill": skill_name, "status": "started"}
 
     # ------------------------------------------------------------------
-    # FR-8.2: WebSocket Live Updates
+    # WebSocket Live Updates
     # ------------------------------------------------------------------
 
     @app.websocket("/ws")

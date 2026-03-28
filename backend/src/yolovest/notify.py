@@ -34,9 +34,18 @@ class ConsoleNotifier(NotifierBase):
         logger.info("[NOTIFY] %s", message)
 
     async def send_trade_alert(self, trade: dict[str, Any]) -> None:
-        """Send a trade entry/exit alert."""
+        """Send a trade entry alert."""
         msg = _format_trade_alert(trade)
         await self.send(msg)
+
+    async def send_exit_alert(self, symbol: str, reason: str, pnl: float) -> None:
+        """Send a trade exit alert."""
+        emoji = "+" if pnl >= 0 else ""
+        await self.send(f"Exit: {symbol} — {reason} — PnL: {emoji}{pnl:.2f}")
+
+    async def send_error_alert(self, error: str) -> None:
+        """Send an error alert."""
+        await self.send(f"Error: {error}")
 
 
 class Notifier:
@@ -89,16 +98,37 @@ class Notifier:
         return delivered
 
     async def send_trade_alert(self, trade: dict[str, Any]) -> None:
-        """Send a trade entry/exit alert via all configured backends."""
+        """Send a trade entry alert via all configured backends."""
         alerts_cfg = self._config.notifications.telegram.alerts
         msg = _format_trade_alert(trade)
 
-        # Check if trade alerts are enabled
-        signal_type = trade.get("signal_type", "")
-        if signal_type in ("BUY", "SELL") and not alerts_cfg.trade_entry:
-            # Log locally but don't send to Telegram
+        if not alerts_cfg.trade_entry:
             logger.info("[TRADE] %s", msg)
             self._sent_messages.append(msg)
+            return
+
+        await self.send(msg)
+
+    async def send_exit_alert(self, symbol: str, reason: str, pnl: float) -> None:
+        """Send a trade exit alert (target/SL hit, square-off)."""
+        alerts_cfg = self._config.notifications.telegram.alerts
+        emoji = "+" if pnl >= 0 else ""
+        msg = f"Exit: {symbol} — {reason} — PnL: {emoji}{pnl:.2f}"
+
+        if not alerts_cfg.trade_exit:
+            logger.info("[EXIT] %s", msg)
+            self._sent_messages.append(msg)
+            return
+
+        await self.send(msg)
+
+    async def send_error_alert(self, error: str) -> None:
+        """Send an error alert."""
+        alerts_cfg = self._config.notifications.telegram.alerts
+        msg = f"Error: {error}"
+
+        if not alerts_cfg.errors:
+            logger.warning("[ERROR ALERT SUPPRESSED] %s", error)
             return
 
         await self.send(msg)

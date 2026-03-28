@@ -1,4 +1,4 @@
-"""News aggregator with concurrent fetching and deduplication (FR-2.13)."""
+"""News aggregator with concurrent fetching and deduplication."""
 
 import asyncio
 import logging

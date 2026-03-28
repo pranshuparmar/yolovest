@@ -94,14 +94,14 @@ function PredictionRow({ p }: { p: PredictionDetail }) {
           <div>
             <span className="text-gray-500">Created</span>
             <p className="text-gray-300 mt-0.5">
-              {new Date(p.created_at).toLocaleString("en-IN")}
+              {new Date(p.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}
             </p>
           </div>
           <div>
             <span className="text-gray-500">End Time</span>
             <p className="text-gray-300 mt-0.5">
               {p.prediction_end_time
-                ? new Date(p.prediction_end_time).toLocaleString("en-IN")
+                ? new Date(p.prediction_end_time).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
                 : "—"}
             </p>
           </div>
@@ -156,7 +156,7 @@ export function PredictionsPage() {
       <h2 className="text-lg font-semibold">Predictions</h2>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 md:grid-cols-5 gap-4">
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
           <p className="text-xs text-gray-500">Today</p>
           <p className="text-xl font-semibold">{today?.length || 0}</p>
