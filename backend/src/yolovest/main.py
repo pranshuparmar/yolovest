@@ -508,6 +508,11 @@ async def async_main(args: argparse.Namespace) -> None:
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
 
+    # Build heartbeat watchdog
+    from yolovest.watchdog import HeartbeatWatchdog
+    watchdog = HeartbeatWatchdog(ctx)
+    orchestrator.set_watchdog(watchdog)
+
     # Wire WebSocket broadcasting for skill completion notifications
     # and event bus → WebSocket bridge for real-time dashboard updates
     try:
@@ -563,6 +568,9 @@ async def async_main(args: argparse.Namespace) -> None:
     # Start CRON scheduler as background task
     cron_task = asyncio.create_task(_start_cron_scheduler(cron_scheduler))
 
+    # Start heartbeat watchdog
+    watchdog_task = asyncio.create_task(_start_watchdog(watchdog))
+
     # Start
     import os
     domain = os.environ.get("DOMAIN")
@@ -581,9 +589,11 @@ async def async_main(args: argparse.Namespace) -> None:
     try:
         await orchestrator.start()
     finally:
-        # 1. Stop cron scheduler
+        # 1. Stop cron scheduler and watchdog
         cron_scheduler.stop()
         cron_task.cancel()
+        watchdog.stop()
+        watchdog_task.cancel()
 
         # 2. Cancel telegram task to interrupt the long-poll HTTP request,
         #    then call stop() to cleanly shut down the updater.
@@ -637,6 +647,14 @@ async def _start_cron_scheduler(scheduler: CronScheduler) -> None:
         await scheduler.start()
     except Exception:
         logger.exception("CRON scheduler failed")
+
+
+async def _start_watchdog(watchdog: "HeartbeatWatchdog") -> None:
+    """Start the heartbeat watchdog in background."""
+    try:
+        await watchdog.start()
+    except Exception:
+        logger.exception("Heartbeat watchdog failed")
 
 
 async def _start_dashboard(ctx: AppContext) -> None:

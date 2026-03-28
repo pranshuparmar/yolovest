@@ -65,9 +65,14 @@ class HeartbeatOrchestrator:
         self._max_consecutive_skips = ctx.config.heartbeat.max_consecutive_skips
         self._running = False
         self._on_skill_complete: SkillCallback | None = None
+        self._watchdog: Any | None = None
         self._skills: dict[str, SkillBase] = skills if skills is not None else {}
         if skills is None:
             self._init_skills()
+
+    def set_watchdog(self, watchdog: Any) -> None:
+        """Set the heartbeat watchdog reference."""
+        self._watchdog = watchdog
 
     def _init_skills(self) -> None:
         """Instantiate all registered skills with context."""
@@ -415,6 +420,10 @@ class HeartbeatOrchestrator:
                 await self._ctx.notify.send(
                     "CRITICAL: Unhandled heartbeat error", alert_type="errors",
                 )
+
+            # Notify watchdog that a heartbeat cycle completed (even if errored)
+            if self._watchdog:
+                self._watchdog.record_heartbeat()
 
             # Determine interval based on market hours
             if self._ctx.market_hours.is_market_hours():
