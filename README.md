@@ -192,7 +192,3 @@ frontend/
 - Market hours: 9:15 AM - 3:30 PM IST. Square-off at 3:15 PM.
 - Kite API requires daily re-authentication (user pastes request_token via Telegram or dashboard).
 - All UI timestamps display in IST (`Asia/Kolkata`).
-
-## License
-
-MIT
