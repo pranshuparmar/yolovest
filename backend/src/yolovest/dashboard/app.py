@@ -253,7 +253,10 @@ def create_app(ctx: AppContext) -> FastAPI:
             return await ctx.broker.get_holdings()
         except Exception as e:
             logger.warning("Failed to fetch holdings: %s", e)
-            return []
+            raise HTTPException(
+                status_code=502,
+                detail=f"Broker error: {e}. Token may be expired — re-authenticate via Settings.",
+            )
 
     @app.post("/api/orders")
     async def place_manual_order(
@@ -533,10 +536,13 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         # --- Zerodha Broker ---
         broker_configured = bool(getattr(ctx.config.broker, "api_key", ""))
-        # Quick local check — don't call kite.profile() on every page load
-        broker_authenticated = bool(
-            hasattr(ctx.broker, "_access_token") and ctx.broker._access_token
-        )
+        # Verify token is actually valid (catches expired tokens)
+        broker_authenticated = False
+        if broker_configured:
+            try:
+                broker_authenticated = await ctx.broker.is_authenticated()
+            except Exception:
+                pass
         broker_margins: dict[str, Any] | None = None
         results["zerodha"] = {
             "configured": broker_configured,
