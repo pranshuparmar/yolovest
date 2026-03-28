@@ -210,6 +210,11 @@ export const api = {
       method: "POST",
     }),
 
+  retireModel: (modelType: string, version: string) =>
+    apiFetch<{ retired: boolean }>(`/api/ml-models/${modelType}/${version}/retire`, {
+      method: "POST",
+    }),
+
   shadowComparison: (modelType: string) =>
     apiFetch<{ shadow: Record<string, number>; production: Record<string, number> }>(`/api/ml-models/${modelType}/shadow-comparison`),
 

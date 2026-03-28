@@ -309,6 +309,17 @@ export function useReshadowModel() {
   });
 }
 
+export function useRetireModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ modelType, version }: { modelType: string; version: string }) =>
+      api.retireModel(modelType, version),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ml-models"] });
+    },
+  });
+}
+
 export function useShadowComparison(modelType: string | null) {
   return useQuery({
     queryKey: ["shadow-comparison", modelType],

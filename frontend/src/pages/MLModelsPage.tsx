@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMLModels, usePromoteModel, useDeleteModel, useReshadowModel, useShadowComparison } from "../hooks/queries";
+import { useMLModels, usePromoteModel, useDeleteModel, useReshadowModel, useRetireModel, useShadowComparison } from "../hooks/queries";
 import clsx from "clsx";
 import type { MLModelInfo } from "../types/api";
 
@@ -43,6 +43,8 @@ function ModelCard({
   isDeleting,
   onReshadow,
   isReshadowing,
+  onRetire,
+  isRetiring,
   prodModel,
 }: {
   model: MLModelInfo;
@@ -54,6 +56,8 @@ function ModelCard({
   isDeleting?: boolean;
   onReshadow?: () => void;
   isReshadowing?: boolean;
+  onRetire?: () => void;
+  isRetiring?: boolean;
   prodModel?: MLModelInfo;
 }) {
   const statusConfig = {
@@ -98,6 +102,15 @@ function ModelCard({
               {isReshadowing ? "..." : "Re-shadow"}
             </button>
           )}
+          {onRetire && (
+            <button
+              onClick={onRetire}
+              disabled={isRetiring}
+              className="px-2.5 py-1 rounded text-xs font-medium bg-gray-700 text-gray-400 hover:bg-gray-600 transition-colors disabled:opacity-30"
+            >
+              {isRetiring ? "..." : "Retire"}
+            </button>
+          )}
           {onDelete && (
             <button
               onClick={onDelete}
@@ -107,9 +120,6 @@ function ModelCard({
               {isDeleting ? "..." : "Delete"}
             </button>
           )}
-          <span className={clsx("px-2 py-0.5 rounded text-xs font-medium", cfg.badge)}>
-            {cfg.label}
-          </span>
         </div>
       </div>
 
@@ -268,9 +278,11 @@ export function MLModelsPage() {
   const promote = usePromoteModel();
   const deleteModel = useDeleteModel();
   const reshadow = useReshadowModel();
+  const retire = useRetireModel();
   const [promotingVersion, setPromotingVersion] = useState<string | null>(null);
   const [deletingVersion, setDeletingVersion] = useState<string | null>(null);
   const [reshadowingVersion, setReshadowingVersion] = useState<string | null>(null);
+  const [retiringVersion, setRetiringVersion] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const productionModels = data?.production || {};
@@ -299,6 +311,14 @@ export function MLModelsPage() {
         },
         onSettled: () => setReshadowingVersion(null),
       },
+    );
+  };
+
+  const handleRetire = (modelType: string, version: string) => {
+    setRetiringVersion(version);
+    retire.mutate(
+      { modelType, version },
+      { onSettled: () => setRetiringVersion(null) },
     );
   };
 
@@ -367,6 +387,8 @@ export function MLModelsPage() {
                 prodModel={productionModels[model.model_type || ""]}
                 onPromote={() => model.model_type && model.version && handlePromote(model.model_type, model.version)}
                 isPromoting={promote.isPending && promotingVersion === model.version}
+                onRetire={() => model.model_type && model.version && handleRetire(model.model_type, model.version)}
+                isRetiring={retire.isPending && retiringVersion === model.version}
                 onDelete={() => model.model_type && model.version && handleDelete(model.model_type, model.version)}
                 isDeleting={deleteModel.isPending && deletingVersion === model.version}
               />

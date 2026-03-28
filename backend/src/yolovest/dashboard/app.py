@@ -831,6 +831,19 @@ def create_app(ctx: AppContext) -> FastAPI:
                 }
         return {"reshadowed": ok, "model_type": model_type, "version": version}
 
+    @app.post("/api/ml-models/{model_type}/{version}/retire")
+    async def retire_model_endpoint(
+        model_type: str,
+        version: str,
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Retire a shadow model (stop A/B testing, move to retired)."""
+        await ctx.db.retire_model(model_type, version)
+        if ctx.ml:
+            ctx.ml.clear_shadow(model_type)
+        logger.info("Retired %s model %s", model_type, version)
+        return {"retired": True, "model_type": model_type, "version": version}
+
     @app.get("/api/ml-models/{model_type}/shadow-comparison")
     async def get_shadow_comparison(
         model_type: str,
