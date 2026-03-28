@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
 def _parse_time(t: str) -> dt_time:
@@ -69,14 +69,14 @@ class CapitalConfig(BaseModel):
 
 
 class BrokerConfig(BaseModel):
-    api_key: str = ""
-    api_secret: str = ""
+    api_key: SecretStr = SecretStr("")
+    api_secret: SecretStr = SecretStr("")
 
 
 class LLMConfig(BaseModel):
     enabled: bool = False
     model: str = "gemini-2.5-pro"
-    api_key: str = ""
+    api_key: SecretStr = SecretStr("")
 
 
 class MarketDataConfig(BaseModel):
@@ -265,7 +265,7 @@ class LoggingConfig(BaseModel):
 class DashboardConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8080
-    password: str = "yolovest"  # basic password auth
+    password: SecretStr = SecretStr("yolovest")
 
 
 class TelegramAlertsConfig(BaseModel):
@@ -279,7 +279,7 @@ class TelegramAlertsConfig(BaseModel):
 
 class TelegramConfig(BaseModel):
     enabled: bool = False
-    bot_token: str = ""
+    bot_token: SecretStr = SecretStr("")
     chat_id: str = ""
     alerts: TelegramAlertsConfig = Field(default_factory=TelegramAlertsConfig)
 

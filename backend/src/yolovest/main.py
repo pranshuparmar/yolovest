@@ -219,10 +219,12 @@ def _build_db(config: AppConfig) -> Database | _StubDB:
 
 def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
     """Build broker — real if API keys set, stub otherwise."""
-    if config.broker.api_key and config.broker.api_key != "${KITE_API_KEY}":
+    api_key = config.broker.api_key.get_secret_value()
+    api_secret = config.broker.api_secret.get_secret_value()
+    if api_key and api_key != "${KITE_API_KEY}":
         return ZerodhaBroker(
-            api_key=config.broker.api_key,
-            api_secret=config.broker.api_secret,
+            api_key=api_key,
+            api_secret=api_secret,
             mode=config.mode,
             paper_slippage_pct=config.execution.paper_slippage_pct,
             max_retries=config.execution.max_order_retries,
@@ -233,10 +235,9 @@ def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
 
 def _build_llm(config: AppConfig) -> GeminiLLM | _StubLLM:
     """Build LLM — real if enabled + API key set, stub otherwise."""
-    if (config.llm.enabled
-            and config.llm.api_key
-            and config.llm.api_key != "${GEMINI_API_KEY}"):
-        return GeminiLLM(api_key=config.llm.api_key, model=config.llm.model)
+    llm_key = config.llm.api_key.get_secret_value()
+    if (config.llm.enabled and llm_key and llm_key != "${GEMINI_API_KEY}"):
+        return GeminiLLM(api_key=llm_key, model=config.llm.model)
     if not config.llm.enabled:
         logger.info("LLM disabled via config (llm.enabled=false)")
     return _StubLLM()
@@ -254,12 +255,12 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
 
     # Kite data plan as primary when enabled
     if config.market_data.kite_data_enabled:
-        api_key = config.broker.api_key
-        if api_key and api_key != "${KITE_API_KEY}":
+        kite_key = config.broker.api_key.get_secret_value()
+        if kite_key and kite_key != "${KITE_API_KEY}":
             try:
                 from yolovest.data.kite_data import KiteDataProvider
 
-                kite_provider = KiteDataProvider(api_key=api_key)
+                kite_provider = KiteDataProvider(api_key=kite_key)
                 daily_providers.append(kite_provider)
                 logger.info("Kite Connect data provider enabled as primary")
             except Exception as e:

@@ -1198,14 +1198,34 @@ class Database:
     async def close_position(
         self, position_id: int | str, exit_price: float, pnl: float
     ) -> None:
-        """Close a position with exit price and realized PnL."""
+        """Close a position with exit price and realized PnL.
+
+        Uses a savepoint to ensure the trade update and audit log
+        are committed atomically — no half-closed positions.
+        """
         ts_now = now_ist().isoformat()
-        await self.conn.execute(
-            "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, closed_at = ? "
-            "WHERE trade_id = ?",
-            (exit_price, pnl, ts_now, str(position_id)),
-        )
-        await self.conn.commit()
+        pos_id = str(position_id)
+        await self.conn.execute("SAVEPOINT close_position")
+        try:
+            await self.conn.execute(
+                "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, closed_at = ? "
+                "WHERE trade_id = ?",
+                (exit_price, pnl, ts_now, pos_id),
+            )
+            await self.conn.execute(
+                "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
+                "input_summary, output_summary) VALUES (?, ?, ?, ?, ?)",
+                (
+                    ts_now, "position_closed", "position-monitor",
+                    json.dumps({"trade_id": pos_id, "exit_price": exit_price}),
+                    json.dumps({"pnl": pnl}),
+                ),
+            )
+            await self.conn.execute("RELEASE SAVEPOINT close_position")
+            await self.conn.commit()
+        except Exception:
+            await self.conn.execute("ROLLBACK TO SAVEPOINT close_position")
+            raise
 
     # ------------------------------------------------------------------
     # Predictions

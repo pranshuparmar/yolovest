@@ -20,13 +20,31 @@ Flow:
 """
 
 import asyncio
+import hashlib
 import logging
 from typing import Any
 
 from yolovest.costs import compute_transaction_costs
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+from yolovest.timezone import now_ist
 
 logger = logging.getLogger(__name__)
+
+
+def _signal_dedup_key(signal: dict[str, Any]) -> str:
+    """Generate a dedup key for a signal to prevent duplicate order placement.
+
+    Key components: symbol + signal_type + date + entry_price (rounded).
+    If the process crashes after placing a broker order but before recording
+    the trade, the same signal re-entering this skill will be detected.
+    """
+    parts = (
+        signal["symbol"],
+        signal["signal_type"],
+        now_ist().strftime("%Y-%m-%d"),
+        f"{signal['entry_price']:.0f}",
+    )
+    return hashlib.sha256(":".join(parts).encode()).hexdigest()[:16]
 
 
 class TradeExecuteSkill(SkillBase):
@@ -119,6 +137,24 @@ class TradeExecuteSkill(SkillBase):
         cfg = self.ctx.config.execution
         last_error = None
         product = signal.get("product", "MIS")
+
+        # Idempotency check: prevent duplicate orders on crash/restart.
+        # Uses agent_memory with a TTL to track in-flight executions.
+        dedup_key = _signal_dedup_key(signal)
+        if self.ctx.memory:
+            existing = await self.ctx.memory.get("trade_dedup", dedup_key)
+            if existing:
+                logger.warning(
+                    "trade-execute: DUPLICATE detected for %s %s (dedup=%s) — skipping",
+                    signal["signal_type"], signal["symbol"], dedup_key,
+                )
+                return SkillResult(
+                    success=True,
+                    skill_name=self.name,
+                    data={"skipped": True, "reason": "duplicate_signal", "dedup_key": dedup_key},
+                )
+            # Mark as in-flight BEFORE placing the order
+            await self.ctx.memory.set("trade_dedup", dedup_key, "in_flight", ttl_hours=24)
 
         # Use fresh LTP for order price
         try:
