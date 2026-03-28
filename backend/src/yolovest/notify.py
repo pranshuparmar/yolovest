@@ -72,8 +72,33 @@ class Notifier:
         """Set the Telegram bot reference for sending messages."""
         self._telegram_bot = bot
 
-    async def send(self, message: str) -> bool:
+    # Maps alert_type names to TelegramAlertsConfig field names
+    _ALERT_TYPE_MAP: dict[str, str] = {
+        "trade_entry": "trade_entry",
+        "trade_exit": "trade_exit",
+        "errors": "errors",
+        "daily_summary": "daily_summary",
+        "weekly_summary": "weekly_summary",
+        "kill_switch": "kill_switch",
+    }
+
+    def _is_alert_enabled(self, alert_type: str | None) -> bool:
+        """Check if a specific alert type is enabled in telegram config."""
+        if alert_type is None:
+            return True
+        field = self._ALERT_TYPE_MAP.get(alert_type)
+        if field is None:
+            return True
+        return bool(getattr(self._config.notifications.telegram.alerts, field, True))
+
+    async def send(self, message: str, *, alert_type: str | None = None) -> bool:
         """Send a notification message.
+
+        Args:
+            message: The notification text.
+            alert_type: Optional alert category (e.g. "errors", "trade_entry").
+                When set, the corresponding telegram.alerts toggle is checked
+                before sending to Telegram. Console always receives the message.
 
         Returns True if the message was delivered to at least one backend.
         """
@@ -87,8 +112,12 @@ class Notifier:
         self._sent_messages.append(message)
         delivered = True
 
-        # Telegram backend (if enabled and bot is set)
-        if self._config.notifications.telegram.enabled and self._telegram_bot:
+        # Telegram backend (if enabled, bot is set, and alert type is allowed)
+        if (
+            self._config.notifications.telegram.enabled
+            and self._telegram_bot
+            and self._is_alert_enabled(alert_type)
+        ):
             try:
                 result = await self._telegram_bot.send_message(message)  # type: ignore[attr-defined]
                 delivered = result or delivered
@@ -99,39 +128,19 @@ class Notifier:
 
     async def send_trade_alert(self, trade: dict[str, Any]) -> None:
         """Send a trade entry alert via all configured backends."""
-        alerts_cfg = self._config.notifications.telegram.alerts
         msg = _format_trade_alert(trade)
-
-        if not alerts_cfg.trade_entry:
-            logger.info("[TRADE] %s", msg)
-            self._sent_messages.append(msg)
-            return
-
-        await self.send(msg)
+        await self.send(msg, alert_type="trade_entry")
 
     async def send_exit_alert(self, symbol: str, reason: str, pnl: float) -> None:
         """Send a trade exit alert (target/SL hit, square-off)."""
-        alerts_cfg = self._config.notifications.telegram.alerts
         emoji = "+" if pnl >= 0 else ""
         msg = f"Exit: {symbol} — {reason} — PnL: {emoji}{pnl:.2f}"
-
-        if not alerts_cfg.trade_exit:
-            logger.info("[EXIT] %s", msg)
-            self._sent_messages.append(msg)
-            return
-
-        await self.send(msg)
+        await self.send(msg, alert_type="trade_exit")
 
     async def send_error_alert(self, error: str) -> None:
         """Send an error alert."""
-        alerts_cfg = self._config.notifications.telegram.alerts
         msg = f"Error: {error}"
-
-        if not alerts_cfg.errors:
-            logger.warning("[ERROR ALERT SUPPRESSED] %s", error)
-            return
-
-        await self.send(msg)
+        await self.send(msg, alert_type="errors")
 
     @property
     def sent_messages(self) -> list[str]:

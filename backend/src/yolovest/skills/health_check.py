@@ -100,13 +100,12 @@ class HealthCheckSkill(SkillBase):
                     + "\n".join(critical_failures)
                 )
 
-        # Alert on any failures
+        # Alert on any failures (respects errors alert toggle)
         if critical_failures:
-            alerts_cfg = self.ctx.config.notifications.telegram.alerts
-            if alerts_cfg.errors:
-                await self.ctx.notify.send(
-                    "Health check failures:\n" + "\n".join(critical_failures)
-                )
+            await self.ctx.notify.send(
+                "Health check failures:\n" + "\n".join(critical_failures),
+                alert_type="errors",
+            )
 
         return SkillResult(
             success=len(critical_failures) == 0,

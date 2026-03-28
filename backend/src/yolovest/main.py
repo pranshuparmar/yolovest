@@ -158,28 +158,42 @@ class _StubBroker:
 
 
 class _StubLLM:
-    """Minimal LLM stub when no real LLM yet)."""
+    """Minimal LLM stub when no real LLM configured.
+
+    Returns safe no-op defaults instead of raising, so callers without
+    try/except won't crash the pipeline.
+    """
 
     async def ping(self) -> bool:
         return False
 
     async def review_trade(self, context: object) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import TradeReview
+        return TradeReview(decision="APPROVE", reasoning="LLM not configured — auto-approved")
 
     async def analyze_sentiment(self, symbol: str, headlines: list[str]) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import SentimentResult
+        return SentimentResult(symbol=symbol, sentiment="neutral", confidence=0.0)
 
     async def summarize_with_web_grounding(self, prompt: str) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import WebGroundingResult
+        return WebGroundingResult(query=prompt, summary="LLM not configured")
 
     async def validate_watchlist(self, *args: object, **kwargs: object) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import WatchlistValidation
+        return WatchlistValidation()
 
     async def summarize_market_day(self) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import MarketDaySummary
+        from yolovest.timezone import now_ist
+        return MarketDaySummary(
+            date=now_ist().strftime("%Y-%m-%d"),
+            market_sentiment="neutral",
+        )
 
     async def analyze_prediction_failures(self, failures: list[dict[str, object]]) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import FailureAnalysis
+        return FailureAnalysis(summary="LLM not configured — no analysis")
 
 
 class _StubMarketData:

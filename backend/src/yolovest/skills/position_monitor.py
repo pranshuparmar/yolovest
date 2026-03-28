@@ -18,6 +18,7 @@ Flow:
 6. Alert on any discrepancies between local and broker state
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -44,16 +45,29 @@ class PositionMonitorSkill(SkillBase):
         discrepancies = self._reconcile(local_positions, broker_positions)
         if discrepancies:
             await self.ctx.notify.send(
-                f"Position discrepancy detected:\n{discrepancies}"
+                f"Position discrepancy detected:\n{discrepancies}",
+                alert_type="errors",
             )
 
         trails_modified = 0
         targets_hit: list[dict[str, Any]] = []
         stops_hit: list[dict[str, Any]] = []
+        ltp_failures: list[str] = []
 
         for pos in local_positions:
             symbol = pos["symbol"]
-            current_price = await self.ctx.market_data.get_ltp(symbol)
+
+            # Fetch LTP with retry (positions must not go unmonitored)
+            current_price = await self._get_ltp_with_retry(symbol)
+            if current_price is None:
+                ltp_failures.append(symbol)
+                logger.error(
+                    "position-monitor: LTP fetch failed for %s after retries — "
+                    "position UNMONITORED this cycle",
+                    symbol,
+                )
+                continue
+
             entry = pos["entry_price"]
             sl = pos["stop_loss_price"]
             target = pos["target_price"]
@@ -154,26 +168,63 @@ class PositionMonitorSkill(SkillBase):
                 "trails_modified": trails_modified,
             })
 
+        # Alert on LTP fetch failures (positions were unmonitored)
+        if ltp_failures:
+            await self.ctx.notify.send(
+                f"WARNING: LTP fetch failed for {len(ltp_failures)} positions "
+                f"({', '.join(ltp_failures)}). These positions were NOT monitored "
+                f"this cycle — SL/target checks skipped.",
+                alert_type="errors",
+            )
+
         target_syms = [h["symbol"] for h in targets_hit]
         stop_syms = [h["symbol"] for h in stops_hit]
         logger.info(
             "position-monitor: %d positions — targets_hit=%s, stops_hit=%s, "
-            "trails_modified=%d, discrepancies=%d",
+            "trails_modified=%d, discrepancies=%d, ltp_failures=%d",
             len(local_positions), target_syms or "none", stop_syms or "none",
             trails_modified, len(discrepancies) if discrepancies else 0,
+            len(ltp_failures),
         )
 
         return SkillResult(
-            success=True,
+            success=len(ltp_failures) == 0,
             skill_name=self.name,
+            error=f"LTP fetch failed for: {', '.join(ltp_failures)}" if ltp_failures else None,
             data={
                 "positions_monitored": len(local_positions),
                 "trails_modified": trails_modified,
                 "targets_hit": target_syms,
                 "stops_hit": stop_syms,
                 "discrepancies": len(discrepancies) if discrepancies else 0,
+                "ltp_failures": ltp_failures,
             },
         )
+
+    async def _get_ltp_with_retry(
+        self, symbol: str, max_retries: int = 3, base_delay: float = 1.0,
+    ) -> float | None:
+        """Fetch LTP with exponential backoff retries.
+
+        Returns the price on success, or None if all retries exhausted.
+        """
+        for attempt in range(max_retries):
+            try:
+                price = await self.ctx.market_data.get_ltp(symbol)
+                if price is not None and price > 0:
+                    return price
+                logger.warning(
+                    "LTP for %s returned invalid value: %s (attempt %d/%d)",
+                    symbol, price, attempt + 1, max_retries,
+                )
+            except Exception as e:
+                logger.warning(
+                    "LTP fetch failed for %s: %s (attempt %d/%d)",
+                    symbol, e, attempt + 1, max_retries,
+                )
+            if attempt < max_retries - 1:
+                await asyncio.sleep(base_delay * (2 ** attempt))
+        return None
 
     def _reconcile(self, local: list[dict[str, Any]], broker: list[dict[str, Any]]) -> list[str]:
         """Compare local DB positions with broker positions."""

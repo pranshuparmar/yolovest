@@ -73,13 +73,12 @@ class KillSwitchSkill(SkillBase):
             except Exception:
                 pass  # log but continue
 
-        alerts_cfg = self.ctx.config.notifications.telegram.alerts
-        if alerts_cfg.kill_switch:
-            await self.ctx.notify.send(
-                f"STOP: Trading paused. {cancelled} pending orders cancelled.\n"
-                "Existing positions are untouched.\n"
-                "Send /resume to restart trading."
-            )
+        await self.ctx.notify.send(
+            f"STOP: Trading paused. {cancelled} pending orders cancelled.\n"
+            "Existing positions are untouched.\n"
+            "Send /resume to restart trading.",
+            alert_type="kill_switch",
+        )
 
         await self.broadcast("kill_switch_activated", {
             "command": "stop", "orders_cancelled": cancelled,
@@ -108,13 +107,12 @@ class KillSwitchSkill(SkillBase):
         sq_result = await square_off.execute(force=True)
 
         total_pnl = sq_result.data.get("total_pnl", 0)
-        alerts_cfg = self.ctx.config.notifications.telegram.alerts
-        if alerts_cfg.kill_switch:
-            await self.ctx.notify.send(
-                f"KILL: All positions squared off. PnL: {total_pnl:,.2f}\n"
-                "Trading is paused.\n"
-                "Send /resume to restart trading."
-            )
+        await self.ctx.notify.send(
+            f"KILL: All positions squared off. PnL: {total_pnl:,.2f}\n"
+            "Trading is paused.\n"
+            "Send /resume to restart trading.",
+            alert_type="kill_switch",
+        )
 
         await self.broadcast("kill_switch_activated", {
             "command": "kill", "total_pnl": total_pnl,
@@ -141,10 +139,10 @@ class KillSwitchSkill(SkillBase):
         health_result = await health.execute()
 
         healthy = health_result.data.get("all_healthy", False)
-        alerts_cfg = self.ctx.config.notifications.telegram.alerts
-        if alerts_cfg.kill_switch:
-            status = "All systems healthy." if healthy else "WARNING: Some systems unhealthy."
-            await self.ctx.notify.send(f"RESUME: Trading resumed. {status}")
+        status = "All systems healthy." if healthy else "WARNING: Some systems unhealthy."
+        await self.ctx.notify.send(
+            f"RESUME: Trading resumed. {status}", alert_type="kill_switch",
+        )
 
         return SkillResult(
             success=True,

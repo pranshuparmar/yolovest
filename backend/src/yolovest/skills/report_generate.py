@@ -107,11 +107,9 @@ class ReportGenerateSkill(SkillBase):
 
         await self.ctx.db.store_report(report)
 
-        # Telegram delivery
-        alerts_cfg = self.ctx.config.notifications.telegram.alerts
-        if alerts_cfg.daily_summary:
-            msg = self._format_daily_report(report)
-            await self.ctx.notify.send(msg)
+        # Notify (respects daily_summary alert toggle)
+        msg = self._format_daily_report(report)
+        await self.ctx.notify.send(msg, alert_type="daily_summary")
 
         return SkillResult(success=True, skill_name=self.name, data=report)
 
@@ -187,10 +185,8 @@ class ReportGenerateSkill(SkillBase):
 
         await self.ctx.db.store_report(report)
 
-        alerts_cfg = self.ctx.config.notifications.telegram.alerts
-        if alerts_cfg.weekly_summary:
-            msg = self._format_weekly_report(report)
-            await self.ctx.notify.send(msg)
+        msg = self._format_weekly_report(report)
+        await self.ctx.notify.send(msg, alert_type="weekly_summary")
 
         return SkillResult(success=True, skill_name=self.name, data=report)
 

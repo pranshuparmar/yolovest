@@ -99,7 +99,8 @@ class SquareOffSkill(SkillBase):
             await self.ctx.notify.send(
                 f"Square-off complete: {len(squared_off)} positions closed, "
                 f"PnL: ₹{total_pnl:,.2f}"
-                + (f"\nFailures: {len(failures)}" if failures else "")
+                + (f"\nFailures: {len(failures)}" if failures else ""),
+                alert_type="trade_exit",
             )
 
         return SkillResult(
