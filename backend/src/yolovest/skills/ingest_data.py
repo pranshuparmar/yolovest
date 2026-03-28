@@ -108,70 +108,77 @@ class IngestDataSkill(SkillBase):
                 sorted(quarantined & set(symbols)),
             )
 
-        # --- OHLCV Data (primary + fallback) ---
-        for symbol in active_symbols:
-            try:
-                # Skip external fetch if DB cache is fresh
-                if await self._is_cached_fresh(symbol, "daily"):
-                    results["symbols_ingested"] += 1
-                    results["cache_hits"] += 1
-                    logger.debug("Cache hit for %s daily — skipping external fetch", symbol)
-                else:
-                    daily = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=30)
-                    await self.ctx.db.upsert_ohlcv(symbol, "daily", daily, "ingester")
-                    results["symbols_ingested"] += 1
+        # --- OHLCV Data (primary + fallback) — fetched concurrently ---
+        # Use a semaphore to limit concurrent external API calls (avoid rate limits).
+        _OHLCV_CONCURRENCY = 5
+        sem = asyncio.Semaphore(_OHLCV_CONCURRENCY)
+        is_market = self.ctx.market_hours.is_market_hours()
 
-                    # Check if data is actually fresh — the ingester may have
-                    # returned stale fallback data (e.g. delisted symbols where
-                    # Jugaad returns old bars but yfinance fails). Count stale
-                    # returns as failures for quarantine purposes.
-                    if daily:
-                        latest = daily[-1].timestamp
-                        if latest.tzinfo is None:
-                            latest = latest.replace(tzinfo=IST)
-                        days_old = (now_ist() - latest).days
-                        if days_old > 5:
-                            logger.warning(
-                                "Stale data for %s: latest bar is %dd old",
-                                symbol, days_old,
-                            )
-                            now_quarantined = await self.ctx.db.record_fetch_failure(
-                                symbol, f"data {days_old}d stale",
-                            )
-                            if now_quarantined:
-                                logger.warning(
-                                    "ingest-data: QUARANTINED %s — data consistently stale (%dd old)",
-                                    symbol, days_old,
+        async def _ingest_symbol(symbol: str) -> dict[str, Any]:
+            """Ingest OHLCV for a single symbol. Returns per-symbol result."""
+            async with sem:
+                result: dict[str, Any] = {"symbol": symbol, "ok": False, "cache_hit": False}
+                try:
+                    if await self._is_cached_fresh(symbol, "daily"):
+                        result["ok"] = True
+                        result["cache_hit"] = True
+                    else:
+                        daily = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=30)
+                        await self.ctx.db.upsert_ohlcv(symbol, "daily", daily, "ingester")
+                        result["ok"] = True
+
+                        if daily:
+                            latest = daily[-1].timestamp
+                            if latest.tzinfo is None:
+                                latest = latest.replace(tzinfo=IST)
+                            days_old = (now_ist() - latest).days
+                            if days_old > 5:
+                                logger.warning("Stale data for %s: latest bar is %dd old", symbol, days_old)
+                                now_quarantined = await self.ctx.db.record_fetch_failure(
+                                    symbol, f"data {days_old}d stale",
                                 )
-                                results["quarantined"] += 1
+                                if now_quarantined:
+                                    result["quarantined"] = True
+                            else:
+                                await self.ctx.db.record_fetch_success(symbol)
                         else:
                             await self.ctx.db.record_fetch_success(symbol)
-                    else:
-                        await self.ctx.db.record_fetch_success(symbol)
 
-                # Intraday candles if market is open
-                if self.ctx.market_hours.is_market_hours():
-                    if not await self._is_cached_fresh(symbol, "5minute"):
+                    # Intraday candles if market is open
+                    if is_market and not await self._is_cached_fresh(symbol, "5minute"):
                         try:
-                            intraday = await self.ctx.market_data.get_ohlcv(
-                                symbol, "5minute", days=1
-                            )
+                            intraday = await self.ctx.market_data.get_ohlcv(symbol, "5minute", days=1)
                             await self.ctx.db.upsert_ohlcv(symbol, "5minute", intraday, "ingester")
                         except Exception as e:
                             logger.debug("Intraday fetch skipped for %s: %s", symbol, e)
 
-            except Exception as e:
-                results["errors"].append(f"{symbol}: {e}")
-                logger.warning("OHLCV fetch failed for %s: %s", symbol, e)
-                # Track failure — quarantine after 3 consecutive failures
-                now_quarantined = await self.ctx.db.record_fetch_failure(symbol, str(e))
-                if now_quarantined:
-                    logger.warning(
-                        "ingest-data: QUARANTINED %s after 3 consecutive failures — "
-                        "will be skipped in all pipelines until manually unblocked",
-                        symbol,
-                    )
-                    results["quarantined"] += 1
+                except Exception as e:
+                    result["error"] = str(e)
+                    logger.warning("OHLCV fetch failed for %s: %s", symbol, e)
+                    now_quarantined = await self.ctx.db.record_fetch_failure(symbol, str(e))
+                    if now_quarantined:
+                        result["quarantined"] = True
+
+                return result
+
+        # Fire all symbol fetches concurrently (bounded by semaphore)
+        symbol_results = await asyncio.gather(
+            *[_ingest_symbol(s) for s in active_symbols],
+            return_exceptions=True,
+        )
+
+        for sr in symbol_results:
+            if isinstance(sr, Exception):
+                results["errors"].append(str(sr))
+                continue
+            if sr.get("ok"):
+                results["symbols_ingested"] += 1
+            if sr.get("cache_hit"):
+                results["cache_hits"] += 1
+            if sr.get("error"):
+                results["errors"].append(f"{sr['symbol']}: {sr['error']}")
+            if sr.get("quarantined"):
+                results["quarantined"] += 1
 
         # --- Check if expensive fetches should be skipped ---
         # News, fundamentals, Google Finance etc. don't change minute-to-minute.

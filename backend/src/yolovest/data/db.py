@@ -23,12 +23,20 @@ _DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
 
 
 class Database:
-    """Async SQLite database with WAL mode and migration support."""
+    """Async SQLite database with WAL mode, read/write separation, and migration support.
+
+    Uses two connection types:
+    - Write connection (_conn): single connection for all writes, with
+      PRAGMA synchronous=FULL for crash safety.
+    - Read connection (_read_conn): separate read-only connection, allowing
+      concurrent reads even during writes (WAL mode benefit).
+    """
 
     def __init__(self, db_path: str, migrations_dir: Path | None = None) -> None:
         self._db_path = db_path
         self._migrations_dir = migrations_dir or _DEFAULT_MIGRATIONS_DIR
         self._conn: aiosqlite.Connection | None = None
+        self._read_conn: aiosqlite.Connection | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -52,8 +60,21 @@ class Database:
         # -- Integrity check on startup (fast check, not full page scan) --
         await self._check_integrity()
 
+        # Read connection — separate, for concurrent reads during writes.
+        # Opens in read-only mode so it can't accidentally mutate data.
+        try:
+            self._read_conn = await aiosqlite.connect(
+                f"file:{self._db_path}?mode=ro", uri=True,
+            )
+            self._read_conn.row_factory = aiosqlite.Row
+            await self._read_conn.execute("PRAGMA busy_timeout=5000")
+        except Exception as e:
+            logger.warning("Read-only connection failed (%s), using single connection", e)
+            self._read_conn = None
+
         await self._run_migrations()
-        logger.info("Database initialized at %s", self._db_path)
+        logger.info("Database initialized at %s (read_conn=%s)", self._db_path,
+                     "enabled" if self._read_conn else "disabled")
 
     async def _check_integrity(self) -> None:
         """Run a quick integrity check on startup.
@@ -79,16 +100,31 @@ class Database:
             logger.warning("Database integrity check could not run: %s", e)
 
     async def close(self) -> None:
-        """Close the database connection."""
+        """Close all database connections."""
+        if self._read_conn:
+            await self._read_conn.close()
+            self._read_conn = None
         if self._conn:
             await self._conn.close()
             self._conn = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
+        """Write connection — use for INSERT/UPDATE/DELETE."""
         if self._conn is None:
             raise RuntimeError("Database not initialized. Call initialize() first.")
         return self._conn
+
+    @property
+    def read_conn(self) -> aiosqlite.Connection:
+        """Read connection — use for SELECT queries.
+
+        Falls back to write connection if read connection is not available
+        (e.g., in-memory databases or older SQLite without URI support).
+        """
+        if self._read_conn is not None:
+            return self._read_conn
+        return self.conn
 
     # ------------------------------------------------------------------
     # Migration Runner
@@ -168,7 +204,7 @@ class Database:
     # ------------------------------------------------------------------
 
     async def is_kill_switch_active(self) -> bool:
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT value FROM system_state WHERE key = 'kill_switch'"
         )
         row = await cursor.fetchone()
@@ -183,7 +219,7 @@ class Database:
         await self.conn.commit()
 
     async def get_system_state(self, key: str) -> str | None:
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT value FROM system_state WHERE key = ?", (key,)
         )
         row = await cursor.fetchone()
@@ -236,7 +272,7 @@ class Database:
         from datetime import timedelta
 
         cutoff = (now_ist() - timedelta(days=days)).isoformat()
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT timestamp, open, high, low, close, volume FROM ohlcv "
             "WHERE symbol = ? AND interval = ? "
             "AND timestamp >= ? "
@@ -287,7 +323,7 @@ class Database:
 
     async def get_watchlist(self) -> list[dict[str, Any]]:
         """Get current watchlist ordered by composite score."""
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT symbol, composite_score, technical_score, volume_momentum_score, "
             "news_sentiment_score, fundamental_score, sector, updated_at "
             "FROM watchlist ORDER BY composite_score DESC"
@@ -402,7 +438,7 @@ class Database:
 
     async def get_open_positions(self) -> list[dict[str, Any]]:
         """Get trades with status 'open' or 'partially_filled'."""
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT * FROM trades WHERE status IN ('open', 'partially_filled')"
         )
         rows = await cursor.fetchall()
@@ -715,13 +751,13 @@ class Database:
             hour=0, minute=0, second=0, microsecond=0
         ).isoformat()
         # Symbols with signals generated today
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT DISTINCT symbol FROM signals WHERE created_at >= ?",
             (today_start,),
         )
         signaled = {row[0] for row in await cursor.fetchall()}
         # Symbols with open positions (regardless of when opened)
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT DISTINCT symbol FROM trades "
             "WHERE status IN ('open', 'partially_filled')"
         )
