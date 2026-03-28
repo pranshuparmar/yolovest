@@ -92,6 +92,17 @@ class DatabaseMaintenanceSkill(SkillBase):
         except Exception as e:
             logger.warning("Model backup pruning failed: %s", e)
 
+        # --- Step 4: Auto-delete old retired models ---
+        try:
+            cleanup_days = self.ctx.config.retraining.retired_model_cleanup_days
+            if cleanup_days > 0:
+                deleted_models = await self.ctx.db.cleanup_retired_models(cleanup_days)
+                results["retired_models_deleted"] = deleted_models
+                if deleted_models > 0:
+                    logger.info("Auto-deleted %d retired models older than %dd", deleted_models, cleanup_days)
+        except Exception as e:
+            logger.warning("Retired model cleanup failed: %s", e)
+
         # --- Audit log ---
         with contextlib.suppress(Exception):
             await self.ctx.db.log_audit(

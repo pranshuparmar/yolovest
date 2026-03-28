@@ -180,6 +180,32 @@ class GenerateSignalsSkill(SkillBase):
                         symbol, features, current_price=current_price,
                     )
 
+                # Shadow inference (non-blocking, best-effort)
+                model_type = "intraday" if use_intraday else "swing"
+                if self.ctx.ml.has_shadow(model_type):
+                    try:
+                        if use_intraday:
+                            shadow_pred = await self.ctx.ml.predict_shadow_intraday(
+                                symbol, features, current_price=current_price,
+                            )
+                        else:
+                            shadow_pred = await self.ctx.ml.predict_shadow_swing(
+                                symbol, features, current_price=current_price,
+                            )
+                        if shadow_pred is not None:
+                            await self.ctx.db.insert_shadow_prediction({
+                                "symbol": symbol,
+                                "predicted_direction": shadow_pred.signal_type,
+                                "confidence": shadow_pred.confidence,
+                                "predicted_target": shadow_pred.target_price,
+                                "predicted_stop_loss": shadow_pred.stop_loss_price,
+                                "expected_holding_period": shadow_pred.holding_period,
+                                "model_version": shadow_pred.model_version,
+                                "entry_price": shadow_pred.entry_price,
+                            })
+                    except Exception as e:
+                        logger.debug("Shadow inference failed for %s: %s", symbol, e)
+
                 # Step 4: Skip HOLD signals
                 if prediction.signal_type == "HOLD":
                     filter_counts["hold_signal"] += 1

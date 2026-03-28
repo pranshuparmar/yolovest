@@ -53,3 +53,27 @@ class MLBase(ABC):
     async def deploy_shadow(self, model_type: str, version: str, days: int) -> None:
         """Deploy a model version in shadow mode for validation."""
         ...
+
+    # Shadow model methods (default implementations for backward compatibility)
+
+    def has_shadow(self, model_type: str) -> bool:
+        """Check if a shadow model is loaded."""
+        return False
+
+    def clear_shadow(self, model_type: str) -> None:
+        """Unload shadow model."""
+
+    async def load_shadow_model(self, model_type: str, version: str | None = None) -> None:
+        """Load a model into the shadow slot."""
+
+    async def predict_shadow_intraday(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction | None:
+        """Run shadow intraday model. Returns None if no shadow loaded."""
+        return None
+
+    async def predict_shadow_swing(
+        self, symbol: str, features: dict[str, Any], *, current_price: float | None = None,
+    ) -> MLPrediction | None:
+        """Run shadow swing model. Returns None if no shadow loaded."""
+        return None

@@ -205,6 +205,14 @@ export const api = {
       method: "DELETE",
     }),
 
+  reshadowModel: (modelType: string, version: string) =>
+    apiFetch<{ reshadowed: boolean }>(`/api/ml-models/${modelType}/${version}/reshadow`, {
+      method: "POST",
+    }),
+
+  shadowComparison: (modelType: string) =>
+    apiFetch<{ shadow: Record<string, number>; production: Record<string, number> }>(`/api/ml-models/${modelType}/shadow-comparison`),
+
   predictionsToday: () =>
     apiFetch<PredictionDetail[]>("/api/predictions/today"),
 

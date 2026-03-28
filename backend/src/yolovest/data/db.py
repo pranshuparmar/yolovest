@@ -841,6 +841,36 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
+    async def cleanup_retired_models(self, older_than_days: int) -> int:
+        """Delete retired models older than N days (DB record + .pkl file)."""
+        from datetime import timedelta
+        cutoff = (now_ist() - timedelta(days=older_than_days)).isoformat()
+        cursor = await self.conn.execute(
+            "SELECT model_type, version, file_path FROM model_versions "
+            "WHERE status = 'retired' AND created_at < ?",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        deleted = 0
+        for row in rows:
+            try:
+                await self.delete_model_version(row["model_type"], row["version"])
+                deleted += 1
+            except Exception:
+                pass
+        return deleted
+
+    async def reshadow_model(self, model_type: str, version: str) -> bool:
+        """Move a retired model back to shadow status for re-evaluation."""
+        cursor = await self.conn.execute(
+            "UPDATE model_versions SET status = 'shadow', "
+            "shadow_start_date = datetime('now') "
+            "WHERE model_type = ? AND version = ? AND status = 'retired'",
+            (model_type, version),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
     # ------------------------------------------------------------------
     # Training Data
     # ------------------------------------------------------------------
@@ -1221,6 +1251,85 @@ class Database:
         )
         await self.conn.commit()
         return pred_id
+
+    async def insert_shadow_prediction(self, prediction: dict[str, Any]) -> str:
+        """Insert a shadow model prediction for A/B comparison."""
+        import uuid
+
+        pred_id = f"SP-{uuid.uuid4().hex[:8]}"
+        ts_now = now_ist().isoformat()
+
+        from yolovest.models.schemas import _parse_holding_period
+
+        holding = prediction.get("expected_holding_period", "intraday")
+        end_time = now_ist() + _parse_holding_period(holding)
+
+        await self.conn.execute(
+            "INSERT INTO predictions (prediction_id, signal_id, trade_id, created_at, "
+            "prediction_end_time, actual_price, direction_correct, target_hit, "
+            "actual_pnl_pct, is_shadow, model_version) "
+            "VALUES (?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?)",
+            (pred_id, ts_now, end_time.isoformat(), prediction.get("model_version")),
+        )
+
+        # Store details in a lightweight format for scoring
+        await self.conn.execute(
+            "UPDATE predictions SET "
+            "signal_id = (SELECT id FROM signals WHERE symbol = ? ORDER BY created_at DESC LIMIT 1) "
+            "WHERE prediction_id = ?",
+            (prediction.get("symbol"), pred_id),
+        )
+        await self.conn.commit()
+        return pred_id
+
+    async def get_shadow_vs_production_metrics(
+        self, model_type: str, since_date: str,
+    ) -> dict[str, Any]:
+        """Compare shadow vs production prediction accuracy over a period.
+
+        Returns {shadow: {metrics}, production: {metrics}, agreement_rate}.
+        """
+        # Get the production and shadow model versions for this type
+        prod = await self.get_production_model(model_type)
+        prod_version = prod["version"] if prod else None
+
+        shadow_models = await self.get_all_shadow_models()
+        shadow_versions = [
+            s["version"] for s in shadow_models if s["model_type"] == model_type
+        ]
+
+        result: dict[str, Any] = {"shadow": {}, "production": {}, "agreement_rate": None}
+
+        # Fetch scored predictions grouped by is_shadow
+        cursor = await self.conn.execute(
+            "SELECT p.is_shadow, p.model_version, "
+            "  COUNT(*) as total, "
+            "  SUM(CASE WHEN p.direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
+            "  SUM(CASE WHEN p.target_hit = 1 THEN 1 ELSE 0 END) as targets_hit, "
+            "  AVG(p.actual_pnl_pct) as avg_pnl "
+            "FROM predictions p "
+            "WHERE p.actual_price IS NOT NULL "
+            "AND p.created_at >= ? "
+            "GROUP BY p.is_shadow",
+            (since_date,),
+        )
+        rows = await cursor.fetchall()
+
+        for row in rows:
+            metrics = {
+                "total": row["total"],
+                "correct": row["correct"],
+                "targets_hit": row["targets_hit"],
+                "direction_accuracy": round(row["correct"] / row["total"], 4) if row["total"] > 0 else 0,
+                "target_hit_rate": round(row["targets_hit"] / row["total"], 4) if row["total"] > 0 else 0,
+                "avg_pnl_pct": round(row["avg_pnl"], 4) if row["avg_pnl"] is not None else 0,
+            }
+            if row["is_shadow"]:
+                result["shadow"] = metrics
+            else:
+                result["production"] = metrics
+
+        return result
 
     async def get_unscored_predictions(self) -> list[dict[str, Any]]:
         """Get predictions whose holding period has elapsed but haven't been scored.

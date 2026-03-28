@@ -120,6 +120,8 @@ database:
 retraining:
   schedule_cron: "0 6 * * 6"          # retrain schedule (Saturday 6 AM)
   shadow_mode_days: 7                 # run new model in shadow for N days before promoting
+  shadow_min_predictions: 10          # minimum scored predictions before promotion decision
+  retired_model_cleanup_days: 30      # auto-delete retired models after N days (0 = never)
 
 reports:
   daily_report_time: "16:00"          # daily report generation time (IST)

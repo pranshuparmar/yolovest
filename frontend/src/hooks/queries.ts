@@ -298,6 +298,26 @@ export function useDeleteModel() {
   });
 }
 
+export function useReshadowModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ modelType, version }: { modelType: string; version: string }) =>
+      api.reshadowModel(modelType, version),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ml-models"] });
+    },
+  });
+}
+
+export function useShadowComparison(modelType: string | null) {
+  return useQuery({
+    queryKey: ["shadow-comparison", modelType],
+    queryFn: () => api.shadowComparison(modelType!),
+    enabled: !!modelType,
+    staleTime: 60_000,
+  });
+}
+
 export function usePredictionsToday() {
   return useQuery({
     queryKey: ["predictions", "today"],

@@ -243,6 +243,8 @@ class DatabaseConfig(BaseModel):
 class RetrainingConfig(BaseModel):
     schedule_cron: str = "0 6 * * 6"
     shadow_mode_days: int = 7
+    shadow_min_predictions: int = 10
+    retired_model_cleanup_days: int = 30
 
 
 class ReportsConfig(BaseModel):

@@ -381,6 +381,22 @@ async def async_main(args: argparse.Namespace) -> None:
             except Exception as e:
                 logger.warning("Failed to load %s model at startup: %s", model_type, e)
 
+        # Load shadow models (if any are in shadow status in DB)
+        try:
+            shadow_models = await ctx.db.get_all_shadow_models()
+            for shadow in shadow_models:
+                try:
+                    await ctx.ml.load_shadow_model(
+                        shadow["model_type"], shadow["version"],
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to load shadow %s model %s: %s",
+                        shadow["model_type"], shadow["version"], e,
+                    )
+        except Exception:
+            pass
+
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
 

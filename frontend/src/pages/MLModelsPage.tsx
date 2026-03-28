@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMLModels, usePromoteModel, useDeleteModel } from "../hooks/queries";
+import { useMLModels, usePromoteModel, useDeleteModel, useReshadowModel, useShadowComparison } from "../hooks/queries";
 import clsx from "clsx";
 import type { MLModelInfo } from "../types/api";
 
@@ -41,6 +41,8 @@ function ModelCard({
   isPromoting,
   onDelete,
   isDeleting,
+  onReshadow,
+  isReshadowing,
   prodModel,
 }: {
   model: MLModelInfo;
@@ -50,6 +52,8 @@ function ModelCard({
   isPromoting?: boolean;
   onDelete?: () => void;
   isDeleting?: boolean;
+  onReshadow?: () => void;
+  isReshadowing?: boolean;
   prodModel?: MLModelInfo;
 }) {
   const statusConfig = {
@@ -83,6 +87,15 @@ function ModelCard({
               )}
             >
               {isPromoting ? "Promoting…" : status === "retired" ? "Restore to Production" : "Promote to Production"}
+            </button>
+          )}
+          {onReshadow && (
+            <button
+              onClick={onReshadow}
+              disabled={isReshadowing}
+              className="px-2.5 py-1 rounded text-xs font-medium bg-amber-900/30 text-amber-400 hover:bg-amber-800/50 transition-colors disabled:opacity-30"
+            >
+              {isReshadowing ? "..." : "Re-shadow"}
             </button>
           )}
           {onDelete && (
@@ -193,12 +206,71 @@ function ComparisonRow({ shadow, production }: { shadow: MLModelInfo; production
   );
 }
 
+function ShadowLiveMetrics({ modelType }: { modelType: string }) {
+  const { data } = useShadowComparison(modelType);
+  if (!data || (!data.shadow?.total && !data.production?.total)) return null;
+
+  const s = data.shadow || {};
+  const p = data.production || {};
+
+  return (
+    <div className="bg-gray-900 border border-amber-800/30 rounded-lg p-4">
+      <h4 className="text-xs font-medium text-amber-400 mb-3">
+        Live Shadow vs Production — {modelType}
+      </h4>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-gray-500 border-b border-gray-800">
+              <th className="py-1 px-2 text-left">Metric</th>
+              <th className="py-1 px-2 text-right">Production</th>
+              <th className="py-1 px-2 text-right">Shadow</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 px-2 text-gray-400">Predictions</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{p.total ?? 0}</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{s.total ?? 0}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 px-2 text-gray-400">Direction Accuracy</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{p.direction_accuracy != null ? `${(p.direction_accuracy * 100).toFixed(1)}%` : "—"}</td>
+              <td className={clsx("py-1.5 px-2 text-right font-medium",
+                s.direction_accuracy != null && p.direction_accuracy != null
+                  ? s.direction_accuracy > p.direction_accuracy ? "text-emerald-400" : s.direction_accuracy < p.direction_accuracy ? "text-red-400" : "text-gray-300"
+                  : "text-gray-300"
+              )}>{s.direction_accuracy != null ? `${(s.direction_accuracy * 100).toFixed(1)}%` : "—"}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 px-2 text-gray-400">Target Hit Rate</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{p.target_hit_rate != null ? `${(p.target_hit_rate * 100).toFixed(1)}%` : "—"}</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{s.target_hit_rate != null ? `${(s.target_hit_rate * 100).toFixed(1)}%` : "—"}</td>
+            </tr>
+            <tr>
+              <td className="py-1.5 px-2 text-gray-400">Avg PnL %</td>
+              <td className="py-1.5 px-2 text-right text-gray-300">{p.avg_pnl_pct != null ? `${(p.avg_pnl_pct * 100).toFixed(2)}%` : "—"}</td>
+              <td className={clsx("py-1.5 px-2 text-right font-medium",
+                s.avg_pnl_pct != null && p.avg_pnl_pct != null
+                  ? s.avg_pnl_pct > p.avg_pnl_pct ? "text-emerald-400" : s.avg_pnl_pct < p.avg_pnl_pct ? "text-red-400" : "text-gray-300"
+                  : "text-gray-300"
+              )}>{s.avg_pnl_pct != null ? `${(s.avg_pnl_pct * 100).toFixed(2)}%` : "—"}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function MLModelsPage() {
   const { data, isLoading } = useMLModels();
   const promote = usePromoteModel();
   const deleteModel = useDeleteModel();
+  const reshadow = useReshadowModel();
   const [promotingVersion, setPromotingVersion] = useState<string | null>(null);
   const [deletingVersion, setDeletingVersion] = useState<string | null>(null);
+  const [reshadowingVersion, setReshadowingVersion] = useState<string | null>(null);
 
   const productionModels = data?.production || {};
   const shadowModels = data?.shadow || [];
@@ -210,6 +282,14 @@ export function MLModelsPage() {
     deleteModel.mutate(
       { modelType, version },
       { onSettled: () => setDeletingVersion(null) },
+    );
+  };
+
+  const handleReshadow = (modelType: string, version: string) => {
+    setReshadowingVersion(version);
+    reshadow.mutate(
+      { modelType, version },
+      { onSettled: () => setReshadowingVersion(null) },
     );
   };
 
@@ -279,6 +359,15 @@ export function MLModelsPage() {
         )}
       </div>
 
+      {/* Shadow live performance comparison */}
+      {shadowModels.length > 0 && (
+        <div className="space-y-4">
+          {[...new Set(shadowModels.map((m) => m.model_type).filter(Boolean))].map((mt) => (
+            <ShadowLiveMetrics key={mt} modelType={mt!} />
+          ))}
+        </div>
+      )}
+
       {/* Retired models */}
       <div>
         <h3 className="text-sm font-medium text-gray-400 mb-3">
@@ -300,6 +389,8 @@ export function MLModelsPage() {
                 status="retired"
                 onPromote={() => model.model_type && model.version && handlePromote(model.model_type, model.version)}
                 isPromoting={promote.isPending && promotingVersion === model.version}
+                onReshadow={() => model.model_type && model.version && handleReshadow(model.model_type, model.version)}
+                isReshadowing={reshadow.isPending && reshadowingVersion === model.version}
                 onDelete={() => model.model_type && model.version && handleDelete(model.model_type, model.version)}
                 isDeleting={deleteModel.isPending && deletingVersion === model.version}
               />

@@ -22,6 +22,7 @@ def _make_bars(n: int) -> list[OHLCVBar]:
 @pytest.fixture
 def signal_skill(app_context):
     app_context.ml = AsyncMock()
+    app_context.ml.has_shadow = lambda model_type: False
     return GenerateSignalsSkill(app_context)
 
 

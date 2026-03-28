@@ -801,6 +801,35 @@ def create_app(ctx: AppContext) -> FastAPI:
                 logger.warning("Failed to load promoted model %s/%s: %s", model_type, version, e)
         return {"promoted": True, "model_type": model_type, "version": version}
 
+    @app.post("/api/ml-models/{model_type}/{version}/reshadow")
+    async def reshadow_model(
+        model_type: str,
+        version: str,
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Move a retired model back to shadow for re-evaluation."""
+        ok = await ctx.db.reshadow_model(model_type, version)
+        if ok and ctx.ml:
+            try:
+                await ctx.ml.load_shadow_model(model_type, version)
+            except Exception as e:
+                logger.warning("Failed to load re-shadowed model %s/%s: %s", model_type, version, e)
+        return {"reshadowed": ok, "model_type": model_type, "version": version}
+
+    @app.get("/api/ml-models/{model_type}/shadow-comparison")
+    async def get_shadow_comparison(
+        model_type: str,
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Head-to-head shadow vs production prediction metrics."""
+        shadow_models = await ctx.db.get_all_shadow_models()
+        shadow = next((s for s in shadow_models if s["model_type"] == model_type), None)
+        if not shadow:
+            return {"shadow": {}, "production": {}}
+        return await ctx.db.get_shadow_vs_production_metrics(
+            model_type, since_date=shadow.get("shadow_start_date", "2000-01-01"),
+        )
+
     # ------------------------------------------------------------------
     # Predictions Detail & Failures
     # ------------------------------------------------------------------
