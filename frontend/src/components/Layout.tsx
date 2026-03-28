@@ -25,7 +25,7 @@ export function Layout() {
         onMobileClose={() => setMobileOpen(false)}
       />
       <div className="flex-1 flex flex-col min-w-0 h-screen">
-        <header className="h-12 bg-gray-850 border-b border-gray-800 flex items-center justify-between px-4 shrink-0">
+        <header className="h-12 bg-gray-900 border-b border-gray-800 flex items-center justify-between px-4 shrink-0">
           <div className="flex items-center gap-3">
             {/* Mobile sidebar toggle */}
             <button
