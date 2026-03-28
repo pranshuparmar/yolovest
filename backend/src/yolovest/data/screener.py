@@ -16,6 +16,8 @@ from typing import Any
 
 import aiohttp
 
+from yolovest.http_utils import scraper_headers
+
 logger = logging.getLogger(__name__)
 
 # Rate limit: max 2 requests per second to be polite
@@ -35,10 +37,7 @@ class ScreenerScraper:
         if self._session is None:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30),
-                headers={
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-                    "Accept": "text/html",
-                },
+                headers=scraper_headers({"Accept": "text/html"}),
             )
         return self._session
 

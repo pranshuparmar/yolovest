@@ -21,6 +21,8 @@ from typing import Any
 
 import aiohttp
 
+from yolovest.http_utils import scraper_headers
+
 logger = logging.getLogger(__name__)
 
 _RATE_LIMIT_DELAY = 0.5
@@ -41,10 +43,7 @@ class TrendlyneScraper:
         if self._session is None:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30),
-                headers={
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-                    "Accept": "text/html,application/json",
-                },
+                headers=scraper_headers({"Accept": "text/html,application/json"}),
             )
         return self._session
 

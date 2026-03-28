@@ -19,6 +19,8 @@ from typing import Any
 
 import aiohttp
 
+from yolovest.http_utils import scraper_headers
+
 logger = logging.getLogger(__name__)
 
 # Static FOMC schedules by year. Used as fallback when web scraping fails.
@@ -169,7 +171,7 @@ class EconomicCalendarSource:
             session = await self._get_session()
             async with session.get(
                 "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx",
-                headers={"User-Agent": "YoloVest/1.0"},
+                headers=scraper_headers(),
             ) as resp:
                 if resp.status == 200:
                     text = await resp.text()
@@ -213,7 +215,7 @@ class EconomicCalendarSource:
         # RBI publishes MPC schedule on this page
         url = "https://www.rbi.org.in/Scripts/BS_MonetaryPolicyCalendar.aspx"
         async with session.get(
-            url, headers={"User-Agent": "YoloVest/1.0"},
+            url, headers=scraper_headers(),
         ) as resp:
             if resp.status != 200:
                 return []
@@ -316,7 +318,7 @@ class EconomicCalendarSource:
         session = await self._get_session()
         url = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
         async with session.get(
-            url, headers={"User-Agent": "YoloVest/1.0"},
+            url, headers=scraper_headers(),
         ) as resp:
             if resp.status != 200:
                 return []
@@ -390,10 +392,7 @@ class EconomicCalendarSource:
             )
             async with session.get(
                 url,
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept": "application/json",
-                },
+                headers=scraper_headers({"Accept": "application/json"}),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()

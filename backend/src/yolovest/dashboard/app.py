@@ -2,16 +2,28 @@
 
 REST API + WebSocket for portfolio overview, trade detail, reports, and auth.
 All endpoints read from the shared database via AppContext.
+
+Security:
+- Session token auth: POST /api/auth/login returns a signed HMAC token
+- Bearer token in Authorization header for all subsequent requests
+- Basic auth still supported for backwards compatibility (CLI, curl)
+- CSRF protection: state-changing endpoints require X-CSRF-Token header
 """
 
+import hashlib
+import hmac
 import json
 import logging
 import secrets
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    Depends, FastAPI, Header, HTTPException, Query, Request,
+    WebSocket, WebSocketDisconnect, status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -21,7 +33,56 @@ from yolovest.context import AppContext
 
 logger = logging.getLogger(__name__)
 
-security = HTTPBasic()
+security = HTTPBasic(auto_error=False)
+
+# Token signing key — generated once per process lifetime.
+# Tokens become invalid on restart (forces re-login, which is fine).
+_TOKEN_SECRET = secrets.token_bytes(32)
+_TOKEN_TTL_SEC = 24 * 60 * 60  # 24 hours
+
+
+def _sign_token(username: str) -> str:
+    """Create a signed session token: base64(payload).signature."""
+    import base64
+
+    payload = json.dumps({
+        "user": username,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + _TOKEN_TTL_SEC,
+        "jti": secrets.token_hex(8),
+    }).encode()
+    payload_b64 = base64.urlsafe_b64encode(payload).decode()
+    sig = hmac.new(_TOKEN_SECRET, payload, hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{sig}"
+
+
+def _verify_token(token: str) -> str:
+    """Verify a signed session token. Returns username or raises."""
+    import base64
+
+    parts = token.split(".", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=401, detail="Invalid token format")
+
+    payload_b64, sig = parts
+    try:
+        payload = base64.urlsafe_b64decode(payload_b64)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token encoding")
+
+    expected_sig = hmac.new(_TOKEN_SECRET, payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        raise HTTPException(status_code=401, detail="Invalid token signature")
+
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    if data.get("exp", 0) < time.time():
+        raise HTTPException(status_code=401, detail="Token expired")
+
+    return data.get("user", "anonymous")
 
 
 def _extract_broker_capital(margins: dict[str, Any]) -> float:
@@ -144,6 +205,39 @@ def create_app(ctx: AppContext) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # CSRF middleware — require X-CSRF-Token on state-changing methods.
+    # Exempt paths: login (no token yet), Zerodha postback (external caller),
+    # health check (no auth needed).
+    _CSRF_EXEMPT_PATHS = {
+        "/api/auth/login",
+        "/api/auth/zerodha/postback",
+        "/api/health",
+        "/ws",
+    }
+
+    @app.middleware("http")
+    async def csrf_middleware(request: Request, call_next):
+        if request.method in ("POST", "PUT", "DELETE"):
+            if request.url.path not in _CSRF_EXEMPT_PATHS:
+                csrf_header = request.headers.get("X-CSRF-Token", "")
+                # Only enforce CSRF when using Bearer auth (session-based).
+                # Basic auth requests (curl, CLI) are exempt since they
+                # already prove identity per-request.
+                auth_header = request.headers.get("Authorization", "")
+                if auth_header.startswith("Bearer ") and not csrf_header:
+                    from starlette.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Missing X-CSRF-Token header"},
+                    )
+                if csrf_header and not secrets.compare_digest(csrf_header, _csrf_token):
+                    from starlette.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Invalid CSRF token"},
+                    )
+        return await call_next(request)
+
     # Store context for dependency injection
     app.state.ctx = ctx
 
@@ -167,16 +261,51 @@ def create_app(ctx: AppContext) -> FastAPI:
         except Exception:
             pass
 
-    def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)) -> str:  # noqa: B008
-        """Basic password protection."""
-        correct = secrets.compare_digest(credentials.password, _password["current"])
-        if not correct:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials",
-                headers={"WWW-Authenticate": "Basic"},
-            )
-        return credentials.username
+    def verify_credentials(
+        request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+    ) -> str:
+        """Authenticate via Bearer token (preferred) or Basic auth (fallback).
+
+        Bearer token: Authorization: Bearer <token from /api/auth/login>
+        Basic auth: Authorization: Basic <base64(user:password)>
+        """
+        auth_header = request.headers.get("Authorization", "")
+
+        # Try Bearer token first
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            return _verify_token(token)
+
+        # Fall back to Basic auth
+        if credentials is not None:
+            correct = secrets.compare_digest(credentials.password, _password["current"])
+            if correct:
+                return credentials.username
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": 'Bearer, Basic realm="YoloVest"'},
+        )
+
+    # CSRF token — one per process, sent to client on login
+    _csrf_token = secrets.token_hex(32)
+
+    # Login endpoint — issues session token + CSRF token
+    @app.post("/api/auth/login")
+    async def login(body: dict[str, Any]) -> dict[str, Any]:
+        """Authenticate with password and receive a session token."""
+        pw = body.get("password", "")
+        if not secrets.compare_digest(pw, _password["current"]):
+            raise HTTPException(status_code=401, detail="Invalid password")
+        username = body.get("username", "admin")
+        token = _sign_token(username)
+        return {
+            "token": token,
+            "csrf_token": _csrf_token,
+            "expires_in": _TOKEN_TTL_SEC,
+        }
 
     # ------------------------------------------------------------------
     # Portfolio Overview

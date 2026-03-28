@@ -19,6 +19,7 @@ from typing import Any
 
 import aiohttp
 
+from yolovest.http_utils import scraper_headers
 from yolovest.models.schemas import NewsArticle
 from yolovest.news.base import NewsSource
 
@@ -26,17 +27,15 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.nseindia.com"
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.nseindia.com/",
-    "Connection": "keep-alive",
-}
+
+def _nse_headers() -> dict[str, str]:
+    """NSE requires specific headers alongside a rotating User-Agent."""
+    return scraper_headers({
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.nseindia.com/",
+        "Connection": "keep-alive",
+    })
 
 # Max 3 requests per second to NSE
 _RATE_LIMIT_DELAY = 0.34
@@ -65,7 +64,7 @@ class NSEOfficialSource(NewsSource):
         if self._session is None:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30),
-                headers=_HEADERS,
+                headers=_nse_headers(),
             )
             self._owns_session = True
 
@@ -81,7 +80,7 @@ class NSEOfficialSource(NewsSource):
         try:
             async with self._session.get(
                 _BASE_URL,
-                headers={**_HEADERS, "Accept": "text/html"},
+                headers=scraper_headers({"Accept": "text/html", "Referer": "https://www.nseindia.com/"}),
             ) as resp:
                 # We just need the cookies from the response, don't need body
                 await resp.read()
@@ -190,7 +189,7 @@ class NSEOfficialSource(NewsSource):
             session = await self._get_session()
             async with session.get(
                 _BASE_URL,
-                headers={**_HEADERS, "Accept": "text/html"},
+                headers=scraper_headers({"Accept": "text/html", "Referer": "https://www.nseindia.com/"}),
             ) as resp:
                 return resp.status == 200
         except Exception:
