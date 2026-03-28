@@ -160,34 +160,27 @@ export function Sidebar({
   const sidebarContent = (
     <aside
       className={clsx(
-        "bg-gray-850 border-r border-gray-800 flex flex-col h-screen transition-all duration-200 shrink-0",
+        "bg-gray-900 border-r border-gray-800 flex flex-col transition-all duration-200 shrink-0 relative",
         // Desktop sizing
         "hidden md:flex",
         collapsed ? "md:w-14" : "md:w-52"
       )}
     >
-      <div className="p-3 border-b border-gray-800 flex items-center justify-between">
-        {!collapsed && (
-          <div>
-            <h1 className="text-base font-bold text-blue-400">YoloVest</h1>
-            <p className="text-xs text-gray-500">Trading Dashboard</p>
-          </div>
-        )}
-        <button
-          onClick={onToggle}
-          className="text-gray-500 hover:text-gray-300 p-1"
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            {collapsed ? (
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-            ) : (
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
-            )}
-          </svg>
-        </button>
-      </div>
-      <nav className="flex-1 p-1.5 space-y-1 overflow-y-auto">
+      {/* Collapse toggle on the vertical border */}
+      <button
+        onClick={onToggle}
+        className="absolute top-1/2 -right-2.5 -translate-y-1/2 z-20 w-5 h-10 rounded bg-gray-800 border border-gray-700 text-gray-500 hover:text-gray-200 hover:bg-gray-700 flex items-center justify-center transition-colors"
+        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+      >
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+          {collapsed ? (
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+          ) : (
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+          )}
+        </svg>
+      </button>
+      <nav className="flex-1 p-1.5 pt-2 space-y-1 overflow-y-auto">
         {groups.map((group) => (
           <GroupSection
             key={group.label}
