@@ -57,11 +57,30 @@ def parse_args() -> argparse.Namespace:
 
 def setup_logging() -> None:
     """Configure logging for the application."""
+    from pathlib import Path
+    from logging.handlers import RotatingFileHandler
+
+    log_fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    # Write to /app/logs/yolovest.log (persistent volume in Docker)
+    log_dir = Path("./logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        log_dir / "yolovest.log", maxBytes=10 * 1024 * 1024, backupCount=5,
+    )
+    file_handler.setFormatter(log_fmt)
+    file_handler.setLevel(logging.INFO)
+    logging.getLogger().addHandler(file_handler)
+
     # Suppress verbose httpx request logs (they leak Telegram tokens and API keys)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     # Suppress google_genai internal logs
@@ -70,10 +89,7 @@ def setup_logging() -> None:
     # Add in-memory ring buffer for live log viewing from dashboard
     from yolovest.log_buffer import LogBuffer
     buffer_handler = LogBuffer(maxlen=500)
-    buffer_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    buffer_handler.setFormatter(log_fmt)
     logging.getLogger().addHandler(buffer_handler)
 
 
