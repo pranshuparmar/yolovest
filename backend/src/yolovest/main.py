@@ -50,42 +50,64 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def setup_logging() -> None:
-    """Configure logging for the application."""
+def setup_logging(config: "AppConfig | None" = None) -> None:
+    """Configure logging for the application.
+
+    Called twice: once at startup with defaults (before config loads),
+    then again after config loads to apply configured levels.
+    """
     from pathlib import Path
     from logging.handlers import RotatingFileHandler
+    from yolovest.config import LoggingConfig
+
+    cfg = config.log if config else LoggingConfig()
+    level = getattr(logging, cfg.level.upper(), logging.INFO)
+    file_level = getattr(logging, cfg.file_level.upper(), logging.INFO)
 
     log_fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    root = logging.getLogger()
+    root.setLevel(level)
 
-    # Write to /app/logs/yolovest.log (persistent volume in Docker)
-    log_dir = Path("./logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    file_handler = RotatingFileHandler(
-        log_dir / "yolovest.log", maxBytes=10 * 1024 * 1024, backupCount=5,
-    )
-    file_handler.setFormatter(log_fmt)
-    file_handler.setLevel(logging.INFO)
-    logging.getLogger().addHandler(file_handler)
+    # Only add handlers on first call (avoid duplicates on reconfigure)
+    if not root.handlers:
+        # Console handler
+        console = logging.StreamHandler()
+        console.setFormatter(log_fmt)
+        console.setLevel(level)
+        root.addHandler(console)
 
-    # Suppress verbose httpx request logs (they leak Telegram tokens and API keys)
+        # File handler
+        log_dir = Path(cfg.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_dir / "yolovest.log",
+            maxBytes=cfg.max_bytes,
+            backupCount=cfg.backup_count,
+        )
+        file_handler.setFormatter(log_fmt)
+        file_handler.setLevel(file_level)
+        root.addHandler(file_handler)
+
+        # In-memory ring buffer for live log viewing from dashboard
+        from yolovest.log_buffer import LogBuffer
+        buffer_handler = LogBuffer(maxlen=500)
+        buffer_handler.setFormatter(log_fmt)
+        root.addHandler(buffer_handler)
+    else:
+        # Reconfigure: update levels on existing handlers
+        for handler in root.handlers:
+            if isinstance(handler, RotatingFileHandler):
+                handler.setLevel(file_level)
+            elif isinstance(handler, logging.StreamHandler):
+                handler.setLevel(level)
+
+    # Suppress verbose third-party logs (leak tokens and API keys)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    # Suppress google_genai internal logs
     logging.getLogger("google_genai").setLevel(logging.WARNING)
-
-    # Add in-memory ring buffer for live log viewing from dashboard
-    from yolovest.log_buffer import LogBuffer
-    buffer_handler = LogBuffer(maxlen=500)
-    buffer_handler.setFormatter(log_fmt)
-    logging.getLogger().addHandler(buffer_handler)
 
 
 class _StubDB:
@@ -377,6 +399,9 @@ async def async_main(args: argparse.Namespace) -> None:
     except Exception:
         logger.exception("Failed to load config from %s", args.config)
         sys.exit(1)
+
+    # Reconfigure logging with config-based levels
+    setup_logging(config)
 
     # CLI mode override
     if args.mode is not None:

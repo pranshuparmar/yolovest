@@ -254,6 +254,14 @@ class ReportsConfig(BaseModel):
     weekly_report_cron: str = "0 10 * * 6"
 
 
+class LoggingConfig(BaseModel):
+    level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
+    file_level: str = "INFO"  # log file can have a different level
+    log_dir: str = "./logs"
+    max_bytes: int = 10 * 1024 * 1024  # 10 MB per log file
+    backup_count: int = 5  # number of rotated files to keep
+
+
 class DashboardConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8080
@@ -304,6 +312,7 @@ class AppConfig(BaseModel):
     retraining: RetrainingConfig = Field(default_factory=RetrainingConfig)
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
+    log: LoggingConfig = Field(default_factory=LoggingConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
 
     @classmethod
