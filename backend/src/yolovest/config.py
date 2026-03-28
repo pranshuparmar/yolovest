@@ -217,6 +217,14 @@ class ExecutionConfig(BaseModel):
     price_drift_max_pct: float = Field(default=0.02, gt=0, lt=1)
 
 
+class TransactionCostConfig(BaseModel):
+    brokerage_per_leg_pct: float = 0.0003  # 0.03% or ₹20 cap
+    brokerage_cap_per_leg: float = 20.0  # ₹20 max brokerage per order
+    stt_intraday_pct: float = 0.00025  # 0.025% on sell side (MIS)
+    stt_delivery_pct: float = 0.001  # 0.1% on sell side (CNC)
+    other_charges_pct: float = 0.0001  # stamp duty + GST + exchange (~0.01%)
+
+
 class RetentionConfig(BaseModel):
     ohlcv_days: int = 730
     audit_log_days: int = 365
@@ -290,6 +298,7 @@ class AppConfig(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     market_hours: MarketHoursConfig = Field(default_factory=MarketHoursConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    transaction_costs: TransactionCostConfig = Field(default_factory=TransactionCostConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     retraining: RetrainingConfig = Field(default_factory=RetrainingConfig)
     reports: ReportsConfig = Field(default_factory=ReportsConfig)

@@ -68,7 +68,11 @@ class PositionMonitorSkill(SkillBase):
                     gross_pnl = (current_price - entry) * qty
                 else:
                     gross_pnl = (entry - current_price) * qty
-                costs = compute_transaction_costs(entry, current_price, qty)
+                product = pos.get("product", "MIS")
+                costs = compute_transaction_costs(
+                    entry, current_price, qty, product=product,
+                    cost_config=self.ctx.config.transaction_costs,
+                )
                 pnl = round(gross_pnl - costs, 2)
                 await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
                 targets_hit.append({"symbol": symbol, "pnl": pnl})
@@ -87,7 +91,11 @@ class PositionMonitorSkill(SkillBase):
                     gross_pnl = (current_price - entry) * qty
                 else:
                     gross_pnl = (entry - current_price) * qty
-                costs = compute_transaction_costs(entry, current_price, qty)
+                product = pos.get("product", "MIS")
+                costs = compute_transaction_costs(
+                    entry, current_price, qty, product=product,
+                    cost_config=self.ctx.config.transaction_costs,
+                )
                 pnl = round(gross_pnl - costs, 2)
                 await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
                 stops_hit.append({"symbol": symbol, "pnl": pnl})

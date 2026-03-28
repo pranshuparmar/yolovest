@@ -80,7 +80,11 @@ class SquareOffSkill(SkillBase):
                 else:
                     gross_pnl = (entry - exit_price) * qty
 
-                costs = compute_transaction_costs(entry, exit_price, qty)
+                product = pos.get("product", "MIS")
+                costs = compute_transaction_costs(
+                    entry, exit_price, qty, product=product,
+                    cost_config=self.ctx.config.transaction_costs,
+                )
                 pnl = gross_pnl - costs
 
                 await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)

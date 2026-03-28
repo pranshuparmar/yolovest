@@ -69,8 +69,10 @@ class TradeExecuteSkill(SkillBase):
         slippage = abs(fill_price - entry)
 
         # Estimate transaction costs for realistic paper PnL
+        product = signal.get("product", "MIS")
         est_costs = compute_transaction_costs(
             fill_price, signal["target_price"], signal["position_size"],
+            product=product, cost_config=self.ctx.config.transaction_costs,
         )
 
         trade = {

@@ -103,6 +103,13 @@ execution:
   order_timeout_sec: 30               # cancel unfilled remainder after this many seconds
   price_drift_max_pct: 0.02           # reject signal if LTP drifted >2% from entry price
 
+transaction_costs:                    # Zerodha defaults — adjust for other brokers
+  brokerage_per_leg_pct: 0.0003       # 0.03% per order leg
+  brokerage_cap_per_leg: 20.0         # max ₹20 brokerage per order
+  stt_intraday_pct: 0.00025           # STT 0.025% on sell side (MIS)
+  stt_delivery_pct: 0.001             # STT 0.1% on sell side (CNC)
+  other_charges_pct: 0.0001           # stamp duty + GST + exchange fees (~0.01%)
+
 database:
   backup_enabled: true                # enable daily DB backups
   backup_cron: "0 18 * * *"           # backup schedule (daily 6 PM)
