@@ -2289,7 +2289,7 @@ class Database:
 
     async def get_dry_run_signals(self, run_id: str) -> list[dict[str, Any]]:
         """Get all signals for a specific dry-run."""
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT * FROM dry_run_results WHERE run_id = ? ORDER BY confidence_score DESC",
             (run_id,),
         )
@@ -2309,6 +2309,8 @@ class Database:
         """Score a dry-run against actual next-day OHLCV data.
 
         For each signal, fetch the next trading day's OHLCV and compare.
+        Uses date-only comparison to avoid timestamp format mismatches
+        (dry-run created_at has time, OHLCV timestamp may not).
         """
         signals = await self.get_dry_run_signals(run_id)
         if not signals:
@@ -2321,12 +2323,17 @@ class Database:
                 scored += 1
                 continue
 
-            # Get the next day's OHLCV after the dry-run was created
-            cursor = await self.conn.execute(
+            # Extract date-only from created_at (e.g. "2026-03-29T10:30:00" → "2026-03-29")
+            created_date = str(sig["created_at"])[:10]
+
+            # Get the next day's OHLCV after the dry-run date.
+            # Use SUBSTR to compare date portions only, avoiding time format issues.
+            cursor = await self.read_conn.execute(
                 "SELECT open, high, low, close FROM ohlcv "
-                "WHERE symbol = ? AND interval = 'daily' AND timestamp > ? "
+                "WHERE symbol = ? AND interval = 'daily' "
+                "AND SUBSTR(timestamp, 1, 10) > ? "
                 "ORDER BY timestamp ASC LIMIT 1",
-                (sig["symbol"], sig["created_at"]),
+                (sig["symbol"], created_date),
             )
             row = await cursor.fetchone()
             if not row:
