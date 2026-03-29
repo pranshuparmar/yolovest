@@ -30,6 +30,14 @@ export function usePositions() {
   });
 }
 
+export function usePnlCalendar(days = 90) {
+  return useQuery({
+    queryKey: ["pnl-calendar", days],
+    queryFn: () => api.pnlCalendar(days),
+    staleTime: 60_000,
+  });
+}
+
 export function useTradesToday() {
   return useQuery({
     queryKey: ["trades", "today"],

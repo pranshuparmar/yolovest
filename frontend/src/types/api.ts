@@ -98,6 +98,14 @@ export interface EquityCurvePoint {
   trade_count: number;
 }
 
+export interface PnlCalendarDay {
+  date: string;
+  pnl: number;
+  trade_count: number;
+  wins: number;
+  losses: number;
+}
+
 export interface WatchlistItem {
   symbol: string;
   composite_score: number | null;

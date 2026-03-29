@@ -535,6 +535,14 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Daily equity curve data for charting."""
         return await ctx.db.get_equity_curve(days=days)
 
+    @app.get("/api/pnl-calendar")
+    async def get_pnl_calendar(
+        days: int = Query(90, ge=1, le=365),
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Daily PnL for calendar heatmap: {date, pnl, trade_count, wins, losses}."""
+        return await ctx.db.get_daily_pnl_calendar(days=days)
+
     # ------------------------------------------------------------------
     # Trade Detail View
     # ------------------------------------------------------------------

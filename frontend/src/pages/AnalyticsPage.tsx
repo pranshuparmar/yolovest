@@ -2,7 +2,8 @@ import { useState } from "react";
 import { ScoreboardTable } from "../components/ScoreboardTable";
 import { SlippageChart } from "../components/SlippageChart";
 import { LLMAccuracyCard } from "../components/LLMAccuracyCard";
-import { useScoreboard, useSlippage, useLLMAccuracy } from "../hooks/queries";
+import { PnlCalendarHeatmap } from "../components/PnlCalendarHeatmap";
+import { useScoreboard, useSlippage, useLLMAccuracy, usePnlCalendar } from "../hooks/queries";
 
 export function AnalyticsPage() {
   const [groupType, setGroupType] = useState<string | undefined>(undefined);
@@ -11,6 +12,7 @@ export function AnalyticsPage() {
   const { data: scoreboard, isLoading: sbLoading } = useScoreboard(groupType);
   const { data: slippage, isLoading: slLoading } = useSlippage({ days });
   const { data: llmAcc, isLoading: llmLoading } = useLLMAccuracy(days);
+  const { data: pnlCalendar } = usePnlCalendar(days);
 
   return (
     <div className="space-y-6">
@@ -30,6 +32,14 @@ export function AnalyticsPage() {
           </select>
         </div>
       </div>
+
+      {/* PnL Calendar Heatmap */}
+      {pnlCalendar && pnlCalendar.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+          <h3 className="text-sm font-medium text-gray-400 mb-3">PnL Calendar</h3>
+          <PnlCalendarHeatmap data={pnlCalendar} months={days <= 30 ? 1 : days <= 90 ? 3 : days <= 180 ? 6 : 12} />
+        </div>
+      )}
 
       {/* LLM Accuracy */}
       {llmLoading ? (

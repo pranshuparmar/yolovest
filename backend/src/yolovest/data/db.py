@@ -1786,6 +1786,38 @@ class Database:
             })
         return curve
 
+    async def get_daily_pnl_calendar(self, days: int = 90) -> list[dict[str, Any]]:
+        """Daily PnL breakdown for calendar heatmap.
+
+        Returns one entry per day that had trades, with PnL, trade count,
+        wins, and losses.
+        """
+        from datetime import timedelta
+        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cursor = await self.read_conn.execute(
+            "SELECT DATE(closed_at) as trade_date, "
+            "SUM(pnl) as pnl, "
+            "COUNT(*) as trade_count, "
+            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, "
+            "SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses "
+            "FROM trades "
+            "WHERE closed_at >= ? AND pnl IS NOT NULL "
+            "GROUP BY DATE(closed_at) "
+            "ORDER BY trade_date",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "date": row["trade_date"],
+                "pnl": round(row["pnl"] or 0, 2),
+                "trade_count": row["trade_count"],
+                "wins": row["wins"],
+                "losses": row["losses"],
+            }
+            for row in rows
+        ]
+
     async def get_trade_detail(self, trade_id: str) -> dict[str, Any] | None:
         """Get full trade detail with reasoning chain.
 

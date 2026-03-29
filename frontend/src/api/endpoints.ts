@@ -5,6 +5,7 @@ import type {
   Trade,
   TradeDetail,
   EquityCurvePoint,
+  PnlCalendarDay,
   WatchlistItem,
   SectorRotation,
   ScoreboardEntry,
@@ -82,6 +83,9 @@ export const api = {
 
   equityCurve: (days = 30) =>
     apiFetch<EquityCurvePoint[]>(`/api/equity-curve?days=${days}`),
+
+  pnlCalendar: (days = 90) =>
+    apiFetch<PnlCalendarDay[]>(`/api/pnl-calendar?days=${days}`),
 
   watchlist: () => apiFetch<WatchlistItem[]>("/api/watchlist"),
 
