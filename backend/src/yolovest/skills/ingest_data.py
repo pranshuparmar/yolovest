@@ -127,22 +127,59 @@ class IngestDataSkill(SkillBase):
                         await self.ctx.db.upsert_ohlcv(symbol, "daily", daily, "ingester")
                         result["ok"] = True
 
+                        # Check provider-level health (errors, empties) for quarantine.
+                        # This catches delisted symbols where one provider returns
+                        # empty data and another returns stale-but-recent bars.
+                        fetch_meta = {}
+                        if hasattr(self.ctx.market_data, "get_fetch_meta"):
+                            fetch_meta = self.ctx.market_data.get_fetch_meta(symbol)
+
+                        provider_had_issues = (
+                            fetch_meta.get("providers_empty", 0) > 0
+                            or fetch_meta.get("provider_errors", 0) > 0
+                        )
+
                         if daily:
                             latest = daily[-1].timestamp
                             if latest.tzinfo is None:
                                 latest = latest.replace(tzinfo=IST)
                             days_old = (now_ist() - latest).days
+
                             if days_old > 5:
+                                # Clearly stale — count as failure
                                 logger.warning("Stale data for %s: latest bar is %dd old", symbol, days_old)
                                 now_quarantined = await self.ctx.db.record_fetch_failure(
                                     symbol, f"data {days_old}d stale",
                                 )
                                 if now_quarantined:
                                     result["quarantined"] = True
+                            elif provider_had_issues and fetch_meta.get("all_providers_tried"):
+                                # Data returned but providers errored/returned empty
+                                # (e.g. yfinance says delisted, jugaad returns last
+                                # known bars). Count as failure toward quarantine.
+                                errors = fetch_meta.get("provider_errors", 0)
+                                empties = fetch_meta.get("providers_empty", 0)
+                                logger.warning(
+                                    "Provider issues for %s: %d errors, %d empty "
+                                    "(data %dd old, possibly delisted)",
+                                    symbol, errors, empties, days_old,
+                                )
+                                now_quarantined = await self.ctx.db.record_fetch_failure(
+                                    symbol,
+                                    f"provider issues: {errors} errors, {empties} empty, "
+                                    f"data {days_old}d old",
+                                )
+                                if now_quarantined:
+                                    result["quarantined"] = True
                             else:
                                 await self.ctx.db.record_fetch_success(symbol)
                         else:
-                            await self.ctx.db.record_fetch_success(symbol)
+                            # No data at all from any provider
+                            now_quarantined = await self.ctx.db.record_fetch_failure(
+                                symbol, "all providers returned empty",
+                            )
+                            if now_quarantined:
+                                result["quarantined"] = True
 
                     # Intraday candles if market is open
                     if is_market and not await self._is_cached_fresh(symbol, "5minute"):
