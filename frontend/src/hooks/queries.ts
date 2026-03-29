@@ -213,6 +213,17 @@ export function useAuthenticateZerodha() {
   });
 }
 
+export function useReloadConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.reloadConfig,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["system-state"] });
+      qc.invalidateQueries({ queryKey: ["integrations"] });
+    },
+  });
+}
+
 export function useTestTelegram() {
   const qc = useQueryClient();
   return useMutation({

@@ -344,6 +344,9 @@ export const api = {
   rejectPendingTrade: (tradeId: number) =>
     apiFetch<{ success: boolean }>(`/api/pending-trades/${tradeId}/reject`, { method: "POST" }),
 
+  reloadConfig: () =>
+    apiFetch<{ status: string; reloaded: string[] }>("/api/config/reload", { method: "POST" }),
+
   // Dry-Run Signal Preview
   runDryRun: () => apiFetch<DryRunResult>("/api/dry-run", { method: "POST" }),
 

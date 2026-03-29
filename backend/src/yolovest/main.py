@@ -542,38 +542,51 @@ async def async_main(args: argparse.Namespace) -> None:
     # Handle graceful shutdown
     loop = asyncio.get_running_loop()
 
+    def reload_config_from_file() -> dict[str, Any]:
+        """Reload config.yaml and apply safe runtime changes.
+
+        Only reloads settings that are safe to change at runtime.
+        Structural changes (broker, DB, LLM provider) require restart.
+        Returns dict with status and reloaded sections.
+        """
+        new_config = load_config(args.config)
+        # Safe to hot-reload: risk params, scanning weights, heartbeat timing,
+        # market hours, execution params, transaction costs, alert toggles
+        ctx.config.risk = new_config.risk
+        ctx.config.scanning = new_config.scanning
+        ctx.config.heartbeat = new_config.heartbeat
+        ctx.config.market_hours = new_config.market_hours
+        ctx.config.execution = new_config.execution
+        ctx.config.transaction_costs = new_config.transaction_costs
+        ctx.config.strategy = new_config.strategy
+        ctx.config.notifications = new_config.notifications
+        ctx.config.reports = new_config.reports
+        ctx.config.retraining = new_config.retraining
+        ctx.config.market_data = new_config.market_data
+        ctx.config.dashboard = new_config.dashboard
+        # Update market hours checker with new config
+        ctx.market_hours = MarketHoursChecker(ctx.config)
+        reloaded = [
+            "risk", "scanning", "heartbeat", "market_hours", "execution",
+            "transaction_costs", "strategy", "notifications", "reports",
+            "retraining", "market_data", "dashboard",
+        ]
+        logger.info("Config reloaded: %s", ", ".join(reloaded))
+        return {"status": "ok", "reloaded": reloaded}
+
+    # Store reload function on app state so the dashboard can call it
+    ctx._reload_config = reload_config_from_file  # type: ignore[attr-defined]
+
     def shutdown_handler() -> None:
         logger.info("Shutdown signal received")
         orchestrator.stop()
         cron_scheduler.stop()
 
     def reload_handler() -> None:
-        """SIGHUP handler: reload config.yaml without restart.
-
-        Only reloads settings that are safe to change at runtime.
-        Structural changes (broker, DB, LLM provider) require restart.
-        """
+        """SIGHUP handler: reload config.yaml without restart."""
         logger.info("SIGHUP received — reloading config from %s", args.config)
         try:
-            new_config = load_config(args.config)
-            # Safe to hot-reload: risk params, scanning weights, heartbeat timing,
-            # market hours, execution params, transaction costs, alert toggles
-            ctx.config.risk = new_config.risk
-            ctx.config.scanning = new_config.scanning
-            ctx.config.heartbeat = new_config.heartbeat
-            ctx.config.market_hours = new_config.market_hours
-            ctx.config.execution = new_config.execution
-            ctx.config.transaction_costs = new_config.transaction_costs
-            ctx.config.strategy = new_config.strategy
-            ctx.config.notifications = new_config.notifications
-            ctx.config.reports = new_config.reports
-            ctx.config.retraining = new_config.retraining
-            # Update market hours checker with new config
-            ctx.market_hours = MarketHoursChecker(ctx.config)
-            logger.info(
-                "Config reloaded: risk, scanning, heartbeat, market_hours, "
-                "execution, notifications, strategy updated"
-            )
+            reload_config_from_file()
         except Exception:
             logger.exception("Config reload failed — keeping previous config")
 

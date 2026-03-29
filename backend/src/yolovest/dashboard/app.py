@@ -1940,6 +1940,28 @@ def create_app(ctx: AppContext) -> FastAPI:
         await ctx.db.set_system_state("dashboard_password", new_password)
         return {"success": True}
 
+    @app.post("/api/config/reload")
+    async def reload_config(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Reload config.yaml without restart (same as kill -HUP).
+
+        Only reloads safe runtime settings. Structural changes
+        (broker, DB, LLM provider) still require a full restart.
+        """
+        reload_fn = getattr(ctx, "_reload_config", None)
+        if reload_fn is None:
+            raise HTTPException(
+                status_code=501,
+                detail="Config reload not available (missing reload handler)",
+            )
+        try:
+            result = reload_fn()
+            return result
+        except Exception as e:
+            logger.error("Config reload via API failed: %s", e)
+            raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
+
     # ------------------------------------------------------------------
     # Manual Skill Trigger
     # ------------------------------------------------------------------

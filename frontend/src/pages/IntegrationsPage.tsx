@@ -8,6 +8,7 @@ import {
   useChangePassword,
   useUpdateCapital,
   useSyncCapital,
+  useReloadConfig,
 } from "../hooks/queries";
 import { useAuth } from "../hooks/useAuth";
 
@@ -80,6 +81,8 @@ export function IntegrationsPage() {
   const changePassword = useChangePassword();
   const updateCapital = useUpdateCapital();
   const syncCapital = useSyncCapital();
+  const reloadConfig = useReloadConfig();
+  const [reloadResult, setReloadResult] = useState<string | null>(null);
 
   const [requestToken, setRequestToken] = useState("");
   const [telegramMsg, setTelegramMsg] = useState("");
@@ -393,6 +396,40 @@ export function IntegrationsPage() {
               error={syncCapital.data.error}
             />
           )}
+        </div>
+
+        {/* Config Reload */}
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 flex flex-col gap-3">
+          <h3 className="font-medium text-gray-100">Configuration</h3>
+          <p className="text-xs text-gray-500">
+            Reload config.yaml without restarting. Applies changes to risk params,
+            scanning weights, heartbeat timing, notifications, and other runtime settings.
+            Structural changes (broker, DB, LLM provider) still require a restart.
+          </p>
+          <div className="flex items-center gap-3">
+            <ActionButton
+              onClick={() => {
+                setReloadResult(null);
+                reloadConfig.mutate(undefined, {
+                  onSuccess: (data) => {
+                    setReloadResult(`Reloaded: ${data.reloaded.join(", ")}`);
+                  },
+                  onError: (err) => {
+                    setReloadResult(`Failed: ${err instanceof Error ? err.message : "unknown error"}`);
+                  },
+                });
+              }}
+              loading={reloadConfig.isPending}
+              variant="primary"
+            >
+              Reload Config
+            </ActionButton>
+            {reloadResult && (
+              <span className={`text-xs ${reloadResult.startsWith("Failed") ? "text-red-400" : "text-emerald-400"}`}>
+                {reloadResult}
+              </span>
+            )}
+          </div>
         </div>
       </div>
     </div>
