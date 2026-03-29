@@ -11,7 +11,9 @@ import { useTradesToday, useSystemState } from "../hooks/queries";
 export function DashboardPage() {
   const { data: todaysTrades, isLoading } = useTradesToday();
   const { data: systemState } = useSystemState();
-  const [degradedDismissed, setDegradedDismissed] = useState(false);
+  const [degradedDismissed, setDegradedDismissed] = useState(
+    () => sessionStorage.getItem("yv_degraded_dismissed") === "1"
+  );
 
   return (
     <div className="space-y-6">
@@ -30,7 +32,10 @@ export function DashboardPage() {
       {systemState?.is_degraded && systemState?.show_degraded_banner !== false && !degradedDismissed && (
         <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg p-4 relative">
           <button
-            onClick={() => setDegradedDismissed(true)}
+            onClick={() => {
+              sessionStorage.setItem("yv_degraded_dismissed", "1");
+              setDegradedDismissed(true);
+            }}
             className="absolute top-2 right-2 text-yellow-600 hover:text-yellow-400 text-lg leading-none px-1"
             aria-label="Dismiss"
           >
