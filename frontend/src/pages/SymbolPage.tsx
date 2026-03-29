@@ -174,7 +174,6 @@ export function SymbolPage() {
               </span>
             </div>
           )}
-        )}
       </div>
 
       {/* Volume chart */}
