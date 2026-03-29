@@ -188,12 +188,7 @@ export const api = {
     if (params?.limit) q.set("limit", String(params.limit));
     if (params?.offset) q.set("offset", String(params.offset));
     const qs = q.toString();
-    const url = `/api/news${qs ? "?" + qs : ""}`;
-    console.log("[news] fetching:", url, "params:", params);
-    return apiFetch<NewsArticle[]>(url).then((res) => {
-      console.log("[news] received:", res.length, "articles for params:", params);
-      return res;
-    });
+    return apiFetch<NewsArticle[]>(`/api/news${qs ? "?" + qs : ""}`);
   },
 
   sentiment: (symbol: string) =>

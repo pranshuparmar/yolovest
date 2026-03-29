@@ -918,15 +918,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Recent news articles with source attribution."""
-        logger.info(
-            "GET /api/news: symbol=%s source=%s date_from=%s date_to=%s limit=%d offset=%d",
-            symbol, source, date_from, date_to, limit, offset,
-        )
         articles = await ctx.db.get_news_articles(
             symbol=symbol, source=source, date_from=date_from, date_to=date_to,
             limit=limit, offset=offset,
         )
-        logger.info("GET /api/news: returning %d articles", len(articles))
         return articles
 
     @app.get("/api/sentiment/{symbol}")
