@@ -395,23 +395,21 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "(token expired or missing)"
             )
             # Send Telegram alert once per session (not on every page load)
-            if not _broker_expired_alerted["sent"]:
+            if (
+                not _broker_expired_alerted["sent"]
+                and ctx.config.notifications.telegram.enabled
+                and ctx.config.notifications.telegram.alerts.errors
+            ):
                 _broker_expired_alerted["sent"] = True
                 try:
-                    sent = await ctx.notify.send(
+                    await ctx.notify.send(
                         "Kite session expired — holdings unavailable.\n"
                         f"Re-authenticate: {login_url}\n"
                         "Or use /auth <token> in Telegram.",
                         alert_type="errors",
                     )
-                    logger.info(
-                        "Broker expired alert sent=%s (telegram.enabled=%s, errors_toggle=%s)",
-                        sent,
-                        ctx.config.notifications.telegram.enabled,
-                        ctx.config.notifications.telegram.alerts.errors,
-                    )
                 except Exception as e:
-                    logger.warning("Failed to send broker-expired alert: %s", e)
+                    logger.warning("Failed to send broker-expired Telegram alert: %s", e)
             return {
                 "holdings": [],
                 "broker_authenticated": False,
