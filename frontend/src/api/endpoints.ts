@@ -42,6 +42,7 @@ import type {
   DryRunSummary,
   DryRunSignal,
   HoldingEntry,
+  HoldingsResponse,
   ManualOrder,
 } from "../types/api";
 
@@ -54,7 +55,7 @@ export const api = {
 
   tradesToday: () => apiFetch<Trade[]>("/api/trades/today"),
 
-  holdings: () => apiFetch<HoldingEntry[]>("/api/holdings"),
+  holdings: () => apiFetch<HoldingsResponse>("/api/holdings"),
 
   placeOrder: (order: ManualOrder) =>
     apiFetch<{ success: boolean; order_id?: string; error?: string }>("/api/orders", {

@@ -486,6 +486,12 @@ export interface DryRunSummary {
   scored: number;
 }
 
+export interface HoldingsResponse {
+  holdings: HoldingEntry[];
+  broker_authenticated: boolean;
+  login_url?: string;
+}
+
 export interface HoldingEntry {
   tradingsymbol: string;
   exchange: string;

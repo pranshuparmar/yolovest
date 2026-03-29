@@ -369,19 +369,60 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Current open positions."""
         return await ctx.db.get_open_positions()
 
+    # Track whether we've already sent a broker-expired Telegram alert this session
+    # to avoid spamming on every page load / auto-refresh.
+    _broker_expired_alerted = {"sent": False}
+
     @app.get("/api/holdings")
-    async def get_holdings(_user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
+    async def get_holdings(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
         """Zerodha portfolio holdings (CNC/delivery stocks held overnight).
 
-        These are external holdings — may include stocks not traded by YoloVest.
-        Returns empty list if broker is not authenticated.
+        Returns {holdings: [...], broker_authenticated: true} on success.
+        Returns {holdings: [], broker_authenticated: false, login_url: ...}
+        when broker token is expired/missing, plus logs and Telegram alert.
         """
         try:
-            if not await ctx.broker.is_authenticated():
-                return []
-            return await ctx.broker.get_holdings()
+            authenticated = await ctx.broker.is_authenticated()
+        except Exception:
+            authenticated = False
+
+        if not authenticated:
+            login_url = ctx.broker.get_login_url()
+            logger.warning(
+                "Holdings request: broker not authenticated "
+                "(token expired or missing)"
+            )
+            # Send Telegram alert once per session (not on every page load)
+            if not _broker_expired_alerted["sent"]:
+                _broker_expired_alerted["sent"] = True
+                try:
+                    await ctx.notify.send(
+                        "Kite session expired — holdings unavailable.\n"
+                        f"Re-authenticate: {login_url}\n"
+                        "Or use /auth <token> in Telegram.",
+                        alert_type="errors",
+                    )
+                except Exception:
+                    pass
+            return {
+                "holdings": [],
+                "broker_authenticated": False,
+                "login_url": login_url,
+            }
+
+        # Reset alert flag on successful auth
+        _broker_expired_alerted["sent"] = False
+
+        try:
+            holdings = await ctx.broker.get_holdings()
+            return {
+                "holdings": holdings,
+                "broker_authenticated": True,
+            }
         except Exception as e:
-            logger.warning("Failed to fetch holdings: %s", e)
+            logger.error("Failed to fetch holdings: %s", e)
             raise HTTPException(
                 status_code=502,
                 detail=f"Broker error: {e}. Token may be expired — re-authenticate via Settings.",
