@@ -121,7 +121,7 @@ function AuditTab() {
 }
 
 function ServerLogsTab() {
-  const [lines, setLines] = useState(200);
+  const [lines, setLines] = useState(50);
   const [autoScroll, setAutoScroll] = useState(true);
   const [filter, setFilter] = useState("");
   const [copied, setCopied] = useState(false);
@@ -161,6 +161,7 @@ function ServerLogsTab() {
             onChange={(e) => setLines(Number(e.target.value))}
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100"
           >
+            <option value={50}>50</option>
             <option value={100}>100</option>
             <option value={200}>200</option>
             <option value={500}>500</option>

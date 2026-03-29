@@ -617,11 +617,17 @@ class Database:
             query += " AND source = ?"
             params.append(source)
         if date_from:
-            query += " AND DATE(SUBSTR(published_at, 1, 10)) >= ?"
+            # Compare using the stored ISO string directly (YYYY-MM-DD...).
+            # published_at is stored as ISO 8601 (e.g. 2026-03-28T14:30:00+05:30)
+            # so string comparison with 'YYYY-MM-DD' prefix works correctly.
+            query += " AND published_at >= ?"
             params.append(date_from)
         query += " ORDER BY published_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        rows = await self.conn.execute_fetchall(query, tuple(params))
+        logger.debug(
+            "get_news_articles: query=%s params=%s", query, params,
+        )
+        rows = await self.read_conn.execute_fetchall(query, tuple(params))
         results = []
         for r in rows:
             symbols_raw = r[4]
