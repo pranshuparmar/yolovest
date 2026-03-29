@@ -26,6 +26,7 @@ market_data:
   bhavcopy_dir: ./data/bhavcopy       # path to downloaded NSE Bhavcopy CSVs
   cache_ttl_minutes: 15               # cache fetched data to reduce API calls
   stale_threshold_minutes: 30         # reject data older than this many minutes
+  sentiment_ttl_hours: 48             # ignore sentiment older than this in scanning (default 48h)
   backfill_days: 365                  # days of history for backfill-data skill
 
 heartbeat:

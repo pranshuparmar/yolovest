@@ -89,6 +89,7 @@ class MarketDataConfig(BaseModel):
     bhavcopy_dir: str = "./data/bhavcopy"
     cache_ttl_minutes: int = 15
     stale_threshold_minutes: int = 30
+    sentiment_ttl_hours: int = 48  # sentiment older than this is ignored in scanning
     backfill_days: int = 365  # days of history to fetch in backfill-data skill
 
 

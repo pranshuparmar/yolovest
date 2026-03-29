@@ -39,7 +39,10 @@ class MarketScanSkill(SkillBase):
         cfg = self.ctx.config.scanning
 
         # Step 1-2: Load universe, apply volume filter
-        universe = await self.ctx.db.get_nse_universe()
+        sentiment_ttl = self.ctx.config.market_data.sentiment_ttl_hours
+        universe = await self.ctx.db.get_nse_universe(
+            sentiment_ttl_hours=sentiment_ttl,
+        )
         if not universe:
             # Fallback to seed symbols if universe is empty
             universe = [

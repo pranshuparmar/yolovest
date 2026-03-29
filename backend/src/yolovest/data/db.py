@@ -551,11 +551,16 @@ class Database:
         )
         await self.conn.commit()
 
-    async def get_sentiment(self, symbol: str) -> SentimentResult | None:
-        """Get latest sentiment for a symbol."""
-        cursor = await self.conn.execute(
-            "SELECT symbol, sentiment, confidence, key_drivers FROM sentiment WHERE symbol = ?",
-            (symbol,),
+    async def get_sentiment(
+        self, symbol: str, max_age_hours: int = 48,
+    ) -> SentimentResult | None:
+        """Get latest sentiment for a symbol. Returns None if older than max_age_hours."""
+        from datetime import timedelta
+        cutoff = (now_ist() - timedelta(hours=max_age_hours)).isoformat()
+        cursor = await self.read_conn.execute(
+            "SELECT symbol, sentiment, confidence, key_drivers "
+            "FROM sentiment WHERE symbol = ? AND created_at >= ?",
+            (symbol, cutoff),
         )
         row = await cursor.fetchone()
         if not row:
@@ -817,15 +822,23 @@ class Database:
     # NSE Universe
     # ------------------------------------------------------------------
 
-    async def get_nse_universe(self) -> list[dict[str, Any]]:
+    async def get_nse_universe(
+        self, sentiment_ttl_hours: int = 48,
+    ) -> list[dict[str, Any]]:
         """Get all symbols with OHLCV data, enriched with sentiment and fundamentals.
 
-        Returns dicts with sub-scores for market-scan scoring.
+        Only includes sentiment data that is newer than sentiment_ttl_hours.
+        Stale sentiment is treated as neutral (NULL) to avoid outdated signals
+        influencing the scan.
         """
-        cursor = await self.conn.execute(
+        from datetime import timedelta
+        sentiment_cutoff = (now_ist() - timedelta(hours=sentiment_ttl_hours)).isoformat()
+
+        cursor = await self.read_conn.execute(
             "SELECT o.symbol, "
             "  AVG(o.volume) as avg_daily_volume, "
-            "  s.sentiment, s.confidence as sentiment_confidence, "
+            "  CASE WHEN s.created_at >= ? THEN s.sentiment ELSE NULL END as sentiment, "
+            "  CASE WHEN s.created_at >= ? THEN s.confidence ELSE NULL END as sentiment_confidence, "
             "  f.pe_ratio, f.debt_to_equity, f.promoter_holding_pct, "
             "  w.sector "
             "FROM ohlcv o "
@@ -837,7 +850,8 @@ class Database:
             "  SELECT symbol FROM quarantined_symbols WHERE quarantined_at IS NOT NULL"
             ") "
             "GROUP BY o.symbol "
-            "ORDER BY avg_daily_volume DESC"
+            "ORDER BY avg_daily_volume DESC",
+            (sentiment_cutoff, sentiment_cutoff),
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
@@ -2017,6 +2031,15 @@ class Database:
             "DELETE FROM economic_events WHERE created_at < ?", (cutoff,)
         )
         deleted["economic_events"] = cursor.rowcount
+
+        # Sentiment retention: delete entries older than 7 days
+        # (stale sentiment is already ignored in scanning via TTL,
+        #  this just cleans up the table to prevent unbounded growth)
+        cutoff = (now - timedelta(days=7)).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM sentiment WHERE created_at < ?", (cutoff,)
+        )
+        deleted["sentiment"] = cursor.rowcount
 
         await self.conn.commit()
         logger.info("Retention cleanup: %s", deleted)
