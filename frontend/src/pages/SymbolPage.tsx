@@ -107,6 +107,7 @@ export function SymbolPage() {
         ) : chartData.length === 0 ? (
           <p className="text-gray-500 text-sm py-8 text-center">No OHLCV data available</p>
         ) : (
+          <>
           <ResponsiveContainer width="100%" height={280}>
             <ComposedChart data={chartData}>
               <defs>
@@ -174,6 +175,8 @@ export function SymbolPage() {
               </span>
             </div>
           )}
+          </>
+        )}
       </div>
 
       {/* Volume chart */}
