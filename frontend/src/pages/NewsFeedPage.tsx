@@ -91,6 +91,9 @@ export function NewsFeedPage() {
   const [sourceFilter, setSourceFilter] = useState<string>("");
   const [dateFrom, setDateFrom] = useState<string>("");
 
+  // Debug: log filter state changes
+  console.log("[NewsFeedPage] filters:", { symbol, sourceFilter, dateFrom });
+
   const {
     data,
     isLoading,
@@ -104,10 +107,11 @@ export function NewsFeedPage() {
   });
 
   // Flatten all pages into one list (all filtering is now server-side)
-  const filtered = useMemo(
-    () => data?.pages.flat() ?? [],
-    [data]
-  );
+  const filtered = useMemo(() => {
+    const flat = data?.pages.flat() ?? [];
+    console.log("[NewsFeedPage] pages:", data?.pages.length, "total articles:", flat.length);
+    return flat;
+  }, [data]);
   const allArticles = filtered;
 
   // Group by date
@@ -198,7 +202,10 @@ export function NewsFeedPage() {
           <input
             type="date"
             value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
+            onChange={(e) => {
+              console.log("[NewsFeedPage] date changed:", e.target.value);
+              setDateFrom(e.target.value);
+            }}
             className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100"
           />
           <select

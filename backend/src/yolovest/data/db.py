@@ -624,10 +624,34 @@ class Database:
             params.append(date_from)
         query += " ORDER BY published_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        logger.debug(
+        logger.info(
             "get_news_articles: query=%s params=%s", query, params,
         )
+
+        # Check total articles in DB for diagnostics
+        try:
+            total_cursor = await self.read_conn.execute(
+                "SELECT COUNT(*) FROM news_articles"
+            )
+            total_row = await total_cursor.fetchone()
+            total_count = total_row[0] if total_row else 0
+            logger.info("get_news_articles: total articles in DB=%d", total_count)
+
+            if date_from:
+                # Check what published_at looks like for date comparison debug
+                sample_cursor = await self.read_conn.execute(
+                    "SELECT published_at FROM news_articles ORDER BY published_at DESC LIMIT 3"
+                )
+                samples = await sample_cursor.fetchall()
+                logger.info(
+                    "get_news_articles: sample published_at values=%s, date_from=%s",
+                    [s[0] for s in samples], date_from,
+                )
+        except Exception as e:
+            logger.warning("get_news_articles: diagnostic query failed: %s", e)
+
         rows = await self.read_conn.execute_fetchall(query, tuple(params))
+        logger.info("get_news_articles: query returned %d rows", len(rows))
         results = []
         for r in rows:
             symbols_raw = r[4]
