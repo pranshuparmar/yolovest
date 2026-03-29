@@ -819,7 +819,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 from yolovest.main import _sync_kite_data_token
                 _sync_kite_data_token(ctx)
                 try:
-                    await ctx.notify.send("Kite authenticated successfully via dashboard.")
+                    await ctx.notify.send("Kite authenticated successfully.")
                 except Exception:
                     pass
                 return RedirectResponse(url="/integrations?zerodha_auth=success")
