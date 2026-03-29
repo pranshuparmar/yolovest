@@ -96,6 +96,11 @@ class ZerodhaBroker(BrokerBase):
         self._access_token: str | None = None
         self._kite: Any = None
         self._db = db  # For persisting access token across restarts
+        self._authenticated_at: float = 0.0  # monotonic time of last successful auth
+        # Kite tokens expire at 6:00 AM IST daily. We cache the auth status
+        # and only re-verify via API when the token is expected to be expired.
+        # This avoids a kite.profile() call on every heartbeat/page load.
+        self._auth_cache_valid_until: float = 0.0
         # Rate limiter: 8 concurrent to stay under Kite's 10 req/s
         self._rate_limiter = asyncio.Semaphore(8)
         # Circuit breaker: trip after 5 consecutive API failures, 30s cooldown
@@ -125,13 +130,14 @@ class ZerodhaBroker(BrokerBase):
                 self._create_kite_session, request_token
             )
             self._access_token = self._kite.access_token
+            self._update_auth_cache()
             # Persist token for restart recovery
             if self._db:
                 try:
                     await self._db.set_system_state("kite_access_token", self._access_token)
                 except Exception:
                     pass
-            logger.info("Kite Connect authenticated successfully")
+            logger.info("Kite Connect authenticated successfully (valid until ~6:00 AM IST)")
             return True
         except Exception:
             if self._mode == "paper":
@@ -158,7 +164,8 @@ class ZerodhaBroker(BrokerBase):
             await asyncio.to_thread(kite.profile)
             self._kite = kite
             self._access_token = token
-            logger.info("Kite session restored from persisted token")
+            self._update_auth_cache()
+            logger.info("Kite session restored from persisted token (cached until ~6:00 AM IST)")
             return True
         except Exception as e:
             logger.info("Could not restore Kite session (re-login needed): %s", e)
@@ -179,17 +186,54 @@ class ZerodhaBroker(BrokerBase):
         kite.set_access_token(data["access_token"])
         return kite
 
+    def _update_auth_cache(self) -> None:
+        """Compute when the current token expires.
+
+        Kite tokens expire at 6:00 AM IST daily. We cache the auth
+        result and only re-verify via API after this time passes.
+        """
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        self._authenticated_at = time.monotonic()
+
+        # Next 6:00 AM IST
+        expiry = now.replace(hour=6, minute=0, second=0, microsecond=0)
+        if expiry <= now:
+            expiry += timedelta(days=1)
+
+        # Convert to monotonic: seconds until expiry
+        seconds_until_expiry = (expiry - now).total_seconds()
+        self._auth_cache_valid_until = time.monotonic() + seconds_until_expiry
+        logger.debug(
+            "Auth cache valid for %.0f seconds (until ~6:00 AM IST)",
+            seconds_until_expiry,
+        )
+
     async def is_authenticated(self) -> bool:
+        """Check if the broker session is valid.
+
+        Uses cached auth status when the token is known to be valid
+        (before 6:00 AM IST expiry). Falls back to an API call
+        (kite.profile) when the cache has expired or on first check.
+        """
         if self._access_token is None:
             return False
         # Paper-only mode (no real broker connection)
         if self._kite is None:
             return self._access_token == "paper_token"
+        # Use cached result if token hasn't expired yet
+        if time.monotonic() < self._auth_cache_valid_until:
+            return True
+        # Cache expired or never set — verify via API
         try:
             async with self._rate_limiter:
                 await asyncio.to_thread(self._kite.profile)
+            self._update_auth_cache()
             return True
         except Exception:
+            self._auth_cache_valid_until = 0.0  # Invalidate cache
             return False
 
     # ------------------------------------------------------------------
