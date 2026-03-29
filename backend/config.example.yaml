@@ -71,14 +71,14 @@ risk:
   mandatory_stop_loss: true           # enforce SL on every trade
   trailing_sl_enabled: true           # enable trailing stop-loss
   trailing_sl_trigger_multiple: 1.5   # activate trailing SL at 1.5x risk in profit
-  trailing_sl_step_pct: 0.005         # trail SL in 0.5% steps
+  trailing_sl_step_pct: 0.01           # trail SL in 1% steps (0.5% is too tight for mid-caps)
   llm_review_enabled: true            # Gemini risk review before execution
   llm_fallback_to_rules: true         # rules-only if LLM unavailable
   max_same_sector_positions: 1        # correlation check — max positions per sector
   kill_switch_enabled: true           # enable /stop and /kill commands
   kill_switch_persistent: true        # kill switch survives restarts
   min_confidence_score: 0.65          # minimum ML confidence to take a trade
-  max_trades_per_day: 10              # max trades per day (anti-overtrading)
+  max_trades_per_day: 5               # max trades per day (3 positions + 2 re-entries)
   loss_cooldown_minutes: 15           # wait after a losing trade before next entry
   symbol_cooldown_days: 1             # hard block on symbol after last trade (days)
   symbol_repeat_lookback_days: 5      # elevated confidence window for repeat symbols
@@ -120,7 +120,7 @@ database:
     ohlcv_days: 730                   # OHLCV data retention (2 years)
     audit_log_days: 365               # audit log retention (1 financial year)
     predictions_days: 365             # prediction data retention (1 year)
-    news_days: 30                     # news article retention
+    news_days: 90                     # news article retention (lightweight text, useful for pattern analysis)
     economic_events_days: 365         # economic calendar event retention
 
 retraining:

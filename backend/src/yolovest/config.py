@@ -75,7 +75,7 @@ class BrokerConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     enabled: bool = False
-    model: str = "gemini-2.5-pro"
+    model: str = "gemini-2.5-flash"
     api_key: SecretStr = SecretStr("")
 
 
@@ -155,14 +155,14 @@ class RiskConfig(BaseModel):
     mandatory_stop_loss: bool = True
     trailing_sl_enabled: bool = True
     trailing_sl_trigger_multiple: float = Field(default=1.5, gt=0)
-    trailing_sl_step_pct: float = Field(default=0.005, gt=0, lt=1)
+    trailing_sl_step_pct: float = Field(default=0.01, gt=0, lt=1)
     llm_review_enabled: bool = True
     llm_fallback_to_rules: bool = True
     max_same_sector_positions: int = Field(default=1, ge=1)
     kill_switch_enabled: bool = True
     kill_switch_persistent: bool = True
     min_confidence_score: float = Field(default=0.65, ge=0, le=1)
-    max_trades_per_day: int = Field(default=10, ge=1)
+    max_trades_per_day: int = Field(default=5, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
     symbol_cooldown_days: int = Field(default=1, ge=0)
     symbol_repeat_lookback_days: int = Field(default=5, ge=0)
@@ -231,7 +231,7 @@ class RetentionConfig(BaseModel):
     ohlcv_days: int = 730
     audit_log_days: int = 365
     predictions_days: int = 365
-    news_days: int = 30
+    news_days: int = 90
     economic_events_days: int = 365
 
 
