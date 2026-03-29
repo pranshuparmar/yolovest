@@ -11,6 +11,8 @@ export function RiskSimulatorPage() {
   const [maxSingleStock, setMaxSingleStock] = useState(0.1);
   const [maxPositions, setMaxPositions] = useState(10);
   const [initialCapital, setInitialCapital] = useState(100000);
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
 
   const simulate = useRiskSimulator();
 
@@ -20,6 +22,8 @@ export function RiskSimulatorPage() {
       max_single_stock_pct: maxSingleStock,
       max_positions: maxPositions,
       initial_capital: initialCapital,
+      date_from: dateFrom || undefined,
+      date_to: dateTo || undefined,
     });
   };
 
@@ -35,6 +39,23 @@ export function RiskSimulatorPage() {
       {/* Parameters */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
         <h3 className="text-sm font-medium text-gray-400 mb-4">Parameters</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-4">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">From Date</label>
+            <input type="date" value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">To Date</label>
+            <input type="date" value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 w-full" />
+          </div>
+          <div className="flex items-end">
+            <p className="text-xs text-gray-500">Leave empty for all available history</p>
+          </div>
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
           <div>
             <label className="block text-xs text-gray-500 mb-1">Max Exposure %</label>
@@ -73,6 +94,15 @@ export function RiskSimulatorPage() {
       {/* Results */}
       {r && (
         <div className="space-y-4">
+          <p className="text-xs text-gray-500">
+            Simulated against {simulate.data?.signals_available ?? "?"} historical signals
+            {simulate.data?.params.date_from && (
+              <> from {simulate.data.params.date_from}</>
+            )}
+            {simulate.data?.params.date_to && (
+              <> to {simulate.data.params.date_to}</>
+            )}
+          </p>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
               <p className="text-xs text-gray-500">Final Capital</p>

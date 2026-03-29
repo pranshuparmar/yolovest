@@ -2990,9 +2990,20 @@ class Database:
     # Risk Simulator (Feature #6)
     # ------------------------------------------------------------------
 
-    async def get_historical_signals(self, limit: int = 200) -> list[dict[str, Any]]:
-        """Fetch historical signals with their trade outcomes for simulation."""
-        cursor = await self.conn.execute(
+    async def get_historical_signals(
+        self,
+        limit: int = 200,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch historical signals with their trade outcomes for simulation.
+
+        Args:
+            limit: Max signals to return.
+            date_from: Optional start date (YYYY-MM-DD, inclusive).
+            date_to: Optional end date (YYYY-MM-DD, exclusive).
+        """
+        query = (
             "SELECT s.*, t.pnl, t.quantity, t.fill_price, t.slippage, "
             "COALESCE(w.sector, 'Unknown') as sector "
             "FROM signals s "
@@ -3002,8 +3013,17 @@ class Database:
             "  WHERE p.signal_id = s.id LIMIT 1"
             ") "
             "LEFT JOIN watchlist w ON s.symbol = w.symbol "
-            "ORDER BY s.created_at DESC LIMIT ?",
-            (limit,),
+            "WHERE 1=1"
         )
+        params: list[Any] = []
+        if date_from:
+            query += " AND s.created_at >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND s.created_at < ?"
+            params.append(date_to)
+        query += " ORDER BY s.created_at ASC LIMIT ?"
+        params.append(limit)
+        cursor = await self.read_conn.execute(query, tuple(params))
         rows = await cursor.fetchall()
         return [dict[str, Any](r) for r in rows]

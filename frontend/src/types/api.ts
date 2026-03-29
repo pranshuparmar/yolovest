@@ -378,10 +378,13 @@ export interface RiskSimParams {
   max_single_stock_pct: number;
   max_positions: number;
   initial_capital: number;
+  date_from?: string;
+  date_to?: string;
 }
 
 export interface RiskSimResult {
   params: RiskSimParams;
+  signals_available: number;
   results: {
     trades_taken: number;
     trades_skipped: number;

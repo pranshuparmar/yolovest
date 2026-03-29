@@ -1431,8 +1431,12 @@ def create_app(ctx: AppContext) -> FastAPI:
         max_single_stock_pct = body.get("max_single_stock_pct", ctx.config.risk.max_single_stock_pct)
         max_positions = body.get("max_positions", ctx.config.risk.max_open_positions)
         initial_capital = body.get("initial_capital", 100000)
+        date_from = body.get("date_from")  # YYYY-MM-DD or None
+        date_to = body.get("date_to")  # YYYY-MM-DD or None
 
-        signals = await ctx.db.get_historical_signals(200)
+        signals = await ctx.db.get_historical_signals(
+            limit=500, date_from=date_from, date_to=date_to,
+        )
 
         # Simple simulation
         capital = float(initial_capital)
@@ -1492,7 +1496,10 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "max_single_stock_pct": max_single_stock_pct,
                 "max_positions": max_positions,
                 "initial_capital": initial_capital,
+                "date_from": date_from,
+                "date_to": date_to,
             },
+            "signals_available": len(signals),
             "results": {
                 "trades_taken": trades_taken,
                 "trades_skipped": trades_skipped,
