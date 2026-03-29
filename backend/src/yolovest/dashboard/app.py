@@ -398,14 +398,20 @@ def create_app(ctx: AppContext) -> FastAPI:
             if not _broker_expired_alerted["sent"]:
                 _broker_expired_alerted["sent"] = True
                 try:
-                    await ctx.notify.send(
+                    sent = await ctx.notify.send(
                         "Kite session expired — holdings unavailable.\n"
                         f"Re-authenticate: {login_url}\n"
                         "Or use /auth <token> in Telegram.",
                         alert_type="errors",
                     )
-                except Exception:
-                    pass
+                    logger.info(
+                        "Broker expired alert sent=%s (telegram.enabled=%s, errors_toggle=%s)",
+                        sent,
+                        ctx.config.notifications.telegram.enabled,
+                        ctx.config.notifications.telegram.alerts.errors,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to send broker-expired alert: %s", e)
             return {
                 "holdings": [],
                 "broker_authenticated": False,
