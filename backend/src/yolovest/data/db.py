@@ -601,6 +601,7 @@ class Database:
         symbol: str | None = None,
         source: str | None = None,
         date_from: str | None = None,
+        date_to: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -617,11 +618,13 @@ class Database:
             query += " AND source = ?"
             params.append(source)
         if date_from:
-            # Compare using the stored ISO string directly (YYYY-MM-DD...).
-            # published_at is stored as ISO 8601 (e.g. 2026-03-28T14:30:00+05:30)
-            # so string comparison with 'YYYY-MM-DD' prefix works correctly.
+            # ISO 8601 strings are lexicographically sortable, so string
+            # comparison with 'YYYY-MM-DD' works correctly.
             query += " AND published_at >= ?"
             params.append(date_from)
+        if date_to:
+            query += " AND published_at < ?"
+            params.append(date_to)
         query += " ORDER BY published_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         logger.info(

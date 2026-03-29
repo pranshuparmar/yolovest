@@ -91,8 +91,16 @@ export function NewsFeedPage() {
   const [sourceFilter, setSourceFilter] = useState<string>("");
   const [dateFrom, setDateFrom] = useState<string>("");
 
-  // Debug: log filter state changes
-  console.log("[NewsFeedPage] filters:", { symbol, sourceFilter, dateFrom });
+  // When a date is picked, filter to that single day (date_from + date_to)
+  const dateTo = dateFrom
+    ? (() => {
+        const d = new Date(dateFrom + "T00:00:00");
+        d.setDate(d.getDate() + 1);
+        return d.toISOString().slice(0, 10);
+      })()
+    : undefined;
+
+  console.log("[NewsFeedPage] filters:", { symbol, sourceFilter, dateFrom, dateTo });
 
   const {
     data,
@@ -104,6 +112,7 @@ export function NewsFeedPage() {
     symbol: symbol || undefined,
     source: sourceFilter || undefined,
     date_from: dateFrom || undefined,
+    date_to: dateTo,
   });
 
   // Flatten all pages into one list (all filtering is now server-side)
