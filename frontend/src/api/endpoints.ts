@@ -41,7 +41,6 @@ import type {
   DryRunResult,
   DryRunSummary,
   DryRunSignal,
-  HoldingEntry,
   HoldingsResponse,
   ManualOrder,
 } from "../types/api";
