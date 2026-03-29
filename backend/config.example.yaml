@@ -89,7 +89,7 @@ risk:
 market_hours:
   open: "09:15"
   close: "15:30"
-  order_start: "09:15"               # earliest time for new orders
+  order_start: "09:30"               # earliest time for new orders (skip opening volatility)
   order_end: "15:15"                  # latest time for new orders
   square_off: "15:15"                 # auto square-off intraday positions
   square_off_extension: "00:05"       # extra window for square-off orders after order_end

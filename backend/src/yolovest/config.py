@@ -174,7 +174,7 @@ class RiskConfig(BaseModel):
 class MarketHoursConfig(BaseModel):
     open: str = "09:15"
     close: str = "15:30"
-    order_start: str = "09:15"
+    order_start: str = "09:30"
     order_end: str = "15:15"
     square_off: str = "15:15"
     square_off_extension: str = "00:05"
