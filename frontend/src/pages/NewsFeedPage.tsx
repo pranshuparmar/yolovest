@@ -94,9 +94,12 @@ export function NewsFeedPage() {
   // When a date is picked, filter to that single day (date_from + date_to)
   const dateTo = dateFrom
     ? (() => {
-        const d = new Date(dateFrom + "T00:00:00");
-        d.setDate(d.getDate() + 1);
-        return d.toISOString().slice(0, 10);
+        const [y, m, d] = dateFrom.split("-").map(Number);
+        const next = new Date(y, m - 1, d + 1);
+        const ny = next.getFullYear();
+        const nm = String(next.getMonth() + 1).padStart(2, "0");
+        const nd = String(next.getDate()).padStart(2, "0");
+        return `${ny}-${nm}-${nd}`;
       })()
     : undefined;
 
