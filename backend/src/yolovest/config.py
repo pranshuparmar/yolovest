@@ -266,6 +266,7 @@ class DashboardConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8080
     password: SecretStr = SecretStr("yolovest")
+    show_degraded_banner: bool = True  # set false if intentionally running without LLM/services
 
 
 class TelegramAlertsConfig(BaseModel):

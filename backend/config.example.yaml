@@ -143,6 +143,7 @@ dashboard:
   host: "0.0.0.0"
   port: 8080                          # internal API port (nginx proxies to this in Docker)
   password: yolovest                  # basic auth password (change in production!)
+  show_degraded_banner: true          # set false to hide "Degraded Mode" banner (e.g. intentionally running without LLM)
   # Dashboard URL in logs/Telegram is derived from DOMAIN env var (e.g. DOMAIN=yolovest.example.com)
 
 notifications:

@@ -303,6 +303,7 @@ export interface SystemState {
   mode: "paper" | "live";
   degraded_features?: DegradedFeature[];
   is_degraded?: boolean;
+  show_degraded_banner?: boolean;
   auto_approved_today?: number;
   llm_reviewed_today?: number;
 }

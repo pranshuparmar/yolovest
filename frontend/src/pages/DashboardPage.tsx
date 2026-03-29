@@ -27,7 +27,7 @@ export function DashboardPage() {
       <PendingTradesBanner />
 
       {/* Degraded mode banner */}
-      {systemState?.is_degraded && !degradedDismissed && (
+      {systemState?.is_degraded && systemState?.show_degraded_banner !== false && !degradedDismissed && (
         <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg p-4 relative">
           <button
             onClick={() => setDegradedDismissed(true)}

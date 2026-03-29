@@ -1194,6 +1194,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             "mode": ctx.config.mode,
             "degraded_features": degraded,
             "is_degraded": len(degraded) > 0,
+            "show_degraded_banner": ctx.config.dashboard.show_degraded_banner,
             "auto_approved_today": auto_approved_today,
             "llm_reviewed_today": llm_reviewed_today,
         }
