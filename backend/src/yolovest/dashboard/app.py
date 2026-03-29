@@ -405,7 +405,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                     await ctx.notify.send(
                         "Kite session expired — holdings unavailable.\n"
                         f"Re-authenticate: {login_url}\n"
-                        "Or use /auth <token> in Telegram.",
+                        "Or use /auth (request_token) in Telegram.",
                         alert_type="errors",
                     )
                 except Exception as e:
