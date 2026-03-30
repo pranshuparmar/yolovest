@@ -163,7 +163,15 @@ class Database:
             await self.conn.execute("BEGIN")
             try:
                 for stmt in self._split_sql(sql):
-                    await self.conn.execute(stmt)
+                    try:
+                        await self.conn.execute(stmt)
+                    except Exception as stmt_err:
+                        # SQLite ALTER TABLE ADD COLUMN fails if column already exists
+                        # (e.g. from a previously interrupted migration). Safe to skip.
+                        if "duplicate column" in str(stmt_err).lower():
+                            logger.info("Skipping (column already exists): %s", stmt[:80])
+                            continue
+                        raise
                 await self.conn.execute(
                     "INSERT INTO schema_version (version, filename) VALUES (?, ?)",
                     (version, mf.name),
