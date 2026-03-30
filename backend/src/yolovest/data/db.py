@@ -2364,13 +2364,19 @@ class Database:
 
     async def get_dry_run_history(self, limit: int = 10) -> list[dict[str, Any]]:
         """Get dry-run results grouped by run_id, most recent first."""
+        # Check if strategy_mode column exists (migration 013)
+        cursor = await self.conn.execute("PRAGMA table_info(dry_run_results)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        has_mode = "strategy_mode" in columns
+
+        mode_col = ", MAX(strategy_mode) as strategy_mode " if has_mode else " "
         cursor = await self.conn.execute(
             "SELECT run_id, COUNT(*) as signal_count, "
             "MIN(created_at) as created_at, "
             "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
-            "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored, "
-            "MAX(strategy_mode) as strategy_mode "
-            "FROM dry_run_results "
+            "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored"
+            + mode_col
+            + "FROM dry_run_results "
             "GROUP BY run_id ORDER BY created_at DESC LIMIT ?",
             (limit,),
         )
