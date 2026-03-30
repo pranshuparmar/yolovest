@@ -17,10 +17,12 @@ function fmtInr(n: number) {
 function OrderForm({
   defaultSymbol,
   defaultSide,
+  isLocked,
   onClose,
 }: {
   defaultSymbol?: string;
   defaultSide?: "BUY" | "SELL";
+  isLocked?: boolean;
   onClose: () => void;
 }) {
   const placeOrder = usePlaceOrder();
@@ -147,6 +149,12 @@ function OrderForm({
         )}
       </div>
 
+      {isLocked && side === "SELL" && (
+        <div className="bg-amber-900/20 border border-amber-800 rounded px-3 py-2 text-xs text-amber-400">
+          This holding is locked. Automated selling is disabled, but you can still place a manual sell order.
+        </div>
+      )}
+
       <div className="flex items-center gap-3">
         <button
           onClick={handleSubmit}
@@ -182,6 +190,7 @@ export function HoldingsPage() {
   const [orderForm, setOrderForm] = useState<{
     symbol?: string;
     side?: "BUY" | "SELL";
+    locked?: boolean;
   } | null>(null);
 
   const lockHolding = useLockHolding();
@@ -233,6 +242,7 @@ export function HoldingsPage() {
         <OrderForm
           defaultSymbol={orderForm.symbol}
           defaultSide={orderForm.side}
+          isLocked={orderForm.locked}
           onClose={() => setOrderForm(null)}
         />
       )}
@@ -417,15 +427,13 @@ export function HoldingsPage() {
                             Buy
                           </button>
                           <button
-                            onClick={() => {
-                              if (h.locked && !window.confirm(
-                                `${h.tradingsymbol} is locked. Are you sure you want to sell?`
-                              )) return;
+                            onClick={() =>
                               setOrderForm({
                                 symbol: h.tradingsymbol,
                                 side: "SELL",
-                              });
-                            }}
+                                locked: h.locked,
+                              })
+                            }
                             className="px-2 py-0.5 rounded text-xs font-medium bg-red-900/30 text-red-400 hover:bg-red-800/50 transition-colors"
                           >
                             Sell
