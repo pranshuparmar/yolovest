@@ -1747,7 +1747,10 @@ class Database:
         symbol: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Get trade history with optional filters."""
+        """Get trade history with optional filters.
+
+        Dates are YYYY-MM-DD. end_date is inclusive (includes all of that day).
+        """
         query = "SELECT * FROM trades WHERE 1=1"
         params: list[Any] = []
 
@@ -1755,8 +1758,12 @@ class Database:
             query += " AND created_at >= ?"
             params.append(start_date)
         if end_date:
-            query += " AND created_at <= ?"
-            params.append(end_date + "T23:59:59")
+            # end_date is inclusive: add one day as exclusive upper bound.
+            # This avoids the T23:59:59 hack which misses the last second.
+            from datetime import date, timedelta
+            next_day = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
+            query += " AND created_at < ?"
+            params.append(next_day)
         if symbol:
             query += " AND symbol = ?"
             params.append(symbol)
@@ -1764,7 +1771,7 @@ class Database:
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
 
-        cursor = await self.conn.execute(query, params)
+        cursor = await self.read_conn.execute(query, params)
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
@@ -1909,7 +1916,7 @@ class Database:
         query += " ORDER BY report_date DESC LIMIT ?"
         params.append(limit)
 
-        cursor = await self.conn.execute(query, params)
+        cursor = await self.read_conn.execute(query, params)
         rows = await cursor.fetchall()
 
         result = []
