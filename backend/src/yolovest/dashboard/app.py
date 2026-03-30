@@ -1603,7 +1603,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         from yolovest.config import _MODE_HOLDING_PERIODS
         from yolovest.costs import compute_transaction_costs
         from yolovest.data.features import IndicatorConfig, compute_features
-        from yolovest.strategy.holding_period import decide_holding_period, get_atr_multipliers
+        from yolovest.strategy.holding_period import adjust_sell_for_holdings, decide_holding_period, get_atr_multipliers
         from yolovest.timezone import IST
 
         run_id = str(uuid.uuid4())[:8]
@@ -1670,6 +1670,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         # Step 2: Generate signals from shortlisted stocks
         signals_out: list[dict[str, Any]] = []
         ml_unavailable = ctx.ml is None
+
+        # Build held symbols set for SELL signal adjustment
+        open_positions = await ctx.db.get_open_positions()
+        held_symbols = {p["symbol"] for p in open_positions}
         min_confidence = cfg.risk.min_confidence_score
 
         if ml_unavailable:
@@ -1779,6 +1783,12 @@ def create_app(ctx: AppContext) -> FastAPI:
                         symbol, prediction.signal_type, prediction.confidence, min_confidence,
                     )
                     continue
+
+                # Adjust SELL: force to MIS/intraday if user doesn't hold the stock
+                holding_period, product = adjust_sell_for_holdings(
+                    prediction.signal_type, holding_period, product,
+                    symbol, held_symbols,
+                )
 
                 # Apply holding-period-specific ATR multipliers
                 entry = prediction.entry_price

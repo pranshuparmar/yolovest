@@ -60,6 +60,41 @@ def decide_holding_period(
     return (period, product)
 
 
+def adjust_sell_for_holdings(
+    signal_type: str,
+    holding_period: str,
+    product: str,
+    symbol: str,
+    held_symbols: set[str],
+) -> tuple[str, str]:
+    """Adjust SELL signals based on whether the user holds the stock.
+
+    - If the user holds the stock, SELL can use any product/period (selling owned shares).
+    - If the user does NOT hold the stock, it's a short sell — force to MIS/intraday
+      (Indian equity rules: retail short selling must be squared off same day).
+    - BUY signals are never affected.
+
+    Args:
+        signal_type: "BUY", "SELL", or "HOLD"
+        holding_period: Current holding period decision (e.g. "3d", "1w")
+        product: Current product decision (e.g. "CNC")
+        symbol: Stock symbol
+        held_symbols: Set of symbols the user currently holds (open positions + broker holdings)
+
+    Returns:
+        (holding_period, product) — possibly overridden to ("intraday", "MIS") for naked shorts
+    """
+    if signal_type != "SELL":
+        return (holding_period, product)
+
+    if symbol in held_symbols:
+        # User owns the stock — SELL is exiting a position, any product/period is fine
+        return (holding_period, product)
+
+    # Short sell — must be intraday MIS (no overnight short positions for retail)
+    return ("intraday", "MIS")
+
+
 def get_atr_multipliers(holding_period: str, holding_period_config: Any) -> Any:
     """Get ATR multipliers for the given holding period from config."""
     if holding_period == "intraday":

@@ -81,6 +81,11 @@ class GenerateSignalsSkill(SkillBase):
             supertrend=self.ctx.config.strategy.indicators.supertrend,
         )
 
+        # Build set of currently held symbols (open positions)
+        # Used to decide if SELL = exit-owned-stock (CNC ok) vs short-sell (force MIS)
+        open_positions = await self.ctx.db.get_open_positions()
+        held_symbols = {p["symbol"] for p in open_positions}
+
         # Skip symbols that already have a signal or open position today
         already_signaled = await self.ctx.db.get_todays_signaled_symbols()
         if already_signaled:
@@ -219,6 +224,14 @@ class GenerateSignalsSkill(SkillBase):
                     })
                     logger.info("HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
                     continue
+
+                # Adjust SELL signals: force to MIS/intraday if user doesn't hold the stock
+                from yolovest.strategy.holding_period import adjust_sell_for_holdings
+
+                holding_period, product = adjust_sell_for_holdings(
+                    prediction.signal_type, holding_period, product,
+                    symbol, held_symbols,
+                )
 
                 # Override target/SL with period-specific ATR multipliers
                 entry = prediction.entry_price

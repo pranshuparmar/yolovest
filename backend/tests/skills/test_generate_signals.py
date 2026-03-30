@@ -385,3 +385,88 @@ class TestATRMultipliers:
         entry = sig["entry_price"]
         assert sig["target_price"] > entry
         assert sig["stop_loss_price"] < entry
+
+
+class TestSellHoldingsAdjustment:
+    """Test that SELL signals are forced to MIS/intraday when user doesn't hold the stock."""
+
+    def test_sell_without_holdings_forced_to_mis(self):
+        from yolovest.strategy.holding_period import adjust_sell_for_holdings
+
+        hp, product = adjust_sell_for_holdings("SELL", "3d", "CNC", "BEL", held_symbols=set())
+        assert hp == "intraday"
+        assert product == "MIS"
+
+    def test_sell_with_holdings_keeps_cnc(self):
+        from yolovest.strategy.holding_period import adjust_sell_for_holdings
+
+        hp, product = adjust_sell_for_holdings("SELL", "3d", "CNC", "BEL", held_symbols={"BEL", "TCS"})
+        assert hp == "3d"
+        assert product == "CNC"
+
+    def test_sell_1w_without_holdings_forced_to_mis(self):
+        from yolovest.strategy.holding_period import adjust_sell_for_holdings
+
+        hp, product = adjust_sell_for_holdings("SELL", "1w", "CNC", "RELIANCE", held_symbols=set())
+        assert hp == "intraday"
+        assert product == "MIS"
+
+    def test_buy_unaffected_regardless_of_holdings(self):
+        from yolovest.strategy.holding_period import adjust_sell_for_holdings
+
+        hp, product = adjust_sell_for_holdings("BUY", "3d", "CNC", "RELIANCE", held_symbols=set())
+        assert hp == "3d"
+        assert product == "CNC"
+
+    def test_hold_unaffected(self):
+        from yolovest.strategy.holding_period import adjust_sell_for_holdings
+
+        hp, product = adjust_sell_for_holdings("HOLD", "1w", "CNC", "TCS", held_symbols=set())
+        assert hp == "1w"
+        assert product == "CNC"
+
+    async def test_sell_signal_gets_mis_in_pipeline(self, signal_skill):
+        """Full pipeline: SELL signal for non-held stock -> MIS/intraday."""
+        signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
+            {"symbol": "BEL"},
+        ])
+        signal_skill.ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        signal_skill.ctx.db.insert_signal = AsyncMock()
+        signal_skill.ctx.db.get_open_positions = AsyncMock(return_value=[])
+        signal_skill.ctx.ml.predict_swing = AsyncMock(return_value=MLPrediction(
+            signal_type="SELL", entry_price=400.0, target_price=380.0,
+            stop_loss_price=415.0, position_size=1, holding_period="3d",
+            confidence=0.85, model_version="test-v1",
+        ))
+
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
+            result = await signal_skill.execute()
+
+        assert result.data["signals_generated"] == 1
+        sig = result.data["signals"][0]
+        assert sig["product"] == "MIS"
+        assert sig["expected_holding_period"] == "intraday"
+
+    async def test_sell_signal_keeps_cnc_when_held(self, signal_skill):
+        """Full pipeline: SELL signal for held stock keeps CNC."""
+        signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
+            {"symbol": "BEL"},
+        ])
+        signal_skill.ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        signal_skill.ctx.db.insert_signal = AsyncMock()
+        signal_skill.ctx.db.get_open_positions = AsyncMock(return_value=[
+            {"symbol": "BEL", "quantity": 10},
+        ])
+        signal_skill.ctx.ml.predict_swing = AsyncMock(return_value=MLPrediction(
+            signal_type="SELL", entry_price=400.0, target_price=380.0,
+            stop_loss_price=415.0, position_size=1, holding_period="3d",
+            confidence=0.85, model_version="test-v1",
+        ))
+
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
+            result = await signal_skill.execute()
+
+        assert result.data["signals_generated"] == 1
+        sig = result.data["signals"][0]
+        assert sig["product"] == "CNC"
+        assert sig["expected_holding_period"] == "3d"
