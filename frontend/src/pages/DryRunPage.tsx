@@ -161,6 +161,7 @@ export function DryRunPage() {
               <thead>
                 <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
                   <th className="py-2 px-4 text-left">Run ID</th>
+                  <th className="py-2 px-4 text-left">Strategy</th>
                   <th className="py-2 px-4 text-right">Signals</th>
                   <th className="py-2 px-4 text-right">Scored</th>
                   <th className="py-2 px-4 text-right">Correct</th>
@@ -180,6 +181,9 @@ export function DryRunPage() {
                   >
                     <td className="py-2 px-4 font-mono text-xs text-gray-300">
                       {run.run_id}
+                    </td>
+                    <td className="py-2 px-4 text-xs text-gray-400 capitalize">
+                      {(run.strategy_mode ?? "balanced").replace("_", " ")}
                     </td>
                     <td className="py-2 px-4 text-right text-gray-300">
                       {run.signal_count}
@@ -249,6 +253,14 @@ export function DryRunPage() {
             <h3 className="text-sm font-semibold text-gray-300">
               Signals for run{" "}
               <span className="font-mono text-emerald-400">{selectedRun}</span>
+              {(() => {
+                const runMode = history?.find((r) => r.run_id === selectedRun)?.strategy_mode;
+                return runMode ? (
+                  <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-gray-800 text-gray-400 capitalize">
+                    {runMode.replace("_", " ")}
+                  </span>
+                ) : null;
+              })()}
             </h3>
             {scored.length > 0 && (
               <div className="flex items-center gap-4 text-xs">

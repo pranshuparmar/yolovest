@@ -1820,6 +1820,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                     "news_sentiment_score": stock.get("news_sentiment_score"),
                     "fundamental_score": stock.get("fundamental_score"),
                     "volatility_score": stock.get("volatility_score"),
+                    "strategy_mode": effective_mode,
                 })
             except Exception as e:
                 filter_counts["error"] += 1

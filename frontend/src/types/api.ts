@@ -508,6 +508,7 @@ export interface DryRunSummary {
   created_at: string;
   correct: number | null;
   scored: number;
+  strategy_mode: string | null;
 }
 
 export interface HoldingsResponse {

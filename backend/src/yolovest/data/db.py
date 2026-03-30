@@ -2323,8 +2323,8 @@ class Database:
                 "composite_score, technical_score, volume_momentum_score, "
                 "news_sentiment_score, fundamental_score, "
                 "holding_period, product, volatility_score, estimated_costs, "
-                "created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                "strategy_mode, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
                 (
                     run_id,
                     s["symbol"],
@@ -2344,6 +2344,7 @@ class Database:
                     s.get("product"),
                     s.get("volatility_score"),
                     s.get("estimated_costs"),
+                    s.get("strategy_mode"),
                 ),
             )
         await self.conn.commit()
@@ -2355,7 +2356,8 @@ class Database:
             "SELECT run_id, COUNT(*) as signal_count, "
             "MIN(created_at) as created_at, "
             "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
-            "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored "
+            "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored, "
+            "MAX(strategy_mode) as strategy_mode "
             "FROM dry_run_results "
             "GROUP BY run_id ORDER BY created_at DESC LIMIT ?",
             (limit,),
