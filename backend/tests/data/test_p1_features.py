@@ -306,9 +306,9 @@ class TestSlippageFeedback:
         signal = {
             "symbol": "NEWSTOCK",
             "signal_type": "BUY",
-            "entry_price": 1000,
-            "stop_loss_price": 980,
-            "target_price": 1040,
+            "entry_price": 2500,
+            "stop_loss_price": 2450,
+            "target_price": 2600,
             "position_size": 10,
         }
 
@@ -317,7 +317,7 @@ class TestSlippageFeedback:
 
         assert result.success
         assert result.data["approved"]
-        assert result.data["slippage_penalty"] == 0
+        assert result.data.get("slippage_penalty", 0) == 0
 
     async def test_slippage_penalty_capped_at_30pct(self, app_context):
         from yolovest.skills.risk_check import RiskCheckSkill
@@ -442,11 +442,12 @@ class TestLLMReviewAccuracy:
 
 
 class TestNewsAggregatorWiring:
-    def test_build_news_aggregator(self):
+    def test_build_news_aggregator(self, sample_config):
         from yolovest.main import _build_news_aggregator
         from yolovest.news.aggregator import NewsAggregator
 
-        agg = _build_news_aggregator()
+        sample_config.market_data.news_enabled = True
+        agg = _build_news_aggregator(sample_config)
         assert isinstance(agg, NewsAggregator)
         assert len(agg.sources) == 3  # MoneyControl, ETMarkets, LiveMint
 

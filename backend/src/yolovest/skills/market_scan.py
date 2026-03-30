@@ -39,7 +39,10 @@ class MarketScanSkill(SkillBase):
         cfg = self.ctx.config.scanning
 
         # Step 1-2: Load universe, apply volume filter
-        universe = await self.ctx.db.get_nse_universe()
+        sentiment_ttl = self.ctx.config.market_data.sentiment_ttl_hours
+        universe = await self.ctx.db.get_nse_universe(
+            sentiment_ttl_hours=sentiment_ttl,
+        )
         if not universe:
             # Fallback to seed symbols if universe is empty
             universe = [
@@ -78,7 +81,7 @@ class MarketScanSkill(SkillBase):
         sector_analysis = self._analyze_sector_rotation(scored)
 
         # Step 7: Gemini cross-validation
-        if self.ctx.config.risk.llm_review_enabled and shortlist:
+        if self.ctx.config.llm.enabled and self.ctx.config.risk.llm_review_enabled and shortlist:
             try:
                 llm_validation = await self.ctx.llm.validate_watchlist(
                     shortlist=shortlist,

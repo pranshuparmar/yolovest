@@ -45,6 +45,8 @@ class PredictTrackSkill(SkillBase):
 
     async def _run_failure_analysis(self) -> bool:
         """Use Gemini to analyze recent prediction failures."""
+        if not self.ctx.config.llm.enabled:
+            return False
         try:
             outcomes = await self.ctx.db.get_prediction_outcomes()
             failures = [p for p in outcomes if not p.get("direction_correct")]

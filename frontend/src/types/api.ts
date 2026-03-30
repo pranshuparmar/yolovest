@@ -98,6 +98,14 @@ export interface EquityCurvePoint {
   trade_count: number;
 }
 
+export interface PnlCalendarDay {
+  date: string;
+  pnl: number;
+  trade_count: number;
+  wins: number;
+  losses: number;
+}
+
 export interface WatchlistItem {
   symbol: string;
   composite_score: number | null;
@@ -291,10 +299,21 @@ export interface PremarketData {
   llm_summary?: string | null;
 }
 
+export interface DegradedFeature {
+  feature: string;
+  status: string;
+  impact: string;
+}
+
 export interface SystemState {
   kill_switch_active: boolean;
   orchestrator: string | null;
   mode: "paper" | "live";
+  degraded_features?: DegradedFeature[];
+  is_degraded?: boolean;
+  show_degraded_banner?: boolean;
+  auto_approved_today?: number;
+  llm_reviewed_today?: number;
 }
 
 export interface NSESymbol {
@@ -367,10 +386,13 @@ export interface RiskSimParams {
   max_single_stock_pct: number;
   max_positions: number;
   initial_capital: number;
+  date_from?: string;
+  date_to?: string;
 }
 
 export interface RiskSimResult {
   params: RiskSimParams;
+  signals_available: number;
   results: {
     trades_taken: number;
     trades_skipped: number;
@@ -473,6 +495,12 @@ export interface DryRunSummary {
   created_at: string;
   correct: number | null;
   scored: number;
+}
+
+export interface HoldingsResponse {
+  holdings: HoldingEntry[];
+  broker_authenticated: boolean;
+  login_url?: string;
 }
 
 export interface HoldingEntry {

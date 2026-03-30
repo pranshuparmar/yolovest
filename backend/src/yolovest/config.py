@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
 def _parse_time(t: str) -> dt_time:
@@ -69,14 +69,14 @@ class CapitalConfig(BaseModel):
 
 
 class BrokerConfig(BaseModel):
-    api_key: str = ""
-    api_secret: str = ""
+    api_key: SecretStr = SecretStr("")
+    api_secret: SecretStr = SecretStr("")
 
 
 class LLMConfig(BaseModel):
     enabled: bool = False
-    model: str = "gemini-2.5-pro"
-    api_key: str = ""
+    model: str = "gemini-2.5-flash"
+    api_key: SecretStr = SecretStr("")
 
 
 class MarketDataConfig(BaseModel):
@@ -89,6 +89,7 @@ class MarketDataConfig(BaseModel):
     bhavcopy_dir: str = "./data/bhavcopy"
     cache_ttl_minutes: int = 15
     stale_threshold_minutes: int = 30
+    sentiment_ttl_hours: int = 48  # sentiment older than this is ignored in scanning
     backfill_days: int = 365  # days of history to fetch in backfill-data skill
 
 
@@ -154,14 +155,14 @@ class RiskConfig(BaseModel):
     mandatory_stop_loss: bool = True
     trailing_sl_enabled: bool = True
     trailing_sl_trigger_multiple: float = Field(default=1.5, gt=0)
-    trailing_sl_step_pct: float = Field(default=0.005, gt=0, lt=1)
+    trailing_sl_step_pct: float = Field(default=0.01, gt=0, lt=1)
     llm_review_enabled: bool = True
     llm_fallback_to_rules: bool = True
     max_same_sector_positions: int = Field(default=1, ge=1)
     kill_switch_enabled: bool = True
     kill_switch_persistent: bool = True
     min_confidence_score: float = Field(default=0.65, ge=0, le=1)
-    max_trades_per_day: int = Field(default=10, ge=1)
+    max_trades_per_day: int = Field(default=5, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
     symbol_cooldown_days: int = Field(default=1, ge=0)
     symbol_repeat_lookback_days: int = Field(default=5, ge=0)
@@ -173,7 +174,7 @@ class RiskConfig(BaseModel):
 class MarketHoursConfig(BaseModel):
     open: str = "09:15"
     close: str = "15:30"
-    order_start: str = "09:15"
+    order_start: str = "09:30"
     order_end: str = "15:15"
     square_off: str = "15:15"
     square_off_extension: str = "00:05"
@@ -230,7 +231,7 @@ class RetentionConfig(BaseModel):
     ohlcv_days: int = 730
     audit_log_days: int = 365
     predictions_days: int = 365
-    news_days: int = 30
+    news_days: int = 90
     economic_events_days: int = 365
 
 
@@ -254,6 +255,12 @@ class ReportsConfig(BaseModel):
     weekly_report_cron: str = "0 10 * * 6"
 
 
+class NewsDigestConfig(BaseModel):
+    enabled: bool = True
+    schedule_cron: str = "0 9 * * *"  # 9:00 AM IST, every day
+    max_headlines: int = Field(default=10, ge=1, le=50)
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
     file_level: str = "INFO"  # log file can have a different level
@@ -265,7 +272,8 @@ class LoggingConfig(BaseModel):
 class DashboardConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8080
-    password: str = "yolovest"  # basic password auth
+    password: SecretStr = SecretStr("yolovest")
+    show_degraded_banner: bool = True  # set false if intentionally running without LLM/services
 
 
 class TelegramAlertsConfig(BaseModel):
@@ -279,7 +287,7 @@ class TelegramAlertsConfig(BaseModel):
 
 class TelegramConfig(BaseModel):
     enabled: bool = False
-    bot_token: str = ""
+    bot_token: SecretStr = SecretStr("")
     chat_id: str = ""
     alerts: TelegramAlertsConfig = Field(default_factory=TelegramAlertsConfig)
 
@@ -314,6 +322,7 @@ class AppConfig(BaseModel):
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     log: LoggingConfig = Field(default_factory=LoggingConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+    news_digest: NewsDigestConfig = Field(default_factory=NewsDigestConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":

@@ -1,5 +1,6 @@
 """Tests for individual market data providers with mocked HTTP/data."""
 
+import importlib
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,15 @@ import pytest
 pd = pytest.importorskip("pandas", reason="pandas required for provider tests")
 
 
+def _has_module(name: str) -> bool:
+    """Check if a module is importable without actually importing it."""
+    return importlib.util.find_spec(name) is not None
+
+
+@pytest.mark.skipif(
+    not _has_module("jugaad_data"),
+    reason="jugaad_data not installed",
+)
 class TestJugaadDataProvider:
     """Test JugaadDataProvider data transformation."""
 
@@ -70,6 +80,10 @@ class TestJugaadDataProvider:
             await provider.get_ohlcv("RELIANCE", "5minute", 30)
 
 
+@pytest.mark.skipif(
+    not _has_module("yfinance"),
+    reason="yfinance not installed",
+)
 class TestYFinanceProvider:
     """Test YFinanceProvider data transformation."""
 
@@ -120,6 +134,10 @@ class TestYFinanceProvider:
             await provider.get_ohlcv("RELIANCE", "1h", 30)
 
 
+@pytest.mark.skipif(
+    not _has_module("tvDatafeed"),
+    reason="tvDatafeed not installed",
+)
 class TestTVDatafeedProvider:
     """Test TVDatafeedProvider data transformation."""
 

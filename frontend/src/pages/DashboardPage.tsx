@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { PortfolioCards } from "../components/PortfolioCards";
 import { EquityChart } from "../components/EquityChart";
 import { TradesTable } from "../components/TradesTable";
@@ -10,6 +11,9 @@ import { useTradesToday, useSystemState } from "../hooks/queries";
 export function DashboardPage() {
   const { data: todaysTrades, isLoading } = useTradesToday();
   const { data: systemState } = useSystemState();
+  const [degradedDismissed, setDegradedDismissed] = useState(
+    () => sessionStorage.getItem("yv_degraded_dismissed") === "1"
+  );
 
   return (
     <div className="space-y-6">
@@ -23,6 +27,43 @@ export function DashboardPage() {
       </div>
 
       <PendingTradesBanner />
+
+      {/* Degraded mode banner */}
+      {systemState?.is_degraded && systemState?.show_degraded_banner !== false && !degradedDismissed && (
+        <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg p-4 relative">
+          <button
+            onClick={() => {
+              sessionStorage.setItem("yv_degraded_dismissed", "1");
+              setDegradedDismissed(true);
+            }}
+            className="absolute top-2 right-2 text-yellow-600 hover:text-yellow-400 text-lg leading-none px-1"
+            aria-label="Dismiss"
+          >
+            x
+          </button>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-yellow-400 font-semibold text-sm">Degraded Mode</span>
+            {(systemState.auto_approved_today ?? 0) > 0 && (
+              <span className="px-2 py-0.5 rounded text-xs bg-yellow-800/60 text-yellow-300">
+                {systemState.auto_approved_today} auto-approved today
+              </span>
+            )}
+          </div>
+          <div className="space-y-1">
+            {systemState.degraded_features?.map((f) => (
+              <div key={f.feature} className="flex items-start gap-2 text-xs">
+                <span className="text-yellow-500 shrink-0 mt-0.5">
+                  {f.status === "disabled" ? "[OFF]" : "[!]"}
+                </span>
+                <span className="text-gray-300">
+                  <span className="font-medium text-yellow-300">{f.feature}:</span>{" "}
+                  {f.impact}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <PortfolioCards />
 

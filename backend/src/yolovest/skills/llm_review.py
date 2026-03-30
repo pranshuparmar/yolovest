@@ -35,14 +35,14 @@ class LLMReviewSkill(SkillBase):
     schedule = None
 
     def should_run(self) -> bool:
-        return bool(self.ctx.config.risk.llm_review_enabled)
+        return bool(self.ctx.config.llm.enabled and self.ctx.config.risk.llm_review_enabled)
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         signal = kwargs["signal"]
         cfg = self.ctx.config.risk
 
         # If LLM disabled or unavailable, auto-approve
-        if not cfg.llm_review_enabled:
+        if not cfg.llm_review_enabled or not self.ctx.config.llm.enabled:
             return self._auto_approve(signal, "LLM review disabled")
 
         try:

@@ -52,7 +52,7 @@ class DatabaseMaintenanceSkill(SkillBase):
             results["backup_error"] = str(e)
             logger.error("DB backup failed: %s", e)
             with contextlib.suppress(Exception):
-                await self.ctx.notify.send(f"DB backup FAILED: {e}")
+                await self.ctx.notify.send(f"DB backup FAILED: {e}", alert_type="errors")
 
         # --- Step 2: Retention Cleanup ---
         try:

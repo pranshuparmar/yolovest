@@ -1,8 +1,13 @@
 let _authHeader: string | null = null;
+let _csrfToken: string | null = null;
 let _onUnauthorized: (() => void) | null = null;
 
 export function setAuthHeader(header: string | null) {
   _authHeader = header;
+}
+
+export function setCsrfToken(token: string | null) {
+  _csrfToken = token;
 }
 
 export function setOnUnauthorized(fn: () => void) {
@@ -20,6 +25,12 @@ export async function apiFetch<T>(
 
   if (_authHeader) {
     headers["Authorization"] = _authHeader;
+  }
+
+  // Include CSRF token on state-changing requests
+  const method = (options?.method || "GET").toUpperCase();
+  if (_csrfToken && ["POST", "PUT", "DELETE"].includes(method)) {
+    headers["X-CSRF-Token"] = _csrfToken;
   }
 
   const res = await fetch(path, { ...options, headers });

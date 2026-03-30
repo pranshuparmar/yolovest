@@ -5,11 +5,69 @@ Execution only (free tier, no market data). Supports paper + live modes.
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from yolovest.broker.base import BrokerBase
 
 logger = logging.getLogger(__name__)
+
+
+class BrokerCircuitBreaker:
+    """Circuit breaker for broker API calls.
+
+    States:
+    - CLOSED: normal operation, requests pass through
+    - OPEN: too many consecutive failures, all requests fail fast
+    - HALF_OPEN: cooldown expired, allow one probe request
+
+    Prevents hammering a failing/rate-limited Kite API, which would
+    compound the problem and potentially trigger IP bans.
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        cooldown_sec: float = 30.0,
+    ) -> None:
+        self._failure_threshold = failure_threshold
+        self._cooldown_sec = cooldown_sec
+        self._consecutive_failures = 0
+        self._opened_at: float = 0.0  # monotonic time when circuit opened
+        self._state = "CLOSED"
+
+    @property
+    def state(self) -> str:
+        if self._state == "OPEN":
+            if time.monotonic() - self._opened_at >= self._cooldown_sec:
+                self._state = "HALF_OPEN"
+        return self._state
+
+    def record_success(self) -> None:
+        self._consecutive_failures = 0
+        self._state = "CLOSED"
+
+    def record_failure(self) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._failure_threshold:
+            if self._state != "OPEN":
+                logger.warning(
+                    "Broker circuit breaker OPEN after %d consecutive failures "
+                    "(cooldown: %.0fs)",
+                    self._consecutive_failures, self._cooldown_sec,
+                )
+            self._state = "OPEN"
+            self._opened_at = time.monotonic()
+
+    def check(self) -> None:
+        """Raise if circuit is open (requests should fail fast)."""
+        state = self.state
+        if state == "OPEN":
+            remaining = self._cooldown_sec - (time.monotonic() - self._opened_at)
+            raise RuntimeError(
+                f"Broker circuit breaker is OPEN — API calls blocked for "
+                f"{remaining:.0f}s after {self._consecutive_failures} consecutive failures"
+            )
 
 
 class ZerodhaBroker(BrokerBase):
@@ -38,8 +96,17 @@ class ZerodhaBroker(BrokerBase):
         self._access_token: str | None = None
         self._kite: Any = None
         self._db = db  # For persisting access token across restarts
+        self._authenticated_at: float = 0.0  # monotonic time of last successful auth
+        # Kite tokens expire at 6:00 AM IST daily. We cache the auth status
+        # and only re-verify via API when the token is expected to be expired.
+        # This avoids a kite.profile() call on every heartbeat/page load.
+        self._auth_cache_valid_until: float = 0.0
         # Rate limiter: 8 concurrent to stay under Kite's 10 req/s
         self._rate_limiter = asyncio.Semaphore(8)
+        # Circuit breaker: trip after 5 consecutive API failures, 30s cooldown
+        self._circuit_breaker = BrokerCircuitBreaker(
+            failure_threshold=5, cooldown_sec=30.0,
+        )
         # Paper mode state
         self._paper_orders: dict[str, dict[str, Any]] = {}
         self._paper_order_counter = 0
@@ -63,13 +130,14 @@ class ZerodhaBroker(BrokerBase):
                 self._create_kite_session, request_token
             )
             self._access_token = self._kite.access_token
+            self._update_auth_cache()
             # Persist token for restart recovery
             if self._db:
                 try:
                     await self._db.set_system_state("kite_access_token", self._access_token)
                 except Exception:
                     pass
-            logger.info("Kite Connect authenticated successfully")
+            logger.info("Kite Connect authenticated successfully (valid until ~6:00 AM IST)")
             return True
         except Exception:
             if self._mode == "paper":
@@ -96,7 +164,8 @@ class ZerodhaBroker(BrokerBase):
             await asyncio.to_thread(kite.profile)
             self._kite = kite
             self._access_token = token
-            logger.info("Kite session restored from persisted token")
+            self._update_auth_cache()
+            logger.info("Kite session restored from persisted token (cached until ~6:00 AM IST)")
             return True
         except Exception as e:
             logger.info("Could not restore Kite session (re-login needed): %s", e)
@@ -117,17 +186,54 @@ class ZerodhaBroker(BrokerBase):
         kite.set_access_token(data["access_token"])
         return kite
 
+    def _update_auth_cache(self) -> None:
+        """Compute when the current token expires.
+
+        Kite tokens expire at 6:00 AM IST daily. We cache the auth
+        result and only re-verify via API after this time passes.
+        """
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        self._authenticated_at = time.monotonic()
+
+        # Next 6:00 AM IST
+        expiry = now.replace(hour=6, minute=0, second=0, microsecond=0)
+        if expiry <= now:
+            expiry += timedelta(days=1)
+
+        # Convert to monotonic: seconds until expiry
+        seconds_until_expiry = (expiry - now).total_seconds()
+        self._auth_cache_valid_until = time.monotonic() + seconds_until_expiry
+        logger.debug(
+            "Auth cache valid for %.0f seconds (until ~6:00 AM IST)",
+            seconds_until_expiry,
+        )
+
     async def is_authenticated(self) -> bool:
+        """Check if the broker session is valid.
+
+        Uses cached auth status when the token is known to be valid
+        (before 6:00 AM IST expiry). Falls back to an API call
+        (kite.profile) when the cache has expired or on first check.
+        """
         if self._access_token is None:
             return False
         # Paper-only mode (no real broker connection)
         if self._kite is None:
             return self._access_token == "paper_token"
+        # Use cached result if token hasn't expired yet
+        if time.monotonic() < self._auth_cache_valid_until:
+            return True
+        # Cache expired or never set — verify via API
         try:
             async with self._rate_limiter:
                 await asyncio.to_thread(self._kite.profile)
+            self._update_auth_cache()
             return True
         except Exception:
+            self._auth_cache_valid_until = 0.0  # Invalidate cache
             return False
 
     # ------------------------------------------------------------------
@@ -339,15 +445,26 @@ class ZerodhaBroker(BrokerBase):
     # ------------------------------------------------------------------
 
     async def _retry_api_call(self, fn: Any) -> Any:
-        """Retry with exponential backoff."""
+        """Retry with exponential backoff and circuit breaker protection."""
+        # Fail fast if circuit breaker is open
+        self._circuit_breaker.check()
+
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
             try:
                 async with self._rate_limiter:
                     result = await asyncio.to_thread(fn)
+                self._circuit_breaker.record_success()
                 return result
             except Exception as e:
                 last_error = e
+                self._circuit_breaker.record_failure()
+                # If circuit just opened, don't retry — fail fast
+                if self._circuit_breaker.state == "OPEN":
+                    logger.error(
+                        "API call failed and circuit breaker tripped: %s", e,
+                    )
+                    break
                 delay = self._retry_base_delay * (2 ** attempt)
                 logger.warning(
                     "API call failed (attempt %d/%d), retrying in %.1fs: %s",

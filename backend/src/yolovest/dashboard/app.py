@@ -2,16 +2,28 @@
 
 REST API + WebSocket for portfolio overview, trade detail, reports, and auth.
 All endpoints read from the shared database via AppContext.
+
+Security:
+- Session token auth: POST /api/auth/login returns a signed HMAC token
+- Bearer token in Authorization header for all subsequent requests
+- Basic auth still supported for backwards compatibility (CLI, curl)
+- CSRF protection: state-changing endpoints require X-CSRF-Token header
 """
 
+import hashlib
+import hmac
 import json
 import logging
 import secrets
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    Depends, FastAPI, Header, HTTPException, Query, Request,
+    WebSocket, WebSocketDisconnect, status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -21,7 +33,56 @@ from yolovest.context import AppContext
 
 logger = logging.getLogger(__name__)
 
-security = HTTPBasic()
+security = HTTPBasic(auto_error=False)
+
+# Token signing key — generated once per process lifetime.
+# Tokens become invalid on restart (forces re-login, which is fine).
+_TOKEN_SECRET = secrets.token_bytes(32)
+_TOKEN_TTL_SEC = 24 * 60 * 60  # 24 hours
+
+
+def _sign_token(username: str) -> str:
+    """Create a signed session token: base64(payload).signature."""
+    import base64
+
+    payload = json.dumps({
+        "user": username,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + _TOKEN_TTL_SEC,
+        "jti": secrets.token_hex(8),
+    }).encode()
+    payload_b64 = base64.urlsafe_b64encode(payload).decode()
+    sig = hmac.new(_TOKEN_SECRET, payload, hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{sig}"
+
+
+def _verify_token(token: str) -> str:
+    """Verify a signed session token. Returns username or raises."""
+    import base64
+
+    parts = token.split(".", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=401, detail="Invalid token format")
+
+    payload_b64, sig = parts
+    try:
+        payload = base64.urlsafe_b64decode(payload_b64)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token encoding")
+
+    expected_sig = hmac.new(_TOKEN_SECRET, payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        raise HTTPException(status_code=401, detail="Invalid token signature")
+
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    if data.get("exp", 0) < time.time():
+        raise HTTPException(status_code=401, detail="Token expired")
+
+    return data.get("user", "anonymous")
 
 
 def _extract_broker_capital(margins: dict[str, Any]) -> float:
@@ -144,12 +205,45 @@ def create_app(ctx: AppContext) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # CSRF middleware — require X-CSRF-Token on state-changing methods.
+    # Exempt paths: login (no token yet), Zerodha postback (external caller),
+    # health check (no auth needed).
+    _CSRF_EXEMPT_PATHS = {
+        "/api/auth/login",
+        "/api/auth/zerodha/postback",
+        "/api/health",
+        "/ws",
+    }
+
+    @app.middleware("http")
+    async def csrf_middleware(request: Request, call_next):
+        if request.method in ("POST", "PUT", "DELETE"):
+            if request.url.path not in _CSRF_EXEMPT_PATHS:
+                csrf_header = request.headers.get("X-CSRF-Token", "")
+                # Only enforce CSRF when using Bearer auth (session-based).
+                # Basic auth requests (curl, CLI) are exempt since they
+                # already prove identity per-request.
+                auth_header = request.headers.get("Authorization", "")
+                if auth_header.startswith("Bearer ") and not csrf_header:
+                    from starlette.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Missing X-CSRF-Token header"},
+                    )
+                if csrf_header and not secrets.compare_digest(csrf_header, _csrf_token):
+                    from starlette.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Invalid CSRF token"},
+                    )
+        return await call_next(request)
+
     # Store context for dependency injection
     app.state.ctx = ctx
 
     # Auth config
     dash_password = (
-        ctx.config.dashboard.password
+        ctx.config.dashboard.password.get_secret_value()
         if hasattr(ctx.config.dashboard, "password")
         else "yolovest"
     )
@@ -167,16 +261,51 @@ def create_app(ctx: AppContext) -> FastAPI:
         except Exception:
             pass
 
-    def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)) -> str:  # noqa: B008
-        """Basic password protection."""
-        correct = secrets.compare_digest(credentials.password, _password["current"])
-        if not correct:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials",
-                headers={"WWW-Authenticate": "Basic"},
-            )
-        return credentials.username
+    def verify_credentials(
+        request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+    ) -> str:
+        """Authenticate via Bearer token (preferred) or Basic auth (fallback).
+
+        Bearer token: Authorization: Bearer <token from /api/auth/login>
+        Basic auth: Authorization: Basic <base64(user:password)>
+        """
+        auth_header = request.headers.get("Authorization", "")
+
+        # Try Bearer token first
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            return _verify_token(token)
+
+        # Fall back to Basic auth
+        if credentials is not None:
+            correct = secrets.compare_digest(credentials.password, _password["current"])
+            if correct:
+                return credentials.username
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": 'Bearer, Basic realm="YoloVest"'},
+        )
+
+    # CSRF token — one per process, sent to client on login
+    _csrf_token = secrets.token_hex(32)
+
+    # Login endpoint — issues session token + CSRF token
+    @app.post("/api/auth/login")
+    async def login(body: dict[str, Any]) -> dict[str, Any]:
+        """Authenticate with password and receive a session token."""
+        pw = body.get("password", "")
+        if not secrets.compare_digest(pw, _password["current"]):
+            raise HTTPException(status_code=401, detail="Invalid password")
+        username = body.get("username", "admin")
+        token = _sign_token(username)
+        return {
+            "token": token,
+            "csrf_token": _csrf_token,
+            "expires_in": _TOKEN_TTL_SEC,
+        }
 
     # ------------------------------------------------------------------
     # Portfolio Overview
@@ -240,19 +369,64 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Current open positions."""
         return await ctx.db.get_open_positions()
 
+    # Track whether we've already sent a broker-expired Telegram alert this session
+    # to avoid spamming on every page load / auto-refresh.
+    _broker_expired_alerted = {"sent": False}
+
     @app.get("/api/holdings")
-    async def get_holdings(_user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
+    async def get_holdings(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
         """Zerodha portfolio holdings (CNC/delivery stocks held overnight).
 
-        These are external holdings — may include stocks not traded by YoloVest.
-        Returns empty list if broker is not authenticated.
+        Returns {holdings: [...], broker_authenticated: true} on success.
+        Returns {holdings: [], broker_authenticated: false, login_url: ...}
+        when broker token is expired/missing, plus logs and Telegram alert.
         """
         try:
-            if not await ctx.broker.is_authenticated():
-                return []
-            return await ctx.broker.get_holdings()
+            authenticated = await ctx.broker.is_authenticated()
+        except Exception:
+            authenticated = False
+
+        if not authenticated:
+            login_url = ctx.broker.get_login_url()
+            logger.warning(
+                "Holdings request: broker not authenticated "
+                "(token expired or missing)"
+            )
+            # Send Telegram alert once per session (not on every page load)
+            if (
+                not _broker_expired_alerted["sent"]
+                and ctx.config.notifications.telegram.enabled
+                and ctx.config.notifications.telegram.alerts.errors
+            ):
+                _broker_expired_alerted["sent"] = True
+                try:
+                    await ctx.notify.send(
+                        "Kite session expired — holdings unavailable.\n"
+                        f"Re-authenticate: {login_url}\n"
+                        "Or use /auth (request_token) in Telegram.",
+                        alert_type="errors",
+                    )
+                except Exception as e:
+                    logger.warning("Failed to send broker-expired Telegram alert: %s", e)
+            return {
+                "holdings": [],
+                "broker_authenticated": False,
+                "login_url": login_url,
+            }
+
+        # Reset alert flag on successful auth
+        _broker_expired_alerted["sent"] = False
+
+        try:
+            holdings = await ctx.broker.get_holdings()
+            return {
+                "holdings": holdings,
+                "broker_authenticated": True,
+            }
         except Exception as e:
-            logger.warning("Failed to fetch holdings: %s", e)
+            logger.error("Failed to fetch holdings: %s", e)
             raise HTTPException(
                 status_code=502,
                 detail=f"Broker error: {e}. Token may be expired — re-authenticate via Settings.",
@@ -360,6 +534,14 @@ def create_app(ctx: AppContext) -> FastAPI:
     ) -> list[dict[str, Any]]:
         """Daily equity curve data for charting."""
         return await ctx.db.get_equity_curve(days=days)
+
+    @app.get("/api/pnl-calendar")
+    async def get_pnl_calendar(
+        days: int = Query(90, ge=1, le=365),
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Daily PnL for calendar heatmap: {date, pnl, trade_count, wins, losses}."""
+        return await ctx.db.get_daily_pnl_calendar(days=days)
 
     # ------------------------------------------------------------------
     # Trade Detail View
@@ -525,8 +707,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         # Don't ping on page load (wastes quota and blocks for 20+s on 429).
         # Just report config status; user can click "Test Connection" to verify.
         llm_enabled = getattr(ctx.config.llm, "enabled", False)
-        gemini_api_key = getattr(ctx.config.llm, "api_key", "")
-        gemini_configured = bool(gemini_api_key) and not gemini_api_key.startswith("${")
+        _llm_key_raw = ctx.config.llm.api_key.get_secret_value() if hasattr(ctx.config.llm.api_key, "get_secret_value") else str(ctx.config.llm.api_key)
+        gemini_configured = bool(_llm_key_raw) and not _llm_key_raw.startswith("${")
         results["gemini"] = {
             "enabled": llm_enabled,
             "configured": gemini_configured,
@@ -535,7 +717,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         }
 
         # --- Zerodha Broker ---
-        broker_configured = bool(getattr(ctx.config.broker, "api_key", ""))
+        _broker_key_raw = ctx.config.broker.api_key.get_secret_value() if hasattr(ctx.config.broker.api_key, "get_secret_value") else str(ctx.config.broker.api_key)
+        broker_configured = bool(_broker_key_raw) and not _broker_key_raw.startswith("${")
         # Verify token is actually valid (catches expired tokens)
         broker_authenticated = False
         if broker_configured:
@@ -555,7 +738,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         # --- Telegram Bot ---
         telegram_cfg = ctx.config.notifications.telegram if hasattr(ctx.config, "notifications") else None
         telegram_enabled = bool(telegram_cfg and getattr(telegram_cfg, "enabled", False))
-        bot_token = getattr(telegram_cfg, "bot_token", "") if telegram_cfg else ""
+        _bot_token_raw = getattr(telegram_cfg, "bot_token", None) if telegram_cfg else None
+        bot_token = _bot_token_raw.get_secret_value() if hasattr(_bot_token_raw, "get_secret_value") else str(_bot_token_raw or "")
         chat_id = getattr(telegram_cfg, "chat_id", "") if telegram_cfg else ""
         telegram_configured = bool(telegram_cfg and bot_token and chat_id)
 
@@ -643,7 +827,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 from yolovest.main import _sync_kite_data_token
                 _sync_kite_data_token(ctx)
                 try:
-                    await ctx.notify.send("Kite authenticated successfully via dashboard.")
+                    await ctx.notify.send("Kite authenticated successfully.")
                 except Exception:
                     pass
                 return RedirectResponse(url="/integrations?zerodha_auth=success")
@@ -736,13 +920,14 @@ def create_app(ctx: AppContext) -> FastAPI:
         symbol: str | None = Query(None),
         source: str | None = Query(None),
         date_from: str | None = Query(None, description="YYYY-MM-DD"),
+        date_to: str | None = Query(None, description="YYYY-MM-DD (exclusive upper bound)"),
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Recent news articles with source attribution."""
         articles = await ctx.db.get_news_articles(
-            symbol=symbol, source=source, date_from=date_from,
+            symbol=symbol, source=source, date_from=date_from, date_to=date_to,
             limit=limit, offset=offset,
         )
         return articles
@@ -980,13 +1165,92 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def get_system_state(
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """System state including kill switch and orchestrator status."""
+        """System state including kill switch, degraded features, and auto-approvals."""
         kill_switch = await ctx.db.is_kill_switch_active()
         orchestrator_state = await ctx.db.get_system_state("orchestrator")
+
+        # Build degraded mode report: which features are running with fallbacks
+        degraded: list[dict[str, str]] = []
+
+        if not ctx.config.llm.enabled:
+            degraded.append({
+                "feature": "LLM (Gemini)",
+                "status": "disabled",
+                "impact": "Sentiment analysis off, trade review auto-approves, "
+                          "market summaries unavailable",
+            })
+        elif not ctx.config.llm.api_key.get_secret_value():
+            degraded.append({
+                "feature": "LLM (Gemini)",
+                "status": "no_api_key",
+                "impact": "LLM enabled but no API key — all LLM calls use stub defaults",
+            })
+
+        if not ctx.config.market_data.news_enabled:
+            degraded.append({
+                "feature": "News sources",
+                "status": "disabled",
+                "impact": "No sentiment data from MoneyControl, ET Markets, LiveMint",
+            })
+
+        if not ctx.config.market_data.scrapers_enabled:
+            degraded.append({
+                "feature": "Scrapers",
+                "status": "disabled",
+                "impact": "No fundamentals (Screener.in), technicals (Trendlyne), "
+                          "economic calendar, or Google Finance data",
+            })
+
+        if not ctx.config.notifications.telegram.enabled:
+            degraded.append({
+                "feature": "Telegram",
+                "status": "disabled",
+                "impact": "No Telegram alerts — console/dashboard only",
+            })
+
+        if not ctx.config.risk.llm_review_enabled:
+            degraded.append({
+                "feature": "LLM trade review",
+                "status": "disabled",
+                "impact": "All trades auto-approved without AI review",
+            })
+        elif not ctx.config.llm.enabled:
+            degraded.append({
+                "feature": "LLM trade review",
+                "status": "fallback",
+                "impact": "LLM review enabled but LLM disabled — "
+                          "trades auto-approved via rules-only fallback",
+            })
+
+        # Count today's auto-approved trades (no LLM review)
+        auto_approved_today = 0
+        llm_reviewed_today = 0
+        try:
+            cursor = await ctx.db.conn.execute(
+                "SELECT decision, COUNT(*) as cnt FROM llm_reviews "
+                "WHERE created_at >= date('now', 'start of day') "
+                "GROUP BY decision"
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                decision = (dict(row).get("decision") or "").upper()
+                cnt = dict(row).get("cnt", 0)
+                if decision == "AUTO_APPROVE":
+                    auto_approved_today += cnt
+                else:
+                    llm_reviewed_today += cnt
+        except Exception:
+            pass
+
         return {
             "kill_switch_active": kill_switch,
             "orchestrator": orchestrator_state,
             "mode": ctx.config.mode,
+            "degraded_features": degraded,
+            "is_degraded": len(degraded) > 0,
+            "show_degraded_banner": ctx.config.dashboard.show_degraded_banner,
+            "auto_approved_today": auto_approved_today,
+            "llm_reviewed_today": llm_reviewed_today,
         }
 
     # ------------------------------------------------------------------
@@ -1175,8 +1439,12 @@ def create_app(ctx: AppContext) -> FastAPI:
         max_single_stock_pct = body.get("max_single_stock_pct", ctx.config.risk.max_single_stock_pct)
         max_positions = body.get("max_positions", ctx.config.risk.max_open_positions)
         initial_capital = body.get("initial_capital", 100000)
+        date_from = body.get("date_from")  # YYYY-MM-DD or None
+        date_to = body.get("date_to")  # YYYY-MM-DD or None
 
-        signals = await ctx.db.get_historical_signals(200)
+        signals = await ctx.db.get_historical_signals(
+            limit=500, date_from=date_from, date_to=date_to,
+        )
 
         # Simple simulation
         capital = float(initial_capital)
@@ -1236,7 +1504,10 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "max_single_stock_pct": max_single_stock_pct,
                 "max_positions": max_positions,
                 "initial_capital": initial_capital,
+                "date_from": date_from,
+                "date_to": date_to,
             },
+            "signals_available": len(signals),
             "results": {
                 "trades_taken": trades_taken,
                 "trades_skipped": trades_skipped,
@@ -1668,6 +1939,28 @@ def create_app(ctx: AppContext) -> FastAPI:
         # Persist to DB so it survives restarts
         await ctx.db.set_system_state("dashboard_password", new_password)
         return {"success": True}
+
+    @app.post("/api/config/reload")
+    async def reload_config(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Reload config.yaml without restart (same as kill -HUP).
+
+        Only reloads safe runtime settings. Structural changes
+        (broker, DB, LLM provider) still require a full restart.
+        """
+        reload_fn = getattr(ctx, "_reload_config", None)
+        if reload_fn is None:
+            raise HTTPException(
+                status_code=501,
+                detail="Config reload not available (missing reload handler)",
+            )
+        try:
+            result = reload_fn()
+            return result
+        except Exception as e:
+            logger.error("Config reload via API failed: %s", e)
+            raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
 
     # ------------------------------------------------------------------
     # Manual Skill Trigger

@@ -40,6 +40,18 @@ class MarketDataIngester(MarketDataBase):
         self._daily_providers = daily_providers
         self._intraday_provider = intraday_provider
         self._stale_minutes = stale_threshold_minutes
+        # Per-symbol metadata from the last fetch (provider errors, empties)
+        self._last_fetch_meta: dict[str, dict[str, Any]] = {}
+
+    def get_fetch_meta(self, symbol: str) -> dict[str, Any]:
+        """Get metadata from the last fetch for a symbol.
+
+        Returns dict with:
+        - provider_errors: number of providers that raised exceptions
+        - providers_empty: number that returned empty data (e.g. delisted)
+        - all_providers_tried: True if every provider was tried (fallback chain exhausted)
+        """
+        return self._last_fetch_meta.get(symbol, {})
 
     async def get_ohlcv(
         self, symbol: str, interval: str, days: int = 30,
@@ -54,14 +66,27 @@ class MarketDataIngester(MarketDataBase):
         providers = self._select_providers(interval)
         last_error: Exception | None = None
         best_stale_bars: list[OHLCVBar] | None = None
+        provider_errors = 0
+        providers_empty = 0
 
         for provider in providers:
             try:
                 bars = await provider.get_ohlcv(symbol, interval, days)
                 bars = self._validate_bars(bars)
                 if not bars:
+                    providers_empty += 1
+                    logger.debug(
+                        "Provider %s returned empty for %s",
+                        type(provider).__name__, symbol,
+                    )
                     continue
                 if skip_stale_check or not self._is_stale(bars, interval):
+                    # Track provider health for quarantine decisions
+                    self._last_fetch_meta[symbol] = {
+                        "provider_errors": provider_errors,
+                        "providers_empty": providers_empty,
+                        "all_providers_tried": False,
+                    }
                     return bars
                 # Stale but valid — keep as fallback
                 logger.warning(
@@ -74,12 +99,20 @@ class MarketDataIngester(MarketDataBase):
                 last_error = ValueError(f"Stale data from {type(provider).__name__}")
                 continue
             except Exception as e:
+                provider_errors += 1
                 logger.warning(
                     "Provider %s failed for %s: %s",
                     type(provider).__name__, symbol, e,
                 )
                 last_error = e
                 continue
+
+        # All providers tried — record metadata
+        self._last_fetch_meta[symbol] = {
+            "provider_errors": provider_errors,
+            "providers_empty": providers_empty,
+            "all_providers_tried": True,
+        }
 
         # If all providers returned stale data, return the best one anyway
         # (better to have stale data in DB than nothing)

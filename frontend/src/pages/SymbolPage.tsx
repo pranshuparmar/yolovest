@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import {
   useSymbolOHLCV,
@@ -8,8 +8,8 @@ import {
   useNews,
 } from "../hooks/queries";
 import {
-  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  BarChart, Bar, CartesianGrid,
+  ComposedChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  BarChart, Bar, CartesianGrid, Scatter, Cell,
 } from "recharts";
 import clsx from "clsx";
 import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
@@ -32,13 +32,37 @@ export function SymbolPage() {
   const ct = useChartTheme();
   const tooltipStyle = useTooltipStyle();
 
-  const chartData = (ohlcv || []).map((b) => ({
-    date: new Date(b.timestamp).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" }),
-    close: b.close,
-    volume: b.volume,
-    high: b.high,
-    low: b.low,
-  }));
+  // Build chart data with trade entry/exit overlays
+  const chartData = useMemo(() => {
+    // Build trade lookup by date
+    const entryMap = new Map<string, { price: number; type: string }>();
+    const exitMap = new Map<string, { price: number; type: string; pnl: number | null }>();
+    for (const t of trades || []) {
+      const entryDate = new Date(t.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" });
+      entryMap.set(entryDate, { price: t.fill_price, type: t.signal_type });
+      if (t.closed_at && t.exit_price != null) {
+        const exitDate = new Date(t.closed_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" });
+        exitMap.set(exitDate, { price: t.exit_price, type: t.signal_type, pnl: t.pnl });
+      }
+    }
+
+    return (ohlcv || []).map((b) => {
+      const date = new Date(b.timestamp).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" });
+      const entry = entryMap.get(date);
+      const exit = exitMap.get(date);
+      return {
+        date,
+        close: b.close,
+        volume: b.volume,
+        high: b.high,
+        low: b.low,
+        entryPrice: entry?.price ?? null,
+        entryType: entry?.type ?? null,
+        exitPrice: exit?.price ?? null,
+        exitPnl: exit?.pnl ?? null,
+      };
+    });
+  }, [ohlcv, trades]);
 
   const lastPrice = chartData.length > 0 ? chartData[chartData.length - 1].close : null;
   const firstPrice = chartData.length > 0 ? chartData[0].close : null;
@@ -83,8 +107,9 @@ export function SymbolPage() {
         ) : chartData.length === 0 ? (
           <p className="text-gray-500 text-sm py-8 text-center">No OHLCV data available</p>
         ) : (
+          <>
           <ResponsiveContainer width="100%" height={280}>
-            <AreaChart data={chartData}>
+            <ComposedChart data={chartData}>
               <defs>
                 <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#3fb950" stopOpacity={0.3} />
@@ -94,10 +119,63 @@ export function SymbolPage() {
               <CartesianGrid strokeDasharray="3 3" stroke={ct.grid} />
               <XAxis dataKey="date" tick={{ fontSize: 10, fill: ct.tick }} />
               <YAxis domain={["auto", "auto"]} tick={{ fontSize: 10, fill: ct.tick }} />
-              <Tooltip contentStyle={tooltipStyle} />
+              <Tooltip
+                contentStyle={tooltipStyle}
+                formatter={(value: number, name: string) => {
+                  if (name === "entryPrice") return [`₹${fmt(value)}`, "Entry"];
+                  if (name === "exitPrice") return [`₹${fmt(value)}`, "Exit"];
+                  if (name === "close") return [`₹${fmt(value)}`, "Close"];
+                  return [value, name];
+                }}
+              />
               <Area type="monotone" dataKey="close" stroke="#3fb950" fill="url(#priceGrad)" strokeWidth={2} />
-            </AreaChart>
+              {/* Trade entry points */}
+              <Scatter dataKey="entryPrice" name="entryPrice" shape="triangle" isAnimationActive={false}>
+                {chartData.map((d, i) => (
+                  <Cell
+                    key={i}
+                    fill={d.entryType === "BUY" ? "#3fb950" : "#f85149"}
+                    stroke={d.entryType === "BUY" ? "#3fb950" : "#f85149"}
+                    r={d.entryPrice != null ? 6 : 0}
+                  />
+                ))}
+              </Scatter>
+              {/* Trade exit points */}
+              <Scatter dataKey="exitPrice" name="exitPrice" shape="diamond" isAnimationActive={false}>
+                {chartData.map((d, i) => (
+                  <Cell
+                    key={i}
+                    fill={d.exitPnl != null && d.exitPnl >= 0 ? "#3fb950" : "#f85149"}
+                    stroke="#ffffff"
+                    strokeWidth={1}
+                    r={d.exitPrice != null ? 6 : 0}
+                  />
+                ))}
+              </Scatter>
+            </ComposedChart>
           </ResponsiveContainer>
+          {/* Legend for trade markers */}
+          {(trades?.length ?? 0) > 0 && (
+            <div className="flex items-center gap-4 mt-2 text-[10px] text-gray-500">
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-0 h-0 border-l-[4px] border-r-[4px] border-b-[6px] border-l-transparent border-r-transparent border-b-emerald-400" />
+                BUY Entry
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-0 h-0 border-l-[4px] border-r-[4px] border-b-[6px] border-l-transparent border-r-transparent border-b-red-400" />
+                SELL Entry
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-2.5 h-2.5 rotate-45 bg-emerald-400 border border-white" />
+                Profitable Exit
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-2.5 h-2.5 rotate-45 bg-red-400 border border-white" />
+                Loss Exit
+              </span>
+            </div>
+          )}
+          </>
         )}
       </div>
 

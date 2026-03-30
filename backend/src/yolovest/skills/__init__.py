@@ -1,6 +1,6 @@
 """OpenClaw skill registry for YoloVest.
 
-All 16 skills registered here. The agent orchestrator discovers and invokes
+All 17 skills registered here. The agent orchestrator discovers and invokes
 skills via this registry based on triggers (heartbeat, cron, event, manual).
 """
 
@@ -16,6 +16,7 @@ from yolovest.skills.kill_switch import KillSwitchSkill
 from yolovest.skills.llm_review import LLMReviewSkill
 from yolovest.skills.market_scan import MarketScanSkill
 from yolovest.skills.model_retrain import ModelRetrainSkill
+from yolovest.skills.news_digest import NewsDigestSkill
 from yolovest.skills.position_monitor import PositionMonitorSkill
 from yolovest.skills.predict_track import PredictTrackSkill
 from yolovest.skills.report_generate import ReportGenerateSkill
@@ -42,6 +43,7 @@ SKILL_REGISTRY: dict[str, type] = {
     "health-check": HealthCheckSkill,
     "kill-switch": KillSwitchSkill,
     "database-maintenance": DatabaseMaintenanceSkill,
+    "news-digest": NewsDigestSkill,
 }
 
 __all__ = ["SKILL_REGISTRY"]

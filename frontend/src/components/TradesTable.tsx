@@ -35,7 +35,7 @@ export function TradesTable({
             {!compact && <th className="pb-2 pr-4">Product</th>}
             <th className="pb-2 pr-4">Status</th>
             <th className="pb-2 pr-4">PnL</th>
-            <th className="pb-2">Time</th>
+            <th className="pb-2">Date & Time</th>
           </tr>
         </thead>
         <tbody>
@@ -77,7 +77,12 @@ export function TradesTable({
               >
                 {t.pnl !== null ? `₹${fmt(t.pnl)}` : "—"}
               </td>
-              <td className="py-2 text-gray-500 text-xs">
+              <td className="py-2 text-gray-500 text-xs whitespace-nowrap">
+                {new Date(t.created_at).toLocaleDateString("en-IN", {
+                  timeZone: "Asia/Kolkata",
+                  day: "2-digit",
+                  month: "short",
+                })}{" "}
                 {new Date(t.created_at).toLocaleTimeString("en-IN", {
                   timeZone: "Asia/Kolkata",
                   hour: "2-digit",

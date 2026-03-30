@@ -26,6 +26,7 @@ market_data:
   bhavcopy_dir: ./data/bhavcopy       # path to downloaded NSE Bhavcopy CSVs
   cache_ttl_minutes: 15               # cache fetched data to reduce API calls
   stale_threshold_minutes: 30         # reject data older than this many minutes
+  sentiment_ttl_hours: 48             # ignore sentiment older than this in scanning (default 48h)
   backfill_days: 365                  # days of history for backfill-data skill
 
 heartbeat:
@@ -70,14 +71,14 @@ risk:
   mandatory_stop_loss: true           # enforce SL on every trade
   trailing_sl_enabled: true           # enable trailing stop-loss
   trailing_sl_trigger_multiple: 1.5   # activate trailing SL at 1.5x risk in profit
-  trailing_sl_step_pct: 0.005         # trail SL in 0.5% steps
+  trailing_sl_step_pct: 0.01           # trail SL in 1% steps (0.5% is too tight for mid-caps)
   llm_review_enabled: true            # Gemini risk review before execution
   llm_fallback_to_rules: true         # rules-only if LLM unavailable
   max_same_sector_positions: 1        # correlation check — max positions per sector
   kill_switch_enabled: true           # enable /stop and /kill commands
   kill_switch_persistent: true        # kill switch survives restarts
   min_confidence_score: 0.65          # minimum ML confidence to take a trade
-  max_trades_per_day: 10              # max trades per day (anti-overtrading)
+  max_trades_per_day: 5               # max trades per day (3 positions + 2 re-entries)
   loss_cooldown_minutes: 15           # wait after a losing trade before next entry
   symbol_cooldown_days: 1             # hard block on symbol after last trade (days)
   symbol_repeat_lookback_days: 5      # elevated confidence window for repeat symbols
@@ -88,7 +89,7 @@ risk:
 market_hours:
   open: "09:15"
   close: "15:30"
-  order_start: "09:15"               # earliest time for new orders
+  order_start: "09:30"               # earliest time for new orders (skip opening volatility)
   order_end: "15:15"                  # latest time for new orders
   square_off: "15:15"                 # auto square-off intraday positions
   square_off_extension: "00:05"       # extra window for square-off orders after order_end
@@ -119,7 +120,7 @@ database:
     ohlcv_days: 730                   # OHLCV data retention (2 years)
     audit_log_days: 365               # audit log retention (1 financial year)
     predictions_days: 365             # prediction data retention (1 year)
-    news_days: 30                     # news article retention
+    news_days: 90                     # news article retention (lightweight text, useful for pattern analysis)
     economic_events_days: 365         # economic calendar event retention
 
 retraining:
@@ -143,7 +144,13 @@ dashboard:
   host: "0.0.0.0"
   port: 8080                          # internal API port (nginx proxies to this in Docker)
   password: yolovest                  # basic auth password (change in production!)
+  show_degraded_banner: true          # set false to hide "Degraded Mode" banner (e.g. intentionally running without LLM)
   # Dashboard URL in logs/Telegram is derived from DOMAIN env var (e.g. DOMAIN=yolovest.example.com)
+
+news_digest:
+  enabled: true                         # send daily news headlines to Telegram
+  schedule_cron: "0 9 * * *"             # 9:00 AM IST, every day
+  max_headlines: 10                     # number of headlines to include
 
 notifications:
   telegram:

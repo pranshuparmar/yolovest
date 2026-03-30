@@ -5,6 +5,7 @@ import type {
   Trade,
   TradeDetail,
   EquityCurvePoint,
+  PnlCalendarDay,
   WatchlistItem,
   SectorRotation,
   ScoreboardEntry,
@@ -41,7 +42,7 @@ import type {
   DryRunResult,
   DryRunSummary,
   DryRunSignal,
-  HoldingEntry,
+  HoldingsResponse,
   ManualOrder,
 } from "../types/api";
 
@@ -54,7 +55,7 @@ export const api = {
 
   tradesToday: () => apiFetch<Trade[]>("/api/trades/today"),
 
-  holdings: () => apiFetch<HoldingEntry[]>("/api/holdings"),
+  holdings: () => apiFetch<HoldingsResponse>("/api/holdings"),
 
   placeOrder: (order: ManualOrder) =>
     apiFetch<{ success: boolean; order_id?: string; error?: string }>("/api/orders", {
@@ -82,6 +83,9 @@ export const api = {
 
   equityCurve: (days = 30) =>
     apiFetch<EquityCurvePoint[]>(`/api/equity-curve?days=${days}`),
+
+  pnlCalendar: (days = 90) =>
+    apiFetch<PnlCalendarDay[]>(`/api/pnl-calendar?days=${days}`),
 
   watchlist: () => apiFetch<WatchlistItem[]>("/api/watchlist"),
 
@@ -179,11 +183,12 @@ export const api = {
     return apiFetch<EarningsEvent[]>(`/api/earnings${qs ? "?" + qs : ""}`);
   },
 
-  news: (params?: { symbol?: string; source?: string; date_from?: string; limit?: number; offset?: number }) => {
+  news: (params?: { symbol?: string; source?: string; date_from?: string; date_to?: string; limit?: number; offset?: number }) => {
     const q = new URLSearchParams();
     if (params?.symbol) q.set("symbol", params.symbol);
     if (params?.source) q.set("source", params.source);
     if (params?.date_from) q.set("date_from", params.date_from);
+    if (params?.date_to) q.set("date_to", params.date_to);
     if (params?.limit) q.set("limit", String(params.limit));
     if (params?.offset) q.set("offset", String(params.offset));
     const qs = q.toString();
@@ -338,6 +343,9 @@ export const api = {
 
   rejectPendingTrade: (tradeId: number) =>
     apiFetch<{ success: boolean }>(`/api/pending-trades/${tradeId}/reject`, { method: "POST" }),
+
+  reloadConfig: () =>
+    apiFetch<{ status: string; reloaded: string[] }>("/api/config/reload", { method: "POST" }),
 
   // Dry-Run Signal Preview
   runDryRun: () => apiFetch<DryRunResult>("/api/dry-run", { method: "POST" }),

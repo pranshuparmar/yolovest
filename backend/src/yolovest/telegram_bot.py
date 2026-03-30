@@ -57,7 +57,8 @@ class TelegramBot:
 
     @property
     def enabled(self) -> bool:
-        return self._cfg.enabled and bool(self._cfg.bot_token)
+        token = self._cfg.bot_token.get_secret_value()
+        return self._cfg.enabled and bool(token)
 
     async def start(self) -> None:
         """Start the Telegram bot (long-polling)."""
@@ -76,7 +77,7 @@ class TelegramBot:
 
         self._app = (
             ApplicationBuilder()
-            .token(self._cfg.bot_token)
+            .token(self._cfg.bot_token.get_secret_value())
             .build()
         )
 
@@ -144,7 +145,7 @@ class TelegramBot:
                 # Fallback: create and initialize a standalone bot
                 from telegram import Bot
 
-                bot = Bot(token=self._cfg.bot_token)
+                bot = Bot(token=self._cfg.bot_token.get_secret_value())
                 async with bot:
                     await bot.send_message(
                         chat_id=self._cfg.chat_id,

@@ -158,28 +158,42 @@ class _StubBroker:
 
 
 class _StubLLM:
-    """Minimal LLM stub when no real LLM yet)."""
+    """Minimal LLM stub when no real LLM configured.
+
+    Returns safe no-op defaults instead of raising, so callers without
+    try/except won't crash the pipeline.
+    """
 
     async def ping(self) -> bool:
         return False
 
     async def review_trade(self, context: object) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import TradeReview
+        return TradeReview(decision="APPROVE", reasoning="LLM not configured — auto-approved")
 
     async def analyze_sentiment(self, symbol: str, headlines: list[str]) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import SentimentResult
+        return SentimentResult(symbol=symbol, sentiment="neutral", confidence=0.0)
 
     async def summarize_with_web_grounding(self, prompt: str) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import WebGroundingResult
+        return WebGroundingResult(query=prompt, summary="LLM not configured")
 
     async def validate_watchlist(self, *args: object, **kwargs: object) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import WatchlistValidation
+        return WatchlistValidation()
 
     async def summarize_market_day(self) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import MarketDaySummary
+        from yolovest.timezone import now_ist
+        return MarketDaySummary(
+            date=now_ist().strftime("%Y-%m-%d"),
+            market_sentiment="neutral",
+        )
 
     async def analyze_prediction_failures(self, failures: list[dict[str, object]]) -> object:
-        raise NotImplementedError("No LLM configured")
+        from yolovest.models.schemas import FailureAnalysis
+        return FailureAnalysis(summary="LLM not configured — no analysis")
 
 
 class _StubMarketData:
@@ -205,10 +219,12 @@ def _build_db(config: AppConfig) -> Database | _StubDB:
 
 def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
     """Build broker — real if API keys set, stub otherwise."""
-    if config.broker.api_key and config.broker.api_key != "${KITE_API_KEY}":
+    api_key = config.broker.api_key.get_secret_value()
+    api_secret = config.broker.api_secret.get_secret_value()
+    if api_key and api_key != "${KITE_API_KEY}":
         return ZerodhaBroker(
-            api_key=config.broker.api_key,
-            api_secret=config.broker.api_secret,
+            api_key=api_key,
+            api_secret=api_secret,
             mode=config.mode,
             paper_slippage_pct=config.execution.paper_slippage_pct,
             max_retries=config.execution.max_order_retries,
@@ -219,10 +235,9 @@ def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
 
 def _build_llm(config: AppConfig) -> GeminiLLM | _StubLLM:
     """Build LLM — real if enabled + API key set, stub otherwise."""
-    if (config.llm.enabled
-            and config.llm.api_key
-            and config.llm.api_key != "${GEMINI_API_KEY}"):
-        return GeminiLLM(api_key=config.llm.api_key, model=config.llm.model)
+    llm_key = config.llm.api_key.get_secret_value()
+    if (config.llm.enabled and llm_key and llm_key != "${GEMINI_API_KEY}"):
+        return GeminiLLM(api_key=llm_key, model=config.llm.model)
     if not config.llm.enabled:
         logger.info("LLM disabled via config (llm.enabled=false)")
     return _StubLLM()
@@ -240,12 +255,12 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
 
     # Kite data plan as primary when enabled
     if config.market_data.kite_data_enabled:
-        api_key = config.broker.api_key
-        if api_key and api_key != "${KITE_API_KEY}":
+        kite_key = config.broker.api_key.get_secret_value()
+        if kite_key and kite_key != "${KITE_API_KEY}":
             try:
                 from yolovest.data.kite_data import KiteDataProvider
 
-                kite_provider = KiteDataProvider(api_key=api_key)
+                kite_provider = KiteDataProvider(api_key=kite_key)
                 daily_providers.append(kite_provider)
                 logger.info("Kite Connect data provider enabled as primary")
             except Exception as e:
@@ -408,6 +423,17 @@ async def async_main(args: argparse.Namespace) -> None:
         config.mode = args.mode
 
     logger.info("YoloVest starting in %s mode", config.mode)
+    logger.info(
+        "Config toggles: llm.enabled=%s, telegram.enabled=%s, "
+        "news_enabled=%s, scrapers_enabled=%s, kite_data_enabled=%s, "
+        "llm_review_enabled=%s",
+        config.llm.enabled,
+        config.notifications.telegram.enabled,
+        config.market_data.news_enabled,
+        config.market_data.scrapers_enabled,
+        config.market_data.kite_data_enabled,
+        config.risk.llm_review_enabled,
+    )
 
     # Build context
     ctx = build_context(config)
@@ -482,6 +508,11 @@ async def async_main(args: argparse.Namespace) -> None:
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
 
+    # Build heartbeat watchdog
+    from yolovest.watchdog import HeartbeatWatchdog
+    watchdog = HeartbeatWatchdog(ctx)
+    orchestrator.set_watchdog(watchdog)
+
     # Wire WebSocket broadcasting for skill completion notifications
     # and event bus → WebSocket bridge for real-time dashboard updates
     try:
@@ -511,13 +542,62 @@ async def async_main(args: argparse.Namespace) -> None:
     # Handle graceful shutdown
     loop = asyncio.get_running_loop()
 
+    def reload_config_from_file() -> dict[str, Any]:
+        """Reload config.yaml and apply safe runtime changes.
+
+        Only reloads settings that are safe to change at runtime.
+        Structural changes (broker, DB, LLM provider) require restart.
+        Returns dict with status and reloaded sections.
+        """
+        new_config = load_config(args.config)
+        # Safe to hot-reload: risk params, scanning weights, heartbeat timing,
+        # market hours, execution params, transaction costs, alert toggles
+        ctx.config.risk = new_config.risk
+        ctx.config.scanning = new_config.scanning
+        ctx.config.heartbeat = new_config.heartbeat
+        ctx.config.market_hours = new_config.market_hours
+        ctx.config.execution = new_config.execution
+        ctx.config.transaction_costs = new_config.transaction_costs
+        ctx.config.strategy = new_config.strategy
+        ctx.config.notifications = new_config.notifications
+        ctx.config.reports = new_config.reports
+        ctx.config.retraining = new_config.retraining
+        ctx.config.market_data = new_config.market_data
+        ctx.config.dashboard = new_config.dashboard
+        ctx.config.news_digest = new_config.news_digest
+        # Update market hours checker with new config
+        ctx.market_hours = MarketHoursChecker(ctx.config)
+        reloaded = [
+            "risk", "scanning", "heartbeat", "market_hours", "execution",
+            "transaction_costs", "strategy", "notifications", "reports",
+            "retraining", "market_data", "dashboard",
+        ]
+        logger.info("Config reloaded: %s", ", ".join(reloaded))
+        return {"status": "ok", "reloaded": reloaded}
+
+    # Store reload function on app state so the dashboard can call it
+    ctx._reload_config = reload_config_from_file  # type: ignore[attr-defined]
+
     def shutdown_handler() -> None:
         logger.info("Shutdown signal received")
         orchestrator.stop()
         cron_scheduler.stop()
 
+    def reload_handler() -> None:
+        """SIGHUP handler: reload config.yaml without restart."""
+        logger.info("SIGHUP received — reloading config from %s", args.config)
+        try:
+            reload_config_from_file()
+        except Exception:
+            logger.exception("Config reload failed — keeping previous config")
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, shutdown_handler)
+    # SIGHUP for config reload (Unix only)
+    try:
+        loop.add_signal_handler(signal.SIGHUP, reload_handler)
+    except (ValueError, OSError):
+        pass  # SIGHUP not available on Windows
 
     # Start Telegram bot if enabled
     telegram_task = None
@@ -537,6 +617,9 @@ async def async_main(args: argparse.Namespace) -> None:
     # Start CRON scheduler as background task
     cron_task = asyncio.create_task(_start_cron_scheduler(cron_scheduler))
 
+    # Start heartbeat watchdog
+    watchdog_task = asyncio.create_task(_start_watchdog(watchdog))
+
     # Start
     import os
     domain = os.environ.get("DOMAIN")
@@ -555,9 +638,11 @@ async def async_main(args: argparse.Namespace) -> None:
     try:
         await orchestrator.start()
     finally:
-        # 1. Stop cron scheduler
+        # 1. Stop cron scheduler and watchdog
         cron_scheduler.stop()
         cron_task.cancel()
+        watchdog.stop()
+        watchdog_task.cancel()
 
         # 2. Cancel telegram task to interrupt the long-poll HTTP request,
         #    then call stop() to cleanly shut down the updater.
@@ -611,6 +696,14 @@ async def _start_cron_scheduler(scheduler: CronScheduler) -> None:
         await scheduler.start()
     except Exception:
         logger.exception("CRON scheduler failed")
+
+
+async def _start_watchdog(watchdog: "HeartbeatWatchdog") -> None:
+    """Start the heartbeat watchdog in background."""
+    try:
+        await watchdog.start()
+    except Exception:
+        logger.exception("Heartbeat watchdog failed")
 
 
 async def _start_dashboard(ctx: AppContext) -> None:

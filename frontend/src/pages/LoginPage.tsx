@@ -13,15 +13,8 @@ export function LoginPage() {
     setLoading(true);
 
     try {
-      const res = await fetch("/api/portfolio", {
-        headers: {
-          Authorization: "Basic " + btoa(":" + password),
-        },
-      });
-
-      if (res.ok) {
-        login(password);
-      } else {
+      const ok = await login(password);
+      if (!ok) {
         setError("Invalid password");
       }
     } catch {

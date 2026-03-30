@@ -23,38 +23,108 @@ _DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
 
 
 class Database:
-    """Async SQLite database with WAL mode and migration support."""
+    """Async SQLite database with WAL mode, read/write separation, and migration support.
+
+    Uses two connection types:
+    - Write connection (_conn): single connection for all writes, with
+      PRAGMA synchronous=FULL for crash safety.
+    - Read connection (_read_conn): separate read-only connection, allowing
+      concurrent reads even during writes (WAL mode benefit).
+    """
 
     def __init__(self, db_path: str, migrations_dir: Path | None = None) -> None:
         self._db_path = db_path
         self._migrations_dir = migrations_dir or _DEFAULT_MIGRATIONS_DIR
         self._conn: aiosqlite.Connection | None = None
+        self._read_conn: aiosqlite.Connection | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
-        """Open connection, run migrations, enable WAL mode."""
+        """Open connection, run migrations, enable WAL mode with hardened settings."""
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._db_path)
         self._conn.row_factory = aiosqlite.Row
+
+        # -- Durability & concurrency hardening --
+        # WAL mode: concurrent reads during writes, crash-safe journal
         await self._conn.execute("PRAGMA journal_mode=WAL")
+        # Sync WAL to disk on every commit (FULL = safest, ~2x slower than NORMAL)
+        await self._conn.execute("PRAGMA synchronous=FULL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
+        # Wait up to 5s for locks instead of failing immediately with SQLITE_BUSY
+        await self._conn.execute("PRAGMA busy_timeout=5000")
+
+        # -- Integrity check on startup (fast check, not full page scan) --
+        await self._check_integrity()
+
+        # Read connection — separate, for concurrent reads during writes.
+        # Opens in read-only mode so it can't accidentally mutate data.
+        try:
+            self._read_conn = await aiosqlite.connect(
+                f"file:{self._db_path}?mode=ro", uri=True,
+            )
+            self._read_conn.row_factory = aiosqlite.Row
+            await self._read_conn.execute("PRAGMA busy_timeout=5000")
+        except Exception as e:
+            logger.warning("Read-only connection failed (%s), using single connection", e)
+            self._read_conn = None
+
         await self._run_migrations()
-        logger.info("Database initialized at %s", self._db_path)
+        logger.info("Database initialized at %s (read_conn=%s)", self._db_path,
+                     "enabled" if self._read_conn else "disabled")
+
+    async def _check_integrity(self) -> None:
+        """Run a quick integrity check on startup.
+
+        Uses `PRAGMA quick_check` (checks B-tree structure without scanning
+        every page) which is much faster than `PRAGMA integrity_check`.
+        Logs a critical warning if corruption is detected but does NOT
+        abort — allows the app to start so backups can be taken.
+        """
+        try:
+            cursor = await self._conn.execute("PRAGMA quick_check")
+            row = await cursor.fetchone()
+            result = row[0] if row else "unknown"
+            if result != "ok":
+                logger.critical(
+                    "DATABASE INTEGRITY CHECK FAILED: %s — "
+                    "data may be corrupted. Take a backup immediately.",
+                    result,
+                )
+            else:
+                logger.debug("Database integrity check passed")
+        except Exception as e:
+            logger.warning("Database integrity check could not run: %s", e)
 
     async def close(self) -> None:
-        """Close the database connection."""
+        """Close all database connections."""
+        if self._read_conn:
+            await self._read_conn.close()
+            self._read_conn = None
         if self._conn:
             await self._conn.close()
             self._conn = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
+        """Write connection — use for INSERT/UPDATE/DELETE."""
         if self._conn is None:
             raise RuntimeError("Database not initialized. Call initialize() first.")
         return self._conn
+
+    @property
+    def read_conn(self) -> aiosqlite.Connection:
+        """Read connection — use for SELECT queries.
+
+        Falls back to write connection if read connection is not available
+        (e.g., in-memory databases or older SQLite without URI support).
+        """
+        if self._read_conn is not None:
+            return self._read_conn
+        return self.conn
 
     # ------------------------------------------------------------------
     # Migration Runner
@@ -134,7 +204,7 @@ class Database:
     # ------------------------------------------------------------------
 
     async def is_kill_switch_active(self) -> bool:
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT value FROM system_state WHERE key = 'kill_switch'"
         )
         row = await cursor.fetchone()
@@ -149,7 +219,7 @@ class Database:
         await self.conn.commit()
 
     async def get_system_state(self, key: str) -> str | None:
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT value FROM system_state WHERE key = ?", (key,)
         )
         row = await cursor.fetchone()
@@ -202,7 +272,7 @@ class Database:
         from datetime import timedelta
 
         cutoff = (now_ist() - timedelta(days=days)).isoformat()
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT timestamp, open, high, low, close, volume FROM ohlcv "
             "WHERE symbol = ? AND interval = ? "
             "AND timestamp >= ? "
@@ -253,7 +323,7 @@ class Database:
 
     async def get_watchlist(self) -> list[dict[str, Any]]:
         """Get current watchlist ordered by composite score."""
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT symbol, composite_score, technical_score, volume_momentum_score, "
             "news_sentiment_score, fundamental_score, sector, updated_at "
             "FROM watchlist ORDER BY composite_score DESC"
@@ -368,7 +438,7 @@ class Database:
 
     async def get_open_positions(self) -> list[dict[str, Any]]:
         """Get trades with status 'open' or 'partially_filled'."""
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT * FROM trades WHERE status IN ('open', 'partially_filled')"
         )
         rows = await cursor.fetchall()
@@ -481,11 +551,16 @@ class Database:
         )
         await self.conn.commit()
 
-    async def get_sentiment(self, symbol: str) -> SentimentResult | None:
-        """Get latest sentiment for a symbol."""
-        cursor = await self.conn.execute(
-            "SELECT symbol, sentiment, confidence, key_drivers FROM sentiment WHERE symbol = ?",
-            (symbol,),
+    async def get_sentiment(
+        self, symbol: str, max_age_hours: int = 48,
+    ) -> SentimentResult | None:
+        """Get latest sentiment for a symbol. Returns None if older than max_age_hours."""
+        from datetime import timedelta
+        cutoff = (now_ist() - timedelta(hours=max_age_hours)).isoformat()
+        cursor = await self.read_conn.execute(
+            "SELECT symbol, sentiment, confidence, key_drivers "
+            "FROM sentiment WHERE symbol = ? AND created_at >= ?",
+            (symbol, cutoff),
         )
         row = await cursor.fetchone()
         if not row:
@@ -531,6 +606,7 @@ class Database:
         symbol: str | None = None,
         source: str | None = None,
         date_from: str | None = None,
+        date_to: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -547,11 +623,16 @@ class Database:
             query += " AND source = ?"
             params.append(source)
         if date_from:
-            query += " AND DATE(SUBSTR(published_at, 1, 10)) >= ?"
+            # ISO 8601 strings are lexicographically sortable, so string
+            # comparison with 'YYYY-MM-DD' works correctly.
+            query += " AND published_at >= ?"
             params.append(date_from)
+        if date_to:
+            query += " AND published_at < ?"
+            params.append(date_to)
         query += " ORDER BY published_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        rows = await self.conn.execute_fetchall(query, tuple(params))
+        rows = await self.read_conn.execute_fetchall(query, tuple(params))
         results = []
         for r in rows:
             symbols_raw = r[4]
@@ -681,13 +762,13 @@ class Database:
             hour=0, minute=0, second=0, microsecond=0
         ).isoformat()
         # Symbols with signals generated today
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT DISTINCT symbol FROM signals WHERE created_at >= ?",
             (today_start,),
         )
         signaled = {row[0] for row in await cursor.fetchall()}
         # Symbols with open positions (regardless of when opened)
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT DISTINCT symbol FROM trades "
             "WHERE status IN ('open', 'partially_filled')"
         )
@@ -741,15 +822,23 @@ class Database:
     # NSE Universe
     # ------------------------------------------------------------------
 
-    async def get_nse_universe(self) -> list[dict[str, Any]]:
+    async def get_nse_universe(
+        self, sentiment_ttl_hours: int = 48,
+    ) -> list[dict[str, Any]]:
         """Get all symbols with OHLCV data, enriched with sentiment and fundamentals.
 
-        Returns dicts with sub-scores for market-scan scoring.
+        Only includes sentiment data that is newer than sentiment_ttl_hours.
+        Stale sentiment is treated as neutral (NULL) to avoid outdated signals
+        influencing the scan.
         """
-        cursor = await self.conn.execute(
+        from datetime import timedelta
+        sentiment_cutoff = (now_ist() - timedelta(hours=sentiment_ttl_hours)).isoformat()
+
+        cursor = await self.read_conn.execute(
             "SELECT o.symbol, "
             "  AVG(o.volume) as avg_daily_volume, "
-            "  s.sentiment, s.confidence as sentiment_confidence, "
+            "  CASE WHEN s.created_at >= ? THEN s.sentiment ELSE NULL END as sentiment, "
+            "  CASE WHEN s.created_at >= ? THEN s.confidence ELSE NULL END as sentiment_confidence, "
             "  f.pe_ratio, f.debt_to_equity, f.promoter_holding_pct, "
             "  w.sector "
             "FROM ohlcv o "
@@ -761,7 +850,8 @@ class Database:
             "  SELECT symbol FROM quarantined_symbols WHERE quarantined_at IS NOT NULL"
             ") "
             "GROUP BY o.symbol "
-            "ORDER BY avg_daily_volume DESC"
+            "ORDER BY avg_daily_volume DESC",
+            (sentiment_cutoff, sentiment_cutoff),
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
@@ -1142,36 +1232,63 @@ class Database:
     # ------------------------------------------------------------------
 
     async def insert_trade(self, trade: dict[str, Any]) -> str:
-        """Insert a new trade record. Returns the generated trade_id."""
+        """Insert a new trade record atomically with audit log.
+
+        Uses a savepoint so the trade insert + audit entry either both
+        succeed or both roll back — no orphaned records on crash.
+        """
         import uuid
 
         trade_id = trade.get("trade_id") or f"T-{uuid.uuid4().hex[:8]}"
         ts_now = now_ist().isoformat()
 
-        await self.conn.execute(
-            "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
-            "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
-            "mode, status, slippage, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                trade_id,
-                trade["symbol"],
-                trade["signal_type"],
-                trade["entry_price"],
-                trade.get("fill_price", trade["entry_price"]),
-                trade["quantity"],
-                trade["stop_loss_price"],
-                trade["target_price"],
-                trade.get("order_id"),
-                trade.get("sl_order_id"),
-                trade.get("product", "MIS"),
-                trade.get("mode", "paper"),
-                trade.get("status", "open"),
-                trade.get("slippage", 0.0),
-                ts_now,
-            ),
-        )
-        await self.conn.commit()
+        await self.conn.execute("SAVEPOINT insert_trade")
+        try:
+            await self.conn.execute(
+                "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
+                "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
+                "mode, status, slippage, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    trade_id,
+                    trade["symbol"],
+                    trade["signal_type"],
+                    trade["entry_price"],
+                    trade.get("fill_price", trade["entry_price"]),
+                    trade["quantity"],
+                    trade["stop_loss_price"],
+                    trade["target_price"],
+                    trade.get("order_id"),
+                    trade.get("sl_order_id"),
+                    trade.get("product", "MIS"),
+                    trade.get("mode", "paper"),
+                    trade.get("status", "open"),
+                    trade.get("slippage", 0.0),
+                    ts_now,
+                ),
+            )
+            await self.conn.execute(
+                "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
+                "input_summary, output_summary) VALUES (?, ?, ?, ?, ?)",
+                (
+                    ts_now, "trade_inserted", "trade-execute",
+                    json.dumps({
+                        "trade_id": trade_id, "symbol": trade["symbol"],
+                        "signal_type": trade["signal_type"],
+                        "mode": trade.get("mode", "paper"),
+                    }),
+                    json.dumps({
+                        "fill_price": trade.get("fill_price"),
+                        "quantity": trade["quantity"],
+                        "slippage": trade.get("slippage", 0.0),
+                    }),
+                ),
+            )
+            await self.conn.execute("RELEASE SAVEPOINT insert_trade")
+            await self.conn.commit()
+        except Exception:
+            await self.conn.execute("ROLLBACK TO SAVEPOINT insert_trade")
+            raise
         return trade_id
 
     async def update_position_sl(self, position_id: int | str, new_sl: float) -> None:
@@ -1198,14 +1315,34 @@ class Database:
     async def close_position(
         self, position_id: int | str, exit_price: float, pnl: float
     ) -> None:
-        """Close a position with exit price and realized PnL."""
+        """Close a position with exit price and realized PnL.
+
+        Uses a savepoint to ensure the trade update and audit log
+        are committed atomically — no half-closed positions.
+        """
         ts_now = now_ist().isoformat()
-        await self.conn.execute(
-            "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, closed_at = ? "
-            "WHERE trade_id = ?",
-            (exit_price, pnl, ts_now, str(position_id)),
-        )
-        await self.conn.commit()
+        pos_id = str(position_id)
+        await self.conn.execute("SAVEPOINT close_position")
+        try:
+            await self.conn.execute(
+                "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, closed_at = ? "
+                "WHERE trade_id = ?",
+                (exit_price, pnl, ts_now, pos_id),
+            )
+            await self.conn.execute(
+                "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
+                "input_summary, output_summary) VALUES (?, ?, ?, ?, ?)",
+                (
+                    ts_now, "position_closed", "position-monitor",
+                    json.dumps({"trade_id": pos_id, "exit_price": exit_price}),
+                    json.dumps({"pnl": pnl}),
+                ),
+            )
+            await self.conn.execute("RELEASE SAVEPOINT close_position")
+            await self.conn.commit()
+        except Exception:
+            await self.conn.execute("ROLLBACK TO SAVEPOINT close_position")
+            raise
 
     # ------------------------------------------------------------------
     # Predictions
@@ -1237,10 +1374,14 @@ class Database:
                 signal_id = row[0]
 
         await self.conn.execute(
-            "INSERT INTO predictions (prediction_id, signal_id, trade_id, created_at, "
-            "prediction_end_time, actual_price, direction_correct, target_hit, "
-            "actual_pnl_pct) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
-            (pred_id, signal_id, prediction.get("trade_id"), ts_now, end_time.isoformat()),
+            "INSERT INTO predictions (prediction_id, signal_id, trade_id, symbol, "
+            "created_at, prediction_end_time, actual_price, direction_correct, "
+            "target_hit, actual_pnl_pct) "
+            "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+            (
+                pred_id, signal_id, prediction.get("trade_id"),
+                prediction.get("symbol"), ts_now, end_time.isoformat(),
+            ),
         )
 
         # Also store prediction details in audit for traceability
@@ -1348,7 +1489,7 @@ class Database:
         cursor = await self.conn.execute(
             "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
             "p.prediction_end_time, "
-            "s.symbol, s.signal_type as predicted_direction, "
+            "COALESCE(p.symbol, s.symbol) as symbol, s.signal_type as predicted_direction, "
             "s.entry_price, s.target_price as predicted_target, "
             "s.stop_loss_price as predicted_stop_loss, "
             "s.confidence_score as confidence, "
@@ -1368,7 +1509,7 @@ class Database:
         cursor = await self.conn.execute(
             "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
             "p.prediction_end_time, "
-            "s.symbol, s.signal_type as predicted_direction, "
+            "COALESCE(p.symbol, s.symbol) as symbol, s.signal_type as predicted_direction, "
             "s.entry_price, s.target_price as predicted_target, "
             "s.stop_loss_price as predicted_stop_loss, "
             "s.confidence_score as confidence, "
@@ -1465,7 +1606,7 @@ class Database:
         """Get all predictions with outcomes for scoreboard computation."""
         cursor = await self.conn.execute(
             "SELECT p.prediction_id, p.direction_correct, p.target_hit, "
-            "p.actual_pnl_pct, s.symbol, s.confidence_score as confidence, "
+            "p.actual_pnl_pct, COALESCE(p.symbol, s.symbol) as symbol, s.confidence_score as confidence, "
             "s.model_version "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
@@ -1494,8 +1635,10 @@ class Database:
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).isoformat()
-        cursor = await self.conn.execute(
-            "SELECT p.*, s.symbol, s.signal_type, s.confidence_score "
+        cursor = await self.read_conn.execute(
+            "SELECT p.*, "
+            "COALESCE(p.symbol, s.symbol) as symbol, "
+            "s.signal_type, s.confidence_score "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
             "WHERE p.created_at >= ? ORDER BY p.created_at",
@@ -1534,7 +1677,8 @@ class Database:
             hour=9, minute=15, second=0, microsecond=0
         )
         cursor = await self.conn.execute(
-            "SELECT p.*, s.symbol, s.signal_type, s.confidence_score "
+            "SELECT p.*, COALESCE(p.symbol, s.symbol) as symbol, "
+            "s.signal_type, s.confidence_score "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
             "WHERE p.created_at >= ? ORDER BY p.created_at",
@@ -1610,7 +1754,10 @@ class Database:
         symbol: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Get trade history with optional filters."""
+        """Get trade history with optional filters.
+
+        Dates are YYYY-MM-DD. end_date is inclusive (includes all of that day).
+        """
         query = "SELECT * FROM trades WHERE 1=1"
         params: list[Any] = []
 
@@ -1618,8 +1765,12 @@ class Database:
             query += " AND created_at >= ?"
             params.append(start_date)
         if end_date:
-            query += " AND created_at <= ?"
-            params.append(end_date + "T23:59:59")
+            # end_date is inclusive: add one day as exclusive upper bound.
+            # This avoids the T23:59:59 hack which misses the last second.
+            from datetime import date, timedelta
+            next_day = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
+            query += " AND created_at < ?"
+            params.append(next_day)
         if symbol:
             query += " AND symbol = ?"
             params.append(symbol)
@@ -1627,7 +1778,7 @@ class Database:
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
 
-        cursor = await self.conn.execute(query, params)
+        cursor = await self.read_conn.execute(query, params)
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
@@ -1662,6 +1813,38 @@ class Database:
                 "trade_count": row["trade_count"],
             })
         return curve
+
+    async def get_daily_pnl_calendar(self, days: int = 90) -> list[dict[str, Any]]:
+        """Daily PnL breakdown for calendar heatmap.
+
+        Returns one entry per day that had trades, with PnL, trade count,
+        wins, and losses.
+        """
+        from datetime import timedelta
+        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cursor = await self.read_conn.execute(
+            "SELECT DATE(closed_at) as trade_date, "
+            "SUM(pnl) as pnl, "
+            "COUNT(*) as trade_count, "
+            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, "
+            "SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses "
+            "FROM trades "
+            "WHERE closed_at >= ? AND pnl IS NOT NULL "
+            "GROUP BY DATE(closed_at) "
+            "ORDER BY trade_date",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "date": row["trade_date"],
+                "pnl": round(row["pnl"] or 0, 2),
+                "trade_count": row["trade_count"],
+                "wins": row["wins"],
+                "losses": row["losses"],
+            }
+            for row in rows
+        ]
 
     async def get_trade_detail(self, trade_id: str) -> dict[str, Any] | None:
         """Get full trade detail with reasoning chain.
@@ -1740,7 +1923,7 @@ class Database:
         query += " ORDER BY report_date DESC LIMIT ?"
         params.append(limit)
 
-        cursor = await self.conn.execute(query, params)
+        cursor = await self.read_conn.execute(query, params)
         rows = await cursor.fetchall()
 
         result = []
@@ -1762,6 +1945,11 @@ class Database:
     async def backup(self, backup_dir: str, model_dir: str | None = None) -> str:
         """Create a timestamped backup of the database and model artifacts.
 
+        Uses SQLite's online backup API (via VACUUM INTO) which produces a
+        consistent, self-contained backup even while the database is being
+        written to. This is safer than checkpoint + file copy, which can
+        produce corrupt backups if writes happen between the two operations.
+
         Args:
             backup_dir: Directory to store backup files.
             model_dir: Optional path to ML model artifacts (.pkl files).
@@ -1772,10 +1960,21 @@ class Database:
         Path(backup_dir).mkdir(parents=True, exist_ok=True)
         timestamp = now_ist().strftime("%Y%m%d_%H%M%S")
         backup_path = str(Path(backup_dir) / f"yolovest_{timestamp}.db")
-        # Use SQLite backup API via a checkpoint first
-        await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        shutil.copy2(self._db_path, backup_path)
-        logger.info("Database backup created: %s", backup_path)
+
+        # VACUUM INTO creates a clean, defragmented copy atomically.
+        # It holds a read lock during the copy, so no writes can sneak in.
+        # The result is a standalone DB file (no WAL/SHM needed).
+        try:
+            await self.conn.execute("VACUUM INTO ?", (backup_path,))
+            logger.info("Database backup created (VACUUM INTO): %s", backup_path)
+        except Exception as e:
+            # Fallback: checkpoint + copy (older SQLite without VACUUM INTO)
+            logger.warning(
+                "VACUUM INTO failed (%s), falling back to checkpoint + copy", e,
+            )
+            await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            shutil.copy2(self._db_path, backup_path)
+            logger.info("Database backup created (file copy): %s", backup_path)
 
         # Backup ML model artifacts alongside the DB
         models_backed_up = 0
@@ -1846,6 +2045,15 @@ class Database:
             "DELETE FROM economic_events WHERE created_at < ?", (cutoff,)
         )
         deleted["economic_events"] = cursor.rowcount
+
+        # Sentiment retention: delete entries older than 7 days
+        # (stale sentiment is already ignored in scanning via TTL,
+        #  this just cleans up the table to prevent unbounded growth)
+        cutoff = (now - timedelta(days=7)).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM sentiment WHERE created_at < ?", (cutoff,)
+        )
+        deleted["sentiment"] = cursor.rowcount
 
         await self.conn.commit()
         logger.info("Retention cleanup: %s", deleted)
@@ -2150,7 +2358,7 @@ class Database:
 
     async def get_dry_run_signals(self, run_id: str) -> list[dict[str, Any]]:
         """Get all signals for a specific dry-run."""
-        cursor = await self.conn.execute(
+        cursor = await self.read_conn.execute(
             "SELECT * FROM dry_run_results WHERE run_id = ? ORDER BY confidence_score DESC",
             (run_id,),
         )
@@ -2170,6 +2378,8 @@ class Database:
         """Score a dry-run against actual next-day OHLCV data.
 
         For each signal, fetch the next trading day's OHLCV and compare.
+        Uses date-only comparison to avoid timestamp format mismatches
+        (dry-run created_at has time, OHLCV timestamp may not).
         """
         signals = await self.get_dry_run_signals(run_id)
         if not signals:
@@ -2182,12 +2392,17 @@ class Database:
                 scored += 1
                 continue
 
-            # Get the next day's OHLCV after the dry-run was created
-            cursor = await self.conn.execute(
+            # Extract date-only from created_at (e.g. "2026-03-29T10:30:00" → "2026-03-29")
+            created_date = str(sig["created_at"])[:10]
+
+            # Get the next day's OHLCV after the dry-run date.
+            # Use SUBSTR to compare date portions only, avoiding time format issues.
+            cursor = await self.read_conn.execute(
                 "SELECT open, high, low, close FROM ohlcv "
-                "WHERE symbol = ? AND interval = 'daily' AND timestamp > ? "
+                "WHERE symbol = ? AND interval = 'daily' "
+                "AND SUBSTR(timestamp, 1, 10) > ? "
                 "ORDER BY timestamp ASC LIMIT 1",
-                (sig["symbol"], sig["created_at"]),
+                (sig["symbol"], created_date),
             )
             row = await cursor.fetchone()
             if not row:
@@ -2601,11 +2816,12 @@ class Database:
 
     async def get_symbol_predictions(self, symbol: str) -> list[dict[str, Any]]:
         """Predictions linked to a specific symbol via signals."""
-        cursor = await self.conn.execute(
-            "SELECT p.*, s.symbol, s.signal_type, s.confidence_score "
+        cursor = await self.read_conn.execute(
+            "SELECT p.*, COALESCE(p.symbol, s.symbol) as symbol, "
+            "s.signal_type, s.confidence_score "
             "FROM predictions p "
-            "JOIN signals s ON p.signal_id = s.id "
-            "WHERE s.symbol = ? "
+            "LEFT JOIN signals s ON p.signal_id = s.id "
+            "WHERE COALESCE(p.symbol, s.symbol) = ? "
             "ORDER BY p.created_at DESC LIMIT 50",
             (symbol,),
         )
@@ -2851,9 +3067,20 @@ class Database:
     # Risk Simulator (Feature #6)
     # ------------------------------------------------------------------
 
-    async def get_historical_signals(self, limit: int = 200) -> list[dict[str, Any]]:
-        """Fetch historical signals with their trade outcomes for simulation."""
-        cursor = await self.conn.execute(
+    async def get_historical_signals(
+        self,
+        limit: int = 200,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch historical signals with their trade outcomes for simulation.
+
+        Args:
+            limit: Max signals to return.
+            date_from: Optional start date (YYYY-MM-DD, inclusive).
+            date_to: Optional end date (YYYY-MM-DD, exclusive).
+        """
+        query = (
             "SELECT s.*, t.pnl, t.quantity, t.fill_price, t.slippage, "
             "COALESCE(w.sector, 'Unknown') as sector "
             "FROM signals s "
@@ -2863,8 +3090,17 @@ class Database:
             "  WHERE p.signal_id = s.id LIMIT 1"
             ") "
             "LEFT JOIN watchlist w ON s.symbol = w.symbol "
-            "ORDER BY s.created_at DESC LIMIT ?",
-            (limit,),
+            "WHERE 1=1"
         )
+        params: list[Any] = []
+        if date_from:
+            query += " AND s.created_at >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND s.created_at < ?"
+            params.append(date_to)
+        query += " ORDER BY s.created_at ASC LIMIT ?"
+        params.append(limit)
+        cursor = await self.read_conn.execute(query, tuple(params))
         rows = await cursor.fetchall()
         return [dict[str, Any](r) for r in rows]

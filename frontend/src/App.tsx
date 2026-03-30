@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import { ThemeProvider } from "./hooks/useTheme";
-import { setAuthHeader, setOnUnauthorized } from "./api/client";
+import { setAuthHeader, setCsrfToken, setOnUnauthorized } from "./api/client";
 import { Layout } from "./components/Layout";
 import { LoginPage } from "./pages/LoginPage";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -41,12 +41,13 @@ const queryClient = new QueryClient({
 });
 
 function AuthSync() {
-  const { authHeader, logout, isAuthenticated } = useAuth();
+  const { authHeader, csrfToken, logout, isAuthenticated } = useAuth();
 
   useEffect(() => {
     setAuthHeader(authHeader);
+    setCsrfToken(csrfToken);
     setOnUnauthorized(logout);
-  }, [authHeader, logout]);
+  }, [authHeader, csrfToken, logout]);
 
   // WebSocket is now handled by NotificationCenter in Layout
   if (!isAuthenticated) {

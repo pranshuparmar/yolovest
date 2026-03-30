@@ -65,9 +65,14 @@ class HeartbeatOrchestrator:
         self._max_consecutive_skips = ctx.config.heartbeat.max_consecutive_skips
         self._running = False
         self._on_skill_complete: SkillCallback | None = None
+        self._watchdog: Any | None = None
         self._skills: dict[str, SkillBase] = skills if skills is not None else {}
         if skills is None:
             self._init_skills()
+
+    def set_watchdog(self, watchdog: Any) -> None:
+        """Set the heartbeat watchdog reference."""
+        self._watchdog = watchdog
 
     def _init_skills(self) -> None:
         """Instantiate all registered skills with context."""
@@ -100,7 +105,8 @@ class HeartbeatOrchestrator:
             if self._consecutive_skips >= self._max_consecutive_skips:
                 await self._ctx.notify.send(
                     f"CRITICAL: {self._consecutive_skips} consecutive heartbeats "
-                    f"skipped due to overrun."
+                    f"skipped due to overrun.",
+                    alert_type="errors",
                 )
             return {"skipped": True, "consecutive_skips": self._consecutive_skips}
 
@@ -123,7 +129,8 @@ class HeartbeatOrchestrator:
             logger.error("health-check failed — ABORTING heartbeat")
             await self._ctx.notify.send(
                 "ABORT: health-check failed. Heartbeat aborted.\n"
-                f"Error: {health_result.error}"
+                f"Error: {health_result.error}",
+                alert_type="errors",
             )
             results["aborted"] = True
             return results
@@ -283,7 +290,8 @@ class HeartbeatOrchestrator:
                 f"Pending approval: {sig_type} {symbol} @ ₹{entry:.2f} "
                 f"(conf {conf:.0%})\n"
                 f"Approve: /approve {pending_id}\n"
-                f"Reject: /reject {pending_id}"
+                f"Reject: /reject {pending_id}",
+                alert_type="trade_entry",
             )
             results[f"{prefix}/pending"] = SkillResult(
                 success=True, skill_name="pending-approval",
@@ -297,7 +305,8 @@ class HeartbeatOrchestrator:
         if not trade_result.success:
             logger.warning("trade-execute failed for signal %d", index)
             await self._ctx.notify.send(
-                f"Trade execution failed for signal {index}: {trade_result.error}"
+                f"Trade execution failed for signal {index}: {trade_result.error}",
+                alert_type="errors",
             )
             return results
 
@@ -378,7 +387,8 @@ class HeartbeatOrchestrator:
         if not result.success:
             await self._ctx.notify.send(
                 "CRITICAL: position-monitor failed. Open positions are unmonitored.\n"
-                f"Error: {result.error}"
+                f"Error: {result.error}",
+                alert_type="errors",
             )
 
     async def start(self) -> None:
@@ -407,7 +417,13 @@ class HeartbeatOrchestrator:
                     )
             except Exception:
                 logger.exception("Unhandled error in heartbeat")
-                await self._ctx.notify.send("CRITICAL: Unhandled heartbeat error")
+                await self._ctx.notify.send(
+                    "CRITICAL: Unhandled heartbeat error", alert_type="errors",
+                )
+
+            # Notify watchdog that a heartbeat cycle completed (even if errored)
+            if self._watchdog:
+                self._watchdog.record_heartbeat()
 
             # Determine interval based on market hours
             if self._ctx.market_hours.is_market_hours():

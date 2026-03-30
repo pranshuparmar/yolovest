@@ -11,16 +11,25 @@ Flow:
 5. Check disk space (SQLite DB growing?)
 6. Check open positions are consistent (no orphaned orders)
 7. Check kill switch state — if active, skip all trading skills
-8. If any critical check fails:
+8. If broker not authenticated during market hours, send periodic
+   Telegram reminder (throttled to once per 30 minutes)
+9. If any critical check fails:
    a. Send Telegram alert (errors alert type)
    b. If positions are at risk, trigger protective square-off
    c. Log failure for dashboard display
-9. Return health status for orchestrator to decide which skills to run
+10. Return health status for orchestrator to decide which skills to run
 """
 
+import logging
+import time
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
+
+# Throttle broker auth reminders: minimum seconds between alerts
+_BROKER_AUTH_REMINDER_INTERVAL_SEC = 30 * 60  # 30 minutes
 
 
 class HealthCheckSkill(SkillBase):
@@ -42,6 +51,11 @@ class HealthCheckSkill(SkillBase):
         except Exception as e:
             checks["broker"] = False
             critical_failures.append(f"Broker: {e}")
+
+        # Broker auth reminder: if not authenticated during market hours,
+        # send periodic Telegram reminder (throttled to every 30 minutes)
+        if not checks.get("broker") and self.ctx.market_hours.is_market_hours():
+            await self._send_broker_auth_reminder()
 
         # Check 2: Database
         try:
@@ -100,13 +114,12 @@ class HealthCheckSkill(SkillBase):
                     + "\n".join(critical_failures)
                 )
 
-        # Alert on any failures
+        # Alert on any failures (respects errors alert toggle)
         if critical_failures:
-            alerts_cfg = self.ctx.config.notifications.telegram.alerts
-            if alerts_cfg.errors:
-                await self.ctx.notify.send(
-                    "Health check failures:\n" + "\n".join(critical_failures)
-                )
+            await self.ctx.notify.send(
+                "Health check failures:\n" + "\n".join(critical_failures),
+                alert_type="errors",
+            )
 
         return SkillResult(
             success=len(critical_failures) == 0,
@@ -150,3 +163,29 @@ class HealthCheckSkill(SkillBase):
             return local_count == broker_count
         except Exception:
             return False
+
+    # Track last broker auth reminder time (monotonic, per-process)
+    _last_broker_auth_reminder: float = 0.0
+
+    async def _send_broker_auth_reminder(self) -> None:
+        """Send a Telegram reminder to authenticate with Kite.
+
+        Throttled to once per _BROKER_AUTH_REMINDER_INTERVAL_SEC (30 min).
+        """
+        now = time.monotonic()
+        if now - self._last_broker_auth_reminder < _BROKER_AUTH_REMINDER_INTERVAL_SEC:
+            return
+
+        HealthCheckSkill._last_broker_auth_reminder = now
+        login_url = self.ctx.broker.get_login_url()
+        logger.warning("Broker not authenticated during market hours — sending reminder")
+
+        try:
+            await self.ctx.notify.send(
+                "Kite session not authenticated — trading is disabled.\n"
+                f"Re-authenticate: {login_url}\n"
+                "Or use /auth (request_token) in Telegram.",
+                alert_type="errors",
+            )
+        except Exception as e:
+            logger.warning("Failed to send broker auth reminder: %s", e)

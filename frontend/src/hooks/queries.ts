@@ -30,6 +30,14 @@ export function usePositions() {
   });
 }
 
+export function usePnlCalendar(days = 90) {
+  return useQuery({
+    queryKey: ["pnl-calendar", days],
+    queryFn: () => api.pnlCalendar(days),
+    staleTime: 60_000,
+  });
+}
+
 export function useTradesToday() {
   return useQuery({
     queryKey: ["trades", "today"],
@@ -205,6 +213,17 @@ export function useAuthenticateZerodha() {
   });
 }
 
+export function useReloadConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.reloadConfig,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["system-state"] });
+      qc.invalidateQueries({ queryKey: ["integrations"] });
+    },
+  });
+}
+
 export function useTestTelegram() {
   const qc = useQueryClient();
   return useMutation({
@@ -247,11 +266,11 @@ export function useNews(params?: { symbol?: string; limit?: number }) {
 
 const NEWS_PAGE_SIZE = 50;
 
-export function useNewsInfinite(params?: { symbol?: string; source?: string; date_from?: string }) {
+export function useNewsInfinite(params?: { symbol?: string; source?: string; date_from?: string; date_to?: string }) {
   return useInfiniteQuery({
     queryKey: ["news-infinite", params],
     queryFn: ({ pageParam = 0 }) =>
-      api.news({ symbol: params?.symbol, source: params?.source, date_from: params?.date_from, limit: NEWS_PAGE_SIZE, offset: pageParam }),
+      api.news({ symbol: params?.symbol, source: params?.source, date_from: params?.date_from, date_to: params?.date_to, limit: NEWS_PAGE_SIZE, offset: pageParam }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, _allPages, lastPageParam) =>
       lastPage.length < NEWS_PAGE_SIZE ? undefined : lastPageParam + NEWS_PAGE_SIZE,

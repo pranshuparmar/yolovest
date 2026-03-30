@@ -178,11 +178,15 @@ function OrderForm({
 }
 
 export function HoldingsPage() {
-  const { data: holdings, isLoading, isError, error, refetch, isFetching } = useHoldings();
+  const { data: response, isLoading, isError, error, refetch, isFetching } = useHoldings();
   const [orderForm, setOrderForm] = useState<{
     symbol?: string;
     side?: "BUY" | "SELL";
   } | null>(null);
+
+  const holdings = response?.holdings;
+  const brokerAuthenticated = response?.broker_authenticated ?? true;
+  const loginUrl = response?.login_url;
 
   const totalInvestment = holdings?.reduce(
     (sum, h) => sum + h.quantity * h.average_price,
@@ -228,6 +232,39 @@ export function HoldingsPage() {
           defaultSide={orderForm.side}
           onClose={() => setOrderForm(null)}
         />
+      )}
+
+      {/* Broker auth expired banner */}
+      {!brokerAuthenticated && (
+        <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg p-4 flex items-start gap-3">
+          <span className="text-amber-400 text-lg shrink-0">!</span>
+          <div>
+            <p className="text-amber-300 font-medium text-sm">
+              Kite session expired
+            </p>
+            <p className="text-gray-400 text-xs mt-1">
+              Your Zerodha token has expired. Re-authenticate to view holdings and enable trading.
+            </p>
+            <div className="flex gap-2 mt-2">
+              <a
+                href="/integrations"
+                className="px-3 py-1 rounded text-xs font-medium bg-amber-700/50 hover:bg-amber-700 text-amber-200 transition-colors"
+              >
+                Go to Settings
+              </a>
+              {loginUrl && (
+                <a
+                  href={loginUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+                >
+                  Kite Login
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Summary cards */}

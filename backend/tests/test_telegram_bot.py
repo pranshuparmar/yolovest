@@ -2,6 +2,8 @@
 
 from unittest.mock import AsyncMock, patch
 
+from pydantic import SecretStr
+
 from yolovest.notify import Notifier, _format_trade_alert
 from yolovest.telegram_bot import TelegramBot
 
@@ -96,21 +98,21 @@ class TestNotifierTelegramIntegration:
 class TestTelegramBot:
     def test_bot_disabled_without_token(self, app_context):
         app_context.config.notifications.telegram.enabled = True
-        app_context.config.notifications.telegram.bot_token = ""
+        app_context.config.notifications.telegram.bot_token = SecretStr("")
         bot = TelegramBot(app_context)
 
         assert not bot.enabled
 
     def test_bot_disabled_when_not_enabled(self, app_context):
         app_context.config.notifications.telegram.enabled = False
-        app_context.config.notifications.telegram.bot_token = "test-token"
+        app_context.config.notifications.telegram.bot_token = SecretStr("test-token")
         bot = TelegramBot(app_context)
 
         assert not bot.enabled
 
     def test_bot_enabled_with_token(self, app_context):
         app_context.config.notifications.telegram.enabled = True
-        app_context.config.notifications.telegram.bot_token = "test-token"
+        app_context.config.notifications.telegram.bot_token = SecretStr("test-token")
         bot = TelegramBot(app_context)
 
         assert bot.enabled

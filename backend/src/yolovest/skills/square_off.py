@@ -10,15 +10,26 @@ Flow:
    a. Cancel any pending SL/target orders for the position
    b. Place market order to close the position
    c. Record exit price and PnL
-4. Operate within square_off_extension window for order execution
+4. Retry failed positions until hard deadline (market close - 1 min)
 5. Send Telegram summary of all squared-off positions
-6. If any square-off fails, alert immediately and retry
+6. If any positions remain after deadline, send CRITICAL alert
 """
 
+import asyncio
+import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from yolovest.costs import compute_transaction_costs
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+from yolovest.timezone import now_ist
+
+logger = logging.getLogger(__name__)
+
+# Max retries per position before giving up for this cycle
+_MAX_RETRIES_PER_POSITION = 3
+# Seconds between retry rounds
+_RETRY_DELAY_SEC = 10
 
 
 class SquareOffSkill(SkillBase):
@@ -41,6 +52,26 @@ class SquareOffSkill(SkillBase):
     def should_run(self) -> bool:
         return bool(self.ctx.market_hours.is_square_off_window())
 
+    def _get_hard_deadline(self) -> datetime:
+        """Compute the hard deadline: market close - 1 minute.
+
+        After this, the broker will auto-square at market price with
+        potentially terrible slippage. We must finish before this.
+        If we're already past market close (e.g. force=True from kill switch,
+        or running outside market hours), set deadline 5 minutes from now.
+        """
+        now = now_ist()
+        close_str = self.ctx.config.market_hours.close  # e.g. "15:30"
+        parts = close_str.split(":")
+        close_time = now.replace(
+            hour=int(parts[0]), minute=int(parts[1]), second=0, microsecond=0,
+        )
+        deadline = close_time - timedelta(minutes=1)
+        if deadline <= now:
+            # Already past market close — give a reasonable window
+            deadline = now + timedelta(minutes=5)
+        return deadline
+
     async def execute(self, **kwargs: Any) -> SkillResult:
         force = kwargs.get("force", False)  # True when called from kill-switch
         positions = await self.ctx.db.get_open_positions()
@@ -49,67 +80,134 @@ class SquareOffSkill(SkillBase):
         if not force:
             positions = [p for p in positions if p["product"] == "MIS"]
 
-        squared_off = []
-        failures = []
-
-        for pos in positions:
-            try:
-                # Cancel pending SL/target orders
-                if pos.get("sl_order_id"):
-                    await self.ctx.broker.cancel_order(pos["sl_order_id"])
-
-                # Place market exit order
-                exit_type = "SELL" if pos["signal_type"] == "BUY" else "BUY"
-                exit_order_id = await self.ctx.broker.place_order(
-                    symbol=pos["symbol"],
-                    side=exit_type,
-                    quantity=pos["quantity"],
-                    order_type="MARKET",
-                    product=pos.get("product", "MIS"),
-                )
-
-                # Get fill price
-                order_status = await self.ctx.broker.get_order_status(exit_order_id)
-                exit_price = order_status.get("average_price")
-
-                # Compute PnL with transaction costs
-                qty = pos["quantity"]
-                entry = pos["entry_price"]
-                if pos["signal_type"] == "BUY":
-                    gross_pnl = (exit_price - entry) * qty
-                else:
-                    gross_pnl = (entry - exit_price) * qty
-
-                product = pos.get("product", "MIS")
-                costs = compute_transaction_costs(
-                    entry, exit_price, qty, product=product,
-                    cost_config=self.ctx.config.transaction_costs,
-                )
-                pnl = gross_pnl - costs
-
-                await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)
-                squared_off.append({"symbol": pos["symbol"], "pnl": pnl})
-
-            except Exception as e:
-                failures.append({"symbol": pos["symbol"], "error": str(e)})
-
-        # Telegram summary
-        if squared_off or failures:
-            total_pnl = sum(s["pnl"] for s in squared_off)
-            await self.ctx.notify.send(
-                f"Square-off complete: {len(squared_off)} positions closed, "
-                f"PnL: ₹{total_pnl:,.2f}"
-                + (f"\nFailures: {len(failures)}" if failures else "")
+        if not positions:
+            return SkillResult(
+                success=True, skill_name=self.name,
+                data={"squared_off": [], "total_pnl": 0, "failures": [], "force": force},
             )
 
+        deadline = self._get_hard_deadline()
+        squared_off: list[dict[str, Any]] = []
+        remaining = list(positions)
+        all_failures: list[dict[str, Any]] = []
+        attempt = 0
+
+        while remaining and attempt < _MAX_RETRIES_PER_POSITION:
+            if attempt > 0:
+                # Check deadline before retrying
+                if now_ist() >= deadline:
+                    logger.error(
+                        "square-off: HARD DEADLINE reached with %d positions still open",
+                        len(remaining),
+                    )
+                    break
+                logger.warning(
+                    "square-off: retrying %d failed positions (attempt %d/%d)",
+                    len(remaining), attempt + 1, _MAX_RETRIES_PER_POSITION,
+                )
+                await asyncio.sleep(_RETRY_DELAY_SEC)
+
+            failed_this_round: list[dict[str, Any]] = []
+            errors_this_round: list[dict[str, Any]] = []
+
+            for pos in remaining:
+                # Check deadline mid-loop
+                if now_ist() >= deadline:
+                    failed_this_round.append(pos)
+                    errors_this_round.append({
+                        "symbol": pos["symbol"], "error": "hard deadline reached",
+                    })
+                    continue
+
+                try:
+                    result = await self._close_single_position(pos)
+                    squared_off.append(result)
+                except Exception as e:
+                    logger.warning(
+                        "square-off: failed to close %s (attempt %d): %s",
+                        pos["symbol"], attempt + 1, e,
+                    )
+                    failed_this_round.append(pos)
+                    errors_this_round.append({
+                        "symbol": pos["symbol"], "error": str(e),
+                    })
+
+            remaining = failed_this_round
+            all_failures = errors_this_round
+            attempt += 1
+
+        # Telegram summary
+        total_pnl = sum(s["pnl"] for s in squared_off)
+        if squared_off or all_failures:
+            msg = (
+                f"Square-off complete: {len(squared_off)} positions closed, "
+                f"PnL: ₹{total_pnl:,.2f}"
+            )
+            if all_failures:
+                failed_syms = [f["symbol"] for f in all_failures]
+                msg += (
+                    f"\nCRITICAL: {len(all_failures)} positions FAILED to close "
+                    f"after {attempt} attempts: {', '.join(failed_syms)}\n"
+                    f"Broker will auto-square these at market close — expect slippage!"
+                )
+            await self.ctx.notify.send(msg, alert_type="trade_exit")
+
         return SkillResult(
-            success=len(failures) == 0,
+            success=len(all_failures) == 0,
             skill_name=self.name,
             data={
                 "squared_off": squared_off,
-                "total_pnl": sum(s["pnl"] for s in squared_off),
-                "failures": failures,
+                "total_pnl": total_pnl,
+                "failures": all_failures,
                 "force": force,
+                "attempts": attempt,
             },
-            error=f"{len(failures)} positions failed to close" if failures else None,
+            error=(
+                f"{len(all_failures)} positions failed to close after {attempt} attempts"
+                if all_failures else None
+            ),
         )
+
+    async def _close_single_position(self, pos: dict[str, Any]) -> dict[str, Any]:
+        """Close a single position. Raises on failure."""
+        # Cancel pending SL/target orders
+        if pos.get("sl_order_id"):
+            try:
+                await self.ctx.broker.cancel_order(pos["sl_order_id"])
+            except Exception as e:
+                logger.warning(
+                    "square-off: failed to cancel SL order for %s: %s",
+                    pos["symbol"], e,
+                )
+
+        # Place market exit order
+        exit_type = "SELL" if pos["signal_type"] == "BUY" else "BUY"
+        exit_order_id = await self.ctx.broker.place_order(
+            symbol=pos["symbol"],
+            side=exit_type,
+            quantity=pos["quantity"],
+            order_type="MARKET",
+            product=pos.get("product", "MIS"),
+        )
+
+        # Get fill price
+        order_status = await self.ctx.broker.get_order_status(exit_order_id)
+        exit_price = order_status.get("average_price")
+
+        # Compute PnL with transaction costs
+        qty = pos["quantity"]
+        entry = pos["entry_price"]
+        if pos["signal_type"] == "BUY":
+            gross_pnl = (exit_price - entry) * qty
+        else:
+            gross_pnl = (entry - exit_price) * qty
+
+        product = pos.get("product", "MIS")
+        costs = compute_transaction_costs(
+            entry, exit_price, qty, product=product,
+            cost_config=self.ctx.config.transaction_costs,
+        )
+        pnl = gross_pnl - costs
+
+        await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)
+        return {"symbol": pos["symbol"], "pnl": pnl}
