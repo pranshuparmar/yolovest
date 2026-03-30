@@ -564,6 +564,7 @@ async def async_main(args: argparse.Namespace) -> None:
         ctx.config.retraining = new_config.retraining
         ctx.config.market_data = new_config.market_data
         ctx.config.dashboard = new_config.dashboard
+        ctx.config.news_digest = new_config.news_digest
         # Update market hours checker with new config
         ctx.market_hours = MarketHoursChecker(ctx.config)
         reloaded = [

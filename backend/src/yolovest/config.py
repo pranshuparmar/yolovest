@@ -255,6 +255,12 @@ class ReportsConfig(BaseModel):
     weekly_report_cron: str = "0 10 * * 6"
 
 
+class NewsDigestConfig(BaseModel):
+    enabled: bool = True
+    schedule_cron: str = "0 9 * * 1-5"  # 9:00 AM IST, weekdays
+    max_headlines: int = Field(default=10, ge=1, le=50)
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
     file_level: str = "INFO"  # log file can have a different level
@@ -316,6 +322,7 @@ class AppConfig(BaseModel):
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     log: LoggingConfig = Field(default_factory=LoggingConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+    news_digest: NewsDigestConfig = Field(default_factory=NewsDigestConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":

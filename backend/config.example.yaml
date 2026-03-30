@@ -147,6 +147,11 @@ dashboard:
   show_degraded_banner: true          # set false to hide "Degraded Mode" banner (e.g. intentionally running without LLM)
   # Dashboard URL in logs/Telegram is derived from DOMAIN env var (e.g. DOMAIN=yolovest.example.com)
 
+news_digest:
+  enabled: true                         # send daily news headlines to Telegram
+  schedule_cron: "0 9 * * 1-5"          # 9:00 AM IST, weekdays
+  max_headlines: 10                     # number of headlines to include
+
 notifications:
   telegram:
     enabled: false
