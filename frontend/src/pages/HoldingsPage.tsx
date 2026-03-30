@@ -417,19 +417,16 @@ export function HoldingsPage() {
                             Buy
                           </button>
                           <button
-                            onClick={() =>
+                            onClick={() => {
+                              if (h.locked && !window.confirm(
+                                `${h.tradingsymbol} is locked. Are you sure you want to sell?`
+                              )) return;
                               setOrderForm({
                                 symbol: h.tradingsymbol,
                                 side: "SELL",
-                              })
-                            }
-                            disabled={h.locked}
-                            className={clsx(
-                              "px-2 py-0.5 rounded text-xs font-medium transition-colors",
-                              h.locked
-                                ? "bg-gray-800 text-gray-600 cursor-not-allowed"
-                                : "bg-red-900/30 text-red-400 hover:bg-red-800/50"
-                            )}
+                              });
+                            }}
+                            className="px-2 py-0.5 rounded text-xs font-medium bg-red-900/30 text-red-400 hover:bg-red-800/50 transition-colors"
                           >
                             Sell
                           </button>
