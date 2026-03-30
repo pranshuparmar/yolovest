@@ -1374,10 +1374,14 @@ class Database:
                 signal_id = row[0]
 
         await self.conn.execute(
-            "INSERT INTO predictions (prediction_id, signal_id, trade_id, created_at, "
-            "prediction_end_time, actual_price, direction_correct, target_hit, "
-            "actual_pnl_pct) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
-            (pred_id, signal_id, prediction.get("trade_id"), ts_now, end_time.isoformat()),
+            "INSERT INTO predictions (prediction_id, signal_id, trade_id, symbol, "
+            "created_at, prediction_end_time, actual_price, direction_correct, "
+            "target_hit, actual_pnl_pct) "
+            "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+            (
+                pred_id, signal_id, prediction.get("trade_id"),
+                prediction.get("symbol"), ts_now, end_time.isoformat(),
+            ),
         )
 
         # Also store prediction details in audit for traceability
@@ -1485,7 +1489,7 @@ class Database:
         cursor = await self.conn.execute(
             "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
             "p.prediction_end_time, "
-            "s.symbol, s.signal_type as predicted_direction, "
+            "COALESCE(p.symbol, s.symbol) as symbol, s.signal_type as predicted_direction, "
             "s.entry_price, s.target_price as predicted_target, "
             "s.stop_loss_price as predicted_stop_loss, "
             "s.confidence_score as confidence, "
@@ -1505,7 +1509,7 @@ class Database:
         cursor = await self.conn.execute(
             "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
             "p.prediction_end_time, "
-            "s.symbol, s.signal_type as predicted_direction, "
+            "COALESCE(p.symbol, s.symbol) as symbol, s.signal_type as predicted_direction, "
             "s.entry_price, s.target_price as predicted_target, "
             "s.stop_loss_price as predicted_stop_loss, "
             "s.confidence_score as confidence, "
@@ -1602,7 +1606,7 @@ class Database:
         """Get all predictions with outcomes for scoreboard computation."""
         cursor = await self.conn.execute(
             "SELECT p.prediction_id, p.direction_correct, p.target_hit, "
-            "p.actual_pnl_pct, s.symbol, s.confidence_score as confidence, "
+            "p.actual_pnl_pct, COALESCE(p.symbol, s.symbol) as symbol, s.confidence_score as confidence, "
             "s.model_version "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
@@ -1631,8 +1635,10 @@ class Database:
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).isoformat()
-        cursor = await self.conn.execute(
-            "SELECT p.*, s.symbol, s.signal_type, s.confidence_score "
+        cursor = await self.read_conn.execute(
+            "SELECT p.*, "
+            "COALESCE(p.symbol, s.symbol) as symbol, "
+            "s.signal_type, s.confidence_score "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
             "WHERE p.created_at >= ? ORDER BY p.created_at",
@@ -1671,7 +1677,8 @@ class Database:
             hour=9, minute=15, second=0, microsecond=0
         )
         cursor = await self.conn.execute(
-            "SELECT p.*, s.symbol, s.signal_type, s.confidence_score "
+            "SELECT p.*, COALESCE(p.symbol, s.symbol) as symbol, "
+            "s.signal_type, s.confidence_score "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
             "WHERE p.created_at >= ? ORDER BY p.created_at",
@@ -2809,11 +2816,12 @@ class Database:
 
     async def get_symbol_predictions(self, symbol: str) -> list[dict[str, Any]]:
         """Predictions linked to a specific symbol via signals."""
-        cursor = await self.conn.execute(
-            "SELECT p.*, s.symbol, s.signal_type, s.confidence_score "
+        cursor = await self.read_conn.execute(
+            "SELECT p.*, COALESCE(p.symbol, s.symbol) as symbol, "
+            "s.signal_type, s.confidence_score "
             "FROM predictions p "
-            "JOIN signals s ON p.signal_id = s.id "
-            "WHERE s.symbol = ? "
+            "LEFT JOIN signals s ON p.signal_id = s.id "
+            "WHERE COALESCE(p.symbol, s.symbol) = ? "
             "ORDER BY p.created_at DESC LIMIT 50",
             (symbol,),
         )
