@@ -985,7 +985,11 @@ class Database:
     async def get_prediction_outcomes(self) -> list[dict[str, Any]]:
         """Load predictions with actual outcomes for retraining analysis."""
         cursor = await self.conn.execute(
-            "SELECT * FROM predictions WHERE actual_price IS NOT NULL"
+            "SELECT p.*, COALESCE(p.symbol, s.symbol) as symbol, "
+            "s.signal_type, s.confidence_score "
+            "FROM predictions p "
+            "LEFT JOIN signals s ON p.signal_id = s.id "
+            "WHERE p.actual_price IS NOT NULL"
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
