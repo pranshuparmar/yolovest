@@ -149,7 +149,7 @@ dashboard:
 
 news_digest:
   enabled: true                         # send daily news headlines to Telegram
-  schedule_cron: "0 9 * * 1-5"          # 9:00 AM IST, weekdays
+  schedule_cron: "0 9 * * *"             # 9:00 AM IST, every day
   max_headlines: 10                     # number of headlines to include
 
 notifications:

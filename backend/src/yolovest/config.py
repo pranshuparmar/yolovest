@@ -257,7 +257,7 @@ class ReportsConfig(BaseModel):
 
 class NewsDigestConfig(BaseModel):
     enabled: bool = True
-    schedule_cron: str = "0 9 * * 1-5"  # 9:00 AM IST, weekdays
+    schedule_cron: str = "0 9 * * *"  # 9:00 AM IST, every day
     max_headlines: int = Field(default=10, ge=1, le=50)
 
 
