@@ -372,6 +372,12 @@ export const api = {
   unquarantineSymbol: (symbol: string) =>
     apiFetch<{ success: boolean; symbol: string }>(`/api/quarantined-symbols/${symbol}`, { method: "DELETE" }),
 
+  lockHolding: (symbol: string) =>
+    apiFetch<{ success: boolean; symbol: string; locked: boolean }>(`/api/locked-holdings/${symbol}`, { method: "POST" }),
+
+  unlockHolding: (symbol: string) =>
+    apiFetch<{ success: boolean; symbol: string; locked: boolean }>(`/api/locked-holdings/${symbol}`, { method: "DELETE" }),
+
   listSkills: () =>
     apiFetch<{ name: string; description: string; trigger: string; schedule: string | null }[]>(
       "/api/skills",

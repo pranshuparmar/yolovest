@@ -3113,3 +3113,40 @@ class Database:
         cursor = await self.read_conn.execute(query, tuple(params))
         rows = await cursor.fetchall()
         return [dict[str, Any](r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Locked Holdings
+    # ------------------------------------------------------------------
+
+    async def get_locked_symbols(self) -> set[str]:
+        """Return the set of symbols that are locked (should not be sold)."""
+        cursor = await self.read_conn.execute("SELECT symbol FROM locked_holdings")
+        rows = await cursor.fetchall()
+        return {row[0] for row in rows}
+
+    async def get_locked_holdings(self) -> list[dict[str, Any]]:
+        """Return all locked holdings with metadata."""
+        cursor = await self.read_conn.execute(
+            "SELECT symbol, locked_at, notes FROM locked_holdings ORDER BY locked_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](r) for r in rows]
+
+    async def lock_symbol(self, symbol: str, notes: str | None = None) -> bool:
+        """Lock a symbol to prevent YoloVest from selling it."""
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO locked_holdings (symbol, locked_at, notes) "
+            "VALUES (?, datetime('now'), ?)",
+            (symbol.upper(), notes),
+        )
+        await self.conn.commit()
+        return True
+
+    async def unlock_symbol(self, symbol: str) -> bool:
+        """Unlock a symbol, allowing YoloVest to sell it again."""
+        cursor = await self.conn.execute(
+            "DELETE FROM locked_holdings WHERE symbol = ?",
+            (symbol.upper(),),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0

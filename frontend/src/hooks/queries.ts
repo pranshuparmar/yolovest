@@ -80,6 +80,22 @@ export function usePlaceOrder() {
   });
 }
 
+export function useLockHolding() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.lockHolding,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["holdings"] }),
+  });
+}
+
+export function useUnlockHolding() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.unlockHolding,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["holdings"] }),
+  });
+}
+
 export function useTradeDetail(tradeId: string) {
   return useQuery({
     queryKey: ["trade", tradeId],

@@ -86,6 +86,9 @@ class GenerateSignalsSkill(SkillBase):
         open_positions = await self.ctx.db.get_open_positions()
         held_symbols = {p["symbol"] for p in open_positions}
 
+        # Load locked symbols — SELL signals for these will be skipped entirely
+        locked_symbols = await self.ctx.db.get_locked_symbols()
+
         # Skip symbols that already have a signal or open position today
         already_signaled = await self.ctx.db.get_todays_signaled_symbols()
         if already_signaled:
@@ -223,6 +226,17 @@ class GenerateSignalsSkill(SkillBase):
                         "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
                     })
                     logger.info("HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
+                    continue
+
+                # Skip SELL signals for locked holdings (user explicitly protected them)
+                if prediction.signal_type == "SELL" and symbol in locked_symbols:
+                    filter_counts.setdefault("locked_holding", 0)
+                    filter_counts["locked_holding"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "locked_holding",
+                        "detail": f"SELL blocked — {symbol} is locked",
+                    })
+                    logger.info("Locked holding: skipping SELL for %s", symbol)
                     continue
 
                 # Adjust SELL signals: force to MIS/intraday if user doesn't hold the stock

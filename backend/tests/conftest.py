@@ -167,6 +167,7 @@ def mock_db() -> AsyncMock:
     db = AsyncMock()
     db.health_check = AsyncMock(return_value=True)
     db.get_open_positions = AsyncMock(return_value=[])
+    db.get_locked_symbols = AsyncMock(return_value=set())
     db.is_kill_switch_active = AsyncMock(return_value=False)
     db.set_kill_switch = AsyncMock(return_value=True)
     db.get_portfolio_state = AsyncMock(return_value={

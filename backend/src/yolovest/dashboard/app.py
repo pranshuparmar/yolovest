@@ -441,6 +441,11 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         try:
             holdings = await ctx.broker.get_holdings()
+            # Merge lock status into holdings
+            locked_symbols = await ctx.db.get_locked_symbols()
+            for h in holdings:
+                sym = h.get("tradingsymbol") or h.get("symbol", "")
+                h["locked"] = sym in locked_symbols
             return {
                 "holdings": holdings,
                 "broker_authenticated": True,
@@ -451,6 +456,36 @@ def create_app(ctx: AppContext) -> FastAPI:
                 status_code=502,
                 detail=f"Broker error: {e}. Token may be expired — re-authenticate via Settings.",
             )
+
+    @app.get("/api/locked-holdings")
+    async def get_locked_holdings(
+        _user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Get all locked holdings."""
+        return await ctx.db.get_locked_holdings()
+
+    @app.post("/api/locked-holdings/{symbol}")
+    async def lock_holding(
+        symbol: str,
+        notes: str | None = Query(default=None),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Lock a holding — YoloVest will not sell this symbol."""
+        await ctx.db.lock_symbol(symbol, notes)
+        logger.info("Locked holding: %s (notes: %s)", symbol, notes)
+        return {"success": True, "symbol": symbol.upper(), "locked": True}
+
+    @app.delete("/api/locked-holdings/{symbol}")
+    async def unlock_holding(
+        symbol: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Unlock a holding — YoloVest can sell this symbol again."""
+        removed = await ctx.db.unlock_symbol(symbol)
+        if not removed:
+            raise HTTPException(status_code=404, detail=f"{symbol} was not locked")
+        logger.info("Unlocked holding: %s", symbol)
+        return {"success": True, "symbol": symbol.upper(), "locked": False}
 
     @app.post("/api/orders")
     async def place_manual_order(

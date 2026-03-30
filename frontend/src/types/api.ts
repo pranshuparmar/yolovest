@@ -529,6 +529,7 @@ export interface HoldingEntry {
   day_change_percentage: number;
   isin?: string;
   t1_quantity?: number;
+  locked?: boolean;
 }
 
 export interface ManualOrder {

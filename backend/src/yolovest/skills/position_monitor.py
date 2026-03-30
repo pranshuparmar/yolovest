@@ -66,6 +66,9 @@ class PositionMonitorSkill(SkillBase):
         # Skip positions that were just recovered (already closed in DB)
         recovered_set = set(recovered)
 
+        # Load locked symbols — these should not be auto-sold (target/SL/trail)
+        locked_symbols = await self.ctx.db.get_locked_symbols()
+
         for pos in local_positions:
             symbol = pos["symbol"]
             if symbol in recovered_set:
@@ -86,6 +89,13 @@ class PositionMonitorSkill(SkillBase):
             sl = pos["stop_loss_price"]
             target = pos["target_price"]
             risk_per_share = abs(entry - sl)
+
+            # Locked holdings: track PnL but never auto-close
+            if symbol in locked_symbols:
+                await self.ctx.db.update_unrealized_pnl(
+                    pos["trade_id"], current_price,
+                )
+                continue
 
             # Target hit?
             if (pos["signal_type"] == "BUY" and current_price >= target) or (
