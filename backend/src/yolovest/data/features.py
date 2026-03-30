@@ -78,6 +78,7 @@ def compute_features(
         atr = compute_atr(highs, lows, closes, period=14)
         if atr is not None:
             features["atr_14"] = atr
+            features["atr_pct"] = atr / closes[-1] if closes[-1] > 0 else 0.0
 
     if cfg.volume_profile:
         vp = compute_volume_profile(volumes)

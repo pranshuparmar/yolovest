@@ -274,7 +274,7 @@ class XGBoostSignalModel(MLBase):
         stop_loss_price = max(stop_loss_price, 0.01)
         entry_price = max(entry_price, 0.01)
 
-        holding_period = "intraday" if model_type == "intraday" else "3d"
+        holding_period = "intraday" if model_type == "intraday" else "3d"  # default; caller overrides via signal
 
         from typing import Literal, cast
         signal_type = cast(Literal["BUY", "SELL", "HOLD"], signal_type_str)
@@ -369,7 +369,7 @@ class XGBoostSignalModel(MLBase):
         stop_loss_price = max(stop_loss_price, 0.01)
         entry_price = max(entry_price, 0.01)
 
-        holding_period = "intraday" if model_type == "intraday" else "3d"
+        holding_period = "intraday" if model_type == "intraday" else "3d"  # default; caller overrides via signal
 
         # Cast to Literal type expected by MLPrediction
         from typing import Literal, cast

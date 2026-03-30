@@ -33,7 +33,7 @@ class TestValidConfigLoads:
     def test_config_from_fixture_is_valid(self, sample_config):
         assert sample_config.mode == "paper"
         assert sample_config.capital.initial_amount == 100000
-        assert sample_config.scanning.weights.technical == 0.40
+        assert sample_config.scanning.weights.technical == 0.35
 
     def test_config_live_mode(self):
         config = AppConfig(mode="live")
@@ -43,8 +43,8 @@ class TestValidConfigLoads:
 class TestScanningWeightsValidation:
     def test_weights_summing_to_one_passes(self):
         w = ScanningWeights(
-            technical=0.30, volume_momentum=0.30,
-            news_sentiment=0.20, fundamental=0.20,
+            technical=0.30, volume_momentum=0.25,
+            news_sentiment=0.20, fundamental=0.15, volatility=0.10,
         )
         assert w.technical == 0.30
 
@@ -192,7 +192,7 @@ class TestMissingRequiredFields:
     def test_scanning_default_weights_sum_to_one(self):
         config = ScanningConfig()
         w = config.weights
-        total = w.technical + w.volume_momentum + w.news_sentiment + w.fundamental
+        total = w.technical + w.volume_momentum + w.news_sentiment + w.fundamental + w.volatility
         assert abs(total - 1.0) < 1e-6
 
     def test_risk_uses_defaults(self):

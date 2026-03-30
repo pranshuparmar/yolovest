@@ -68,7 +68,7 @@ class GenerateSignalsSkill(SkillBase):
                 },
             )
 
-        use_intraday = self._should_use_intraday_model()
+        strategy_cfg = self.ctx.config.strategy
         indicator_cfg = IndicatorConfig(
             ema_periods=self.ctx.config.strategy.ema_periods,
             rsi=self.ctx.config.strategy.indicators.rsi,
@@ -164,6 +164,10 @@ class GenerateSignalsSkill(SkillBase):
                 except Exception:
                     pass  # fall back to features["close"] in _predict()
 
+                # Decide holding period based on stock characteristics and strategy mode
+                holding_period, product = self._decide_holding_period(features)
+                use_intraday = holding_period == "intraday"
+
                 # Use latest intraday price for feature close during market hours
                 if use_intraday:
                     intraday_bars = await self.ctx.db.get_ohlcv(symbol, "5minute", days=1)
@@ -216,14 +220,33 @@ class GenerateSignalsSkill(SkillBase):
                     logger.info("HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
                     continue
 
+                # Override target/SL with period-specific ATR multipliers
+                entry = prediction.entry_price
+                atr = features.get("atr_14", entry * 0.02)
+                multipliers = self._get_atr_multipliers(holding_period)
+
+                if prediction.signal_type == "BUY":
+                    target_price = entry + multipliers.target * atr
+                    stop_loss_price = entry - multipliers.stop_loss * atr
+                elif prediction.signal_type == "SELL":
+                    target_price = entry - multipliers.target * atr
+                    stop_loss_price = entry + multipliers.stop_loss * atr
+                else:
+                    target_price = prediction.target_price
+                    stop_loss_price = prediction.stop_loss_price
+
+                target_price = max(target_price, 0.01)
+                stop_loss_price = max(stop_loss_price, 0.01)
+
                 signal = {
                     "symbol": symbol,
                     "signal_type": prediction.signal_type,
-                    "entry_price": prediction.entry_price,
-                    "target_price": prediction.target_price,
-                    "stop_loss_price": prediction.stop_loss_price,
+                    "entry_price": entry,
+                    "target_price": round(target_price, 2),
+                    "stop_loss_price": round(stop_loss_price, 2),
                     "position_size": prediction.position_size,
-                    "expected_holding_period": prediction.holding_period,
+                    "expected_holding_period": holding_period,
+                    "product": product,
                     "confidence_score": prediction.confidence,
                     "features_snapshot": features,
                     "model_version": prediction.model_version,
@@ -300,10 +323,58 @@ class GenerateSignalsSkill(SkillBase):
             },
         )
 
-    def _should_use_intraday_model(self) -> bool:
-        """Decide model type based on time of day and config."""
-        if self.ctx.config.strategy.default_trade_type == "swing":
-            return False
-        # Before 14:00 IST → intraday (MIS needs time to play out before 15:15 square-off)
-        now = datetime.now(IST).time()
-        return now < time(14, 0)
+    def _decide_holding_period(self, features: dict) -> tuple[str, str]:
+        """Decide holding period and product type based on stock characteristics and strategy mode.
+
+        Returns:
+            (holding_period, product) — e.g. ("intraday", "MIS") or ("1w", "CNC")
+        """
+        allowed = self.ctx.config.strategy.allowed_holding_periods or ["intraday", "3d", "1w"]
+        now_time = datetime.now(IST).time()
+        vol_cfg = self.ctx.config.strategy.volatility
+
+        atr_pct = features.get("atr_pct", 0.0)
+        rel_vol = features.get("relative_volume", 1.0)
+
+        # Intraday: needs high volatility, high volume, and enough time before square-off
+        if "intraday" in allowed:
+            has_volatility = atr_pct >= vol_cfg.ideal_min_atr_pct
+            has_volume = rel_vol >= 1.5
+            has_time = now_time < time(14, 0)
+            if has_volatility and has_volume and has_time:
+                return ("intraday", "MIS")
+
+        # 1-week: needs strong trend (EMA alignment) and SuperTrend confirming
+        if "1w" in allowed:
+            ema_9 = features.get("ema_9", 0)
+            ema_21 = features.get("ema_21", 0)
+            ema_50 = features.get("ema_50", 0)
+            supertrend = features.get("supertrend_trend", 0)
+
+            bullish_trend = ema_9 > ema_21 > ema_50 > 0 and supertrend > 0
+            bearish_trend = 0 < ema_9 < ema_21 < ema_50 and supertrend < 0
+            moderate_vol = vol_cfg.min_atr_pct <= atr_pct <= vol_cfg.ideal_max_atr_pct
+
+            if (bullish_trend or bearish_trend) and moderate_vol:
+                return ("1w", "CNC")
+
+        # 3-day swing: default fallback
+        if "3d" in allowed:
+            return ("3d", "CNC")
+
+        # Fall back to first allowed period
+        period = allowed[0] if allowed else "intraday"
+        product = "MIS" if period == "intraday" else "CNC"
+        return (period, product)
+
+    def _get_atr_multipliers(self, holding_period: str) -> "ATRMultipliers":
+        """Get ATR multipliers for the given holding period from config."""
+        from yolovest.config import ATRMultipliers
+
+        hp_cfg = self.ctx.config.strategy.holding_periods
+        if holding_period == "intraday":
+            return hp_cfg.intraday
+        elif holding_period == "1w":
+            return hp_cfg.week
+        else:
+            return hp_cfg.short_swing

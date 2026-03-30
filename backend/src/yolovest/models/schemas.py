@@ -51,7 +51,8 @@ class Signal(BaseModel):
     target_price: float = Field(gt=0)
     stop_loss_price: float = Field(gt=0)
     position_size: int = Field(gt=0)
-    expected_holding_period: str  # e.g., "intraday", "3d", "1w"
+    expected_holding_period: Literal["intraday", "3d", "1w"] = "intraday"
+    product: Literal["MIS", "CNC"] = "MIS"
     confidence_score: float = Field(ge=0.0, le=1.0)
     model_version: str
     features_snapshot: dict[str, Any] = Field(default_factory=dict)

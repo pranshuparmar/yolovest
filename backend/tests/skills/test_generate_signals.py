@@ -1,4 +1,4 @@
-"""Tests for generate-signals skill diagnostics."""
+"""Tests for generate-signals skill diagnostics and strategy logic."""
 
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
@@ -7,6 +7,7 @@ import pytest
 
 from yolovest.models.schemas import MLPrediction, OHLCVBar
 from yolovest.skills.generate_signals import GenerateSignalsSkill
+from yolovest.timezone import IST
 
 
 def _make_bars(n: int) -> list[OHLCVBar]:
@@ -40,7 +41,7 @@ class TestGenerateSignalsDiagnostics:
             confidence=0.45, model_version="test-v1",
         ))
 
-        with patch.object(signal_skill, "_should_use_intraday_model", return_value=False):
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
             result = await signal_skill.execute()
 
         assert result.success
@@ -61,7 +62,7 @@ class TestGenerateSignalsDiagnostics:
             confidence=0.50, model_version="test-v1",
         ))
 
-        with patch.object(signal_skill, "_should_use_intraday_model", return_value=False):
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
             result = await signal_skill.execute()
 
         assert result.success
@@ -77,7 +78,7 @@ class TestGenerateSignalsDiagnostics:
         ])
         signal_skill.ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(30))
 
-        with patch.object(signal_skill, "_should_use_intraday_model", return_value=False):
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
             result = await signal_skill.execute()
 
         assert result.success
@@ -96,7 +97,7 @@ class TestGenerateSignalsDiagnostics:
             confidence=0.85, model_version="test-v1",
         ))
 
-        with patch.object(signal_skill, "_should_use_intraday_model", return_value=False):
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
             result = await signal_skill.execute()
 
         assert result.success
@@ -121,7 +122,7 @@ class TestGenerateSignalsDiagnostics:
             confidence=0.85, model_version="test-v1",
         ))
 
-        with patch.object(signal_skill, "_should_use_intraday_model", return_value=False):
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
             result = await signal_skill.execute()
 
         assert result.success
@@ -143,7 +144,7 @@ class TestGenerateSignalsDiagnostics:
         )
         signal_skill.ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
 
-        with patch.object(signal_skill, "_should_use_intraday_model", return_value=False):
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
             result = await signal_skill.execute()
 
         assert result.data["signals_generated"] == 0
@@ -170,7 +171,7 @@ class TestGenerateSignalsDiagnostics:
             confidence=0.70, model_version="test-v1",
         ))
 
-        with patch.object(signal_skill, "_should_use_intraday_model", return_value=False):
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
             result = await signal_skill.execute()
 
         assert result.data["signals_generated"] == 0
@@ -196,9 +197,191 @@ class TestGenerateSignalsDiagnostics:
             confidence=0.85, model_version="test-v1",
         ))
 
-        with patch.object(signal_skill, "_should_use_intraday_model", return_value=False):
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
             result = await signal_skill.execute()
 
         assert result.data["signals_generated"] == 1
         diag = result.data["diagnostics"]
         assert diag["filter_counts"]["passed"] == 1
+
+
+class TestHoldingPeriodDecision:
+    """Test the intelligent holding period decision logic."""
+
+    def test_intraday_when_high_vol_and_volume_and_morning(self, signal_skill):
+        """High ATR%, high relative volume, morning → intraday/MIS."""
+        features = {
+            "atr_pct": 0.025,
+            "relative_volume": 2.0,
+            "ema_9": 100, "ema_21": 99, "ema_50": 98,
+            "supertrend_trend": 1.0,
+        }
+        with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            period, product = signal_skill._decide_holding_period(features)
+        assert period == "intraday"
+        assert product == "MIS"
+
+    def test_no_intraday_after_1400(self, signal_skill):
+        """After 14:00 IST, intraday should not be selected."""
+        features = {
+            "atr_pct": 0.025,
+            "relative_volume": 2.0,
+            "ema_9": 100, "ema_21": 99, "ema_50": 98,
+            "supertrend_trend": 1.0,
+        }
+        with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 30, 14, 30, tzinfo=IST)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            period, product = signal_skill._decide_holding_period(features)
+        assert period != "intraday"
+        assert product == "CNC"
+
+    def test_1w_when_strong_trend(self, signal_skill):
+        """Strong EMA alignment + SuperTrend confirming + moderate vol → 1w/CNC."""
+        features = {
+            "atr_pct": 0.012,
+            "relative_volume": 1.0,
+            "ema_9": 110, "ema_21": 105, "ema_50": 100,
+            "supertrend_trend": 1.0,
+        }
+        with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            period, product = signal_skill._decide_holding_period(features)
+        assert period == "1w"
+        assert product == "CNC"
+
+    def test_3d_default_fallback(self, signal_skill):
+        """When neither intraday nor 1w criteria met → 3d/CNC."""
+        features = {
+            "atr_pct": 0.008,
+            "relative_volume": 0.8,
+            "ema_9": 100, "ema_21": 101, "ema_50": 99,
+            "supertrend_trend": -1.0,
+        }
+        with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            period, product = signal_skill._decide_holding_period(features)
+        assert period == "3d"
+        assert product == "CNC"
+
+    def test_intraday_mode_only_returns_intraday(self, signal_skill):
+        """With mode=intraday, only intraday is allowed."""
+        signal_skill.ctx.config.strategy.allowed_holding_periods = ["intraday"]
+        features = {
+            "atr_pct": 0.025,
+            "relative_volume": 2.0,
+        }
+        with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            period, product = signal_skill._decide_holding_period(features)
+        assert period == "intraday"
+        assert product == "MIS"
+
+    def test_long_term_mode_only_returns_1w(self, signal_skill):
+        """With mode=long_term, only 1w is allowed."""
+        signal_skill.ctx.config.strategy.allowed_holding_periods = ["1w"]
+        features = {
+            "atr_pct": 0.01,
+            "relative_volume": 1.0,
+            "ema_9": 100, "ema_21": 101, "ema_50": 99,
+            "supertrend_trend": -1.0,
+        }
+        with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            period, product = signal_skill._decide_holding_period(features)
+        assert period == "1w"
+        assert product == "CNC"
+
+
+class TestProductPropagation:
+    """Test that product field flows through to generated signals."""
+
+    async def test_signal_contains_product_field(self, signal_skill):
+        signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
+            {"symbol": "RELIANCE"},
+        ])
+        signal_skill.ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        signal_skill.ctx.db.insert_signal = AsyncMock()
+        signal_skill.ctx.ml.predict_swing = AsyncMock(return_value=MLPrediction(
+            signal_type="BUY", entry_price=100.0, target_price=110.0,
+            stop_loss_price=95.0, position_size=1, holding_period="3d",
+            confidence=0.85, model_version="test-v1",
+        ))
+
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("3d", "CNC")):
+            result = await signal_skill.execute()
+
+        assert result.data["signals_generated"] == 1
+        sig = result.data["signals"][0]
+        assert sig["product"] == "CNC"
+        assert sig["expected_holding_period"] == "3d"
+
+    async def test_intraday_signal_has_mis_product(self, signal_skill):
+        signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
+            {"symbol": "RELIANCE"},
+        ])
+        signal_skill.ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        signal_skill.ctx.db.insert_signal = AsyncMock()
+        signal_skill.ctx.ml.predict_intraday = AsyncMock(return_value=MLPrediction(
+            signal_type="BUY", entry_price=100.0, target_price=110.0,
+            stop_loss_price=95.0, position_size=1, holding_period="intraday",
+            confidence=0.85, model_version="test-v1",
+        ))
+
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("intraday", "MIS")):
+            result = await signal_skill.execute()
+
+        assert result.data["signals_generated"] == 1
+        sig = result.data["signals"][0]
+        assert sig["product"] == "MIS"
+        assert sig["expected_holding_period"] == "intraday"
+
+
+class TestATRMultipliers:
+    """Test that ATR multipliers are applied per holding period."""
+
+    async def test_intraday_uses_tighter_multipliers(self, signal_skill):
+        signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
+            {"symbol": "RELIANCE"},
+        ])
+        signal_skill.ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        signal_skill.ctx.db.insert_signal = AsyncMock()
+        signal_skill.ctx.ml.predict_intraday = AsyncMock(return_value=MLPrediction(
+            signal_type="BUY", entry_price=100.0, target_price=110.0,
+            stop_loss_price=95.0, position_size=1, holding_period="intraday",
+            confidence=0.85, model_version="test-v1",
+        ))
+
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("intraday", "MIS")):
+            result = await signal_skill.execute()
+
+        sig = result.data["signals"][0]
+        entry = sig["entry_price"]
+        assert sig["target_price"] > entry
+        assert sig["stop_loss_price"] < entry
+
+    async def test_week_uses_wider_multipliers(self, signal_skill):
+        signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
+            {"symbol": "RELIANCE"},
+        ])
+        signal_skill.ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
+        signal_skill.ctx.db.insert_signal = AsyncMock()
+        signal_skill.ctx.ml.predict_swing = AsyncMock(return_value=MLPrediction(
+            signal_type="BUY", entry_price=100.0, target_price=110.0,
+            stop_loss_price=95.0, position_size=1, holding_period="3d",
+            confidence=0.85, model_version="test-v1",
+        ))
+
+        with patch.object(signal_skill, "_decide_holding_period", return_value=("1w", "CNC")):
+            result = await signal_skill.execute()
+
+        sig = result.data["signals"][0]
+        entry = sig["entry_price"]
+        assert sig["target_price"] > entry
+        assert sig["stop_loss_price"] < entry

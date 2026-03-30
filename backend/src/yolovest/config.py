@@ -100,14 +100,18 @@ class HeartbeatConfig(BaseModel):
 
 
 class ScanningWeights(BaseModel):
-    technical: float = 0.40
+    technical: float = 0.35
     volume_momentum: float = 0.25
-    news_sentiment: float = 0.20
+    news_sentiment: float = 0.15
     fundamental: float = 0.15
+    volatility: float = 0.10
 
     @model_validator(mode="after")
     def weights_sum_to_one(self) -> "ScanningWeights":
-        total = self.technical + self.volume_momentum + self.news_sentiment + self.fundamental
+        total = (
+            self.technical + self.volume_momentum + self.news_sentiment
+            + self.fundamental + self.volatility
+        )
         if abs(total - 1.0) > 1e-6:
             raise ValueError(
                 f"Scanning weights must sum to 1.0, got {total:.4f}"
@@ -137,11 +141,66 @@ class IndicatorsConfig(BaseModel):
     supertrend: bool = True
 
 
+class ATRMultipliers(BaseModel):
+    """ATR multipliers for target and stop-loss calculation."""
+
+    target: float = Field(default=2.0, gt=0)
+    stop_loss: float = Field(default=1.0, gt=0)
+
+
+class HoldingPeriodConfig(BaseModel):
+    """Per-holding-period ATR multipliers for target/SL sizing."""
+
+    intraday: ATRMultipliers = Field(
+        default_factory=lambda: ATRMultipliers(target=1.5, stop_loss=0.75),
+    )
+    short_swing: ATRMultipliers = Field(
+        default_factory=lambda: ATRMultipliers(target=2.0, stop_loss=1.0),
+    )
+    week: ATRMultipliers = Field(
+        default_factory=lambda: ATRMultipliers(target=3.0, stop_loss=1.5),
+    )
+
+
+class VolatilityConfig(BaseModel):
+    """Volatility thresholds for stock selection and holding period decisions.
+
+    ATR% = ATR / price. A stock with 2% ATR% moves ~2% per day on average.
+    """
+
+    min_atr_pct: float = Field(default=0.005, ge=0)
+    max_atr_pct: float = Field(default=0.05, gt=0)
+    ideal_min_atr_pct: float = Field(default=0.015, ge=0)
+    ideal_max_atr_pct: float = Field(default=0.03, gt=0)
+
+
+# Mode presets: allowed holding periods per strategy mode
+_MODE_HOLDING_PERIODS: dict[str, list[str]] = {
+    "intraday": ["intraday"],
+    "short_term": ["intraday", "3d", "1w"],
+    "balanced": ["intraday", "3d", "1w"],
+    "long_term": ["1w"],
+}
+
+
 class StrategyConfig(BaseModel):
+    mode: Literal["intraday", "short_term", "balanced", "long_term"] = "balanced"
+    allowed_holding_periods: list[str] | None = None
+    holding_periods: HoldingPeriodConfig = Field(default_factory=HoldingPeriodConfig)
+    volatility: VolatilityConfig = Field(default_factory=VolatilityConfig)
     ema_periods: list[int] = Field(default_factory=lambda: [9, 21, 50, 200])
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     default_trade_type: Literal["intraday", "swing"] = "intraday"
     min_training_samples: int = 200
+
+    @model_validator(mode="after")
+    def apply_mode_defaults(self) -> "StrategyConfig":
+        """Set allowed_holding_periods from mode if not explicitly provided."""
+        if self.allowed_holding_periods is None:
+            self.allowed_holding_periods = _MODE_HOLDING_PERIODS.get(
+                self.mode, ["intraday", "3d", "1w"],
+            )
+        return self
 
 
 class RiskConfig(BaseModel):

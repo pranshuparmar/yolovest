@@ -41,12 +41,43 @@ scanning:
   shortlist_size: 25                  # number of candidate stocks from daily scan
   min_avg_daily_volume: 500000        # filter out stocks below this avg daily volume
   weights:                            # ranking algorithm weights (must sum to 1.0)
-    technical: 0.40
+    technical: 0.35
     volume_momentum: 0.25
-    news_sentiment: 0.20
+    news_sentiment: 0.15
     fundamental: 0.15
+    volatility: 0.10                  # favor stocks with sufficient daily range
 
 strategy:
+  # Investment strategy mode — controls which holding periods are allowed
+  # and how stocks are selected. Options:
+  #   intraday   — intraday only (MIS), favors high-volatility + volume
+  #   short_term — intraday + 3-day + 1-week, balanced with volatility
+  #   balanced   — all holding periods, even weight distribution (default)
+  #   long_term  — 1-week only (CNC), favors trending + fundamental stocks
+  mode: balanced
+
+  # Override which holding periods are allowed (auto-derived from mode if omitted)
+  # allowed_holding_periods: ["intraday", "3d", "1w"]
+
+  # ATR multipliers per holding period — controls target and stop-loss distance
+  holding_periods:
+    intraday:                         # tight: must hit within hours
+      target: 1.5                     # target = entry ± 1.5 × ATR
+      stop_loss: 0.75                 # SL = entry ∓ 0.75 × ATR
+    short_swing:                      # 3-day swing
+      target: 2.0
+      stop_loss: 1.0
+    week:                             # 1-week hold — more room to breathe
+      target: 3.0
+      stop_loss: 1.5
+
+  # Volatility thresholds (ATR% = ATR/price) for stock selection
+  volatility:
+    min_atr_pct: 0.005                # 0.5% — below this stock doesn't move enough
+    max_atr_pct: 0.05                 # 5% — above this too risky
+    ideal_min_atr_pct: 0.015          # 1.5% — sweet spot lower bound
+    ideal_max_atr_pct: 0.03           # 3% — sweet spot upper bound
+
   ema_periods: [9, 21, 50, 200]       # moving average periods
   indicators:                         # toggle individual indicators
     rsi: true
@@ -57,7 +88,7 @@ strategy:
     volume_profile: true
     obv: true
     supertrend: true
-  default_trade_type: "intraday"      # intraday | swing
+  default_trade_type: "intraday"      # intraday | swing (legacy, used by ML model selection)
   min_training_samples: 200           # minimum data points to train a model
 
 risk:
