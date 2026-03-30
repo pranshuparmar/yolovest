@@ -348,7 +348,11 @@ export const api = {
     apiFetch<{ status: string; reloaded: string[] }>("/api/config/reload", { method: "POST" }),
 
   // Dry-Run Signal Preview
-  runDryRun: () => apiFetch<DryRunResult>("/api/dry-run", { method: "POST" }),
+  runDryRun: (mode?: string) =>
+    apiFetch<DryRunResult>(
+      `/api/dry-run${mode ? `?mode=${mode}` : ""}`,
+      { method: "POST" },
+    ),
 
   dryRunHistory: (limit = 10) =>
     apiFetch<DryRunSummary[]>(`/api/dry-run/history?limit=${limit}`),

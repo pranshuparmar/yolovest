@@ -131,7 +131,22 @@ def _extract_broker_capital(margins: dict[str, Any]) -> float:
 _ws_clients: set[WebSocket] = set()
 
 
-def _compute_scan_scores(stock: dict[str, Any], min_vol: int) -> dict[str, Any]:
+def _compute_volatility_score(atr_pct: float, vol_cfg: Any) -> float:
+    """Compute a [0, 1] volatility score using a bell-curve preference."""
+    if atr_pct <= 0 or atr_pct < vol_cfg.min_atr_pct:
+        return 0.0
+    if atr_pct > vol_cfg.max_atr_pct:
+        return 0.3
+    if vol_cfg.ideal_min_atr_pct <= atr_pct <= vol_cfg.ideal_max_atr_pct:
+        return 1.0
+    if atr_pct < vol_cfg.ideal_min_atr_pct:
+        rng = vol_cfg.ideal_min_atr_pct - vol_cfg.min_atr_pct
+        return 0.5 + 0.5 * ((atr_pct - vol_cfg.min_atr_pct) / rng) if rng > 0 else 0.5
+    rng = vol_cfg.max_atr_pct - vol_cfg.ideal_max_atr_pct
+    return 0.3 + 0.7 * ((vol_cfg.max_atr_pct - atr_pct) / rng) if rng > 0 else 0.5
+
+
+def _compute_scan_scores(stock: dict[str, Any], min_vol: int, vol_cfg: Any = None) -> dict[str, Any]:
     """Compute sub-scores for dry-run market scanning (mirrors MarketScanSkill logic)."""
     # Technical score from indicators
     signals: list[float] = []
@@ -180,11 +195,16 @@ def _compute_scan_scores(stock: dict[str, Any], min_vol: int) -> dict[str, Any]:
     else:
         fund_score = (promoter / 100.0) * 0.4 + 0.3
 
+    # Volatility score
+    atr_pct = stock.get("atr_pct") or 0.0
+    volatility_score = _compute_volatility_score(atr_pct, vol_cfg) if vol_cfg else 0.5
+
     return {
         "technical_score": tech,
         "volume_momentum_score": round(vol_score, 4),
         "news_sentiment_score": round(sent_score, 4),
         "fundamental_score": round(min(fund_score, 1.0), 4),
+        "volatility_score": round(volatility_score, 4),
     }
 
 
@@ -552,9 +572,23 @@ def create_app(ctx: AppContext) -> FastAPI:
         trade_id: str, user: str = Depends(verify_credentials)
     ) -> dict[str, Any]:
         """Full reasoning chain for a trade: signal → risk → LLM → execution → outcome."""
+        from yolovest.costs import compute_transaction_cost_breakdown
+
         detail = await ctx.db.get_trade_detail(trade_id)
         if not detail:
             raise HTTPException(status_code=404, detail="Trade not found")
+
+        # Compute cost breakdown for display
+        fill = detail.get("fill_price") or detail.get("entry_price", 0)
+        exit_p = detail.get("exit_price") or detail.get("target_price") or fill
+        qty = detail.get("quantity") or 0
+        product = detail.get("product") or "MIS"
+        if fill and qty:
+            detail["cost_breakdown"] = compute_transaction_cost_breakdown(
+                fill, exit_p, qty, product=product,
+                cost_config=ctx.config.transaction_costs,
+            )
+
         return detail
 
     # ------------------------------------------------------------------
@@ -1552,16 +1586,34 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.post("/api/dry-run")
     async def run_dry_run_signals(
+        mode: str | None = Query(
+            default=None,
+            pattern=r"^(intraday|short_term|balanced|long_term)$",
+            description="Strategy mode override (intraday, short_term, balanced, long_term)",
+        ),
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Run market-scan + signal generation on current data (read-only, no trades).
 
         Works regardless of market hours. Results are stored for next-day comparison.
+        Optional `mode` query param overrides the configured strategy.mode for this run.
         """
+        from datetime import datetime as dt
+
+        from yolovest.config import _MODE_HOLDING_PERIODS
+        from yolovest.costs import compute_transaction_costs
         from yolovest.data.features import IndicatorConfig, compute_features
+        from yolovest.strategy.holding_period import decide_holding_period, get_atr_multipliers
+        from yolovest.timezone import IST
 
         run_id = str(uuid.uuid4())[:8]
         cfg = ctx.config
+
+        # Resolve effective strategy mode and allowed holding periods
+        effective_mode = mode or cfg.strategy.mode
+        allowed_periods = _MODE_HOLDING_PERIODS.get(
+            effective_mode, cfg.strategy.allowed_holding_periods or ["intraday", "3d", "1w"],
+        )
 
         # Step 1: Run market-scan logic (without writing to watchlist)
         universe = await ctx.db.get_nse_universe()
@@ -1575,16 +1627,17 @@ def create_app(ctx: AppContext) -> FastAPI:
             if (s.get("avg_daily_volume") or 0) >= cfg.scanning.min_avg_daily_volume
         ]
 
-        # Score stocks
+        # Score stocks (including volatility)
         weights = cfg.scanning.weights
         scored = []
         for stock in liquid:
-            sub = _compute_scan_scores(stock, cfg.scanning.min_avg_daily_volume)
+            sub = _compute_scan_scores(stock, cfg.scanning.min_avg_daily_volume, cfg.strategy.volatility)
             composite = (
                 sub["technical_score"] * weights.technical
                 + sub["volume_momentum_score"] * weights.volume_momentum
                 + sub["news_sentiment_score"] * weights.news_sentiment
                 + sub["fundamental_score"] * weights.fundamental
+                + sub["volatility_score"] * weights.volatility
             )
             scored.append({**stock, **sub, "composite_score": composite})
 
@@ -1598,6 +1651,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             return {
                 "success": True,
                 "run_id": run_id,
+                "mode": effective_mode,
                 "universe_size": len(universe),
                 "shortlist_size": 0,
                 "signals": [],
@@ -1687,9 +1741,22 @@ def create_app(ctx: AppContext) -> FastAPI:
                 except Exception:
                     pass  # fall back to features["close"] in _predict()
 
-                prediction = await ctx.ml.predict_swing(
-                    symbol, features, current_price=current_price,
+                # Decide holding period based on features and selected strategy mode
+                now_time = dt.now(IST).time()
+                holding_period, product = decide_holding_period(
+                    features, allowed_periods, cfg.strategy.volatility, now_time,
                 )
+                use_intraday = holding_period == "intraday"
+
+                if use_intraday:
+                    prediction = await ctx.ml.predict_intraday(
+                        symbol, features, current_price=current_price,
+                    )
+                else:
+                    prediction = await ctx.ml.predict_swing(
+                        symbol, features, current_price=current_price,
+                    )
+
                 if prediction.signal_type == "HOLD":
                     filter_counts["hold_signal"] += 1
                     rejection_details.append({
@@ -1713,21 +1780,46 @@ def create_app(ctx: AppContext) -> FastAPI:
                     )
                     continue
 
+                # Apply holding-period-specific ATR multipliers
+                entry = prediction.entry_price
+                atr = features.get("atr_14", entry * 0.02)
+                multipliers = get_atr_multipliers(holding_period, cfg.strategy.holding_periods)
+
+                if prediction.signal_type == "BUY":
+                    target_price = round(max(entry + multipliers.target * atr, 0.01), 2)
+                    stop_loss_price = round(max(entry - multipliers.stop_loss * atr, 0.01), 2)
+                elif prediction.signal_type == "SELL":
+                    target_price = round(max(entry - multipliers.target * atr, 0.01), 2)
+                    stop_loss_price = round(max(entry + multipliers.stop_loss * atr, 0.01), 2)
+                else:
+                    target_price = prediction.target_price
+                    stop_loss_price = prediction.stop_loss_price
+
+                # Estimate transaction costs
+                est_costs = compute_transaction_costs(
+                    entry, target_price, prediction.position_size,
+                    product=product, cost_config=cfg.transaction_costs,
+                )
+
                 filter_counts["passed"] += 1
                 signals_out.append({
                     "symbol": symbol,
                     "signal_type": prediction.signal_type,
-                    "entry_price": prediction.entry_price,
-                    "target_price": prediction.target_price,
-                    "stop_loss_price": prediction.stop_loss_price,
+                    "entry_price": entry,
+                    "target_price": target_price,
+                    "stop_loss_price": stop_loss_price,
                     "confidence_score": prediction.confidence,
                     "position_size": prediction.position_size,
                     "model_version": prediction.model_version,
+                    "holding_period": holding_period,
+                    "product": product,
+                    "estimated_costs": est_costs,
                     "composite_score": stock.get("composite_score"),
                     "technical_score": stock.get("technical_score"),
                     "volume_momentum_score": stock.get("volume_momentum_score"),
                     "news_sentiment_score": stock.get("news_sentiment_score"),
                     "fundamental_score": stock.get("fundamental_score"),
+                    "volatility_score": stock.get("volatility_score"),
                 })
             except Exception as e:
                 filter_counts["error"] += 1
@@ -1740,9 +1832,9 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         # Log diagnostics summary (always, not just on 0 signals)
         logger.info(
-            "Dry-run %s complete: scanned %d stocks, shortlisted %d, "
+            "Dry-run %s (%s mode) complete: scanned %d stocks, shortlisted %d, "
             "generated %d signals — %s",
-            run_id, len(universe), len(shortlist),
+            run_id, effective_mode, len(universe), len(shortlist),
             len(signals_out), filter_counts,
         )
 
@@ -1753,6 +1845,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         result: dict[str, Any] = {
             "success": True,
             "run_id": run_id,
+            "mode": effective_mode,
             "universe_size": len(universe),
             "shortlist_size": len(shortlist),
             "signals": signals_out,

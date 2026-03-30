@@ -37,6 +37,7 @@ export function DryRunPage() {
   const runSkill = useRunSkill();
   const scoreDryRun = useScoreDryRun();
   const deleteDryRun = useDeleteDryRun();
+  const [selectedMode, setSelectedMode] = useState<string>("balanced");
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const { data: signals, isLoading: detailLoading } =
     useDryRunDetail(selectedRun);
@@ -49,7 +50,7 @@ export function DryRunPage() {
   }, [history, selectedRun]);
 
   const handleRun = () => {
-    runDryRun.mutate(undefined, {
+    runDryRun.mutate(selectedMode, {
       onSuccess: (result) => {
         if (result.run_id) setSelectedRun(result.run_id);
       },
@@ -73,20 +74,33 @@ export function DryRunPage() {
             predictions against next-day actuals.
           </p>
         </div>
-        <button
-          onClick={handleRun}
-          disabled={runDryRun.isPending}
-          className="px-4 py-2 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors shrink-0"
-        >
-          {runDryRun.isPending ? "Scanning..." : "Generate Signals Now"}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <select
+            value={selectedMode}
+            onChange={(e) => setSelectedMode(e.target.value)}
+            className="px-3 py-2 rounded text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-emerald-500"
+          >
+            <option value="intraday">Intraday</option>
+            <option value="short_term">Short Term</option>
+            <option value="balanced">Balanced</option>
+            <option value="long_term">Long Term</option>
+          </select>
+          <button
+            onClick={handleRun}
+            disabled={runDryRun.isPending}
+            className="px-4 py-2 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors"
+          >
+            {runDryRun.isPending ? "Scanning..." : "Generate Signals Now"}
+          </button>
+        </div>
       </div>
 
       {/* Run result banner */}
       {runDryRun.isSuccess && runDryRun.data && (
         <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3 text-sm text-emerald-400">
           Dry run <span className="font-mono">{runDryRun.data.run_id}</span>{" "}
-          complete: scanned {runDryRun.data.universe_size} stocks, shortlisted{" "}
+          ({runDryRun.data.mode ?? "balanced"} mode) complete: scanned{" "}
+          {runDryRun.data.universe_size} stocks, shortlisted{" "}
           {runDryRun.data.shortlist_size}, generated{" "}
           <span className="font-semibold">
             {runDryRun.data.signals.length}
@@ -274,10 +288,13 @@ export function DryRunPage() {
                   <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
                     <th className="py-2 px-3 text-left">Symbol</th>
                     <th className="py-2 px-3 text-center">Signal</th>
+                    <th className="py-2 px-3 text-center">Hold</th>
+                    <th className="py-2 px-3 text-center">Product</th>
                     <th className="py-2 px-3 text-right">Entry</th>
                     <th className="py-2 px-3 text-right">Target</th>
                     <th className="py-2 px-3 text-right">SL</th>
                     <th className="py-2 px-3 text-right">Confidence</th>
+                    <th className="py-2 px-3 text-right">Est. Costs</th>
                     <th className="py-2 px-3 text-right">Actual Close</th>
                     <th className="py-2 px-3 text-right">Move %</th>
                     <th className="py-2 px-3 text-center">Direction</th>
@@ -305,6 +322,23 @@ export function DryRunPage() {
                           {s.signal_type}
                         </span>
                       </td>
+                      <td className="py-2 px-3 text-center text-xs text-gray-400">
+                        {s.holding_period ?? "--"}
+                      </td>
+                      <td className="py-2 px-3 text-center">
+                        {s.product ? (
+                          <span className={clsx(
+                            "px-1.5 py-0.5 rounded text-xs font-medium",
+                            s.product === "MIS"
+                              ? "bg-amber-900/30 text-amber-400"
+                              : "bg-blue-900/30 text-blue-400"
+                          )}>
+                            {s.product}
+                          </span>
+                        ) : (
+                          <span className="text-gray-600">--</span>
+                        )}
+                      </td>
                       <td className="py-2 px-3 text-right font-mono text-gray-300">
                         {fmt(s.entry_price)}
                       </td>
@@ -327,6 +361,9 @@ export function DryRunPage() {
                         >
                           {(s.confidence_score * 100).toFixed(0)}%
                         </span>
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-xs text-gray-400">
+                        {s.estimated_costs != null ? `₹${fmt(s.estimated_costs)}` : "--"}
                       </td>
                       <td className="py-2 px-3 text-right font-mono text-gray-300">
                         {s.actual_close != null ? fmt(s.actual_close) : (

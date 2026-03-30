@@ -1247,8 +1247,8 @@ class Database:
             await self.conn.execute(
                 "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
                 "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
-                "mode, status, slippage, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "mode, status, slippage, estimated_costs, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     trade_id,
                     trade["symbol"],
@@ -1264,6 +1264,7 @@ class Database:
                     trade.get("mode", "paper"),
                     trade.get("status", "open"),
                     trade.get("slippage", 0.0),
+                    trade.get("estimated_costs"),
                     ts_now,
                 ),
             )
@@ -2320,8 +2321,10 @@ class Database:
                 "(run_id, symbol, signal_type, entry_price, target_price, "
                 "stop_loss_price, confidence_score, position_size, model_version, "
                 "composite_score, technical_score, volume_momentum_score, "
-                "news_sentiment_score, fundamental_score, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                "news_sentiment_score, fundamental_score, "
+                "holding_period, product, volatility_score, estimated_costs, "
+                "created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
                 (
                     run_id,
                     s["symbol"],
@@ -2337,6 +2340,10 @@ class Database:
                     s.get("volume_momentum_score"),
                     s.get("news_sentiment_score"),
                     s.get("fundamental_score"),
+                    s.get("holding_period"),
+                    s.get("product"),
+                    s.get("volatility_score"),
+                    s.get("estimated_costs"),
                 ),
             )
         await self.conn.commit()

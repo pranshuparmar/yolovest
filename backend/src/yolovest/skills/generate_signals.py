@@ -324,57 +324,16 @@ class GenerateSignalsSkill(SkillBase):
         )
 
     def _decide_holding_period(self, features: dict) -> tuple[str, str]:
-        """Decide holding period and product type based on stock characteristics and strategy mode.
+        """Decide holding period and product type based on stock characteristics and strategy mode."""
+        from yolovest.strategy.holding_period import decide_holding_period
 
-        Returns:
-            (holding_period, product) — e.g. ("intraday", "MIS") or ("1w", "CNC")
-        """
         allowed = self.ctx.config.strategy.allowed_holding_periods or ["intraday", "3d", "1w"]
         now_time = datetime.now(IST).time()
         vol_cfg = self.ctx.config.strategy.volatility
-
-        atr_pct = features.get("atr_pct", 0.0)
-        rel_vol = features.get("relative_volume", 1.0)
-
-        # Intraday: needs high volatility, high volume, and enough time before square-off
-        if "intraday" in allowed:
-            has_volatility = atr_pct >= vol_cfg.ideal_min_atr_pct
-            has_volume = rel_vol >= 1.5
-            has_time = now_time < time(14, 0)
-            if has_volatility and has_volume and has_time:
-                return ("intraday", "MIS")
-
-        # 1-week: needs strong trend (EMA alignment) and SuperTrend confirming
-        if "1w" in allowed:
-            ema_9 = features.get("ema_9", 0)
-            ema_21 = features.get("ema_21", 0)
-            ema_50 = features.get("ema_50", 0)
-            supertrend = features.get("supertrend_trend", 0)
-
-            bullish_trend = ema_9 > ema_21 > ema_50 > 0 and supertrend > 0
-            bearish_trend = 0 < ema_9 < ema_21 < ema_50 and supertrend < 0
-            moderate_vol = vol_cfg.min_atr_pct <= atr_pct <= vol_cfg.ideal_max_atr_pct
-
-            if (bullish_trend or bearish_trend) and moderate_vol:
-                return ("1w", "CNC")
-
-        # 3-day swing: default fallback
-        if "3d" in allowed:
-            return ("3d", "CNC")
-
-        # Fall back to first allowed period
-        period = allowed[0] if allowed else "intraday"
-        product = "MIS" if period == "intraday" else "CNC"
-        return (period, product)
+        return decide_holding_period(features, allowed, vol_cfg, now_time)
 
     def _get_atr_multipliers(self, holding_period: str) -> "ATRMultipliers":
         """Get ATR multipliers for the given holding period from config."""
-        from yolovest.config import ATRMultipliers
+        from yolovest.strategy.holding_period import get_atr_multipliers
 
-        hp_cfg = self.ctx.config.strategy.holding_periods
-        if holding_period == "intraday":
-            return hp_cfg.intraday
-        elif holding_period == "1w":
-            return hp_cfg.week
-        else:
-            return hp_cfg.short_swing
+        return get_atr_multipliers(holding_period, self.ctx.config.strategy.holding_periods)

@@ -32,10 +32,18 @@ export interface Trade {
   mode: "paper" | "live";
   status: string;
   slippage: number;
+  estimated_costs: number | null;
   pnl: number | null;
   exit_price: number | null;
   created_at: string;
   closed_at: string | null;
+}
+
+export interface CostBreakdown {
+  brokerage: number;
+  stt: number;
+  other_charges: number;
+  total: number;
 }
 
 export interface LLMReview {
@@ -89,6 +97,7 @@ export interface TradeDetail extends Trade {
   prediction: Prediction | null;
   signal: Signal | null;
   audit_trail: AuditEntry[];
+  cost_breakdown?: CostBreakdown;
 }
 
 export interface EquityCurvePoint {
@@ -473,6 +482,10 @@ export interface DryRunSignal {
   confidence_score: number;
   position_size: number | null;
   model_version: string | null;
+  holding_period: string | null;
+  product: string | null;
+  estimated_costs: number | null;
+  volatility_score: number | null;
   composite_score: number | null;
   technical_score: number | null;
   volume_momentum_score: number | null;
@@ -530,6 +543,7 @@ export interface ManualOrder {
 export interface DryRunResult {
   success: boolean;
   run_id: string;
+  mode?: string;
   universe_size: number;
   shortlist_size: number;
   signals: DryRunSignal[];

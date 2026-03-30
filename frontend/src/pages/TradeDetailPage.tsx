@@ -163,12 +163,15 @@ export function TradeDetailPage() {
           <div><p className="text-xs text-gray-500">Fill Price</p><p>₹{fmt(data.fill_price)}</p></div>
           <div><p className="text-xs text-gray-500">Quantity</p><p>{data.quantity}</p></div>
           <div><p className="text-xs text-gray-500">Slippage</p><p>{fmt(data.slippage)}</p></div>
+          {data.estimated_costs != null && (
+            <div><p className="text-xs text-gray-500">Est. Costs</p><p className="text-amber-400">₹{fmt(data.estimated_costs)}</p></div>
+          )}
           <div><p className="text-xs text-gray-500">Stop Loss</p><p className="text-red-400">₹{fmt(data.stop_loss_price)}</p></div>
           <div><p className="text-xs text-gray-500">Target</p><p className="text-emerald-400">₹{fmt(data.target_price)}</p></div>
           <div><p className="text-xs text-gray-500">Product</p><p>{data.product}</p></div>
           <div><p className="text-xs text-gray-500">Status</p><p>{data.status}</p></div>
           <div>
-            <p className="text-xs text-gray-500">PnL</p>
+            <p className="text-xs text-gray-500">Net PnL (after costs)</p>
             <p className={clsx(data.pnl != null && data.pnl > 0 ? "text-emerald-400" : data.pnl != null && data.pnl < 0 ? "text-red-400" : "")}>
               {data.pnl !== null ? `₹${fmt(data.pnl)}` : "—"}
             </p>
@@ -178,6 +181,18 @@ export function TradeDetailPage() {
           {data.closed_at && <div><p className="text-xs text-gray-500">Closed</p><p className="text-xs">{new Date(data.closed_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</p></div>}
         </div>
       </Section>
+
+      {/* Transaction Cost Breakdown */}
+      {data.cost_breakdown && (
+        <Section title="Transaction Costs">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div><p className="text-xs text-gray-500">Brokerage</p><p>₹{fmt(data.cost_breakdown.brokerage)}</p></div>
+            <div><p className="text-xs text-gray-500">STT ({data.product === "MIS" ? "0.025%" : "0.1%"})</p><p>₹{fmt(data.cost_breakdown.stt)}</p></div>
+            <div><p className="text-xs text-gray-500">Other (Stamp + GST + Exchange)</p><p>₹{fmt(data.cost_breakdown.other_charges)}</p></div>
+            <div><p className="text-xs text-gray-500">Total Charges</p><p className="text-amber-400 font-medium">₹{fmt(data.cost_breakdown.total)}</p></div>
+          </div>
+        </Section>
+      )}
 
       {/* LLM Review full reasoning */}
       {data.llm_review && (

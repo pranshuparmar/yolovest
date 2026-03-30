@@ -653,7 +653,7 @@ export function useDryRunDetail(runId: string | null) {
 export function useRunDryRun() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: api.runDryRun,
+    mutationFn: (mode?: string) => api.runDryRun(mode),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["dry-run-history"] }),
   });
 }
