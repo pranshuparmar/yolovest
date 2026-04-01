@@ -158,28 +158,46 @@ class Database:
 
             logger.info("Applying migration %s", mf.name)
             sql = mf.read_text()
-            # Use explicit transaction for atomicity (M1 fix).
-            # executescript runs implicit commits which break atomicity.
-            await self.conn.execute("BEGIN")
+            stmts = self._split_sql(sql)
+
+            # Separate ALTER TABLE statements from others — ALTER TABLE
+            # in SQLite cannot run inside explicit transactions in some builds.
+            alter_stmts = [s for s in stmts if s.lstrip("-").lstrip().upper().startswith("ALTER")]
+            other_stmts = [s for s in stmts if s not in alter_stmts]
+
             try:
-                for stmt in self._split_sql(sql):
+                # Run ALTER TABLE statements outside transaction, one at a time
+                for stmt in alter_stmts:
                     try:
                         await self.conn.execute(stmt)
+                        await self.conn.commit()
                     except Exception as stmt_err:
-                        # SQLite ALTER TABLE ADD COLUMN fails if column already exists
-                        # (e.g. from a previously interrupted migration). Safe to skip.
                         if "duplicate column" in str(stmt_err).lower():
                             logger.info("Skipping (column already exists): %s", stmt[:80])
                             continue
                         raise
+
+                # Run remaining statements in a transaction
+                if other_stmts:
+                    await self.conn.execute("BEGIN")
+                    try:
+                        for stmt in other_stmts:
+                            await self.conn.execute(stmt)
+                        await self.conn.commit()
+                    except Exception:
+                        await self.conn.rollback()
+                        raise
+
+                # Record migration as applied
                 await self.conn.execute(
-                    "INSERT INTO schema_version (version, filename) VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO schema_version (version, filename) VALUES (?, ?)",
                     (version, mf.name),
                 )
                 await self.conn.commit()
             except Exception:
-                await self.conn.rollback()
+                logger.error("Migration %s failed", mf.name, exc_info=True)
                 raise
+            logger.info("Migration %s applied", mf.name)
             logger.info("Migration %s applied", mf.name)
 
     @staticmethod
@@ -1254,32 +1272,44 @@ class Database:
         trade_id = trade.get("trade_id") or f"T-{uuid.uuid4().hex[:8]}"
         ts_now = now_ist().isoformat()
 
+        # Check if estimated_costs column exists (migration 013)
+        trade_columns = await self._get_table_columns("trades")
+        has_costs = "estimated_costs" in trade_columns
+
         await self.conn.execute("SAVEPOINT insert_trade")
         try:
-            await self.conn.execute(
-                "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
-                "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
-                "mode, status, slippage, estimated_costs, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    trade_id,
-                    trade["symbol"],
-                    trade["signal_type"],
-                    trade["entry_price"],
-                    trade.get("fill_price", trade["entry_price"]),
-                    trade["quantity"],
-                    trade["stop_loss_price"],
-                    trade["target_price"],
-                    trade.get("order_id"),
-                    trade.get("sl_order_id"),
-                    trade.get("product", "MIS"),
-                    trade.get("mode", "paper"),
-                    trade.get("status", "open"),
-                    trade.get("slippage", 0.0),
-                    trade.get("estimated_costs"),
-                    ts_now,
-                ),
-            )
+            if has_costs:
+                await self.conn.execute(
+                    "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
+                    "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
+                    "mode, status, slippage, estimated_costs, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        trade_id, trade["symbol"], trade["signal_type"],
+                        trade["entry_price"], trade.get("fill_price", trade["entry_price"]),
+                        trade["quantity"], trade["stop_loss_price"], trade["target_price"],
+                        trade.get("order_id"), trade.get("sl_order_id"),
+                        trade.get("product", "MIS"), trade.get("mode", "paper"),
+                        trade.get("status", "open"), trade.get("slippage", 0.0),
+                        trade.get("estimated_costs"), ts_now,
+                    ),
+                )
+            else:
+                await self.conn.execute(
+                    "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
+                    "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
+                    "mode, status, slippage, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        trade_id, trade["symbol"], trade["signal_type"],
+                        trade["entry_price"], trade.get("fill_price", trade["entry_price"]),
+                        trade["quantity"], trade["stop_loss_price"], trade["target_price"],
+                        trade.get("order_id"), trade.get("sl_order_id"),
+                        trade.get("product", "MIS"), trade.get("mode", "paper"),
+                        trade.get("status", "open"), trade.get("slippage", 0.0),
+                        ts_now,
+                    ),
+                )
             await self.conn.execute(
                 "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
                 "input_summary, output_summary) VALUES (?, ?, ?, ?, ?)",
@@ -2323,41 +2353,42 @@ class Database:
     # Dry-Run Signal Preview
     # ------------------------------------------------------------------
 
+    async def _get_table_columns(self, table: str) -> set[str]:
+        """Return the set of column names for a table."""
+        cursor = await self.conn.execute(f"PRAGMA table_info({table})")
+        return {row[1] for row in await cursor.fetchall()}
+
     async def insert_dry_run_results(
         self, run_id: str, signals: list[dict[str, Any]]
     ) -> int:
         """Save dry-run signal results for next-day comparison."""
+        columns = await self._get_table_columns("dry_run_results")
+
+        # Base columns (always present from migration 007)
+        base_cols = [
+            "run_id", "symbol", "signal_type", "entry_price", "target_price",
+            "stop_loss_price", "confidence_score", "position_size", "model_version",
+            "composite_score", "technical_score", "volume_momentum_score",
+            "news_sentiment_score", "fundamental_score", "created_at",
+        ]
+        # Optional columns (from migration 013+)
+        optional_cols = [
+            "holding_period", "product", "volatility_score",
+            "estimated_costs", "strategy_mode",
+        ]
+        insert_cols = base_cols + [c for c in optional_cols if c in columns]
+        placeholders = ", ".join("?" if c != "created_at" else "datetime('now')" for c in insert_cols)
+        col_names = ", ".join(insert_cols)
+        value_cols = [c for c in insert_cols if c != "created_at"]
+
         for s in signals:
+            values = tuple(
+                s.get(c) if c != "run_id" else run_id
+                for c in value_cols
+            )
             await self.conn.execute(
-                "INSERT INTO dry_run_results "
-                "(run_id, symbol, signal_type, entry_price, target_price, "
-                "stop_loss_price, confidence_score, position_size, model_version, "
-                "composite_score, technical_score, volume_momentum_score, "
-                "news_sentiment_score, fundamental_score, "
-                "holding_period, product, volatility_score, estimated_costs, "
-                "strategy_mode, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
-                (
-                    run_id,
-                    s["symbol"],
-                    s["signal_type"],
-                    s["entry_price"],
-                    s["target_price"],
-                    s["stop_loss_price"],
-                    s["confidence_score"],
-                    s.get("position_size"),
-                    s.get("model_version"),
-                    s.get("composite_score"),
-                    s.get("technical_score"),
-                    s.get("volume_momentum_score"),
-                    s.get("news_sentiment_score"),
-                    s.get("fundamental_score"),
-                    s.get("holding_period"),
-                    s.get("product"),
-                    s.get("volatility_score"),
-                    s.get("estimated_costs"),
-                    s.get("strategy_mode"),
-                ),
+                f"INSERT INTO dry_run_results ({col_names}) VALUES ({placeholders})",
+                values,
             )
         await self.conn.commit()
         return len(signals)
@@ -3136,14 +3167,26 @@ class Database:
     # Locked Holdings
     # ------------------------------------------------------------------
 
+    async def _table_exists(self, table: str) -> bool:
+        """Check if a table exists in the database."""
+        cursor = await self.read_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        )
+        return await cursor.fetchone() is not None
+
     async def get_locked_symbols(self) -> set[str]:
         """Return the set of symbols that are locked (should not be sold)."""
+        if not await self._table_exists("locked_holdings"):
+            return set()
         cursor = await self.read_conn.execute("SELECT symbol FROM locked_holdings")
         rows = await cursor.fetchall()
         return {row[0] for row in rows}
 
     async def get_locked_holdings(self) -> list[dict[str, Any]]:
         """Return all locked holdings with metadata."""
+        if not await self._table_exists("locked_holdings"):
+            return []
         cursor = await self.read_conn.execute(
             "SELECT symbol, locked_at, notes FROM locked_holdings ORDER BY locked_at DESC"
         )
@@ -3152,6 +3195,14 @@ class Database:
 
     async def lock_symbol(self, symbol: str, notes: str | None = None) -> bool:
         """Lock a symbol to prevent YoloVest from selling it."""
+        if not await self._table_exists("locked_holdings"):
+            # Auto-create if migration hasn't run
+            await self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS locked_holdings ("
+                "symbol TEXT PRIMARY KEY, locked_at TEXT NOT NULL DEFAULT (datetime('now')), "
+                "notes TEXT)"
+            )
+            await self.conn.commit()
         await self.conn.execute(
             "INSERT OR REPLACE INTO locked_holdings (symbol, locked_at, notes) "
             "VALUES (?, datetime('now'), ?)",
@@ -3162,6 +3213,8 @@ class Database:
 
     async def unlock_symbol(self, symbol: str) -> bool:
         """Unlock a symbol, allowing YoloVest to sell it again."""
+        if not await self._table_exists("locked_holdings"):
+            return False
         cursor = await self.conn.execute(
             "DELETE FROM locked_holdings WHERE symbol = ?",
             (symbol.upper(),),
