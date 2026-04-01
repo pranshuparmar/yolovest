@@ -4,6 +4,7 @@ import {
   usePredictionsUnscored,
   usePredictionOutcomes,
   useScoreboard,
+  useRunSkill,
 } from "../hooks/queries";
 import { ScoreboardTable } from "../components/ScoreboardTable";
 import clsx from "clsx";
@@ -127,6 +128,7 @@ export function PredictionsPage() {
   const { data: outcomes, isLoading: outcomesLoading } =
     usePredictionOutcomes();
   const { data: scoreboard, isLoading: sbLoading } = useScoreboard(sbGroup);
+  const runSkill = useRunSkill();
 
   const tabData: Record<string, { items: PredictionDetail[] | undefined; loading: boolean }> = {
     today: { items: today, loading: todayLoading },
@@ -153,7 +155,26 @@ export function PredictionsPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-semibold">Predictions</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Predictions</h2>
+        <button
+          onClick={() => runSkill.mutate("predict-track")}
+          disabled={runSkill.isPending}
+          className="px-4 py-2 rounded text-sm font-medium bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50 transition-colors"
+        >
+          {runSkill.isPending ? "Scoring..." : "Score Predictions"}
+        </button>
+      </div>
+      {runSkill.isSuccess && (
+        <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3 text-sm text-emerald-400">
+          Prediction scoring complete. Refresh the page to see updated results.
+        </div>
+      )}
+      {runSkill.isError && (
+        <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-sm text-red-400">
+          Scoring failed. Check server logs for details.
+        </div>
+      )}
 
       {/* Summary cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 md:grid-cols-5 gap-4">

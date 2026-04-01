@@ -1003,10 +1003,12 @@ class Database:
     async def get_prediction_outcomes(self) -> list[dict[str, Any]]:
         """Load predictions with actual outcomes for retraining analysis."""
         cursor = await self.conn.execute(
-            "SELECT p.*, COALESCE(p.symbol, s.symbol) as symbol, "
-            "s.signal_type, s.confidence_score "
+            "SELECT p.*, COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+            "COALESCE(s.signal_type, t.signal_type) as signal_type, "
+            "s.confidence_score "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
+            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
             "WHERE p.actual_price IS NOT NULL"
         )
         rows = await cursor.fetchall()
@@ -1532,13 +1534,16 @@ class Database:
         cursor = await self.conn.execute(
             "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
             "p.prediction_end_time, "
-            "COALESCE(p.symbol, s.symbol) as symbol, s.signal_type as predicted_direction, "
-            "s.entry_price, s.target_price as predicted_target, "
-            "s.stop_loss_price as predicted_stop_loss, "
+            "COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+            "COALESCE(s.signal_type, t.signal_type) as predicted_direction, "
+            "COALESCE(s.entry_price, t.entry_price) as entry_price, "
+            "COALESCE(s.target_price, t.target_price) as predicted_target, "
+            "COALESCE(s.stop_loss_price, t.stop_loss_price) as predicted_stop_loss, "
             "s.confidence_score as confidence, "
             "s.model_version "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
+            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
             "WHERE p.actual_price IS NULL "
             "AND p.prediction_end_time <= ? "
             "ORDER BY p.created_at",
@@ -1552,13 +1557,16 @@ class Database:
         cursor = await self.conn.execute(
             "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
             "p.prediction_end_time, "
-            "COALESCE(p.symbol, s.symbol) as symbol, s.signal_type as predicted_direction, "
-            "s.entry_price, s.target_price as predicted_target, "
-            "s.stop_loss_price as predicted_stop_loss, "
+            "COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+            "COALESCE(s.signal_type, t.signal_type) as predicted_direction, "
+            "COALESCE(s.entry_price, t.entry_price) as entry_price, "
+            "COALESCE(s.target_price, t.target_price) as predicted_target, "
+            "COALESCE(s.stop_loss_price, t.stop_loss_price) as predicted_stop_loss, "
             "s.confidence_score as confidence, "
             "s.model_version "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
+            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
             "WHERE p.actual_price IS NULL "
             "ORDER BY p.created_at DESC",
         )
@@ -1649,10 +1657,11 @@ class Database:
         """Get all predictions with outcomes for scoreboard computation."""
         cursor = await self.conn.execute(
             "SELECT p.prediction_id, p.direction_correct, p.target_hit, "
-            "p.actual_pnl_pct, COALESCE(p.symbol, s.symbol) as symbol, s.confidence_score as confidence, "
+            "p.actual_pnl_pct, COALESCE(p.symbol, s.symbol, t.symbol) as symbol, s.confidence_score as confidence, "
             "s.model_version "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
+            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
             "WHERE p.actual_price IS NOT NULL"
         )
         rows = await cursor.fetchall()
@@ -1680,10 +1689,12 @@ class Database:
         ).isoformat()
         cursor = await self.read_conn.execute(
             "SELECT p.*, "
-            "COALESCE(p.symbol, s.symbol) as symbol, "
-            "s.signal_type, s.confidence_score "
+            "COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+            "COALESCE(s.signal_type, t.signal_type) as signal_type, "
+            "s.confidence_score "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
+            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
             "WHERE p.created_at >= ? ORDER BY p.created_at",
             (today_start,),
         )
@@ -1720,10 +1731,12 @@ class Database:
             hour=9, minute=15, second=0, microsecond=0
         )
         cursor = await self.conn.execute(
-            "SELECT p.*, COALESCE(p.symbol, s.symbol) as symbol, "
-            "s.signal_type, s.confidence_score "
+            "SELECT p.*, COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+            "COALESCE(s.signal_type, t.signal_type) as signal_type, "
+            "s.confidence_score "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
+            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
             "WHERE p.created_at >= ? ORDER BY p.created_at",
             (monday.isoformat(),),
         )
@@ -2875,11 +2888,12 @@ class Database:
     async def get_symbol_predictions(self, symbol: str) -> list[dict[str, Any]]:
         """Predictions linked to a specific symbol via signals."""
         cursor = await self.read_conn.execute(
-            "SELECT p.*, COALESCE(p.symbol, s.symbol) as symbol, "
+            "SELECT p.*, COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
             "s.signal_type, s.confidence_score "
             "FROM predictions p "
             "LEFT JOIN signals s ON p.signal_id = s.id "
-            "WHERE COALESCE(p.symbol, s.symbol) = ? "
+            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
+            "WHERE COALESCE(p.symbol, s.symbol, t.symbol) = ? "
             "ORDER BY p.created_at DESC LIMIT 50",
             (symbol,),
         )
