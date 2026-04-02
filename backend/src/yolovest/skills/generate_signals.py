@@ -173,7 +173,7 @@ class GenerateSignalsSkill(SkillBase):
                     pass  # fall back to features["close"] in _predict()
 
                 # Decide holding period based on stock characteristics and strategy mode
-                holding_period, product = self._decide_holding_period(features)
+                holding_period, product, expected_days = self._decide_holding_period(features)
                 use_intraday = holding_period == "intraday"
 
                 # Use latest intraday price for feature close during market hours
@@ -247,17 +247,21 @@ class GenerateSignalsSkill(SkillBase):
                     symbol, held_symbols,
                 )
 
-                # Override target/SL with period-specific ATR multipliers
+                # Override target/SL with ATR multipliers interpolated for holding duration
+                from yolovest.strategy.holding_period import interpolate_atr_multipliers
+
                 entry = prediction.entry_price
                 atr = features.get("atr_14", entry * 0.02)
-                multipliers = self._get_atr_multipliers(holding_period)
+                target_mult, sl_mult = interpolate_atr_multipliers(
+                    expected_days, self.ctx.config.strategy.holding_periods,
+                )
 
                 if prediction.signal_type == "BUY":
-                    target_price = entry + multipliers.target * atr
-                    stop_loss_price = entry - multipliers.stop_loss * atr
+                    target_price = entry + target_mult * atr
+                    stop_loss_price = entry - sl_mult * atr
                 elif prediction.signal_type == "SELL":
-                    target_price = entry - multipliers.target * atr
-                    stop_loss_price = entry + multipliers.stop_loss * atr
+                    target_price = entry - target_mult * atr
+                    stop_loss_price = entry + sl_mult * atr
                 else:
                     target_price = prediction.target_price
                     stop_loss_price = prediction.stop_loss_price
@@ -273,6 +277,7 @@ class GenerateSignalsSkill(SkillBase):
                     "stop_loss_price": round(stop_loss_price, 2),
                     "position_size": prediction.position_size,
                     "expected_holding_period": holding_period,
+                    "expected_holding_days": expected_days,
                     "product": product,
                     "confidence_score": prediction.confidence,
                     "features_snapshot": features,
@@ -350,17 +355,14 @@ class GenerateSignalsSkill(SkillBase):
             },
         )
 
-    def _decide_holding_period(self, features: dict) -> tuple[str, str]:
-        """Decide holding period and product type based on stock characteristics and strategy mode."""
+    def _decide_holding_period(self, features: dict) -> tuple[str, str, int]:
+        """Decide holding period, product type, and expected days based on stock characteristics."""
+        from yolovest.config import _MODE_HOLDING_DAYS
         from yolovest.strategy.holding_period import decide_holding_period
 
-        allowed = self.ctx.config.strategy.allowed_holding_periods or ["intraday", "3d", "1w"]
+        allowed = self.ctx.config.strategy.allowed_holding_periods or ["intraday", "short_term", "long_term"]
+        mode = self.ctx.config.strategy.mode
+        mode_days = _MODE_HOLDING_DAYS.get(mode)
         now_time = datetime.now(IST).time()
         vol_cfg = self.ctx.config.strategy.volatility
-        return decide_holding_period(features, allowed, vol_cfg, now_time)
-
-    def _get_atr_multipliers(self, holding_period: str) -> "ATRMultipliers":
-        """Get ATR multipliers for the given holding period from config."""
-        from yolovest.strategy.holding_period import get_atr_multipliers
-
-        return get_atr_multipliers(holding_period, self.ctx.config.strategy.holding_periods)
+        return decide_holding_period(features, allowed, vol_cfg, now_time, mode_days_range=mode_days)

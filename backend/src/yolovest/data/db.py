@@ -1380,44 +1380,39 @@ class Database:
         trade_id = trade.get("trade_id") or f"T-{uuid.uuid4().hex[:8]}"
         ts_now = now_ist().isoformat()
 
-        # Check if estimated_costs column exists (migration 013)
         trade_columns = await self._get_table_columns("trades")
-        has_costs = "estimated_costs" in trade_columns
+
+        # Build column list dynamically based on available columns
+        base_cols = [
+            "trade_id", "symbol", "signal_type", "entry_price", "fill_price",
+            "quantity", "stop_loss_price", "target_price", "order_id", "sl_order_id",
+            "product", "mode", "status", "slippage",
+        ]
+        optional_cols = ["estimated_costs", "expected_holding_days"]
+        insert_cols = base_cols + [c for c in optional_cols if c in trade_columns] + ["created_at"]
+        placeholders = ", ".join("?" for _ in insert_cols)
+        col_names = ", ".join(insert_cols)
+
+        values = tuple(
+            trade.get(c, trade.get("entry_price") if c == "fill_price" else None)
+            if c not in ("trade_id", "created_at", "product", "mode", "status", "slippage")
+            else {
+                "trade_id": trade_id,
+                "created_at": ts_now,
+                "product": trade.get("product", "MIS"),
+                "mode": trade.get("mode", "paper"),
+                "status": trade.get("status", "open"),
+                "slippage": trade.get("slippage", 0.0),
+            }[c]
+            for c in insert_cols
+        )
 
         await self.conn.execute("SAVEPOINT insert_trade")
         try:
-            if has_costs:
-                await self.conn.execute(
-                    "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
-                    "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
-                    "mode, status, slippage, estimated_costs, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        trade_id, trade["symbol"], trade["signal_type"],
-                        trade["entry_price"], trade.get("fill_price", trade["entry_price"]),
-                        trade["quantity"], trade["stop_loss_price"], trade["target_price"],
-                        trade.get("order_id"), trade.get("sl_order_id"),
-                        trade.get("product", "MIS"), trade.get("mode", "paper"),
-                        trade.get("status", "open"), trade.get("slippage", 0.0),
-                        trade.get("estimated_costs"), ts_now,
-                    ),
-                )
-            else:
-                await self.conn.execute(
-                    "INSERT INTO trades (trade_id, symbol, signal_type, entry_price, fill_price, "
-                    "quantity, stop_loss_price, target_price, order_id, sl_order_id, product, "
-                    "mode, status, slippage, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        trade_id, trade["symbol"], trade["signal_type"],
-                        trade["entry_price"], trade.get("fill_price", trade["entry_price"]),
-                        trade["quantity"], trade["stop_loss_price"], trade["target_price"],
-                        trade.get("order_id"), trade.get("sl_order_id"),
-                        trade.get("product", "MIS"), trade.get("mode", "paper"),
-                        trade.get("status", "open"), trade.get("slippage", 0.0),
-                        ts_now,
-                    ),
-                )
+            await self.conn.execute(
+                f"INSERT INTO trades ({col_names}) VALUES ({placeholders})",
+                values,
+            )
             await self.conn.execute(
                 "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
                 "input_summary, output_summary) VALUES (?, ?, ?, ?, ?)",
@@ -2503,10 +2498,10 @@ class Database:
             "composite_score", "technical_score", "volume_momentum_score",
             "news_sentiment_score", "fundamental_score", "created_at",
         ]
-        # Optional columns (from migration 013+)
+        # Optional columns (from migration 013+, 016+)
         optional_cols = [
             "holding_period", "product", "volatility_score",
-            "estimated_costs", "strategy_mode",
+            "estimated_costs", "strategy_mode", "expected_holding_days",
         ]
         insert_cols = base_cols + [c for c in optional_cols if c in columns]
         placeholders = ", ".join("?" if c != "created_at" else "datetime('now')" for c in insert_cols)

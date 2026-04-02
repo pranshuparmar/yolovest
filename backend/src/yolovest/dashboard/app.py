@@ -1635,10 +1635,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         """
         from datetime import datetime as dt
 
-        from yolovest.config import _MODE_HOLDING_PERIODS
+        from yolovest.config import _MODE_HOLDING_DAYS, _MODE_HOLDING_PERIODS
         from yolovest.costs import compute_transaction_costs
         from yolovest.data.features import IndicatorConfig, compute_features
-        from yolovest.strategy.holding_period import adjust_sell_for_holdings, decide_holding_period, get_atr_multipliers
+        from yolovest.strategy.holding_period import adjust_sell_for_holdings, decide_holding_period, interpolate_atr_multipliers
         from yolovest.timezone import IST
 
         run_id = str(uuid.uuid4())[:8]
@@ -1646,8 +1646,9 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         # Resolve effective strategy mode and allowed holding periods
         effective_mode = mode or cfg.strategy.mode
+        mode_days_range = _MODE_HOLDING_DAYS.get(effective_mode)
         allowed_periods = _MODE_HOLDING_PERIODS.get(
-            effective_mode, cfg.strategy.allowed_holding_periods or ["intraday", "3d", "1w"],
+            effective_mode, cfg.strategy.allowed_holding_periods or ["intraday", "short_term", "long_term"],
         )
 
         # Step 1: Run market-scan logic (without writing to watchlist)
@@ -1782,8 +1783,9 @@ def create_app(ctx: AppContext) -> FastAPI:
 
                 # Decide holding period based on features and selected strategy mode
                 now_time = dt.now(IST).time()
-                holding_period, product = decide_holding_period(
+                holding_period, product, expected_days = decide_holding_period(
                     features, allowed_periods, cfg.strategy.volatility, now_time,
+                    mode_days_range=mode_days_range,
                 )
                 use_intraday = holding_period == "intraday"
 
@@ -1825,17 +1827,19 @@ def create_app(ctx: AppContext) -> FastAPI:
                     symbol, held_symbols,
                 )
 
-                # Apply holding-period-specific ATR multipliers
+                # Apply ATR multipliers interpolated for holding duration
                 entry = prediction.entry_price
                 atr = features.get("atr_14", entry * 0.02)
-                multipliers = get_atr_multipliers(holding_period, cfg.strategy.holding_periods)
+                target_mult, sl_mult = interpolate_atr_multipliers(
+                    expected_days, cfg.strategy.holding_periods,
+                )
 
                 if prediction.signal_type == "BUY":
-                    target_price = round(max(entry + multipliers.target * atr, 0.01), 2)
-                    stop_loss_price = round(max(entry - multipliers.stop_loss * atr, 0.01), 2)
+                    target_price = round(max(entry + target_mult * atr, 0.01), 2)
+                    stop_loss_price = round(max(entry - sl_mult * atr, 0.01), 2)
                 elif prediction.signal_type == "SELL":
-                    target_price = round(max(entry - multipliers.target * atr, 0.01), 2)
-                    stop_loss_price = round(max(entry + multipliers.stop_loss * atr, 0.01), 2)
+                    target_price = round(max(entry - target_mult * atr, 0.01), 2)
+                    stop_loss_price = round(max(entry + sl_mult * atr, 0.01), 2)
                 else:
                     target_price = prediction.target_price
                     stop_loss_price = prediction.stop_loss_price
@@ -1857,6 +1861,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                     "position_size": prediction.position_size,
                     "model_version": prediction.model_version,
                     "holding_period": holding_period,
+                    "expected_holding_days": expected_days,
                     "product": product,
                     "estimated_costs": est_costs,
                     "composite_score": stock.get("composite_score"),

@@ -149,7 +149,11 @@ class ATRMultipliers(BaseModel):
 
 
 class HoldingPeriodConfig(BaseModel):
-    """Per-holding-period ATR multipliers for target/SL sizing."""
+    """ATR multipliers per holding period for target/SL sizing.
+
+    For dynamic holding periods, multipliers are interpolated between the
+    nearest defined buckets based on expected_holding_days.
+    """
 
     intraday: ATRMultipliers = Field(
         default_factory=lambda: ATRMultipliers(target=1.5, stop_loss=0.75),
@@ -159,6 +163,9 @@ class HoldingPeriodConfig(BaseModel):
     )
     week: ATRMultipliers = Field(
         default_factory=lambda: ATRMultipliers(target=3.0, stop_loss=1.5),
+    )
+    long: ATRMultipliers = Field(
+        default_factory=lambda: ATRMultipliers(target=5.0, stop_loss=2.0),
     )
 
 
@@ -174,13 +181,32 @@ class VolatilityConfig(BaseModel):
     ideal_max_atr_pct: float = Field(default=0.03, gt=0)
 
 
-# Mode presets: allowed holding periods per strategy mode
+# Mode presets: (min_days, max_days) range per strategy mode.
+# Holding period is computed dynamically per stock within this range.
+_MODE_HOLDING_DAYS: dict[str, tuple[int, int]] = {
+    "intraday": (0, 0),        # same day (MIS)
+    "short_term": (2, 5),      # 2–5 trading days
+    "balanced": (0, 15),       # model decides: intraday up to 3 weeks
+    "long_term": (5, 66),      # 1 week to ~3 months (configurable via max_holding_days)
+}
+
+# Kept for backwards compatibility — maps mode to discrete period labels
 _MODE_HOLDING_PERIODS: dict[str, list[str]] = {
     "intraday": ["intraday"],
-    "short_term": ["intraday", "3d", "1w"],
-    "balanced": ["intraday", "3d", "1w"],
-    "long_term": ["1w"],
+    "short_term": ["short_term"],
+    "balanced": ["intraday", "short_term", "long_term"],
+    "long_term": ["long_term"],
 }
+
+
+class HoldingExpiryConfig(BaseModel):
+    """Controls what happens when a position exceeds its expected holding period."""
+
+    enabled: bool = True
+    action: Literal["tighten_or_close", "force_close", "ignore"] = "tighten_or_close"
+    breakeven_buffer_pct: float = Field(default=0.3, ge=0, le=5.0)
+    loss_threshold_pct: float = Field(default=-0.5, ge=-10.0, le=0)
+    max_holding_days: int = Field(default=66, ge=1, le=252)  # ~3 months of trading days
 
 
 class FeedbackSourcesConfig(BaseModel):
@@ -216,7 +242,7 @@ class StrategyConfig(BaseModel):
         """Set allowed_holding_periods from mode if not explicitly provided."""
         if self.allowed_holding_periods is None:
             self.allowed_holding_periods = _MODE_HOLDING_PERIODS.get(
-                self.mode, ["intraday", "3d", "1w"],
+                self.mode, ["intraday", "short_term", "long_term"],
             )
         return self
 
@@ -246,6 +272,7 @@ class RiskConfig(BaseModel):
     symbol_repeat_min_confidence: float = Field(default=0.80, ge=0, le=1)
     margin_usage_enabled: bool = False  # when False, position value capped by available cash (no leverage)
     weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
+    holding_expiry: HoldingExpiryConfig = Field(default_factory=HoldingExpiryConfig)
 
 
 class MarketHoursConfig(BaseModel):

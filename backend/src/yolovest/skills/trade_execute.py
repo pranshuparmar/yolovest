@@ -106,6 +106,7 @@ class TradeExecuteSkill(SkillBase):
             "mode": "paper",
             "slippage": round(slippage, 2),
             "estimated_costs": est_costs,
+            "expected_holding_days": signal.get("expected_holding_days"),
         }
 
         trade_id = await self.ctx.db.insert_trade(trade)

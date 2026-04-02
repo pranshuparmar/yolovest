@@ -52,24 +52,28 @@ strategy:
   # and how stocks are selected. Options:
   #   intraday   — intraday only (MIS), favors high-volatility + volume
   #   short_term — intraday + 3-day + 1-week, balanced with volatility
-  #   balanced   — all holding periods, even weight distribution (default)
-  #   long_term  — 1-week only (CNC), favors trending + fundamental stocks
+  #   balanced   — dynamic: model decides per stock, intraday to 3 weeks (default)
+  #   long_term  — 1 week to ~3 months, dynamic per stock based on ATR/trend
   mode: balanced
 
   # Override which holding periods are allowed (auto-derived from mode if omitted)
-  # allowed_holding_periods: ["intraday", "3d", "1w"]
+  # allowed_holding_periods: ["intraday", "short_term", "long_term"]
 
   # ATR multipliers per holding period — controls target and stop-loss distance
+  # For dynamic holding periods, multipliers are interpolated between these anchors
   holding_periods:
     intraday:                         # tight: must hit within hours
       target: 1.5                     # target = entry ± 1.5 × ATR
       stop_loss: 0.75                 # SL = entry ∓ 0.75 × ATR
-    short_swing:                      # 3-day swing
+    short_swing:                      # 2-5 day swing
       target: 2.0
       stop_loss: 1.0
-    week:                             # 1-week hold — more room to breathe
+    week:                             # ~1 week hold
       target: 3.0
       stop_loss: 1.5
+    long:                             # 2+ weeks — wide targets for trending stocks
+      target: 5.0
+      stop_loss: 2.0
 
   # Volatility thresholds (ATR% = ATR/price) for stock selection
   volatility:
@@ -126,6 +130,14 @@ risk:
   symbol_repeat_min_confidence: 0.80  # confidence required for repeat symbols (vs 0.65 normal)
   margin_usage_enabled: false         # false = position value capped by available cash (no leverage)
   weekly_reset_day: "monday"          # day when weekly circuit breaker PnL resets
+
+  # Holding period expiry — what happens when a position exceeds its expected holding days
+  holding_expiry:
+    enabled: true                     # enable time-based position management
+    action: "tighten_or_close"        # "tighten_or_close" | "force_close" | "ignore"
+    breakeven_buffer_pct: 0.3         # in-profit SL tightened to entry + 0.3%
+    loss_threshold_pct: -0.5          # below this = "at a loss", close immediately
+    max_holding_days: 66              # absolute max (~3 months of trading days)
 
 market_hours:
   open: "09:15"
