@@ -3,13 +3,13 @@ import { useCorrelations } from "../hooks/queries";
 import clsx from "clsx";
 
 function corrColor(v: number): string {
-  if (v >= 0.7) return "bg-emerald-600 text-white";
-  if (v >= 0.4) return "bg-emerald-900/60 text-emerald-300";
-  if (v >= 0.1) return "bg-emerald-900/30 text-emerald-400";
-  if (v > -0.1) return "bg-gray-800 text-gray-400";
-  if (v > -0.4) return "bg-red-900/30 text-red-400";
-  if (v > -0.7) return "bg-red-900/60 text-red-300";
-  return "bg-red-600 text-white";
+  if (v >= 0.7) return "bg-emerald-500 text-white font-semibold";
+  if (v >= 0.4) return "bg-emerald-700/80 text-emerald-100";
+  if (v >= 0.1) return "bg-emerald-900/40 text-emerald-300";
+  if (v > -0.1) return "bg-gray-700/50 text-gray-400";
+  if (v > -0.4) return "bg-red-900/40 text-red-300";
+  if (v > -0.7) return "bg-red-700/80 text-red-100";
+  return "bg-red-500 text-white font-semibold";
 }
 
 export function CorrelationPage() {
@@ -36,11 +36,11 @@ export function CorrelationPage() {
 
       {/* Legend */}
       <div className="flex gap-2 text-xs flex-wrap">
-        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-emerald-600" /> Strong +</span>
-        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-emerald-900/60" /> Moderate +</span>
-        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-gray-800 border border-gray-700" /> Weak</span>
-        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-red-900/60" /> Moderate -</span>
-        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-red-600" /> Strong -</span>
+        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-emerald-500" /> Strong +</span>
+        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-emerald-700/80" /> Moderate +</span>
+        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-gray-700/50 border border-gray-600" /> Weak</span>
+        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-red-700/80" /> Moderate -</span>
+        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-red-500" /> Strong -</span>
       </div>
 
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 overflow-x-auto">
