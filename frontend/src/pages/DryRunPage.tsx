@@ -365,6 +365,9 @@ export function DryRunPage() {
                       </td>
                       <td className="py-2 px-3 text-center text-xs text-gray-400">
                         {s.holding_period ?? "--"}
+                        {s.expected_holding_days != null && s.expected_holding_days > 0 && (
+                          <span className="text-gray-600 ml-1">({s.expected_holding_days}d)</span>
+                        )}
                       </td>
                       <td className="py-2 px-3 text-center">
                         {s.product ? (

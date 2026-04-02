@@ -498,6 +498,7 @@ export interface DryRunSignal {
   position_size: number | null;
   model_version: string | null;
   holding_period: string | null;
+  expected_holding_days: number | null;
   product: string | null;
   estimated_costs: number | null;
   volatility_score: number | null;
