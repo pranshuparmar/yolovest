@@ -409,10 +409,16 @@ class XGBoostSignalModel(MLBase):
         min_samples = params.pop(
             "min_training_samples", _MIN_TRAINING_SAMPLES_DEFAULT
         )
+        sample_weights_raw = params.pop("sample_weights", None)
 
         import numpy as np
 
         y_arr = np.asarray(y)
+        weights_arr = (
+            np.asarray(sample_weights_raw, dtype=np.float64)
+            if sample_weights_raw
+            else None
+        )
         if len(y_arr) < min_samples:
             raise ValueError(
                 f"Insufficient training data: {len(y_arr)} samples "
@@ -468,9 +474,10 @@ class XGBoostSignalModel(MLBase):
             for train_idx, test_idx in tscv.split(X_arr):
                 X_train, X_test = X_arr[train_idx], X_arr[test_idx]  # noqa: N806
                 y_train, y_test = y_arr[train_idx], y_arr[test_idx]
+                w_train = weights_arr[train_idx] if weights_arr is not None else None
 
                 fold_model = xgb.XGBClassifier(**xgb_params)
-                fold_model.fit(X_train, y_train, verbose=False)
+                fold_model.fit(X_train, y_train, sample_weight=w_train, verbose=False)
 
                 preds = fold_model.predict(X_test)
                 # Simulated returns: correct direction = +1%, wrong = -0.5%
@@ -487,8 +494,8 @@ class XGBoostSignalModel(MLBase):
                         ret = 0.0  # HOLD
                     all_returns.append(ret)
 
-            # Final model trained on all data
-            model.fit(X_arr, y_arr, verbose=False)
+            # Final model trained on all data (with sample weights if available)
+            model.fit(X_arr, y_arr, sample_weight=weights_arr, verbose=False)
 
             # Calibrate probabilities (Platt scaling)
             calibrator = CalibratedClassifierCV(

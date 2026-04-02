@@ -91,6 +91,16 @@ strategy:
   default_trade_type: "intraday"      # intraday | swing (legacy, used by ML model selection)
   min_training_samples: 200           # minimum data points to train a model
 
+  # ML feedback loop — learn from prediction outcomes, dry runs, and trade results
+  feedback:
+    enabled: true                     # enable feedback features in retraining
+    lookback_days: 14                 # how far back to aggregate feedback (1-90 days)
+    sample_weight_boost: 2.0          # weight multiplier for symbols where model performed poorly (1.0-5.0)
+    sources:
+      predictions: true               # use scored prediction outcomes
+      dry_runs: true                  # use scored dry run results
+      trades: true                    # use closed trade PnL and slippage
+
 risk:
   max_risk_per_trade_pct: 0.02        # 2% of capital per trade
   max_portfolio_exposure_pct: 0.60    # 60% max exposure, 40% always cash

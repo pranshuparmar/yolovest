@@ -1014,6 +1014,112 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
+    async def get_feedback_data(self, lookback_days: int = 14) -> dict[str, dict[str, float]]:
+        """Get per-symbol feedback stats from recent predictions, dry runs, and trades.
+
+        Returns a dict keyed by symbol with rolling accuracy, PnL, slippage stats.
+        Used to augment ML training features and compute sample weights.
+        """
+        from datetime import timedelta
+
+        cutoff = (now_ist() - timedelta(days=lookback_days)).isoformat()
+        feedback: dict[str, dict[str, float]] = {}
+
+        def _ensure(sym: str) -> dict[str, float]:
+            if sym not in feedback:
+                feedback[sym] = {}
+            return feedback[sym]
+
+        # 1. Prediction outcomes
+        try:
+            cursor = await self.read_conn.execute(
+                "SELECT COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+                "p.direction_correct, p.target_hit, p.actual_pnl_pct "
+                "FROM predictions p "
+                "LEFT JOIN signals s ON p.signal_id = s.id "
+                "LEFT JOIN trades t ON p.trade_id = t.trade_id "
+                "WHERE p.actual_price IS NOT NULL AND p.scored_at >= ?",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            sym_preds: dict[str, list[dict]] = {}
+            for r in rows:
+                sym = r[0]
+                if not sym:
+                    continue
+                sym_preds.setdefault(sym, []).append({
+                    "correct": r[1], "target_hit": r[2], "pnl_pct": r[3],
+                })
+            for sym, preds in sym_preds.items():
+                fb = _ensure(sym)
+                n = len(preds)
+                fb["pred_count"] = float(n)
+                fb["pred_accuracy"] = sum(1 for p in preds if p["correct"]) / n
+                fb["pred_target_hit_rate"] = sum(1 for p in preds if p["target_hit"]) / n
+                pnls = [p["pnl_pct"] for p in preds if p["pnl_pct"] is not None]
+                fb["pred_avg_pnl_pct"] = sum(pnls) / len(pnls) if pnls else 0.0
+        except Exception as e:
+            logger.warning("Feedback: prediction query failed: %s", e)
+
+        # 2. Dry run scores
+        try:
+            cursor = await self.read_conn.execute(
+                "SELECT symbol, direction_correct, target_hit, actual_move_pct "
+                "FROM dry_run_results "
+                "WHERE scored_at IS NOT NULL AND scored_at >= ?",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            sym_dr: dict[str, list[dict]] = {}
+            for r in rows:
+                sym = r[0]
+                if not sym:
+                    continue
+                sym_dr.setdefault(sym, []).append({
+                    "correct": r[1], "target_hit": r[2], "move_pct": r[3],
+                })
+            for sym, drs in sym_dr.items():
+                fb = _ensure(sym)
+                n = len(drs)
+                fb["dry_run_count"] = float(n)
+                fb["dry_run_accuracy"] = sum(1 for d in drs if d["correct"]) / n
+                moves = [d["move_pct"] for d in drs if d["move_pct"] is not None]
+                fb["dry_run_avg_move_pct"] = sum(moves) / len(moves) if moves else 0.0
+        except Exception as e:
+            logger.warning("Feedback: dry run query failed: %s", e)
+
+        # 3. Closed trades
+        try:
+            cursor = await self.read_conn.execute(
+                "SELECT symbol, pnl, slippage, entry_price, fill_price "
+                "FROM trades "
+                "WHERE closed_at IS NOT NULL AND closed_at >= ?",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            sym_trades: dict[str, list[dict]] = {}
+            for r in rows:
+                sym = r[0]
+                if not sym:
+                    continue
+                entry = r[3] or 1
+                sym_trades.setdefault(sym, []).append({
+                    "pnl": r[1], "slippage_pct": abs(r[2] or 0) / entry * 100,
+                })
+            for sym, trades in sym_trades.items():
+                fb = _ensure(sym)
+                n = len(trades)
+                fb["trade_count"] = float(n)
+                fb["trade_win_rate"] = sum(1 for t in trades if (t["pnl"] or 0) > 0) / n
+                pnls = [t["pnl"] for t in trades if t["pnl"] is not None]
+                fb["trade_avg_pnl"] = sum(pnls) / len(pnls) if pnls else 0.0
+                slips = [t["slippage_pct"] for t in trades]
+                fb["trade_avg_slippage_pct"] = sum(slips) / len(slips) if slips else 0.0
+        except Exception as e:
+            logger.warning("Feedback: trades query failed: %s", e)
+
+        return feedback
+
     # ------------------------------------------------------------------
     # Failure Analysis
     # ------------------------------------------------------------------

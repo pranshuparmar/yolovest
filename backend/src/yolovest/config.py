@@ -183,11 +183,29 @@ _MODE_HOLDING_PERIODS: dict[str, list[str]] = {
 }
 
 
+class FeedbackSourcesConfig(BaseModel):
+    """Which feedback data sources to include in retraining."""
+
+    predictions: bool = True  # prediction outcomes (paper, live, all modes)
+    dry_runs: bool = True  # scored dry run signals
+    trades: bool = True  # closed trade PnL and slippage
+
+
+class FeedbackConfig(BaseModel):
+    """Controls the ML feedback loop — how the model learns from its own performance."""
+
+    enabled: bool = True
+    lookback_days: int = Field(default=14, ge=1, le=90)
+    sample_weight_boost: float = Field(default=2.0, gt=1.0, le=5.0)
+    sources: FeedbackSourcesConfig = Field(default_factory=FeedbackSourcesConfig)
+
+
 class StrategyConfig(BaseModel):
     mode: Literal["intraday", "short_term", "balanced", "long_term"] = "balanced"
     allowed_holding_periods: list[str] | None = None
     holding_periods: HoldingPeriodConfig = Field(default_factory=HoldingPeriodConfig)
     volatility: VolatilityConfig = Field(default_factory=VolatilityConfig)
+    feedback: FeedbackConfig = Field(default_factory=FeedbackConfig)
     ema_periods: list[int] = Field(default_factory=lambda: [9, 21, 50, 200])
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     default_trade_type: Literal["intraday", "swing"] = "intraday"
