@@ -18,8 +18,8 @@ export function ScoreboardTable({ entries }: { entries: ScoreboardEntry[] }) {
   }
 
   const sorted = [...entries].sort((a, b) => {
-    const av = (a as Record<string, unknown>)[sortKey] ?? 0;
-    const bv = (b as Record<string, unknown>)[sortKey] ?? 0;
+    const av = (a as unknown as Record<string, unknown>)[sortKey] ?? 0;
+    const bv = (b as unknown as Record<string, unknown>)[sortKey] ?? 0;
     if (typeof av === "string" && typeof bv === "string") {
       return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
     }
