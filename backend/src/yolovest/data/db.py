@@ -1553,27 +1553,42 @@ class Database:
 
         pred_id = f"SP-{uuid.uuid4().hex[:8]}"
         ts_now = now_ist().isoformat()
+        symbol = prediction.get("symbol")
 
         from yolovest.models.schemas import _parse_holding_period
 
         holding = prediction.get("expected_holding_period", "intraday")
         end_time = now_ist() + _parse_holding_period(holding)
 
-        await self.conn.execute(
-            "INSERT INTO predictions (prediction_id, signal_id, trade_id, created_at, "
-            "prediction_end_time, actual_price, direction_correct, target_hit, "
-            "actual_pnl_pct, is_shadow, model_version) "
-            "VALUES (?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?)",
-            (pred_id, ts_now, end_time.isoformat(), prediction.get("model_version")),
-        )
+        # Check if symbol column exists (migration 012)
+        columns = await self._get_table_columns("predictions")
+        has_symbol = "symbol" in columns
 
-        # Store details in a lightweight format for scoring
-        await self.conn.execute(
-            "UPDATE predictions SET "
-            "signal_id = (SELECT id FROM signals WHERE symbol = ? ORDER BY created_at DESC LIMIT 1) "
-            "WHERE prediction_id = ?",
-            (prediction.get("symbol"), pred_id),
-        )
+        if has_symbol:
+            await self.conn.execute(
+                "INSERT INTO predictions (prediction_id, symbol, signal_id, trade_id, created_at, "
+                "prediction_end_time, actual_price, direction_correct, target_hit, "
+                "actual_pnl_pct, is_shadow, model_version) "
+                "VALUES (?, ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?)",
+                (pred_id, symbol, ts_now, end_time.isoformat(), prediction.get("model_version")),
+            )
+        else:
+            await self.conn.execute(
+                "INSERT INTO predictions (prediction_id, signal_id, trade_id, created_at, "
+                "prediction_end_time, actual_price, direction_correct, target_hit, "
+                "actual_pnl_pct, is_shadow, model_version) "
+                "VALUES (?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?)",
+                (pred_id, ts_now, end_time.isoformat(), prediction.get("model_version")),
+            )
+
+        # Also link to the latest signal for this symbol (best-effort)
+        if symbol:
+            await self.conn.execute(
+                "UPDATE predictions SET "
+                "signal_id = (SELECT id FROM signals WHERE symbol = ? ORDER BY created_at DESC LIMIT 1) "
+                "WHERE prediction_id = ?",
+                (symbol, pred_id),
+            )
         await self.conn.commit()
         return pred_id
 
