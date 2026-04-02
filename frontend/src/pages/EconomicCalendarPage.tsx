@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useEconomicCalendar, useEarnings } from "../hooks/queries";
 import clsx from "clsx";
+import { getTimezone } from "../utils/datetime";
 
 const impactColors: Record<string, string> = {
   high: "bg-red-900/40 text-red-400",
@@ -82,7 +83,7 @@ export function EconomicCalendarPage() {
               <div key={date}>
                 <div className="text-xs font-medium text-emerald-400 mb-2 sticky top-0 bg-gray-900 py-1">
                   {new Date(date + "T00:00:00").toLocaleDateString("en-IN", {
-                    timeZone: "Asia/Kolkata",
+                    timeZone: getTimezone(),
                     weekday: "long",
                     year: "numeric",
                     month: "short",
@@ -160,7 +161,7 @@ export function EconomicCalendarPage() {
                   >
                     <td className="py-2 pr-4 text-gray-400">
                       {new Date(e.event_date).toLocaleDateString("en-IN", {
-                        timeZone: "Asia/Kolkata",
+                        timeZone: getTimezone(),
                         month: "short",
                         day: "numeric",
                       })}

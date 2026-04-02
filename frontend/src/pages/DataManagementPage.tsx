@@ -10,7 +10,7 @@ import {
   useUnquarantineSymbol,
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
-import { parseUTC } from "../utils/datetime";
+import { parseUTC, getTimezone } from "../utils/datetime";
 
 const TABLE_INFO: Record<string, { label: string; description: string; defaultDays: number }> = {
   ohlcv: { label: "OHLCV Candles", description: "Daily and intraday price bars", defaultDays: 730 },
@@ -32,7 +32,7 @@ function formatDate(iso: string | null): string {
   if (!iso) return "--";
   try {
     return parseUTC(iso).toLocaleDateString("en-IN", {
-      timeZone: "Asia/Kolkata",
+      timeZone: getTimezone(),
       day: "2-digit",
       month: "short",
       year: "numeric",
@@ -45,7 +45,7 @@ function formatDate(iso: string | null): string {
 function formatDateTime(iso: string): string {
   try {
     return parseUTC(iso).toLocaleString("en-IN", {
-      timeZone: "Asia/Kolkata",
+      timeZone: getTimezone(),
       day: "2-digit",
       month: "short",
       year: "numeric",
@@ -180,7 +180,7 @@ function QuarantinedSymbolsSection() {
                   <td className="py-2 px-4 text-right text-gray-400 text-xs">
                     {s.quarantined_at
                       ? parseUTC(s.quarantined_at).toLocaleString("en-IN", {
-                          timeZone: "Asia/Kolkata",
+                          timeZone: getTimezone(),
                           day: "2-digit",
                           month: "short",
                           hour: "2-digit",

@@ -14,7 +14,7 @@ import aiosqlite
 from typing import Any
 
 from yolovest.models.schemas import EconomicEvent, NewsArticle, OHLCVBar, SentimentResult
-from yolovest.timezone import IST, now_ist
+from yolovest.timezone import IST, UTC, now_ist, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -297,7 +297,7 @@ class Database:
         """Fetch OHLCV bars for a symbol, most recent `days` days."""
         from datetime import timedelta
 
-        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=days)).isoformat()
         cursor = await self.read_conn.execute(
             "SELECT timestamp, open, high, low, close, volume FROM ohlcv "
             "WHERE symbol = ? AND interval = ? "
@@ -489,7 +489,7 @@ class Database:
         Set auto_commit=False when batching multiple audit entries,
         then call flush_audit() to commit them all at once.
         """
-        ts_now = now_ist().isoformat()
+        ts_now = now_utc().isoformat()
         await self.conn.execute(
             "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
             "input_summary, output_summary, duration_ms) VALUES (?, ?, ?, ?, ?, ?)",
@@ -582,7 +582,7 @@ class Database:
     ) -> SentimentResult | None:
         """Get latest sentiment for a symbol. Returns None if older than max_age_hours."""
         from datetime import timedelta
-        cutoff = (now_ist() - timedelta(hours=max_age_hours)).isoformat()
+        cutoff = (now_utc() - timedelta(hours=max_age_hours)).isoformat()
         cursor = await self.read_conn.execute(
             "SELECT symbol, sentiment, confidence, key_drivers "
             "FROM sentiment WHERE symbol = ? AND created_at >= ?",
@@ -786,7 +786,7 @@ class Database:
         """Get symbols that already have a signal or open position today."""
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
-        ).isoformat()
+        ).astimezone(UTC).isoformat()
         # Symbols with signals generated today
         cursor = await self.read_conn.execute(
             "SELECT DISTINCT symbol FROM signals WHERE created_at >= ?",
@@ -808,7 +808,7 @@ class Database:
         in the lookback window.
         """
         from datetime import timedelta
-        cutoff = (now_ist() - timedelta(days=lookback_days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=lookback_days)).isoformat()
         cursor = await self.conn.execute(
             "SELECT symbol, MAX(created_at) as last_trade "
             "FROM trades WHERE created_at >= ? "
@@ -858,7 +858,7 @@ class Database:
         influencing the scan.
         """
         from datetime import timedelta
-        sentiment_cutoff = (now_ist() - timedelta(hours=sentiment_ttl_hours)).isoformat()
+        sentiment_cutoff = (now_utc() - timedelta(hours=sentiment_ttl_hours)).isoformat()
 
         cursor = await self.read_conn.execute(
             "SELECT o.symbol, "
@@ -960,7 +960,7 @@ class Database:
     async def cleanup_retired_models(self, older_than_days: int) -> int:
         """Delete retired models older than N days (DB record + .pkl file)."""
         from datetime import timedelta
-        cutoff = (now_ist() - timedelta(days=older_than_days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=older_than_days)).isoformat()
         cursor = await self.conn.execute(
             "SELECT model_type, version, file_path FROM model_versions "
             "WHERE status = 'retired' AND created_at < ?",
@@ -1022,7 +1022,7 @@ class Database:
         """
         from datetime import timedelta
 
-        cutoff = (now_ist() - timedelta(days=lookback_days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=lookback_days)).isoformat()
         feedback: dict[str, dict[str, float]] = {}
 
         def _ensure(sym: str) -> dict[str, float]:
@@ -1159,7 +1159,7 @@ class Database:
         from datetime import timedelta
 
         now = now_ist()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC).isoformat()
 
         # Get initial capital from system_state or fallback
         initial_capital = 100_000.0
@@ -1342,10 +1342,10 @@ class Database:
     # ------------------------------------------------------------------
 
     async def get_todays_trades(self) -> list[dict[str, Any]]:
-        """Get all trades created today."""
+        """Get all trades created today (IST market day)."""
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
-        ).isoformat()
+        ).astimezone(UTC).isoformat()
         cursor = await self.conn.execute(
             "SELECT * FROM trades WHERE created_at >= ? ORDER BY created_at",
             (today_start,),
@@ -1378,7 +1378,7 @@ class Database:
         import uuid
 
         trade_id = trade.get("trade_id") or f"T-{uuid.uuid4().hex[:8]}"
-        ts_now = now_ist().isoformat()
+        ts_now = now_utc().isoformat()
 
         trade_columns = await self._get_table_columns("trades")
 
@@ -1451,7 +1451,7 @@ class Database:
         Note: PnL is stored as NULL while position is open; this updates
         a computed field or can be used for tracking in audit_log.
         """
-        ts_now = now_ist().isoformat()
+        ts_now = now_utc().isoformat()
         # Log unrealized PnL as audit entry for tracking
         await self.log_audit(
             action_type="unrealized_pnl_update",
@@ -1466,7 +1466,7 @@ class Database:
         Uses a savepoint to ensure the trade update and audit log
         are committed atomically — no half-closed positions.
         """
-        ts_now = now_ist().isoformat()
+        ts_now = now_utc().isoformat()
         pos_id = str(position_id)
         await self.conn.execute("SAVEPOINT close_position")
         try:
@@ -1499,13 +1499,13 @@ class Database:
         import uuid
 
         pred_id = prediction.get("prediction_id") or f"P-{uuid.uuid4().hex[:8]}"
-        ts_now = now_ist().isoformat()
+        ts_now = now_utc().isoformat()
 
         # Compute prediction end time from holding period
         from yolovest.models.schemas import _parse_holding_period
 
         holding = prediction.get("expected_holding_period", "intraday")
-        end_time = now_ist() + _parse_holding_period(holding)
+        end_time = now_utc() + _parse_holding_period(holding)
 
         # Try to find the matching signal_id from signals table
         signal_id = prediction.get("signal_id")
@@ -1552,13 +1552,13 @@ class Database:
         import uuid
 
         pred_id = f"SP-{uuid.uuid4().hex[:8]}"
-        ts_now = now_ist().isoformat()
+        ts_now = now_utc().isoformat()
         symbol = prediction.get("symbol")
 
         from yolovest.models.schemas import _parse_holding_period
 
         holding = prediction.get("expected_holding_period", "intraday")
-        end_time = now_ist() + _parse_holding_period(holding)
+        end_time = now_utc() + _parse_holding_period(holding)
 
         # Check if symbol column exists (migration 012)
         columns = await self._get_table_columns("predictions")
@@ -1646,7 +1646,7 @@ class Database:
 
         Used by the predict-track skill to know which predictions are ready to score.
         """
-        ts_now = now_ist().isoformat()
+        ts_now = now_utc().isoformat()
         cursor = await self.conn.execute(
             "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
             "p.prediction_end_time, "
@@ -1881,10 +1881,10 @@ class Database:
         symbol: str | None = None, direction: str | None = None,
         model: str | None = None,
     ) -> dict[str, Any]:
-        """Get predictions created today with pagination and filters."""
+        """Get predictions created today (IST market day) with pagination and filters."""
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
-        ).isoformat()
+        ).astimezone(UTC).isoformat()
         where = "WHERE p.created_at >= ?"
         params: list[Any] = [today_start]
         where, params = self._apply_prediction_filters(
@@ -1925,7 +1925,7 @@ class Database:
         days_since_monday = now.weekday()
         monday = (now - timedelta(days=days_since_monday)).replace(
             hour=9, minute=15, second=0, microsecond=0
-        )
+        ).astimezone(UTC)
         cursor = await self.conn.execute(
             "SELECT * FROM trades WHERE created_at >= ? ORDER BY created_at",
             (monday.isoformat(),),
@@ -1941,7 +1941,7 @@ class Database:
         days_since_monday = now.weekday()
         monday = (now - timedelta(days=days_since_monday)).replace(
             hour=9, minute=15, second=0, microsecond=0
-        )
+        ).astimezone(UTC)
         cursor = await self.conn.execute(
             "SELECT p.*, COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
             "COALESCE(s.signal_type, t.signal_type) as signal_type, "
@@ -1963,7 +1963,7 @@ class Database:
         days_since_monday = now.weekday()
         monday = (now - timedelta(days=days_since_monday)).replace(
             hour=9, minute=15, second=0, microsecond=0
-        )
+        ).astimezone(UTC)
         cursor = await self.conn.execute(
             "SELECT lr.*, t.pnl as trade_pnl "
             "FROM llm_reviews lr "
@@ -2002,7 +2002,7 @@ class Database:
         """Get shadow models that have completed their trial period."""
         from datetime import timedelta
 
-        cutoff = (now_ist() - timedelta(days=shadow_mode_days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=shadow_mode_days)).isoformat()
         cursor = await self.conn.execute(
             "SELECT * FROM model_versions "
             "WHERE status = 'shadow' AND shadow_start_date <= ?",
@@ -2057,7 +2057,7 @@ class Database:
         """
         from datetime import timedelta
 
-        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=days)).isoformat()
         cursor = await self.conn.execute(
             "SELECT DATE(closed_at) as trade_date, "
             "SUM(pnl) as daily_pnl, COUNT(*) as trade_count "
@@ -2089,7 +2089,7 @@ class Database:
         wins, and losses.
         """
         from datetime import timedelta
-        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=days)).isoformat()
         cursor = await self.read_conn.execute(
             "SELECT DATE(closed_at) as trade_date, "
             "SUM(pnl) as pnl, "
@@ -2276,7 +2276,7 @@ class Database:
         """Delete data older than retention periods."""
         from datetime import timedelta
 
-        now = now_ist()
+        now = now_utc()
         deleted = {}
 
         # OHLCV retention
@@ -2392,7 +2392,7 @@ class Database:
     async def expire_pending_trades(self, max_age_minutes: int = 30) -> int:
         """Expire pending trades older than max_age_minutes."""
         from datetime import timedelta
-        cutoff = (now_ist() - timedelta(minutes=max_age_minutes)).isoformat()
+        cutoff = (now_utc() - timedelta(minutes=max_age_minutes)).isoformat()
         cursor = await self.conn.execute(
             "UPDATE pending_trades SET status = 'expired' "
             "WHERE status = 'pending' AND created_at < ?",
@@ -2475,7 +2475,7 @@ class Database:
         if ts_col is None:
             raise ValueError(f"Cleanup not allowed for table: {table}")
 
-        cutoff = (now_ist() - timedelta(days=older_than_days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=older_than_days)).isoformat()
         cursor = await self.conn.execute(
             f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,)  # noqa: S608
         )
@@ -2688,7 +2688,7 @@ class Database:
         if not signals:
             return {"scored": 0, "not_found": 0}
 
-        today = now_ist().strftime("%Y-%m-%d")
+        today = now_utc().strftime("%Y-%m-%d")
         already_scored = 0
         scored = 0
         not_found = 0
@@ -2931,7 +2931,7 @@ class Database:
         """
         from datetime import timedelta
 
-        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=days)).isoformat()
 
         if symbol:
             cursor = await self.conn.execute(
@@ -3005,7 +3005,7 @@ class Database:
         """
         from datetime import timedelta
 
-        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=days)).isoformat()
 
         # Get reviews with matching trade outcomes
         cursor = await self.conn.execute(
@@ -3085,7 +3085,7 @@ class Database:
         self, namespace: str, key: str, value: str, expires_at: str | None = None
     ) -> None:
         """Upsert a memory entry."""
-        now = now_ist().isoformat()
+        now = now_utc().isoformat()
         await self.conn.execute(
             "INSERT INTO agent_memory (namespace, key, value, created_at, updated_at, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?) "
@@ -3123,7 +3123,7 @@ class Database:
 
     async def cleanup_expired_memory(self) -> int:
         """Delete expired memory entries. Returns count deleted."""
-        now = now_ist().isoformat()
+        now = now_utc().isoformat()
         cursor = await self.conn.execute(
             "DELETE FROM agent_memory WHERE expires_at IS NOT NULL AND expires_at < ?",
             (now,),
@@ -3245,7 +3245,7 @@ class Database:
     async def get_execution_quality(self, days: int = 30) -> dict[str, Any]:
         """Detailed execution quality metrics."""
         from datetime import timedelta
-        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=days)).isoformat()
 
         # Slippage by hour
         cursor = await self.conn.execute(
@@ -3329,7 +3329,7 @@ class Database:
     async def get_ohlcv_multi(self, symbols: list[str], days: int = 60) -> dict[str, list[dict[str, Any]]]:
         """Fetch close prices for multiple symbols for correlation computation."""
         from datetime import timedelta
-        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cutoff = (now_utc() - timedelta(days=days)).isoformat()
 
         result: dict[str, list[dict[str, Any]]] = {}
         for symbol in symbols:
@@ -3382,7 +3382,7 @@ class Database:
 
     async def trigger_price_alert(self, alert_id: int) -> None:
         """Mark an alert as triggered."""
-        now = now_ist().isoformat()
+        now = now_utc().isoformat()
         await self.conn.execute(
             "UPDATE price_alerts SET active = 0, triggered_at = ? WHERE id = ?",
             (now, alert_id),

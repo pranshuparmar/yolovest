@@ -1,4 +1,32 @@
 /**
+ * Timezone-aware datetime utilities for YoloVest.
+ *
+ * Backend stores all timestamps in UTC. Frontend converts to display timezone
+ * following this priority:
+ * 1. Config's market_hours.timezone (from /api/health endpoint)
+ * 2. Browser's local timezone (Intl.DateTimeFormat().resolvedOptions().timeZone)
+ * 3. "UTC" as fallback
+ */
+
+/** Display timezone — set by initTimezone() from the health endpoint. */
+let _displayTz: string = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+/**
+ * Initialize the display timezone from config.
+ * Call once on app startup with the timezone from /api/health.
+ */
+export function initTimezone(tz: string | undefined) {
+  if (tz) {
+    _displayTz = tz;
+  }
+}
+
+/** Get the current display timezone. */
+export function getTimezone(): string {
+  return _displayTz;
+}
+
+/**
  * Parse a datetime string as UTC.
  *
  * Backend stores timestamps via SQLite datetime('now') which produces UTC
@@ -19,11 +47,11 @@ export function parseUTC(iso: string): Date {
   return new Date(normalized + "Z");
 }
 
-/** Format a UTC datetime string to IST display (date + time). */
+/** Format a UTC datetime string for display (date + time). */
 export function formatIST(iso: string): string {
   try {
     return parseUTC(iso).toLocaleString("en-IN", {
-      timeZone: "Asia/Kolkata",
+      timeZone: _displayTz,
       day: "2-digit",
       month: "short",
       year: "numeric",
@@ -35,11 +63,11 @@ export function formatIST(iso: string): string {
   }
 }
 
-/** Format a UTC datetime string to IST display (date only). */
+/** Format a UTC datetime string for display (date only). */
 export function formatISTDate(iso: string): string {
   try {
     return parseUTC(iso).toLocaleDateString("en-IN", {
-      timeZone: "Asia/Kolkata",
+      timeZone: _displayTz,
       day: "2-digit",
       month: "short",
       year: "numeric",
@@ -49,11 +77,11 @@ export function formatISTDate(iso: string): string {
   }
 }
 
-/** Format a UTC datetime string to IST display (time only). */
+/** Format a UTC datetime string for display (time only). */
 export function formatISTTime(iso: string): string {
   try {
     return parseUTC(iso).toLocaleTimeString("en-IN", {
-      timeZone: "Asia/Kolkata",
+      timeZone: _displayTz,
       hour: "2-digit",
       minute: "2-digit",
     });

@@ -720,6 +720,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             "status": "ok" if db_ok else "degraded",
             "database": db_ok,
             "mode": ctx.config.mode,
+            "timezone": ctx.config.market_hours.timezone,
         }
 
     @app.get("/api/slippage")

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
+import { getTimezone } from "../utils/datetime";
 
 interface Notification {
   id: number;
@@ -280,7 +281,7 @@ export function NotificationCenter({
                       {n.message}
                     </p>
                     <p className="text-xs text-gray-600 mt-0.5">
-                      {n.timestamp.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}
+                      {n.timestamp.toLocaleTimeString("en-IN", { timeZone: getTimezone() })}
                     </p>
                   </div>
                   <button

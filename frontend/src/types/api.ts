@@ -2,6 +2,7 @@ export interface HealthResponse {
   status: "ok" | "degraded";
   database: boolean;
   mode: "paper" | "live";
+  timezone?: string;
 }
 
 export interface PortfolioState {

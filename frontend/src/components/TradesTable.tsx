@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import type { Trade } from "../types/api";
-import { parseUTC } from "../utils/datetime";
+import { parseUTC, getTimezone } from "../utils/datetime";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", {
@@ -80,12 +80,12 @@ export function TradesTable({
               </td>
               <td className="py-2 text-gray-500 text-xs whitespace-nowrap">
                 {parseUTC(t.created_at).toLocaleDateString("en-IN", {
-                  timeZone: "Asia/Kolkata",
+                  timeZone: getTimezone(),
                   day: "2-digit",
                   month: "short",
                 })}{" "}
                 {parseUTC(t.created_at).toLocaleTimeString("en-IN", {
-                  timeZone: "Asia/Kolkata",
+                  timeZone: getTimezone(),
                   hour: "2-digit",
                   minute: "2-digit",
                 })}

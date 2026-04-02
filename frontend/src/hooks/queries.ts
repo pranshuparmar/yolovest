@@ -1,12 +1,18 @@
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/endpoints";
+import { initTimezone } from "../utils/datetime";
 
 const STALE_30S = 30_000;
 
 export function useHealth() {
   return useQuery({
     queryKey: ["health"],
-    queryFn: api.health,
+    queryFn: async () => {
+      const data = await api.health();
+      // Initialize display timezone from server config on first fetch
+      if (data.timezone) initTimezone(data.timezone);
+      return data;
+    },
     staleTime: STALE_30S,
     refetchInterval: STALE_30S,
   });

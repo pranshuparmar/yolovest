@@ -1,5 +1,6 @@
 import { useEconomicCalendar } from "../hooks/queries";
 import clsx from "clsx";
+import { getTimezone } from "../utils/datetime";
 
 const impactDot: Record<string, string> = {
   high: "bg-red-400",
@@ -43,7 +44,7 @@ export function EconomicCalendarWidget() {
                 <p className="text-xs text-gray-500">
                   {evt.event_date
                     ? new Date(evt.event_date).toLocaleDateString("en-IN", {
-                        timeZone: "Asia/Kolkata",
+                        timeZone: getTimezone(),
                         month: "short",
                         day: "numeric",
                       })
