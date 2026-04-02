@@ -2483,6 +2483,19 @@ class Database:
         """Save dry-run signal results for next-day comparison."""
         columns = await self._get_table_columns("dry_run_results")
 
+        # Ensure strategy_mode column exists (may be missing if migration 013 was skipped)
+        if "strategy_mode" not in columns:
+            try:
+                await self.conn.execute(
+                    "ALTER TABLE dry_run_results ADD COLUMN strategy_mode TEXT DEFAULT 'balanced'"
+                )
+                await self.conn.commit()
+                columns.add("strategy_mode")
+                logger.info("Added missing strategy_mode column to dry_run_results")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    logger.warning("Could not add strategy_mode column: %s", e)
+
         # Base columns (always present from migration 007)
         base_cols = [
             "run_id", "symbol", "signal_type", "entry_price", "target_price",
@@ -2495,11 +2508,7 @@ class Database:
             "holding_period", "product", "volatility_score",
             "estimated_costs", "strategy_mode",
         ]
-        available_optional = [c for c in optional_cols if c in columns]
-        missing_optional = [c for c in optional_cols if c not in columns]
-        if missing_optional:
-            logger.debug("dry_run_results missing optional columns: %s", missing_optional)
-        insert_cols = base_cols + available_optional
+        insert_cols = base_cols + [c for c in optional_cols if c in columns]
         placeholders = ", ".join("?" if c != "created_at" else "datetime('now')" for c in insert_cols)
         col_names = ", ".join(insert_cols)
         value_cols = [c for c in insert_cols if c != "created_at"]
@@ -2519,7 +2528,7 @@ class Database:
     async def get_dry_run_history(self, limit: int = 10) -> list[dict[str, Any]]:
         """Get dry-run results grouped by run_id, most recent first."""
         try:
-            cursor = await self.read_conn.execute(
+            cursor = await self.conn.execute(
                 "SELECT run_id, COUNT(*) as signal_count, "
                 "MIN(created_at) as created_at, "
                 "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
@@ -2531,7 +2540,7 @@ class Database:
             )
         except Exception:
             # Fallback if strategy_mode column doesn't exist (pre-migration 013)
-            cursor = await self.read_conn.execute(
+            cursor = await self.conn.execute(
                 "SELECT run_id, COUNT(*) as signal_count, "
                 "MIN(created_at) as created_at, "
                 "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
