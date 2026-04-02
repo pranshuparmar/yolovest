@@ -17,18 +17,10 @@ function fmt(n: number | null | undefined, d = 2) {
   });
 }
 
+import { formatIST } from "../utils/datetime";
+
 function formatDate(iso: string) {
-  try {
-    return new Date(iso).toLocaleString("en-IN", {
-      timeZone: "Asia/Kolkata",
-      day: "2-digit",
-      month: "short",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
+  return formatIST(iso);
 }
 
 export function DryRunPage() {

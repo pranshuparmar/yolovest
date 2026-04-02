@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { formatIST } from "../utils/datetime";
 import {
   usePredictionsToday,
   usePredictionsUnscored,
@@ -102,14 +103,14 @@ function PredictionRow({ p }: { p: PredictionDetail }) {
           <div>
             <span className="text-gray-500">Created</span>
             <p className="text-gray-300 mt-0.5">
-              {new Date(p.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}
+              {formatIST(p.created_at)}
             </p>
           </div>
           <div>
             <span className="text-gray-500">End Time</span>
             <p className="text-gray-300 mt-0.5">
               {p.prediction_end_time
-                ? new Date(p.prediction_end_time).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+                ? formatIST(p.prediction_end_time)
                 : "\u2014"}
             </p>
           </div>

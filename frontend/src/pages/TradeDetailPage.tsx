@@ -1,6 +1,7 @@
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useTradeDetail } from "../hooks/queries";
 import clsx from "clsx";
+import { parseUTC } from "../utils/datetime";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -70,7 +71,7 @@ function ReasoningTimeline({ data }: { data: NonNullable<ReturnType<typeof useTr
       status: scored ? (p.direction_correct ? "success" : "error") : "pending",
       detail: scored
         ? `Direction: ${p.direction_correct ? "Correct" : "Wrong"} — Target: ${p.target_hit ? "Hit" : "Missed"} — PnL: ${p.actual_pnl_pct != null ? fmt(p.actual_pnl_pct) + "%" : "—"}`
-        : `Awaiting scoring — End: ${p.prediction_end_time ? new Date(p.prediction_end_time).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "—"}`,
+        : `Awaiting scoring — End: ${p.prediction_end_time ? parseUTC(p.prediction_end_time).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "—"}`,
     });
   }
 
@@ -109,7 +110,7 @@ function ReasoningTimeline({ data }: { data: NonNullable<ReturnType<typeof useTr
                 <span className="text-sm font-medium text-gray-200">{step.label}</span>
                 {step.time && (
                   <span className="text-xs text-gray-500">
-                    {new Date(step.time).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                    {parseUTC(step.time).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                   </span>
                 )}
               </div>
@@ -177,8 +178,8 @@ export function TradeDetailPage() {
             </p>
           </div>
           <div><p className="text-xs text-gray-500">Mode</p><p>{data.mode}</p></div>
-          <div><p className="text-xs text-gray-500">Created</p><p className="text-xs">{new Date(data.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</p></div>
-          {data.closed_at && <div><p className="text-xs text-gray-500">Closed</p><p className="text-xs">{new Date(data.closed_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</p></div>}
+          <div><p className="text-xs text-gray-500">Created</p><p className="text-xs">{parseUTC(data.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</p></div>
+          {data.closed_at && <div><p className="text-xs text-gray-500">Closed</p><p className="text-xs">{parseUTC(data.closed_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</p></div>}
         </div>
       </Section>
 
@@ -218,7 +219,7 @@ export function TradeDetailPage() {
             {data.audit_trail.map((entry) => (
               <div key={entry.id} className="flex items-start gap-3 text-xs border-b border-gray-800/50 pb-2">
                 <span className="text-gray-500 whitespace-nowrap">
-                  {new Date(entry.timestamp_ist).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}
+                  {parseUTC(entry.timestamp_ist).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}
                 </span>
                 <span className="text-gray-400 font-medium">{entry.action_type}</span>
                 {entry.skill_name && <span className="text-gray-600">[{entry.skill_name}]</span>}

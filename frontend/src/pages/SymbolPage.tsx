@@ -12,6 +12,7 @@ import {
   BarChart, Bar, CartesianGrid, Scatter, Cell,
 } from "recharts";
 import clsx from "clsx";
+import { parseUTC } from "../utils/datetime";
 import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 
 function fmt(n: number, d = 2) {
@@ -38,16 +39,16 @@ export function SymbolPage() {
     const entryMap = new Map<string, { price: number; type: string }>();
     const exitMap = new Map<string, { price: number; type: string; pnl: number | null }>();
     for (const t of trades || []) {
-      const entryDate = new Date(t.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" });
+      const entryDate = parseUTC(t.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" });
       entryMap.set(entryDate, { price: t.fill_price, type: t.signal_type });
       if (t.closed_at && t.exit_price != null) {
-        const exitDate = new Date(t.closed_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" });
+        const exitDate = parseUTC(t.closed_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" });
         exitMap.set(exitDate, { price: t.exit_price, type: t.signal_type, pnl: t.pnl });
       }
     }
 
     return (ohlcv || []).map((b) => {
-      const date = new Date(b.timestamp).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" });
+      const date = parseUTC(b.timestamp).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric" });
       const entry = entryMap.get(date);
       const exit = exitMap.get(date);
       return {
@@ -208,7 +209,7 @@ export function SymbolPage() {
                   className="flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-800/50 text-sm">
                   <div className="flex items-center gap-2">
                     <span className={clsx("text-xs px-1 rounded", t.signal_type === "BUY" ? "bg-emerald-900/40 text-emerald-400" : "bg-red-900/40 text-red-400")}>{t.signal_type}</span>
-                    <span className="text-gray-400 text-xs">{new Date(t.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</span>
+                    <span className="text-gray-400 text-xs">{parseUTC(t.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</span>
                   </div>
                   <span className={clsx("text-sm", t.pnl != null && t.pnl >= 0 ? "text-emerald-400" : "text-red-400")}>
                     {t.pnl != null ? `₹${fmt(t.pnl)}` : "Open"}
@@ -229,7 +230,7 @@ export function SymbolPage() {
               {predictions.map((p) => (
                 <div key={p.prediction_id} className="flex items-center justify-between py-1.5 px-2 text-sm">
                   <div className="flex items-center gap-2">
-                    <span className="text-gray-400 text-xs">{new Date(p.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</span>
+                    <span className="text-gray-400 text-xs">{parseUTC(p.created_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}</span>
                     {p.direction_correct != null && (
                       <span className={p.direction_correct ? "text-emerald-400 text-xs" : "text-red-400 text-xs"}>
                         {p.direction_correct ? "Correct" : "Wrong"}

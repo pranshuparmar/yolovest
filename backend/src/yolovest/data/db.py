@@ -2615,15 +2615,13 @@ class Database:
             "estimated_costs", "strategy_mode", "expected_holding_days",
         ]
         insert_cols = base_cols + [c for c in optional_cols if c in columns]
-        placeholders = ", ".join("?" for c in insert_cols)
+        placeholders = ", ".join("?" if c != "created_at" else "datetime('now')" for c in insert_cols)
         col_names = ", ".join(insert_cols)
-        value_cols = insert_cols[:]  # all columns get explicit values now
-        ts_now = now_ist().isoformat()
+        value_cols = [c for c in insert_cols if c != "created_at"]
 
         for s in signals:
             values = tuple(
                 run_id if c == "run_id"
-                else ts_now if c == "created_at"
                 else s.get(c)
                 for c in value_cols
             )
