@@ -37,6 +37,7 @@ export function DryRunPage() {
   const runSkill = useRunSkill();
   const scoreDryRun = useScoreDryRun();
   const deleteDryRun = useDeleteDryRun();
+  const [scoreMsg, setScoreMsg] = useState<{ text: string; type: "info" | "warn" } | null>(null);
   const [selectedMode, setSelectedMode] = useState<string>("balanced");
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const { data: signals, isLoading: detailLoading } =
@@ -144,6 +145,25 @@ export function DryRunPage() {
         </div>
       )}
 
+      {scoreMsg && (
+        <div
+          className={clsx(
+            "rounded-lg p-3 text-sm flex items-center justify-between",
+            scoreMsg.type === "warn"
+              ? "bg-amber-900/20 border border-amber-800 text-amber-400"
+              : "bg-emerald-900/20 border border-emerald-800 text-emerald-400",
+          )}
+        >
+          <span>{scoreMsg.text}</span>
+          <button
+            onClick={() => setScoreMsg(null)}
+            className="text-xs opacity-60 hover:opacity-100 ml-2"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Past runs */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
         <div className="px-4 py-3 border-b border-gray-800">
@@ -214,7 +234,16 @@ export function DryRunPage() {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          scoreDryRun.mutate(run.run_id);
+                          setScoreMsg(null);
+                          scoreDryRun.mutate(run.run_id, {
+                            onSuccess: (data) => {
+                              if (data.message) {
+                                setScoreMsg({ text: data.message, type: "warn" });
+                              } else if (data.scored > 0) {
+                                setScoreMsg({ text: `Scored ${data.scored} signal(s).`, type: "info" });
+                              }
+                            },
+                          });
                         }}
                         disabled={
                           scoreDryRun.isPending ||

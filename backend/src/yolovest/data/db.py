@@ -2495,7 +2495,11 @@ class Database:
             "holding_period", "product", "volatility_score",
             "estimated_costs", "strategy_mode",
         ]
-        insert_cols = base_cols + [c for c in optional_cols if c in columns]
+        available_optional = [c for c in optional_cols if c in columns]
+        missing_optional = [c for c in optional_cols if c not in columns]
+        if missing_optional:
+            logger.debug("dry_run_results missing optional columns: %s", missing_optional)
+        insert_cols = base_cols + available_optional
         placeholders = ", ".join("?" if c != "created_at" else "datetime('now')" for c in insert_cols)
         col_names = ", ".join(insert_cols)
         value_cols = [c for c in insert_cols if c != "created_at"]
@@ -2514,22 +2518,28 @@ class Database:
 
     async def get_dry_run_history(self, limit: int = 10) -> list[dict[str, Any]]:
         """Get dry-run results grouped by run_id, most recent first."""
-        # Check if strategy_mode column exists (migration 013)
-        cursor = await self.conn.execute("PRAGMA table_info(dry_run_results)")
-        columns = {row[1] for row in await cursor.fetchall()}
-        has_mode = "strategy_mode" in columns
-
-        mode_col = ", MAX(strategy_mode) as strategy_mode " if has_mode else " "
-        cursor = await self.conn.execute(
-            "SELECT run_id, COUNT(*) as signal_count, "
-            "MIN(created_at) as created_at, "
-            "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
-            "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored"
-            + mode_col
-            + "FROM dry_run_results "
-            "GROUP BY run_id ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        )
+        try:
+            cursor = await self.read_conn.execute(
+                "SELECT run_id, COUNT(*) as signal_count, "
+                "MIN(created_at) as created_at, "
+                "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
+                "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored, "
+                "MAX(strategy_mode) as strategy_mode "
+                "FROM dry_run_results "
+                "GROUP BY run_id ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+        except Exception:
+            # Fallback if strategy_mode column doesn't exist (pre-migration 013)
+            cursor = await self.read_conn.execute(
+                "SELECT run_id, COUNT(*) as signal_count, "
+                "MIN(created_at) as created_at, "
+                "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
+                "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored "
+                "FROM dry_run_results "
+                "GROUP BY run_id ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
         rows = await cursor.fetchall()
         return [dict[str, Any](r) for r in rows]
 
@@ -2562,15 +2572,24 @@ class Database:
         if not signals:
             return {"scored": 0, "not_found": 0}
 
+        today = now_ist().strftime("%Y-%m-%d")
+        already_scored = 0
         scored = 0
         not_found = 0
+        same_day = 0
+
         for sig in signals:
             if sig.get("scored_at"):
-                scored += 1
+                already_scored += 1
                 continue
 
             # Extract date-only from created_at (e.g. "2026-03-29T10:30:00" → "2026-03-29")
             created_date = str(sig["created_at"])[:10]
+
+            # Check if this signal was created today — next-day data won't exist yet
+            if created_date >= today:
+                same_day += 1
+                continue
 
             # Get the next day's OHLCV after the dry-run date.
             # Use SUBSTR to compare date portions only, avoiding time format issues.
@@ -2613,8 +2632,21 @@ class Database:
             )
             scored += 1
 
-        await self.conn.commit()
-        return {"scored": scored, "not_found": not_found}
+        if scored > 0:
+            await self.conn.commit()
+
+        result: dict[str, Any] = {
+            "scored": scored,
+            "not_found": not_found,
+            "already_scored": already_scored,
+        }
+        if same_day > 0:
+            result["same_day"] = same_day
+            result["message"] = (
+                "Signals generated today cannot be scored yet — "
+                "next trading day's data is needed. Try again tomorrow."
+            )
+        return result
 
     async def reset_all_data(self) -> dict[str, int]:
         """Delete ALL rows from all data tables. Schema and migrations are preserved.

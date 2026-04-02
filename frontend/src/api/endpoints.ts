@@ -361,7 +361,7 @@ export const api = {
     apiFetch<DryRunSignal[]>(`/api/dry-run/${runId}`),
 
   scoreDryRun: (runId: string) =>
-    apiFetch<{ scored: number; not_found: number }>(`/api/dry-run/${runId}/score`, { method: "POST" }),
+    apiFetch<{ scored: number; not_found: number; same_day?: number; message?: string }>(`/api/dry-run/${runId}/score`, { method: "POST" }),
 
   deleteDryRun: (runId: string) =>
     apiFetch<{ success: boolean; deleted: number }>(`/api/dry-run/${runId}`, { method: "DELETE" }),
