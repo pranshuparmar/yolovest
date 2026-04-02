@@ -1,8 +1,19 @@
 import { useState } from "react";
 import { useCorrelations } from "../hooks/queries";
+import { useTheme } from "../hooks/useTheme";
 import clsx from "clsx";
 
-function corrColor(v: number): string {
+function corrColor(v: number, light: boolean): string {
+  if (light) {
+    if (v >= 0.7) return "bg-emerald-600 text-white font-semibold";
+    if (v >= 0.4) return "bg-emerald-200 text-emerald-900";
+    if (v >= 0.1) return "bg-emerald-50 text-emerald-800";
+    if (v > -0.1) return "bg-gray-100 text-gray-500";
+    if (v > -0.4) return "bg-red-50 text-red-800";
+    if (v > -0.7) return "bg-red-200 text-red-900";
+    return "bg-red-600 text-white font-semibold";
+  }
+  // dark
   if (v >= 0.7) return "bg-emerald-500 text-white font-semibold";
   if (v >= 0.4) return "bg-emerald-700/80 text-emerald-100";
   if (v >= 0.1) return "bg-emerald-900/40 text-emerald-300";
@@ -15,6 +26,8 @@ function corrColor(v: number): string {
 export function CorrelationPage() {
   const [days, setDays] = useState(60);
   const { data, isLoading } = useCorrelations(days);
+  const { theme } = useTheme();
+  const isLight = theme === "light";
 
   return (
     <div className="space-y-6">
@@ -36,11 +49,11 @@ export function CorrelationPage() {
 
       {/* Legend */}
       <div className="flex gap-2 text-xs flex-wrap">
-        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-emerald-500" /> Strong +</span>
-        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-emerald-700/80" /> Moderate +</span>
-        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-gray-700/50 border border-gray-600" /> Weak</span>
-        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-red-700/80" /> Moderate -</span>
-        <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-red-500" /> Strong -</span>
+        <span className="flex items-center gap-1"><span className={clsx("w-4 h-4 rounded", isLight ? "bg-emerald-600" : "bg-emerald-500")} /> Strong +</span>
+        <span className="flex items-center gap-1"><span className={clsx("w-4 h-4 rounded", isLight ? "bg-emerald-200" : "bg-emerald-700/80")} /> Moderate +</span>
+        <span className="flex items-center gap-1"><span className={clsx("w-4 h-4 rounded border", isLight ? "bg-gray-100 border-gray-300" : "bg-gray-700/50 border-gray-600")} /> Weak</span>
+        <span className="flex items-center gap-1"><span className={clsx("w-4 h-4 rounded", isLight ? "bg-red-200" : "bg-red-700/80")} /> Moderate -</span>
+        <span className="flex items-center gap-1"><span className={clsx("w-4 h-4 rounded", isLight ? "bg-red-600" : "bg-red-500")} /> Strong -</span>
       </div>
 
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 overflow-x-auto">
@@ -69,7 +82,7 @@ export function CorrelationPage() {
                 <tr key={s1}>
                   <td className="p-2 text-gray-400 font-medium text-right pr-3 whitespace-nowrap">{s1}</td>
                   {data.matrix[i].map((v, j) => (
-                    <td key={j} className={clsx("p-2 text-center font-mono min-w-[48px]", corrColor(v))}>
+                    <td key={j} className={clsx("p-2 text-center font-mono min-w-[48px]", corrColor(v, isLight))}>
                       {i === j ? "1.00" : v.toFixed(2)}
                     </td>
                   ))}
