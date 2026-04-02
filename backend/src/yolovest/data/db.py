@@ -1668,26 +1668,104 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
-    async def get_all_awaiting_predictions(self) -> list[dict[str, Any]]:
+    async def get_all_awaiting_predictions(
+        self, *, limit: int = 50, offset: int = 0,
+        symbol: str | None = None, direction: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
         """Get ALL unscored predictions for UI display (regardless of end time)."""
-        cursor = await self.conn.execute(
-            "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
-            "p.prediction_end_time, "
-            "COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
-            "COALESCE(s.signal_type, t.signal_type) as predicted_direction, "
-            "COALESCE(s.entry_price, t.entry_price) as entry_price, "
-            "COALESCE(s.target_price, t.target_price) as predicted_target, "
-            "COALESCE(s.stop_loss_price, t.stop_loss_price) as predicted_stop_loss, "
-            "s.confidence_score as confidence, "
-            "s.model_version "
-            "FROM predictions p "
-            "LEFT JOIN signals s ON p.signal_id = s.id "
-            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
-            "WHERE p.actual_price IS NULL "
-            "ORDER BY p.created_at DESC",
+        where = "WHERE p.actual_price IS NULL"
+        params: list[Any] = []
+        where, params = self._apply_prediction_filters(
+            where, params, symbol=symbol, direction=direction, model=model,
+        )
+        cursor = await self.read_conn.execute(
+            f"SELECT COUNT(*) FROM predictions p "
+            f"LEFT JOIN signals s ON p.signal_id = s.id "
+            f"LEFT JOIN trades t ON p.trade_id = t.trade_id {where}",
+            params,
+        )
+        total = (await cursor.fetchone())[0]
+        cursor = await self.read_conn.execute(
+            f"SELECT p.prediction_id, p.prediction_id as id, p.trade_id, p.created_at, "
+            f"p.prediction_end_time, "
+            f"COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+            f"COALESCE(s.signal_type, t.signal_type) as signal_type, "
+            f"COALESCE(s.entry_price, t.entry_price) as entry_price, "
+            f"COALESCE(s.target_price, t.target_price) as predicted_target, "
+            f"COALESCE(s.stop_loss_price, t.stop_loss_price) as predicted_stop_loss, "
+            f"s.confidence_score, p.model_version "
+            f"FROM predictions p "
+            f"LEFT JOIN signals s ON p.signal_id = s.id "
+            f"LEFT JOIN trades t ON p.trade_id = t.trade_id "
+            f"{where} ORDER BY p.created_at DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
         )
         rows = await cursor.fetchall()
-        return [dict[str, Any](row) for row in rows]
+        return {"items": [dict[str, Any](r) for r in rows], "total": total}
+
+    @staticmethod
+    def _apply_prediction_filters(
+        where: str, params: list[Any], *,
+        symbol: str | None = None, direction: str | None = None,
+        direction_correct: int | None = None, target_hit: int | None = None,
+        model: str | None = None, min_confidence: float | None = None,
+    ) -> tuple[str, list[Any]]:
+        """Append filter clauses to a prediction query WHERE string."""
+        if symbol:
+            where += " AND COALESCE(p.symbol, s.symbol, t.symbol) = ?"
+            params.append(symbol)
+        if direction:
+            where += " AND COALESCE(s.signal_type, t.signal_type) = ?"
+            params.append(direction)
+        if direction_correct is not None:
+            where += " AND p.direction_correct = ?"
+            params.append(direction_correct)
+        if target_hit is not None:
+            where += " AND p.target_hit = ?"
+            params.append(target_hit)
+        if model:
+            where += " AND p.model_version = ?"
+            params.append(model)
+        if min_confidence is not None:
+            where += " AND s.confidence_score >= ?"
+            params.append(min_confidence)
+        return where, params
+
+    async def get_prediction_outcomes_paginated(
+        self, *, limit: int = 50, offset: int = 0,
+        symbol: str | None = None, direction: str | None = None,
+        direction_correct: int | None = None, target_hit: int | None = None,
+        model: str | None = None, min_confidence: float | None = None,
+    ) -> dict[str, Any]:
+        """Scored predictions with pagination and filters."""
+        where = "WHERE p.actual_price IS NOT NULL"
+        params: list[Any] = []
+        where, params = self._apply_prediction_filters(
+            where, params, symbol=symbol, direction=direction,
+            direction_correct=direction_correct, target_hit=target_hit,
+            model=model, min_confidence=min_confidence,
+        )
+        cursor = await self.read_conn.execute(
+            f"SELECT COUNT(*) FROM predictions p "
+            f"LEFT JOIN signals s ON p.signal_id = s.id "
+            f"LEFT JOIN trades t ON p.trade_id = t.trade_id {where}",
+            params,
+        )
+        total = (await cursor.fetchone())[0]
+        cursor = await self.read_conn.execute(
+            f"SELECT p.*, "
+            f"COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+            f"COALESCE(s.signal_type, t.signal_type) as signal_type, "
+            f"s.confidence_score, p.model_version "
+            f"FROM predictions p "
+            f"LEFT JOIN signals s ON p.signal_id = s.id "
+            f"LEFT JOIN trades t ON p.trade_id = t.trade_id "
+            f"{where} ORDER BY p.created_at DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        )
+        rows = await cursor.fetchall()
+        return {"items": [dict[str, Any](r) for r in rows], "total": total}
 
     async def score_prediction(
         self,
@@ -1798,24 +1876,42 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
-    async def get_todays_predictions(self) -> list[dict[str, Any]]:
-        """Get predictions created today."""
+    async def get_todays_predictions(
+        self, *, limit: int = 50, offset: int = 0,
+        symbol: str | None = None, direction: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Get predictions created today with pagination and filters."""
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).isoformat()
+        where = "WHERE p.created_at >= ?"
+        params: list[Any] = [today_start]
+        where, params = self._apply_prediction_filters(
+            where, params, symbol=symbol, direction=direction, model=model,
+        )
+        # Total count
         cursor = await self.read_conn.execute(
-            "SELECT p.*, "
-            "COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
-            "COALESCE(s.signal_type, t.signal_type) as signal_type, "
-            "s.confidence_score "
-            "FROM predictions p "
-            "LEFT JOIN signals s ON p.signal_id = s.id "
-            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
-            "WHERE p.created_at >= ? ORDER BY p.created_at",
-            (today_start,),
+            f"SELECT COUNT(*) FROM predictions p "
+            f"LEFT JOIN signals s ON p.signal_id = s.id "
+            f"LEFT JOIN trades t ON p.trade_id = t.trade_id {where}",
+            params,
+        )
+        total = (await cursor.fetchone())[0]
+        # Page
+        cursor = await self.read_conn.execute(
+            f"SELECT p.*, "
+            f"COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+            f"COALESCE(s.signal_type, t.signal_type) as signal_type, "
+            f"s.confidence_score, p.model_version "
+            f"FROM predictions p "
+            f"LEFT JOIN signals s ON p.signal_id = s.id "
+            f"LEFT JOIN trades t ON p.trade_id = t.trade_id "
+            f"{where} ORDER BY p.created_at DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
         )
         rows = await cursor.fetchall()
-        return [dict[str, Any](row) for row in rows]
+        return {"items": [dict[str, Any](r) for r in rows], "total": total}
 
     # ------------------------------------------------------------------
     # Weekly Data

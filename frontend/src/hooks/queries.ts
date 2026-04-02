@@ -364,26 +364,26 @@ export function useShadowComparison(modelType: string | null) {
   });
 }
 
-export function usePredictionsToday() {
+export function usePredictionsToday(params?: { limit?: number; offset?: number; symbol?: string; direction?: string; model?: string }) {
   return useQuery({
-    queryKey: ["predictions", "today"],
-    queryFn: api.predictionsToday,
+    queryKey: ["predictions", "today", params],
+    queryFn: () => api.predictionsToday(params),
     staleTime: STALE_30S,
   });
 }
 
-export function usePredictionsUnscored() {
+export function usePredictionsUnscored(params?: { limit?: number; offset?: number; symbol?: string; direction?: string; model?: string }) {
   return useQuery({
-    queryKey: ["predictions", "unscored"],
-    queryFn: api.predictionsUnscored,
+    queryKey: ["predictions", "unscored", params],
+    queryFn: () => api.predictionsUnscored(params),
     staleTime: STALE_30S,
   });
 }
 
-export function usePredictionOutcomes() {
+export function usePredictionOutcomes(params?: { limit?: number; offset?: number; symbol?: string; direction?: string; direction_correct?: number; target_hit?: number; model?: string; min_confidence?: number }) {
   return useQuery({
-    queryKey: ["predictions", "outcomes"],
-    queryFn: api.predictionOutcomes,
+    queryKey: ["predictions", "outcomes", params],
+    queryFn: () => api.predictionOutcomes(params),
     staleTime: 60_000,
   });
 }

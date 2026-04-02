@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import {
   usePredictionsToday,
   usePredictionsUnscored,
@@ -10,8 +10,10 @@ import { ScoreboardTable } from "../components/ScoreboardTable";
 import clsx from "clsx";
 import type { PredictionDetail } from "../types/api";
 
+const PAGE_SIZE = 25;
+
 function fmt(n: number | null | undefined, d = 2) {
-  if (n == null) return "—";
+  if (n == null) return "\u2014";
   return n.toLocaleString("en-IN", {
     minimumFractionDigits: d,
     maximumFractionDigits: d,
@@ -30,14 +32,19 @@ function PredictionRow({ p }: { p: PredictionDetail }) {
         onClick={() => setExpanded(!expanded)}
       >
         <span className="text-sm font-medium text-emerald-400 w-24 shrink-0">
-          {p.symbol || "—"}
+          {p.symbol || "\u2014"}
         </span>
         <span className="text-xs text-gray-400 w-16">
-          {p.signal_type || "—"}
+          {p.signal_type || "\u2014"}
         </span>
         <span className="text-xs text-gray-400 w-20">
           Conf: {fmt(p.confidence_score ? p.confidence_score * 100 : null, 1)}%
         </span>
+        {p.model_version && (
+          <span className="text-xs text-gray-600 truncate max-w-[120px]" title={p.model_version}>
+            {p.model_version}
+          </span>
+        )}
         <span className="flex-1" />
         {dirOk !== null && (
           <span
@@ -75,7 +82,7 @@ function PredictionRow({ p }: { p: PredictionDetail }) {
           </span>
         )}
         <span className="text-xs text-gray-500 w-6">
-          {expanded ? "▲" : "▼"}
+          {expanded ? "\u25B2" : "\u25BC"}
         </span>
       </div>
       {expanded && (
@@ -103,7 +110,7 @@ function PredictionRow({ p }: { p: PredictionDetail }) {
             <p className="text-gray-300 mt-0.5">
               {p.prediction_end_time
                 ? new Date(p.prediction_end_time).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
-                : "—"}
+                : "\u2014"}
             </p>
           </div>
           {p.actual_price != null && (
@@ -112,33 +119,125 @@ function PredictionRow({ p }: { p: PredictionDetail }) {
               <p className="text-gray-300 mt-0.5">{fmt(p.actual_price)}</p>
             </div>
           )}
+          {p.model_version && (
+            <div>
+              <span className="text-gray-500">Model</span>
+              <p className="text-gray-300 font-mono text-xs mt-0.5">{p.model_version}</p>
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
+function Pagination({
+  total,
+  page,
+  pageSize,
+  onPageChange,
+}: {
+  total: number;
+  page: number;
+  pageSize: number;
+  onPageChange: (p: number) => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (totalPages <= 1) return null;
+  return (
+    <div className="flex items-center justify-between pt-3 border-t border-gray-800">
+      <span className="text-xs text-gray-500">
+        {total} prediction{total !== 1 ? "s" : ""} | Page {page + 1} of {totalPages}
+      </span>
+      <div className="flex gap-1">
+        <button
+          onClick={() => onPageChange(page - 1)}
+          disabled={page === 0}
+          className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-300 disabled:opacity-30 hover:bg-gray-700 transition-colors"
+        >
+          Prev
+        </button>
+        <button
+          onClick={() => onPageChange(page + 1)}
+          disabled={page >= totalPages - 1}
+          className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-300 disabled:opacity-30 hover:bg-gray-700 transition-colors"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const selectCls =
+  "bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-emerald-500";
+const inputCls =
+  "bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 w-24 focus:outline-none focus:border-emerald-500";
+
 export function PredictionsPage() {
   const [tab, setTab] = useState<"today" | "unscored" | "outcomes">("today");
   const [sbGroup, setSbGroup] = useState<string | undefined>();
 
-  const { data: today, isLoading: todayLoading } = usePredictionsToday();
-  const { data: unscored, isLoading: unscoredLoading } =
-    usePredictionsUnscored();
-  const { data: outcomes, isLoading: outcomesLoading } =
-    usePredictionOutcomes();
+  // Filters
+  const [filterSymbol, setFilterSymbol] = useState("");
+  const [filterDirection, setFilterDirection] = useState("");
+  const [filterDirCorrect, setFilterDirCorrect] = useState("");
+  const [filterTgtHit, setFilterTgtHit] = useState("");
+  const [filterModel, setFilterModel] = useState("");
+
+  // Pagination per tab
+  const [pageToday, setPageToday] = useState(0);
+  const [pageUnscored, setPageUnscored] = useState(0);
+  const [pageOutcomes, setPageOutcomes] = useState(0);
+
+  // Reset page on filter change
+  const resetPages = () => { setPageToday(0); setPageUnscored(0); setPageOutcomes(0); };
+
+  // Build params
+  const baseParams = useMemo(() => ({
+    symbol: filterSymbol || undefined,
+    direction: filterDirection || undefined,
+    model: filterModel || undefined,
+  }), [filterSymbol, filterDirection, filterModel]);
+
+  const outcomeParams = useMemo(() => ({
+    ...baseParams,
+    direction_correct: filterDirCorrect !== "" ? Number(filterDirCorrect) : undefined,
+    target_hit: filterTgtHit !== "" ? Number(filterTgtHit) : undefined,
+  }), [baseParams, filterDirCorrect, filterTgtHit]);
+
+  const { data: todayData, isLoading: todayLoading } = usePredictionsToday({
+    ...baseParams, limit: PAGE_SIZE, offset: pageToday * PAGE_SIZE,
+  });
+  const { data: unscoredData, isLoading: unscoredLoading } = usePredictionsUnscored({
+    ...baseParams, limit: PAGE_SIZE, offset: pageUnscored * PAGE_SIZE,
+  });
+  const { data: outcomesData, isLoading: outcomesLoading } = usePredictionOutcomes({
+    ...outcomeParams, limit: PAGE_SIZE, offset: pageOutcomes * PAGE_SIZE,
+  });
   const { data: scoreboard, isLoading: sbLoading } = useScoreboard(sbGroup);
   const runSkill = useRunSkill();
 
-  const tabData: Record<string, { items: PredictionDetail[] | undefined; loading: boolean }> = {
-    today: { items: today, loading: todayLoading },
-    unscored: { items: unscored, loading: unscoredLoading },
-    outcomes: { items: outcomes, loading: outcomesLoading },
+  // Unwrap paginated responses
+  const today = todayData?.items;
+  const unscored = unscoredData?.items;
+  const outcomes = outcomesData?.items;
+
+  const tabMeta: Record<string, {
+    items: PredictionDetail[] | undefined;
+    loading: boolean;
+    total: number;
+    page: number;
+    setPage: (p: number) => void;
+  }> = {
+    today: { items: today, loading: todayLoading, total: todayData?.total ?? 0, page: pageToday, setPage: setPageToday },
+    unscored: { items: unscored, loading: unscoredLoading, total: unscoredData?.total ?? 0, page: pageUnscored, setPage: setPageUnscored },
+    outcomes: { items: outcomes, loading: outcomesLoading, total: outcomesData?.total ?? 0, page: pageOutcomes, setPage: setPageOutcomes },
   };
 
-  const current = tabData[tab]!;
+  const current = tabMeta[tab]!;
 
-  // Compute summary stats for outcomes
+  // Summary from outcomes total (use backend total, not just current page)
   const outcomeStats = (outcomes || []).reduce(
     (acc, p) => {
       acc.total++;
@@ -167,7 +266,7 @@ export function PredictionsPage() {
       </div>
       {runSkill.isSuccess && (
         <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3 text-sm text-emerald-400">
-          Prediction scoring complete. Refresh the page to see updated results.
+          Prediction scoring complete. Results will update automatically.
         </div>
       )}
       {runSkill.isError && (
@@ -180,12 +279,12 @@ export function PredictionsPage() {
       <div className="grid grid-cols-1 sm:grid-cols-3 md:grid-cols-5 gap-4">
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
           <p className="text-xs text-gray-500">Today</p>
-          <p className="text-xl font-semibold">{today?.length || 0}</p>
+          <p className="text-xl font-semibold">{todayData?.total ?? 0}</p>
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
           <p className="text-xs text-gray-500">Awaiting Score</p>
           <p className="text-xl font-semibold text-amber-400">
-            {unscored?.length || 0}
+            {unscoredData?.total ?? 0}
           </p>
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
@@ -201,7 +300,7 @@ export function PredictionsPage() {
           >
             {outcomeStats.total > 0
               ? fmt((outcomeStats.dirCorrect / outcomeStats.total) * 100, 1)
-              : "—"}
+              : "\u2014"}
             %
           </p>
         </div>
@@ -210,7 +309,7 @@ export function PredictionsPage() {
           <p className="text-xl font-semibold text-blue-400">
             {outcomeStats.total > 0
               ? fmt((outcomeStats.tgtHit / outcomeStats.total) * 100, 1)
-              : "—"}
+              : "\u2014"}
             %
           </p>
         </div>
@@ -224,9 +323,72 @@ export function PredictionsPage() {
           >
             {outcomeStats.pnlCount > 0
               ? `${outcomeStats.totalPnl >= 0 ? "+" : ""}${fmt(outcomeStats.totalPnl / outcomeStats.pnlCount)}`
-              : "—"}
+              : "\u2014"}
             %
           </p>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-xs text-gray-500 font-medium">Filters:</span>
+          <input
+            type="text"
+            placeholder="Symbol"
+            value={filterSymbol}
+            onChange={(e) => { setFilterSymbol(e.target.value.toUpperCase()); resetPages(); }}
+            className={inputCls}
+          />
+          <select
+            value={filterDirection}
+            onChange={(e) => { setFilterDirection(e.target.value); resetPages(); }}
+            className={selectCls}
+          >
+            <option value="">All Directions</option>
+            <option value="BUY">BUY</option>
+            <option value="SELL">SELL</option>
+          </select>
+          <input
+            type="text"
+            placeholder="Model version"
+            value={filterModel}
+            onChange={(e) => { setFilterModel(e.target.value); resetPages(); }}
+            className={clsx(inputCls, "w-40")}
+          />
+          {tab === "outcomes" && (
+            <>
+              <select
+                value={filterDirCorrect}
+                onChange={(e) => { setFilterDirCorrect(e.target.value); resetPages(); }}
+                className={selectCls}
+              >
+                <option value="">Direction: Any</option>
+                <option value="1">Correct</option>
+                <option value="0">Wrong</option>
+              </select>
+              <select
+                value={filterTgtHit}
+                onChange={(e) => { setFilterTgtHit(e.target.value); resetPages(); }}
+                className={selectCls}
+              >
+                <option value="">Target: Any</option>
+                <option value="1">Hit</option>
+                <option value="0">Missed</option>
+              </select>
+            </>
+          )}
+          {(filterSymbol || filterDirection || filterModel || filterDirCorrect || filterTgtHit) && (
+            <button
+              onClick={() => {
+                setFilterSymbol(""); setFilterDirection(""); setFilterModel("");
+                setFilterDirCorrect(""); setFilterTgtHit(""); resetPages();
+              }}
+              className="text-xs text-gray-400 hover:text-gray-200 underline"
+            >
+              Clear all
+            </button>
+          )}
         </div>
       </div>
 
@@ -235,9 +397,9 @@ export function PredictionsPage() {
         <div className="flex border-b border-gray-800">
           {(
             [
-              ["today", "Today's Predictions"],
-              ["unscored", "Awaiting Score"],
-              ["outcomes", "Scored Outcomes"],
+              ["today", `Today (${todayData?.total ?? 0})`],
+              ["unscored", `Awaiting Score (${unscoredData?.total ?? 0})`],
+              ["outcomes", `Scored (${outcomesData?.total ?? 0})`],
             ] as const
           ).map(([key, label]) => (
             <button
@@ -264,6 +426,12 @@ export function PredictionsPage() {
               {current.items.map((p) => (
                 <PredictionRow key={p.prediction_id} p={p} />
               ))}
+              <Pagination
+                total={current.total}
+                page={current.page}
+                pageSize={PAGE_SIZE}
+                onPageChange={current.setPage}
+              />
             </div>
           )}
         </div>

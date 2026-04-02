@@ -1123,24 +1123,53 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.get("/api/predictions/today")
     async def get_todays_predictions(
-        user: str = Depends(verify_credentials),
-    ) -> list[dict[str, Any]]:
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        symbol: str | None = Query(default=None),
+        direction: str | None = Query(default=None, pattern=r"^(BUY|SELL)$"),
+        model: str | None = Query(default=None),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
         """Today's predictions with linked symbols and confidence."""
-        return await ctx.db.get_todays_predictions()
+        return await ctx.db.get_todays_predictions(
+            limit=limit, offset=offset, symbol=symbol,
+            direction=direction, model=model,
+        )
 
     @app.get("/api/predictions/unscored")
     async def get_unscored_predictions(
-        user: str = Depends(verify_credentials),
-    ) -> list[dict[str, Any]]:
-        """All predictions awaiting scoring (including those still within holding period)."""
-        return await ctx.db.get_all_awaiting_predictions()
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        symbol: str | None = Query(default=None),
+        direction: str | None = Query(default=None, pattern=r"^(BUY|SELL)$"),
+        model: str | None = Query(default=None),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """All predictions awaiting scoring."""
+        return await ctx.db.get_all_awaiting_predictions(
+            limit=limit, offset=offset, symbol=symbol,
+            direction=direction, model=model,
+        )
 
     @app.get("/api/predictions/outcomes")
     async def get_prediction_outcomes(
-        user: str = Depends(verify_credentials),
-    ) -> list[dict[str, Any]]:
-        """Scored prediction outcomes for failure analysis."""
-        return await ctx.db.get_prediction_outcomes()
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        symbol: str | None = Query(default=None),
+        direction: str | None = Query(default=None, pattern=r"^(BUY|SELL)$"),
+        direction_correct: int | None = Query(default=None, ge=0, le=1),
+        target_hit: int | None = Query(default=None, ge=0, le=1),
+        model: str | None = Query(default=None),
+        min_confidence: float | None = Query(default=None, ge=0, le=1),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Scored prediction outcomes with filters."""
+        return await ctx.db.get_prediction_outcomes_paginated(
+            limit=limit, offset=offset, symbol=symbol,
+            direction=direction, direction_correct=direction_correct,
+            target_hit=target_hit, model=model,
+            min_confidence=min_confidence,
+        )
 
     # ------------------------------------------------------------------
     # Weekly Summary

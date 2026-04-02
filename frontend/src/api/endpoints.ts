@@ -22,6 +22,7 @@ import type {
   SentimentResult,
   MLModelsResponse,
   PredictionDetail,
+  PaginatedPredictions,
   RiskExposure,
   PremarketData,
   SystemState,
@@ -223,14 +224,41 @@ export const api = {
   shadowComparison: (modelType: string) =>
     apiFetch<{ shadow: Record<string, number>; production: Record<string, number> }>(`/api/ml-models/${modelType}/shadow-comparison`),
 
-  predictionsToday: () =>
-    apiFetch<PredictionDetail[]>("/api/predictions/today"),
+  predictionsToday: (params?: { limit?: number; offset?: number; symbol?: string; direction?: string; model?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.offset) q.set("offset", String(params.offset));
+    if (params?.symbol) q.set("symbol", params.symbol);
+    if (params?.direction) q.set("direction", params.direction);
+    if (params?.model) q.set("model", params.model);
+    const qs = q.toString();
+    return apiFetch<PaginatedPredictions>(`/api/predictions/today${qs ? `?${qs}` : ""}`);
+  },
 
-  predictionsUnscored: () =>
-    apiFetch<PredictionDetail[]>("/api/predictions/unscored"),
+  predictionsUnscored: (params?: { limit?: number; offset?: number; symbol?: string; direction?: string; model?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.offset) q.set("offset", String(params.offset));
+    if (params?.symbol) q.set("symbol", params.symbol);
+    if (params?.direction) q.set("direction", params.direction);
+    if (params?.model) q.set("model", params.model);
+    const qs = q.toString();
+    return apiFetch<PaginatedPredictions>(`/api/predictions/unscored${qs ? `?${qs}` : ""}`);
+  },
 
-  predictionOutcomes: () =>
-    apiFetch<PredictionDetail[]>("/api/predictions/outcomes"),
+  predictionOutcomes: (params?: { limit?: number; offset?: number; symbol?: string; direction?: string; direction_correct?: number; target_hit?: number; model?: string; min_confidence?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.offset) q.set("offset", String(params.offset));
+    if (params?.symbol) q.set("symbol", params.symbol);
+    if (params?.direction) q.set("direction", params.direction);
+    if (params?.direction_correct != null) q.set("direction_correct", String(params.direction_correct));
+    if (params?.target_hit != null) q.set("target_hit", String(params.target_hit));
+    if (params?.model) q.set("model", params.model);
+    if (params?.min_confidence != null) q.set("min_confidence", String(params.min_confidence));
+    const qs = q.toString();
+    return apiFetch<PaginatedPredictions>(`/api/predictions/outcomes${qs ? `?${qs}` : ""}`);
+  },
 
   weeklyTrades: () => apiFetch<Trade[]>("/api/weekly/trades"),
 

@@ -282,12 +282,27 @@ export interface PredictionDetail {
   symbol?: string;
   signal_type?: string;
   confidence_score?: number;
+  model_version?: string;
   created_at: string;
   prediction_end_time: string | null;
   actual_price: number | null;
   direction_correct: boolean | null;
   target_hit: boolean | null;
   actual_pnl_pct: number | null;
+}
+
+export interface PaginatedPredictions {
+  items: PredictionDetail[];
+  total: number;
+}
+
+export interface PredictionFilters {
+  symbol?: string;
+  direction?: "BUY" | "SELL";
+  direction_correct?: 0 | 1;
+  target_hit?: 0 | 1;
+  model?: string;
+  min_confidence?: number;
 }
 
 export interface RiskExposure {
