@@ -27,7 +27,7 @@ market_data:
   cache_ttl_minutes: 15               # cache fetched data to reduce API calls
   stale_threshold_minutes: 30         # reject data older than this many minutes
   sentiment_ttl_hours: 48             # ignore sentiment older than this in scanning (default 48h)
-  backfill_days: 365                  # days of history for backfill-data skill
+  backfill_days: 1095                 # days of history for backfill-data skill (~3 years)
 
 heartbeat:
   market_hours_interval_min: 15       # heartbeat frequency during market hours

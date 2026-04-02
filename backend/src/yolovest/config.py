@@ -90,7 +90,7 @@ class MarketDataConfig(BaseModel):
     cache_ttl_minutes: int = 15
     stale_threshold_minutes: int = 30
     sentiment_ttl_hours: int = 48  # sentiment older than this is ignored in scanning
-    backfill_days: int = 365  # days of history to fetch in backfill-data skill
+    backfill_days: int = 1095  # days of history to fetch in backfill-data skill (~3 years)
 
 
 class HeartbeatConfig(BaseModel):
