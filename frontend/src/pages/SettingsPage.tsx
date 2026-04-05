@@ -461,13 +461,11 @@ function ConfigField({
 // ---------------------------------------------------------------------------
 
 function SectionCard({
-  sectionKey,
   title,
   entries,
   edited,
   onChange,
 }: {
-  sectionKey: string;
   title: string;
   entries: [string, unknown][];
   edited: Record<string, unknown>;
@@ -649,7 +647,6 @@ export default function SettingsPage() {
           return (
             <SectionCard
               key={sectionKey}
-              sectionKey={sectionKey}
               title={title}
               entries={entries}
               edited={edited}
