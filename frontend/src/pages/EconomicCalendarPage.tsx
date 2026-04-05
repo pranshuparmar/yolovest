@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import {
   useEconomicCalendar,
   useEarnings,
@@ -66,6 +66,16 @@ function isWeekend(d: Date): boolean {
   return d.getDay() === 0 || d.getDay() === 6;
 }
 
+// Build tooltip text for an event
+function eventTooltip(evt: CalendarEvent): string {
+  const parts = [evt.title];
+  if (evt.impact) parts.push(`Impact: ${evt.impact}`);
+  if (evt.symbol) parts.push(`Symbol: ${evt.symbol}`);
+  if (evt.source) parts.push(`Source: ${evt.source}`);
+  if (evt.country) parts.push(`Country: ${evt.country}`);
+  return parts.join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Event type styles
 // ---------------------------------------------------------------------------
@@ -91,11 +101,16 @@ function EventBadge({ event }: { event: CalendarEvent }) {
   const s = EVENT_STYLES[event.type] || EVENT_STYLES.economic;
   return (
     <div
-      className={clsx("flex items-center gap-1 px-1 py-0.5 rounded text-[10px] leading-tight truncate", s.bg, s.text)}
-      title={event.title}
+      className={clsx("flex items-center gap-1 px-1 py-0.5 rounded text-[10px] leading-tight", s.bg, s.text)}
+      title={eventTooltip(event)}
     >
       <span className={clsx("w-1.5 h-1.5 rounded-full shrink-0", s.dot)} />
       <span className="truncate">{event.title}</span>
+      {event.impact && (
+        <span className={clsx("shrink-0 px-1 rounded text-[9px]", IMPACT_COLORS[event.impact])}>
+          {event.impact[0].toUpperCase()}
+        </span>
+      )}
     </div>
   );
 }
@@ -108,9 +123,18 @@ function AddHolidayDialog({
   onClose: () => void;
 }) {
   const addMutation = useAddHoliday();
-  const [date, setDate] = useState(dateStr || "");
+  const [date, setDate] = useState("");
   const [isEarlyClose, setIsEarlyClose] = useState(false);
   const [earlyCloseTime, setEarlyCloseTime] = useState("13:00");
+
+  // Reset form when dialog opens with a new date
+  useEffect(() => {
+    if (dateStr !== null) {
+      setDate(dateStr);
+      setIsEarlyClose(false);
+      setEarlyCloseTime("13:00");
+    }
+  }, [dateStr]);
 
   const handleSubmit = () => {
     if (!date) return;
@@ -176,7 +200,7 @@ function AddHolidayDialog({
 }
 
 // ---------------------------------------------------------------------------
-// Day Cell (shared between week and month views)
+// Day Cell (month view)
 // ---------------------------------------------------------------------------
 
 function DayCell({
@@ -184,7 +208,6 @@ function DayCell({
   events,
   isToday,
   isCurrentMonth,
-  isCompact,
   onAddHoliday,
   onRemoveHoliday,
 }: {
@@ -192,7 +215,6 @@ function DayCell({
   events: CalendarEvent[];
   isToday: boolean;
   isCurrentMonth: boolean;
-  isCompact: boolean;
   onAddHoliday: (dateStr: string) => void;
   onRemoveHoliday: (dateStr: string) => void;
 }) {
@@ -203,11 +225,10 @@ function DayCell({
   return (
     <div
       className={clsx(
-        "border border-gray-800 flex flex-col",
-        isCompact ? "min-h-[90px]" : "min-h-[120px]",
+        "border border-gray-800 flex flex-col min-h-[90px]",
         !isCurrentMonth && "opacity-40",
         hasHoliday && "bg-red-950/20",
-        weekend && !hasHoliday && "bg-gray-900/50",
+        weekend && !hasHoliday && "bg-gray-800/40",
       )}
     >
       {/* Day header */}
@@ -244,12 +265,12 @@ function DayCell({
       </div>
       {/* Events */}
       <div className="flex-1 px-1 py-0.5 space-y-0.5 overflow-hidden">
-        {events.slice(0, isCompact ? 3 : 5).map((evt, i) => (
+        {events.slice(0, 3).map((evt, i) => (
           <EventBadge key={i} event={evt} />
         ))}
-        {events.length > (isCompact ? 3 : 5) && (
+        {events.length > 3 && (
           <span className="text-[10px] text-gray-500 px-1">
-            +{events.length - (isCompact ? 3 : 5)} more
+            +{events.length - 3} more
           </span>
         )}
       </div>
@@ -282,16 +303,18 @@ function WeekView({
       <div className="grid grid-cols-7 border-b border-gray-700">
         {days.map((d, i) => {
           const ds = toDateStr(d);
+          const weekend = isWeekend(d);
           return (
             <div
               key={i}
               className={clsx(
                 "text-center py-2 text-xs font-medium border-r border-gray-800 last:border-r-0",
-                isSameDay(ds, todayStr) ? "text-blue-400" : "text-gray-500",
+                isSameDay(ds, todayStr) ? "text-blue-400" : weekend ? "text-gray-600" : "text-gray-500",
+                weekend && "bg-gray-800/40",
               )}
             >
               <div>{DAY_NAMES[d.getDay()]}</div>
-              <div className="text-lg font-bold text-gray-300 mt-0.5">
+              <div className={clsx("text-lg font-bold mt-0.5", weekend && !isSameDay(ds, todayStr) ? "text-gray-500" : "text-gray-300")}>
                 {isSameDay(ds, todayStr) ? (
                   <span className="bg-blue-600 text-white rounded-full w-8 h-8 inline-flex items-center justify-center">
                     {d.getDate()}
@@ -307,18 +330,19 @@ function WeekView({
           );
         })}
       </div>
-      {/* Event rows — time slots style */}
+      {/* Event columns */}
       <div className="grid grid-cols-7">
         {days.map((d, i) => {
           const ds = toDateStr(d);
           const events = eventsMap.get(ds) || [];
+          const weekend = isWeekend(d);
           return (
             <div
               key={i}
               className={clsx(
                 "border-r border-gray-800 last:border-r-0 min-h-[300px] p-1.5 space-y-1",
                 events.some((e) => e.type === "holiday") && "bg-red-950/20",
-                isWeekend(d) && !events.some((e) => e.type === "holiday") && "bg-gray-900/50",
+                weekend && !events.some((e) => e.type === "holiday") && "bg-gray-800/40",
               )}
             >
               {events.length === 0 && (
@@ -333,14 +357,15 @@ function WeekView({
                 <div
                   key={j}
                   className={clsx(
-                    "rounded px-2 py-1.5 text-xs",
+                    "rounded px-2 py-1.5 text-xs group",
                     EVENT_STYLES[evt.type]?.bg || "bg-gray-800",
                     EVENT_STYLES[evt.type]?.text || "text-gray-300",
                   )}
+                  title={eventTooltip(evt)}
                 >
                   <div className="flex items-center gap-1.5">
                     <span className={clsx("w-2 h-2 rounded-full shrink-0", EVENT_STYLES[evt.type]?.dot || "bg-gray-500")} />
-                    <span className="font-medium truncate">{evt.title}</span>
+                    <span className="font-medium truncate group-hover:whitespace-normal group-hover:break-words">{evt.title}</span>
                     {evt.type === "holiday" && (
                       <button
                         onClick={() => onRemoveHoliday(ds)}
@@ -396,7 +421,6 @@ function MonthView({
   for (let i = 0; i < 42; i++) {
     cells.push(addDays(calStart, i));
   }
-  // Trim trailing week if all outside month
   const weeks = [];
   for (let i = 0; i < cells.length; i += 7) {
     const week = cells.slice(i, i + 7);
@@ -409,8 +433,14 @@ function MonthView({
     <div>
       {/* Day headers */}
       <div className="grid grid-cols-7">
-        {DAY_NAMES.map((d) => (
-          <div key={d} className="text-center py-2 text-xs font-medium text-gray-500 border-b border-gray-700">
+        {DAY_NAMES.map((d, i) => (
+          <div
+            key={d}
+            className={clsx(
+              "text-center py-2 text-xs font-medium border-b border-gray-700",
+              i === 0 || i === 6 ? "text-gray-600 bg-gray-800/40" : "text-gray-500",
+            )}
+          >
             {d}
           </div>
         ))}
@@ -428,7 +458,6 @@ function MonthView({
                 events={events}
                 isToday={isSameDay(ds, todayStr)}
                 isCurrentMonth={d.getMonth() === currentDate.getMonth()}
-                isCompact={true}
                 onAddHoliday={onAddHoliday}
                 onRemoveHoliday={onRemoveHoliday}
               />
@@ -464,7 +493,6 @@ export function EconomicCalendarPage() {
       map.get(key)!.push(evt);
     };
 
-    // Economic events
     for (const e of events || []) {
       addEvent(e.event_date, {
         date: e.event_date,
@@ -476,7 +504,6 @@ export function EconomicCalendarPage() {
       });
     }
 
-    // Earnings
     for (const e of earnings || []) {
       addEvent(e.event_date, {
         date: e.event_date,
@@ -487,29 +514,17 @@ export function EconomicCalendarPage() {
       });
     }
 
-    // Holidays
     for (const h of holidaysData?.holidays || []) {
-      addEvent(h, {
-        date: h,
-        title: "NSE Holiday",
-        type: "holiday",
-      });
+      addEvent(h, { date: h, title: "NSE Holiday", type: "holiday" });
     }
 
-    // Early close days
     for (const [d, t] of Object.entries(holidaysData?.early_close_days || {})) {
-      addEvent(d, {
-        date: d,
-        title: `Early Close (${t})`,
-        type: "early_close",
-        earlyCloseTime: t,
-      });
+      addEvent(d, { date: d, title: `Early Close (${t})`, type: "early_close", earlyCloseTime: t });
     }
 
     return map;
   }, [events, earnings, holidaysData]);
 
-  // Navigation
   const navigate = useCallback(
     (direction: -1 | 0 | 1) => {
       if (direction === 0) {
@@ -533,15 +548,13 @@ export function EconomicCalendarPage() {
     [removeMutation],
   );
 
-  // Title text
   const titleText = useMemo(() => {
     if (view === "week") {
       const ws = startOfWeek(currentDate);
       const we = addDays(ws, 6);
       const fmt = (d: Date) =>
         d.toLocaleDateString("en-IN", { month: "short", day: "numeric" });
-      const year = we.getFullYear();
-      return `${fmt(ws)} – ${fmt(we)}, ${year}`;
+      return `${fmt(ws)} – ${fmt(we)}, ${we.getFullYear()}`;
     }
     return `${MONTH_NAMES[currentDate.getMonth()]} ${currentDate.getFullYear()}`;
   }, [view, currentDate]);
@@ -620,6 +633,10 @@ export function EconomicCalendarPage() {
         </span>
         <span className="flex items-center gap-1.5">
           <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" /> Earnings
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded bg-gray-800/60 border border-gray-700" />
+          <span className="text-gray-500">Weekend</span>
         </span>
       </div>
 
