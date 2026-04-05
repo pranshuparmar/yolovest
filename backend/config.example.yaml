@@ -1,7 +1,7 @@
 # YoloVest Configuration
 #
-# This file only contains settings that MUST come from a file:
-# secrets, filesystem paths, and server binding.
+# This file contains settings that cannot be changed at runtime:
+# secrets (from env vars), filesystem paths, and server binding.
 #
 # Everything else — including mode (paper/live), risk parameters, strategy,
 # scanning, telegram toggle, log levels, etc. — is managed in the database
@@ -17,28 +17,31 @@ broker:
 llm:
   api_key: ${GEMINI_API_KEY}          # Google Gemini API key
 
-# Filesystem paths — fixed by Docker volume mounts, no need to change
+# Filesystem paths — defaults match Docker volume mounts.
+# Override here for non-Docker setups; not editable at runtime.
 market_data:
-  bhavcopy_dir: ./data/bhavcopy
+  bhavcopy_dir: ./data/bhavcopy       # NSE Bhavcopy CSV directory
 
 database:
-  path: ./data/yolovest.db
-  backup_dir: ./backups
+  path: ./data/yolovest.db            # SQLite database file
+  backup_dir: ./backups               # daily backup directory
 
-# Server binding — fixed by Docker EXPOSE / nginx proxy
+# Server binding — matches Docker EXPOSE / nginx proxy.
+# Override here for non-Docker setups; requires restart.
 dashboard:
   host: "0.0.0.0"
   port: 8080
   password: yolovest                  # basic auth password (change in production!)
 
-# Log file paths/rotation — fixed by Docker volume mounts
+# Log file location and rotation — defaults match Docker volume mounts.
+# Log *levels* (INFO/DEBUG/etc.) are editable from the Settings UI.
 log:
-  log_dir: ./logs
+  log_dir: ./logs                     # log file directory
   max_bytes: 10485760                 # 10 MB max per log file
   backup_count: 5                     # rotated log files to keep
 
-# Telegram secrets only — enabled toggle is in Settings UI
+# Telegram secrets — the enabled toggle is in the Settings UI
 notifications:
   telegram:
-    bot_token: ${TELEGRAM_BOT_TOKEN}
-    chat_id: ${TELEGRAM_CHAT_ID}
+    bot_token: ${TELEGRAM_BOT_TOKEN}  # from environment
+    chat_id: ${TELEGRAM_CHAT_ID}      # from environment
