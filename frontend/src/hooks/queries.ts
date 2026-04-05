@@ -732,3 +732,23 @@ export function useUnquarantineSymbol() {
     },
   });
 }
+
+// Config (UI-editable settings)
+export function useConfig() {
+  return useQuery({
+    queryKey: ["config"],
+    queryFn: api.getConfig,
+    staleTime: 60_000,
+  });
+}
+
+export function useUpdateConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (updates: Record<string, unknown>) => api.updateConfig(updates),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["config"] });
+      qc.invalidateQueries({ queryKey: ["system-state"] });
+    },
+  });
+}

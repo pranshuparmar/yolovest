@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
-from yolovest.context import AppContext
+from yolovest.context import AppContext, MarketHoursChecker
 
 logger = logging.getLogger(__name__)
 
@@ -2135,6 +2135,82 @@ def create_app(ctx: AppContext) -> FastAPI:
         except Exception as e:
             logger.error("Config reload via API failed: %s", e)
             raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Config (UI-editable settings)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/config")
+    async def get_config(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Return all DB-editable config values grouped by section."""
+        from yolovest.config import config_to_ui_sections, FILE_ONLY_KEYS
+        sections = config_to_ui_sections(ctx.config)
+        return {"sections": sections}
+
+    @app.put("/api/config")
+    async def update_config(
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Update config values. Body: {"updates": {"risk.max_open_positions": 5, ...}}
+
+        Validates all changes through Pydantic before persisting.
+        Returns the updated config sections.
+        """
+        from yolovest.config import (
+            FILE_ONLY_KEYS,
+            apply_db_config,
+            config_to_ui_sections,
+            _flatten_model,
+        )
+
+        body = await request.json()
+        updates: dict[str, Any] = body.get("updates", {})
+        if not updates:
+            raise HTTPException(status_code=400, detail="No updates provided")
+
+        # Reject file-only keys
+        rejected = [k for k in updates if k in FILE_ONLY_KEYS]
+        if rejected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot modify file-only keys via UI: {rejected}",
+            )
+
+        # Convert all values to strings for DB storage
+        import json as _json
+
+        str_updates: dict[str, str] = {}
+        for k, v in updates.items():
+            if isinstance(v, (bool, list, dict)) or v is None:
+                str_updates[k] = _json.dumps(v)
+            else:
+                str_updates[k] = str(v)
+
+        # Load current DB config, overlay updates, validate via Pydantic
+        db_values = await ctx.db.get_all_config()
+        db_values.update(str_updates)
+        try:
+            new_config = apply_db_config(ctx.config, db_values)
+        except Exception as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Validation failed: {e}",
+            )
+
+        # Persist to DB
+        await ctx.db.set_config_bulk(str_updates)
+
+        # Hot-apply to running config
+        ctx.config = new_config
+        ctx.market_hours = MarketHoursChecker(ctx.config)
+
+        logger.info("Config updated via UI: %s", list(updates.keys()))
+
+        sections = config_to_ui_sections(ctx.config)
+        return {"status": "ok", "updated": list(updates.keys()), "sections": sections}
 
     # ------------------------------------------------------------------
     # Manual Skill Trigger

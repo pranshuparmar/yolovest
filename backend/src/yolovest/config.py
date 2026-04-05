@@ -454,3 +454,160 @@ def load_config(path: str) -> AppConfig:
 
     expanded = _expand_env_vars(raw)
     return AppConfig.model_validate(expanded)
+
+
+# ---------------------------------------------------------------------------
+# File-only keys — never stored in DB or exposed via UI.
+# These require secrets, filesystem paths, or server restart to change.
+# ---------------------------------------------------------------------------
+
+FILE_ONLY_KEYS: set[str] = {
+    # Safety-critical mode switch
+    "mode",
+    # Secrets
+    "broker.api_key",
+    "broker.api_secret",
+    "llm.api_key",
+    "notifications.telegram.bot_token",
+    "notifications.telegram.chat_id",
+    # Needs bot lifecycle restart
+    "notifications.telegram.enabled",
+    # Filesystem paths (needed before DB exists or for external tooling)
+    "database.path",
+    "database.backup_dir",
+    "market_data.bhavcopy_dir",
+    # Server binding (requires restart)
+    "dashboard.host",
+    "dashboard.port",
+    "dashboard.password",
+    # Logging (initialized before DB)
+    "log.level",
+    "log.file_level",
+    "log.log_dir",
+    "log.max_bytes",
+    "log.backup_count",
+}
+
+
+def _flatten_model(
+    model: BaseModel, prefix: str = "",
+) -> dict[str, str]:
+    """Flatten a Pydantic model to dot-notation key-value pairs.
+
+    Values are JSON-encoded for non-scalar types (lists, dicts).
+    SecretStr fields are skipped.
+    """
+    import json as _json
+
+    result: dict[str, str] = {}
+    for field_name, field_info in model.model_fields.items():
+        key = f"{prefix}{field_name}" if prefix else field_name
+        value = getattr(model, field_name)
+
+        if isinstance(value, SecretStr):
+            continue  # never persist secrets
+        if isinstance(value, BaseModel):
+            result.update(_flatten_model(value, prefix=f"{key}."))
+        elif isinstance(value, (list, dict)):
+            result[key] = _json.dumps(value)
+        elif isinstance(value, bool):
+            result[key] = _json.dumps(value)  # "true"/"false" not "True"/"False"
+        elif value is None:
+            result[key] = _json.dumps(None)
+        else:
+            result[key] = str(value)
+    return result
+
+
+def get_db_editable_defaults() -> dict[str, str]:
+    """Return the default values for all DB-editable config keys.
+
+    Builds a default AppConfig, flattens it, then removes file-only keys.
+    """
+    defaults = _flatten_model(AppConfig())
+    return {k: v for k, v in defaults.items() if k not in FILE_ONLY_KEYS}
+
+
+def _set_nested(data: dict[str, Any], dotted_key: str, value: Any) -> None:
+    """Set a value in a nested dict using dot-notation key."""
+    parts = dotted_key.split(".")
+    obj = data
+    for part in parts[:-1]:
+        if part not in obj:
+            obj[part] = {}
+        obj = obj[part]
+    obj[parts[-1]] = value
+
+
+def _parse_db_value(key: str, raw: str) -> Any:
+    """Parse a DB string value back to its Python type using the model schema."""
+    import json as _json
+
+    # Try JSON first (handles booleans, lists, dicts, null)
+    try:
+        parsed = _json.loads(raw)
+        # JSON parsed successfully — return as-is for booleans, lists, dicts, null
+        if isinstance(parsed, (bool, list, dict)) or parsed is None:
+            return parsed
+        # For numbers that came through JSON, return them
+        if isinstance(parsed, (int, float)):
+            return parsed
+        # For strings that happen to be valid JSON strings, return raw
+        return raw
+    except (ValueError, _json.JSONDecodeError):
+        pass
+
+    # Try numeric conversion
+    try:
+        if "." in raw:
+            return float(raw)
+        return int(raw)
+    except ValueError:
+        pass
+
+    return raw
+
+
+def apply_db_config(base_config: AppConfig, db_values: dict[str, str]) -> AppConfig:
+    """Merge DB config values into an AppConfig, returning a new instance.
+
+    Builds a nested dict from the base config, overlays DB values,
+    then re-validates through Pydantic.
+    """
+    # Start with the full base config as a dict
+    data = base_config.model_dump()
+
+    # Overlay DB values
+    for key, raw_value in db_values.items():
+        if key in FILE_ONLY_KEYS:
+            continue
+        parsed = _parse_db_value(key, raw_value)
+        _set_nested(data, key, parsed)
+
+    # Re-validate (this runs all Pydantic validators)
+    merged = AppConfig.model_validate(data)
+
+    # Preserve SecretStr fields from the original config (they aren't in DB)
+    merged.broker.api_key = base_config.broker.api_key
+    merged.broker.api_secret = base_config.broker.api_secret
+    merged.llm.api_key = base_config.llm.api_key
+    merged.notifications.telegram.bot_token = base_config.notifications.telegram.bot_token
+    merged.dashboard.password = base_config.dashboard.password
+    return merged
+
+
+def config_to_ui_sections(config: AppConfig) -> dict[str, dict[str, Any]]:
+    """Convert the DB-editable portion of config into UI-friendly sections.
+
+    Returns a dict of section_name -> {key: value} for the frontend.
+    """
+    flat = _flatten_model(config)
+    sections: dict[str, dict[str, Any]] = {}
+    for key, value in sorted(flat.items()):
+        if key in FILE_ONLY_KEYS:
+            continue
+        section = key.split(".")[0]
+        if section not in sections:
+            sections[section] = {}
+        sections[section][key] = _parse_db_value(key, value)
+    return sections

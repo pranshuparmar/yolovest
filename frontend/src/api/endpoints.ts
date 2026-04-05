@@ -45,6 +45,8 @@ import type {
   DryRunSignal,
   HoldingsResponse,
   ManualOrder,
+  ConfigSections,
+  ConfigUpdateResult,
 } from "../types/api";
 
 export const api = {
@@ -416,4 +418,13 @@ export const api = {
       `/api/skills/${skillName}/run`,
       { method: "POST" },
     ),
+
+  // Config (UI-editable settings)
+  getConfig: () => apiFetch<ConfigSections>("/api/config"),
+
+  updateConfig: (updates: Record<string, unknown>) =>
+    apiFetch<ConfigUpdateResult>("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ updates }),
+    }),
 };

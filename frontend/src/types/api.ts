@@ -568,3 +568,13 @@ export interface DryRunResult {
   signals: DryRunSignal[];
   warning?: string;
 }
+
+export interface ConfigSections {
+  sections: Record<string, Record<string, unknown>>;
+}
+
+export interface ConfigUpdateResult {
+  status: string;
+  updated: string[];
+  sections: Record<string, Record<string, unknown>>;
+}
