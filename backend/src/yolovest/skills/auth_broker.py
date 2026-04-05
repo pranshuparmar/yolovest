@@ -24,7 +24,11 @@ class AuthBrokerSkill(SkillBase):
     name = "auth-broker"
     description = "Daily Kite Connect re-authentication"
     trigger = SkillTrigger.CRON
-    schedule = "30 8 * * 1-5"  # 8:30 AM IST, weekdays only
+    schedule = None  # set from config in __init__
+
+    def __init__(self, ctx: Any) -> None:
+        super().__init__(ctx)
+        self.schedule = ctx.config.heartbeat.auth_broker_cron
 
     def should_run(self) -> bool:
         # Always run on schedule — the execute() method handles

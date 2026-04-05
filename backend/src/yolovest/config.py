@@ -97,6 +97,8 @@ class HeartbeatConfig(BaseModel):
     market_hours_interval_min: int = 15
     off_hours_interval_min: int = 60
     max_consecutive_skips: int = 3
+    auth_broker_cron: str = "30 8 * * 1-5"  # daily broker re-auth
+    ingest_premarket_cron: str = "30 8 * * 1-5"  # pre-market data fetch
 
 
 class ScanningWeights(BaseModel):

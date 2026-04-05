@@ -47,8 +47,10 @@ const TABS: Tab[] = [
 // Keys shown in the "General > Top" card (mode + capital)
 const GENERAL_TOP_KEYS = ["mode", "capital.initial_amount", "log.level", "log.file_level"];
 
-// All cron-related keys, pulled from various sections into one card
+// All cron/schedule-related keys, pulled from various sections into one card
 const CRON_KEYS = [
+  "heartbeat.auth_broker_cron",
+  "heartbeat.ingest_premarket_cron",
   "scanning.universe_cron",
   "news_digest.schedule_cron",
   "reports.daily_report_time",
@@ -165,6 +167,8 @@ const KEY_LABELS: Record<string, string> = {
   market_hours_interval_min: "Market Hours Interval (min)",
   off_hours_interval_min: "Off Hours Interval (min)",
   max_consecutive_skips: "Max Consecutive Skips",
+  auth_broker_cron: "Broker Auth",
+  ingest_premarket_cron: "Pre-market Data",
   universe: "Stock Universe",
   universe_cron: "Universe Update",
   shortlist_size: "Shortlist Size",
@@ -243,6 +247,8 @@ const KEY_LABELS: Record<string, string> = {
 
 // Cron key labels (friendly names for the virtual cron section)
 const CRON_LABELS: Record<string, string> = {
+  "heartbeat.auth_broker_cron": "Broker Auth",
+  "heartbeat.ingest_premarket_cron": "Pre-market Data",
   "scanning.universe_cron": "Universe Refresh",
   "news_digest.schedule_cron": "News Digest",
   "reports.daily_report_time": "Daily Report (time)",
