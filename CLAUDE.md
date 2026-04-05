@@ -134,12 +134,28 @@ All data exchange between skills uses typed Pydantic models in `backend/src/yolo
 - **`frontend/src/pages/`** — Dashboard, Positions, Trades, TradeDetail, Watchlist, Analytics, Reports, Audit, Integrations, DryRun, Login, etc.
 - **`frontend/src/components/`** — Reusable UI: EquityChart, PortfolioCards, TradesTable, PositionsTable, SlippageChart, LLMAccuracyCard, etc.
 - **`frontend/src/hooks/`** — React Query hooks, WebSocket hook, auth hook
-- **`backend/migrations/`** — 9 numbered SQL migration files (001-009)
-- **`backend/config.example.yaml`** — Sample config with all keys documented
+- **`backend/migrations/`** — Numbered SQL migration files (001-017)
+- **`backend/config.example.yaml`** — File-only config keys (secrets, paths, server binding)
 
-## Configuration Toggles
+## Configuration
 
-External services can be independently enabled/disabled:
+Config is split between a YAML file (file-only keys) and a SQLite `config` table (everything else, editable via UI).
+
+### File-only keys (config.yaml)
+These require secrets, filesystem paths, or a restart to change:
+- `mode` (paper/live), `broker.*` (API keys), `llm.api_key`
+- `database.path`, `database.backup_dir`, `market_data.bhavcopy_dir`
+- `dashboard.host`, `dashboard.port`, `dashboard.password`
+- `log.*` (all logging config)
+- `notifications.telegram.enabled`, `notifications.telegram.bot_token`, `notifications.telegram.chat_id`
+
+### DB-editable keys (~129 keys, managed via Settings page)
+On first start, code defaults are populated into the `config` table. Thereafter, changes are made via:
+- **UI**: Settings page (`/settings`) with grouped, type-aware form inputs
+- **API**: `GET /api/config`, `PUT /api/config` (validates via Pydantic before persisting)
+- Changes are hot-applied to the running config immediately.
+
+### Service toggles
 
 | Service | Config key | Default | What it controls |
 |---------|-----------|---------|-----------------|
@@ -147,26 +163,30 @@ External services can be independently enabled/disabled:
 | News sources | `market_data.news_enabled` | `true` | MoneyControl, ET Markets, LiveMint RSS feeds |
 | Scrapers | `market_data.scrapers_enabled` | `true` | Screener.in, Trendlyne, Google Finance, NSE, Economic Calendar |
 | Kite data | `market_data.kite_data_enabled` | `false` | Paid Kite Connect historical data API |
-| Telegram | `notifications.telegram.enabled` | `false` | Telegram bot and notifications |
+| Telegram | `notifications.telegram.enabled` | `false` | Telegram bot and notifications (file-only, requires restart) |
 | LLM review gate | `risk.llm_review_enabled` | `true` | Gemini trade approval (falls back to rules-only if LLM disabled) |
+
+### Holidays & early close days
+Stored in DB config (`market_hours.holidays`, `market_hours.early_close_days`). Managed via:
+- **UI**: Calendar page (`/calendar`) — Outlook-style weekly/monthly view with inline add/remove
+- **API**: `GET/POST/DELETE /api/holidays`
+- **Telegram**: `/holiday`, `/holiday add YYYY-MM-DD|today|tomorrow`, `/holiday rm YYYY-MM-DD|today|tomorrow`
 
 ## Domain Context
 
 - **MIS** = Margin Intraday (auto-squared by broker at EOD). **CNC** = Cash and Carry (delivery, held overnight).
 - **SL-M** = Stop-Loss Market order. **GIFT Nifty** = offshore Nifty futures (pre-market indicator).
 - Market hours: 9:15 AM - 3:30 PM IST. Square-off at 3:15 PM. ~15 NSE holidays/year.
-- Early close days configurable via `market_hours.early_close_days` in config.
 - Kite API rate limit: 10 req/s aggregate. Daily re-auth required (user pastes request_token via Telegram).
-- All risk parameters are configurable via `config.yaml` under `risk.*` section.
 
 ## Conventions
 
 - Python 3.11+, async throughout
 - All skills follow the same pattern: extend `SkillBase`, implement `execute()` and `should_run()`
 - Every skill logs a completion summary at INFO level with key metrics
-- Config via YAML + Pydantic validation. Secrets via environment variables (never in config files).
+- Config via YAML (file-only keys) + DB `config` table (everything else) + Pydantic validation. Secrets via environment variables (never in config files or DB).
 - SQLite with WAL mode. Schema versioned via numbered migration scripts in `backend/migrations/`.
-- Paper trading mode by default — live trading requires explicit `mode: live` in config.
+- Paper trading mode by default — live trading requires explicit `mode: live` in config file.
 - India-first design: RBI MPC is primary economic event; global indices tracked as secondary sentiment context only.
 - All UI timestamps use `timeZone: "Asia/Kolkata"` for consistent IST display.
 - Destructive actions (delete dry run, unquarantine symbol) require user confirmation.
