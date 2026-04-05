@@ -142,12 +142,12 @@ All data exchange between skills uses typed Pydantic models in `backend/src/yolo
 Config is split between a YAML file (file-only keys) and a SQLite `config` table (everything else, editable via UI).
 
 ### File-only keys (config.yaml)
-These require secrets, filesystem paths, or a restart to change:
-- `mode` (paper/live), `broker.*` (API keys), `llm.api_key`
+Secrets, filesystem paths (fixed by Docker volume mounts), and server binding:
+- `broker.api_key`, `broker.api_secret`, `llm.api_key`
 - `database.path`, `database.backup_dir`, `market_data.bhavcopy_dir`
 - `dashboard.host`, `dashboard.port`, `dashboard.password`
-- `log.*` (all logging config)
-- `notifications.telegram.enabled`, `notifications.telegram.bot_token`, `notifications.telegram.chat_id`
+- `log.log_dir`, `log.max_bytes`, `log.backup_count`
+- `notifications.telegram.bot_token`, `notifications.telegram.chat_id`
 
 ### DB-editable keys (~129 keys, managed via Settings page)
 On first start, code defaults are populated into the `config` table. Thereafter, changes are made via:
@@ -163,7 +163,7 @@ On first start, code defaults are populated into the `config` table. Thereafter,
 | News sources | `market_data.news_enabled` | `true` | MoneyControl, ET Markets, LiveMint RSS feeds |
 | Scrapers | `market_data.scrapers_enabled` | `true` | Screener.in, Trendlyne, Google Finance, NSE, Economic Calendar |
 | Kite data | `market_data.kite_data_enabled` | `false` | Paid Kite Connect historical data API |
-| Telegram | `notifications.telegram.enabled` | `false` | Telegram bot and notifications (file-only, requires restart) |
+| Telegram | `notifications.telegram.enabled` | `false` | Telegram bot and notifications |
 | LLM review gate | `risk.llm_review_enabled` | `true` | Gemini trade approval (falls back to rules-only if LLM disabled) |
 
 ### Holidays & early close days

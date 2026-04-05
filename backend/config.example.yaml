@@ -1,16 +1,14 @@
 # YoloVest Configuration
 #
 # This file only contains settings that MUST come from a file:
-# secrets, filesystem paths, server binding, and the paper/live mode switch.
+# secrets, filesystem paths, and server binding.
 #
-# All other settings (risk, strategy, scanning, execution, etc.) are managed
-# in the database and editable via the Settings page in the UI or the
-# /holiday Telegram command. On first start, code defaults are populated
-# into the DB automatically. You do NOT need to configure them here.
+# Everything else — including mode (paper/live), risk parameters, strategy,
+# scanning, telegram toggle, log levels, etc. — is managed in the database
+# and editable via the Settings page in the UI. On first start, code defaults
+# are populated into the DB automatically.
 #
 # Copy this file to config.yaml and set environment variables for secrets.
-
-mode: paper  # paper | live — changing to live requires deliberate intent
 
 broker:
   api_key: ${KITE_API_KEY}            # Zerodha Kite Connect API key (from environment)
@@ -19,27 +17,28 @@ broker:
 llm:
   api_key: ${GEMINI_API_KEY}          # Google Gemini API key
 
+# Filesystem paths — fixed by Docker volume mounts, no need to change
 market_data:
-  bhavcopy_dir: ./data/bhavcopy       # path to downloaded NSE Bhavcopy CSVs
+  bhavcopy_dir: ./data/bhavcopy
 
 database:
-  path: ./data/yolovest.db            # SQLite database file path
-  backup_dir: ./backups               # backup directory (used by cron)
+  path: ./data/yolovest.db
+  backup_dir: ./backups
 
+# Server binding — fixed by Docker EXPOSE / nginx proxy
 dashboard:
-  host: "0.0.0.0"                     # bind address (requires restart to change)
-  port: 8080                          # API port — nginx proxies to this in Docker
+  host: "0.0.0.0"
+  port: 8080
   password: yolovest                  # basic auth password (change in production!)
 
+# Log file paths/rotation — fixed by Docker volume mounts
 log:
-  level: INFO                         # console log level (DEBUG, INFO, WARNING, ERROR)
-  file_level: INFO                    # log file level (can be more verbose than console)
-  log_dir: ./logs                     # log file directory
+  log_dir: ./logs
   max_bytes: 10485760                 # 10 MB max per log file
-  backup_count: 5                     # number of rotated log files to keep
+  backup_count: 5                     # rotated log files to keep
 
+# Telegram secrets only — enabled toggle is in Settings UI
 notifications:
   telegram:
-    enabled: false                    # requires restart to toggle (starts/stops bot)
-    bot_token: ${TELEGRAM_BOT_TOKEN}  # Telegram bot token
-    chat_id: ${TELEGRAM_CHAT_ID}      # Telegram chat ID
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}

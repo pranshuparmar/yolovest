@@ -462,27 +462,21 @@ def load_config(path: str) -> AppConfig:
 # ---------------------------------------------------------------------------
 
 FILE_ONLY_KEYS: set[str] = {
-    # Safety-critical mode switch
-    "mode",
-    # Secrets
+    # Secrets (must come from env vars)
     "broker.api_key",
     "broker.api_secret",
     "llm.api_key",
     "notifications.telegram.bot_token",
     "notifications.telegram.chat_id",
-    # Needs bot lifecycle restart
-    "notifications.telegram.enabled",
-    # Filesystem paths (needed before DB exists or for external tooling)
+    # Filesystem paths (hardcoded by Docker volume mounts)
     "database.path",
     "database.backup_dir",
     "market_data.bhavcopy_dir",
-    # Server binding (requires restart)
+    # Server binding (hardcoded by Docker EXPOSE / nginx proxy)
     "dashboard.host",
     "dashboard.port",
     "dashboard.password",
-    # Logging (initialized before DB)
-    "log.level",
-    "log.file_level",
+    # Logging paths/rotation (hardcoded by Docker volume mounts)
     "log.log_dir",
     "log.max_bytes",
     "log.backup_count",

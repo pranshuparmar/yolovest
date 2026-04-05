@@ -2292,8 +2292,22 @@ def create_app(ctx: AppContext) -> FastAPI:
         await ctx.db.set_config_bulk(str_updates)
 
         # Hot-apply to running config
+        old_config = ctx.config
         ctx.config = new_config
         ctx.market_hours = MarketHoursChecker(ctx.config)
+
+        # Side effects for specific keys
+        if any(k.startswith("log.") for k in updates):
+            try:
+                from yolovest.main import setup_logging
+                setup_logging(ctx.config)
+                logger.info("Log levels reloaded: console=%s, file=%s",
+                            ctx.config.log.level, ctx.config.log.file_level)
+            except Exception as e:
+                logger.warning("Failed to reload log levels: %s", e)
+
+        if "mode" in updates:
+            logger.info("Trading mode changed: %s -> %s", old_config.mode, new_config.mode)
 
         logger.info("Config updated via UI: %s", list(updates.keys()))
 
