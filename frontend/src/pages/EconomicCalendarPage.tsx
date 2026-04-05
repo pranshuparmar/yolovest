@@ -392,7 +392,6 @@ function MonthView({
   onRemoveHoliday: (dateStr: string) => void;
 }) {
   const monthStart = startOfMonth(currentDate);
-  const monthEnd = endOfMonth(currentDate);
   const calStart = startOfWeek(monthStart);
   const todayStr = toDateStr(new Date());
 
