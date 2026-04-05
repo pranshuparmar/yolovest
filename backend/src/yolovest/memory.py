@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from yolovest.timezone import now_ist
+from yolovest.timezone import now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class AgentMemory:
             # Check expiry
             if row.get("expires_at"):
                 expires = datetime.fromisoformat(row["expires_at"])
-                if now_ist() > expires:
+                if now_utc() > expires:
                     await self.delete(namespace, key)
                     return None
 
@@ -69,7 +69,7 @@ class AgentMemory:
             expires_at = None
             if ttl_hours is not None:
                 expires_at = (
-                    now_ist() + timedelta(hours=ttl_hours)
+                    now_utc() + timedelta(hours=ttl_hours)
                 ).isoformat()
 
             await self._db.set_memory(namespace, key, serialized, expires_at)
@@ -101,7 +101,7 @@ class AgentMemory:
                 # Check expiry
                 if row.get("expires_at"):
                     expires = datetime.fromisoformat(row["expires_at"])
-                    if now_ist() > expires:
+                    if now_utc() > expires:
                         continue
                 try:
                     result[key] = json.loads(row["value"])

@@ -37,10 +37,11 @@ def sample_config() -> AppConfig:
             "seed_symbols": ["RELIANCE", "TCS"],
             "shortlist_size": 10,
             "weights": {
-                "technical": 0.40,
+                "technical": 0.35,
                 "volume_momentum": 0.25,
-                "news_sentiment": 0.20,
+                "news_sentiment": 0.15,
                 "fundamental": 0.15,
+                "volatility": 0.10,
             },
         },
         risk={
@@ -166,6 +167,8 @@ def mock_db() -> AsyncMock:
     db = AsyncMock()
     db.health_check = AsyncMock(return_value=True)
     db.get_open_positions = AsyncMock(return_value=[])
+    db.get_locked_symbols = AsyncMock(return_value=set())
+    db.get_feedback_data = AsyncMock(return_value={})
     db.is_kill_switch_active = AsyncMock(return_value=False)
     db.set_kill_switch = AsyncMock(return_value=True)
     db.get_portfolio_state = AsyncMock(return_value={

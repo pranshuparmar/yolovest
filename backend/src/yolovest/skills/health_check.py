@@ -71,20 +71,20 @@ class HealthCheckSkill(SkillBase):
             if last_llm_check:
                 from datetime import datetime, timedelta
                 last_ts = datetime.fromisoformat(last_llm_check)
-                from yolovest.timezone import IST, now_ist
+                from yolovest.timezone import UTC, now_utc
                 if last_ts.tzinfo is None:
-                    last_ts = last_ts.replace(tzinfo=IST)
-                if (now_ist() - last_ts) < timedelta(hours=1):
+                    last_ts = last_ts.replace(tzinfo=UTC)
+                if (now_utc() - last_ts) < timedelta(hours=1):
                     checks["llm"] = True  # cached result
                 else:
                     checks["llm"] = await self.ctx.llm.ping()
                     if checks["llm"]:
-                        await self.ctx.db.set_system_state("last_llm_ping_ok", now_ist().isoformat())
+                        await self.ctx.db.set_system_state("last_llm_ping_ok", now_utc().isoformat())
             else:
                 checks["llm"] = await self.ctx.llm.ping()
                 if checks["llm"]:
-                    from yolovest.timezone import now_ist
-                    await self.ctx.db.set_system_state("last_llm_ping_ok", now_ist().isoformat())
+                    from yolovest.timezone import now_utc
+                    await self.ctx.db.set_system_state("last_llm_ping_ok", now_utc().isoformat())
         except Exception:
             checks["llm"] = False  # non-critical, fallback exists
 

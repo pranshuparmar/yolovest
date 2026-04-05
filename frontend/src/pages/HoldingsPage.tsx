@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useHoldings, usePlaceOrder } from "../hooks/queries";
+import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding } from "../hooks/queries";
 import clsx from "clsx";
 import type { ManualOrder } from "../types/api";
 
@@ -17,10 +17,12 @@ function fmtInr(n: number) {
 function OrderForm({
   defaultSymbol,
   defaultSide,
+  isLocked,
   onClose,
 }: {
   defaultSymbol?: string;
   defaultSide?: "BUY" | "SELL";
+  isLocked?: boolean;
   onClose: () => void;
 }) {
   const placeOrder = usePlaceOrder();
@@ -147,6 +149,12 @@ function OrderForm({
         )}
       </div>
 
+      {isLocked && side === "SELL" && (
+        <div className="bg-amber-900/20 border border-amber-800 rounded px-3 py-2 text-xs text-amber-400">
+          This holding is locked. Automated selling is disabled, but you can still place a manual sell order.
+        </div>
+      )}
+
       <div className="flex items-center gap-3">
         <button
           onClick={handleSubmit}
@@ -182,7 +190,11 @@ export function HoldingsPage() {
   const [orderForm, setOrderForm] = useState<{
     symbol?: string;
     side?: "BUY" | "SELL";
+    locked?: boolean;
   } | null>(null);
+
+  const lockHolding = useLockHolding();
+  const unlockHolding = useUnlockHolding();
 
   const holdings = response?.holdings;
   const brokerAuthenticated = response?.broker_authenticated ?? true;
@@ -230,6 +242,7 @@ export function HoldingsPage() {
         <OrderForm
           defaultSymbol={orderForm.symbol}
           defaultSide={orderForm.side}
+          isLocked={orderForm.locked}
           onClose={() => setOrderForm(null)}
         />
       )}
@@ -324,6 +337,7 @@ export function HoldingsPage() {
                   <th className="py-2 px-3 text-right">LTP</th>
                   <th className="py-2 px-3 text-right">P&L</th>
                   <th className="py-2 px-3 text-right">Day Change</th>
+                  <th className="py-2 px-3 text-center">Lock</th>
                   <th className="py-2 px-3 text-right">Actions</th>
                 </tr>
               </thead>
@@ -380,6 +394,25 @@ export function HoldingsPage() {
                         {h.day_change_percentage >= 0 ? "+" : ""}
                         {fmt(h.day_change_percentage, 1)}%
                       </td>
+                      <td className="py-2.5 px-3 text-center">
+                        <button
+                          onClick={() =>
+                            h.locked
+                              ? unlockHolding.mutate(h.tradingsymbol)
+                              : lockHolding.mutate(h.tradingsymbol)
+                          }
+                          disabled={lockHolding.isPending || unlockHolding.isPending}
+                          title={h.locked ? "Unlock — allow YoloVest to sell" : "Lock — prevent YoloVest from selling"}
+                          className={clsx(
+                            "px-2 py-0.5 rounded text-xs font-medium transition-colors disabled:opacity-50",
+                            h.locked
+                              ? "bg-amber-900/40 text-amber-400 hover:bg-amber-800/50"
+                              : "bg-gray-800 text-gray-500 hover:bg-gray-700 hover:text-gray-300"
+                          )}
+                        >
+                          {h.locked ? "Locked" : "Lock"}
+                        </button>
+                      </td>
                       <td className="py-2.5 px-3 text-right">
                         <div className="flex items-center justify-end gap-1">
                           <button
@@ -398,6 +431,7 @@ export function HoldingsPage() {
                               setOrderForm({
                                 symbol: h.tradingsymbol,
                                 side: "SELL",
+                                locked: h.locked,
                               })
                             }
                             className="px-2 py-0.5 rounded text-xs font-medium bg-red-900/30 text-red-400 hover:bg-red-800/50 transition-colors"

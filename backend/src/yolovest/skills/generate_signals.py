@@ -68,7 +68,7 @@ class GenerateSignalsSkill(SkillBase):
                 },
             )
 
-        use_intraday = self._should_use_intraday_model()
+        strategy_cfg = self.ctx.config.strategy
         indicator_cfg = IndicatorConfig(
             ema_periods=self.ctx.config.strategy.ema_periods,
             rsi=self.ctx.config.strategy.indicators.rsi,
@@ -80,6 +80,14 @@ class GenerateSignalsSkill(SkillBase):
             obv=self.ctx.config.strategy.indicators.obv,
             supertrend=self.ctx.config.strategy.indicators.supertrend,
         )
+
+        # Build set of currently held symbols (open positions)
+        # Used to decide if SELL = exit-owned-stock (CNC ok) vs short-sell (force MIS)
+        open_positions = await self.ctx.db.get_open_positions()
+        held_symbols = {p["symbol"] for p in open_positions}
+
+        # Load locked symbols — SELL signals for these will be skipped entirely
+        locked_symbols = await self.ctx.db.get_locked_symbols()
 
         # Skip symbols that already have a signal or open position today
         already_signaled = await self.ctx.db.get_todays_signaled_symbols()
@@ -164,6 +172,10 @@ class GenerateSignalsSkill(SkillBase):
                 except Exception:
                     pass  # fall back to features["close"] in _predict()
 
+                # Decide holding period based on stock characteristics and strategy mode
+                holding_period, product, expected_days = self._decide_holding_period(features)
+                use_intraday = holding_period == "intraday"
+
                 # Use latest intraday price for feature close during market hours
                 if use_intraday:
                     intraday_bars = await self.ctx.db.get_ohlcv(symbol, "5minute", days=1)
@@ -216,14 +228,57 @@ class GenerateSignalsSkill(SkillBase):
                     logger.info("HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
                     continue
 
+                # Skip SELL signals for locked holdings (user explicitly protected them)
+                if prediction.signal_type == "SELL" and symbol in locked_symbols:
+                    filter_counts.setdefault("locked_holding", 0)
+                    filter_counts["locked_holding"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "locked_holding",
+                        "detail": f"SELL blocked — {symbol} is locked",
+                    })
+                    logger.info("Locked holding: skipping SELL for %s", symbol)
+                    continue
+
+                # Adjust SELL signals: force to MIS/intraday if user doesn't hold the stock
+                from yolovest.strategy.holding_period import adjust_sell_for_holdings
+
+                holding_period, product = adjust_sell_for_holdings(
+                    prediction.signal_type, holding_period, product,
+                    symbol, held_symbols,
+                )
+
+                # Override target/SL with ATR multipliers interpolated for holding duration
+                from yolovest.strategy.holding_period import interpolate_atr_multipliers
+
+                entry = prediction.entry_price
+                atr = features.get("atr_14", entry * 0.02)
+                target_mult, sl_mult = interpolate_atr_multipliers(
+                    expected_days, self.ctx.config.strategy.holding_periods,
+                )
+
+                if prediction.signal_type == "BUY":
+                    target_price = entry + target_mult * atr
+                    stop_loss_price = entry - sl_mult * atr
+                elif prediction.signal_type == "SELL":
+                    target_price = entry - target_mult * atr
+                    stop_loss_price = entry + sl_mult * atr
+                else:
+                    target_price = prediction.target_price
+                    stop_loss_price = prediction.stop_loss_price
+
+                target_price = max(target_price, 0.01)
+                stop_loss_price = max(stop_loss_price, 0.01)
+
                 signal = {
                     "symbol": symbol,
                     "signal_type": prediction.signal_type,
-                    "entry_price": prediction.entry_price,
-                    "target_price": prediction.target_price,
-                    "stop_loss_price": prediction.stop_loss_price,
+                    "entry_price": entry,
+                    "target_price": round(target_price, 2),
+                    "stop_loss_price": round(stop_loss_price, 2),
                     "position_size": prediction.position_size,
-                    "expected_holding_period": prediction.holding_period,
+                    "expected_holding_period": holding_period,
+                    "expected_holding_days": expected_days,
+                    "product": product,
                     "confidence_score": prediction.confidence,
                     "features_snapshot": features,
                     "model_version": prediction.model_version,
@@ -300,10 +355,14 @@ class GenerateSignalsSkill(SkillBase):
             },
         )
 
-    def _should_use_intraday_model(self) -> bool:
-        """Decide model type based on time of day and config."""
-        if self.ctx.config.strategy.default_trade_type == "swing":
-            return False
-        # Before 14:00 IST → intraday (MIS needs time to play out before 15:15 square-off)
-        now = datetime.now(IST).time()
-        return now < time(14, 0)
+    def _decide_holding_period(self, features: dict) -> tuple[str, str, int]:
+        """Decide holding period, product type, and expected days based on stock characteristics."""
+        from yolovest.config import _MODE_HOLDING_DAYS
+        from yolovest.strategy.holding_period import decide_holding_period
+
+        allowed = self.ctx.config.strategy.allowed_holding_periods or ["intraday", "short_term", "long_term"]
+        mode = self.ctx.config.strategy.mode
+        mode_days = _MODE_HOLDING_DAYS.get(mode)
+        now_time = datetime.now(IST).time()
+        vol_cfg = self.ctx.config.strategy.volatility
+        return decide_holding_period(features, allowed, vol_cfg, now_time, mode_days_range=mode_days)

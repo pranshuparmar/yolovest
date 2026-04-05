@@ -1,6 +1,6 @@
 """Skill: auth-broker — Daily broker authentication.
 
-Trigger: CRON — daily at 9:00 AM IST (before market open)
+Trigger: CRON — daily at 8:30 AM IST (before market open)
 Pipeline position: First skill of the day, everything depends on this.
 
 Flow:
@@ -24,7 +24,7 @@ class AuthBrokerSkill(SkillBase):
     name = "auth-broker"
     description = "Daily Kite Connect re-authentication"
     trigger = SkillTrigger.CRON
-    schedule = "0 9 * * 1-5"  # 9:00 AM IST, weekdays only
+    schedule = "30 8 * * 1-5"  # 8:30 AM IST, weekdays only
 
     def should_run(self) -> bool:
         # Always run on schedule — the execute() method handles

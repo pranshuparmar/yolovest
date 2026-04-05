@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import { useNewsInfinite, useSentiment } from "../hooks/queries";
 import clsx from "clsx";
+import { getTimezone } from "../utils/datetime";
 import type { NewsArticle } from "../types/api";
 
 const sourceColors: Record<string, { color: string; label: string }> = {
@@ -70,7 +71,7 @@ function formatDateKey(iso: string): string {
   if (d.toDateString() === today.toDateString()) return "Today";
   if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
   return d.toLocaleDateString("en-IN", {
-    timeZone: "Asia/Kolkata",
+    timeZone: getTimezone(),
     weekday: "short",
     day: "numeric",
     month: "short",
@@ -80,7 +81,7 @@ function formatDateKey(iso: string): string {
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("en-IN", {
-    timeZone: "Asia/Kolkata",
+    timeZone: getTimezone(),
     hour: "2-digit",
     minute: "2-digit",
   });

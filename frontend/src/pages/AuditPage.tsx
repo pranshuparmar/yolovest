@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useAudit, useServerLogs } from "../hooks/queries";
 import { CSVExportButton } from "../components/CSVExportButton";
+import { parseUTC, getTimezone } from "../utils/datetime";
 import clsx from "clsx";
 
 function AuditTab() {
@@ -63,8 +64,8 @@ function AuditTab() {
                   className="w-full flex flex-wrap items-center gap-2 sm:gap-3 py-2 text-left text-sm hover:bg-gray-800/30"
                 >
                   <span className="text-gray-500 text-xs whitespace-nowrap w-16 sm:w-20">
-                    {new Date(entry.timestamp_ist).toLocaleTimeString("en-IN", {
-                      timeZone: "Asia/Kolkata",
+                    {parseUTC(entry.timestamp_ist).toLocaleTimeString("en-IN", {
+                      timeZone: getTimezone(),
                       hour: "2-digit",
                       minute: "2-digit",
                       second: "2-digit",

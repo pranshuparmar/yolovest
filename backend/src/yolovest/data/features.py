@@ -78,6 +78,7 @@ def compute_features(
         atr = compute_atr(highs, lows, closes, period=14)
         if atr is not None:
             features["atr_14"] = atr
+            features["atr_pct"] = atr / closes[-1] if closes[-1] > 0 else 0.0
 
     if cfg.volume_profile:
         vp = compute_volume_profile(volumes)
@@ -99,6 +100,30 @@ def compute_features(
                 features[f"ema_{period}"] = ema
 
     return features
+
+
+def merge_feedback_features(
+    features: dict[str, float],
+    symbol: str,
+    feedback_data: dict[str, dict[str, float]],
+) -> None:
+    """Merge per-symbol feedback stats into the feature dict (in-place).
+
+    Adds rolling accuracy, PnL, slippage features from recent predictions,
+    dry runs, and trades. Defaults to 0.5 (neutral) for missing data.
+    """
+    fb = feedback_data.get(symbol, {})
+    has_data = bool(fb)
+
+    features["fb_pred_accuracy"] = fb.get("pred_accuracy", 0.5)
+    features["fb_pred_target_hit"] = fb.get("pred_target_hit_rate", 0.5)
+    features["fb_pred_avg_pnl"] = fb.get("pred_avg_pnl_pct", 0.0)
+    features["fb_dry_run_accuracy"] = fb.get("dry_run_accuracy", 0.5)
+    features["fb_dry_run_avg_move"] = fb.get("dry_run_avg_move_pct", 0.0)
+    features["fb_trade_win_rate"] = fb.get("trade_win_rate", 0.5)
+    features["fb_trade_avg_pnl"] = fb.get("trade_avg_pnl", 0.0)
+    features["fb_trade_avg_slippage"] = fb.get("trade_avg_slippage_pct", 0.0)
+    features["fb_has_data"] = 1.0 if has_data else 0.0
 
 
 # ------------------------------------------------------------------

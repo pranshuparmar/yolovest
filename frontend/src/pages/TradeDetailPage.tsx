@@ -1,6 +1,7 @@
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useTradeDetail } from "../hooks/queries";
 import clsx from "clsx";
+import { parseUTC, getTimezone } from "../utils/datetime";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -70,7 +71,7 @@ function ReasoningTimeline({ data }: { data: NonNullable<ReturnType<typeof useTr
       status: scored ? (p.direction_correct ? "success" : "error") : "pending",
       detail: scored
         ? `Direction: ${p.direction_correct ? "Correct" : "Wrong"} — Target: ${p.target_hit ? "Hit" : "Missed"} — PnL: ${p.actual_pnl_pct != null ? fmt(p.actual_pnl_pct) + "%" : "—"}`
-        : `Awaiting scoring — End: ${p.prediction_end_time ? new Date(p.prediction_end_time).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "—"}`,
+        : `Awaiting scoring — End: ${p.prediction_end_time ? parseUTC(p.prediction_end_time).toLocaleString("en-IN", { timeZone: getTimezone() }) : "—"}`,
     });
   }
 
@@ -109,7 +110,7 @@ function ReasoningTimeline({ data }: { data: NonNullable<ReturnType<typeof useTr
                 <span className="text-sm font-medium text-gray-200">{step.label}</span>
                 {step.time && (
                   <span className="text-xs text-gray-500">
-                    {new Date(step.time).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                    {parseUTC(step.time).toLocaleTimeString("en-IN", { timeZone: getTimezone(), hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                   </span>
                 )}
               </div>
@@ -163,21 +164,36 @@ export function TradeDetailPage() {
           <div><p className="text-xs text-gray-500">Fill Price</p><p>₹{fmt(data.fill_price)}</p></div>
           <div><p className="text-xs text-gray-500">Quantity</p><p>{data.quantity}</p></div>
           <div><p className="text-xs text-gray-500">Slippage</p><p>{fmt(data.slippage)}</p></div>
+          {data.estimated_costs != null && (
+            <div><p className="text-xs text-gray-500">Est. Costs</p><p className="text-amber-400">₹{fmt(data.estimated_costs)}</p></div>
+          )}
           <div><p className="text-xs text-gray-500">Stop Loss</p><p className="text-red-400">₹{fmt(data.stop_loss_price)}</p></div>
           <div><p className="text-xs text-gray-500">Target</p><p className="text-emerald-400">₹{fmt(data.target_price)}</p></div>
           <div><p className="text-xs text-gray-500">Product</p><p>{data.product}</p></div>
           <div><p className="text-xs text-gray-500">Status</p><p>{data.status}</p></div>
           <div>
-            <p className="text-xs text-gray-500">PnL</p>
+            <p className="text-xs text-gray-500">Net PnL (after costs)</p>
             <p className={clsx(data.pnl != null && data.pnl > 0 ? "text-emerald-400" : data.pnl != null && data.pnl < 0 ? "text-red-400" : "")}>
               {data.pnl !== null ? `₹${fmt(data.pnl)}` : "—"}
             </p>
           </div>
           <div><p className="text-xs text-gray-500">Mode</p><p>{data.mode}</p></div>
-          <div><p className="text-xs text-gray-500">Created</p><p className="text-xs">{new Date(data.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</p></div>
-          {data.closed_at && <div><p className="text-xs text-gray-500">Closed</p><p className="text-xs">{new Date(data.closed_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</p></div>}
+          <div><p className="text-xs text-gray-500">Created</p><p className="text-xs">{parseUTC(data.created_at).toLocaleString("en-IN", { timeZone: getTimezone() })}</p></div>
+          {data.closed_at && <div><p className="text-xs text-gray-500">Closed</p><p className="text-xs">{parseUTC(data.closed_at).toLocaleString("en-IN", { timeZone: getTimezone() })}</p></div>}
         </div>
       </Section>
+
+      {/* Transaction Cost Breakdown */}
+      {data.cost_breakdown && (
+        <Section title="Transaction Costs">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div><p className="text-xs text-gray-500">Brokerage</p><p>₹{fmt(data.cost_breakdown.brokerage)}</p></div>
+            <div><p className="text-xs text-gray-500">STT ({data.product === "MIS" ? "0.025%" : "0.1%"})</p><p>₹{fmt(data.cost_breakdown.stt)}</p></div>
+            <div><p className="text-xs text-gray-500">Other (Stamp + GST + Exchange)</p><p>₹{fmt(data.cost_breakdown.other_charges)}</p></div>
+            <div><p className="text-xs text-gray-500">Total Charges</p><p className="text-amber-400 font-medium">₹{fmt(data.cost_breakdown.total)}</p></div>
+          </div>
+        </Section>
+      )}
 
       {/* LLM Review full reasoning */}
       {data.llm_review && (
@@ -203,7 +219,7 @@ export function TradeDetailPage() {
             {data.audit_trail.map((entry) => (
               <div key={entry.id} className="flex items-start gap-3 text-xs border-b border-gray-800/50 pb-2">
                 <span className="text-gray-500 whitespace-nowrap">
-                  {new Date(entry.timestamp_ist).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}
+                  {parseUTC(entry.timestamp_ist).toLocaleTimeString("en-IN", { timeZone: getTimezone() })}
                 </span>
                 <span className="text-gray-400 font-medium">{entry.action_type}</span>
                 {entry.skill_name && <span className="text-gray-600">[{entry.skill_name}]</span>}

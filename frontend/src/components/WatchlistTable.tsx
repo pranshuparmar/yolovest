@@ -1,4 +1,5 @@
 import type { WatchlistItem } from "../types/api";
+import { parseUTC, getTimezone } from "../utils/datetime";
 
 function score(v: number | null) {
   if (v === null) return "—";
@@ -41,7 +42,7 @@ export function WatchlistTable({ items }: { items: WatchlistItem[] }) {
               <td className="py-2 pr-4">{score(item.fundamental_score)}</td>
               <td className="py-2 pr-4 text-gray-400">{item.sector || "—"}</td>
               <td className="py-2 text-xs text-gray-500">
-                {new Date(item.updated_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}
+                {parseUTC(item.updated_at).toLocaleDateString("en-IN", { timeZone: getTimezone() })}
               </td>
             </tr>
           ))}

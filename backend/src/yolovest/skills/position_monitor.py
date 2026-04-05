@@ -38,6 +38,8 @@ class PositionMonitorSkill(SkillBase):
         return bool(self.ctx.market_hours.is_market_hours())
 
     async def execute(self, **kwargs: Any) -> SkillResult:
+        from yolovest.timezone import now_ist
+
         cfg = self.ctx.config.risk
         local_positions = await self.ctx.db.get_open_positions()
         broker_positions = await self.ctx.broker.get_positions()
@@ -61,10 +63,14 @@ class PositionMonitorSkill(SkillBase):
         trails_modified = 0
         targets_hit: list[dict[str, Any]] = []
         stops_hit: list[dict[str, Any]] = []
+        expiry_actions: list[dict[str, Any]] = []
         ltp_failures: list[str] = []
 
         # Skip positions that were just recovered (already closed in DB)
         recovered_set = set(recovered)
+
+        # Load locked symbols — these should not be auto-sold (target/SL/trail)
+        locked_symbols = await self.ctx.db.get_locked_symbols()
 
         for pos in local_positions:
             symbol = pos["symbol"]
@@ -86,6 +92,13 @@ class PositionMonitorSkill(SkillBase):
             sl = pos["stop_loss_price"]
             target = pos["target_price"]
             risk_per_share = abs(entry - sl)
+
+            # Locked holdings: track PnL but never auto-close
+            if symbol in locked_symbols:
+                await self.ctx.db.update_unrealized_pnl(
+                    pos["trade_id"], current_price,
+                )
+                continue
 
             # Target hit?
             if (pos["signal_type"] == "BUY" and current_price >= target) or (
@@ -154,8 +167,36 @@ class PositionMonitorSkill(SkillBase):
                         await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
                         trails_modified += 1
 
+            # Holding period expiry check
+            expiry_result = await self._check_holding_expiry(
+                pos, current_price, entry, now_ist(),
+            )
+            if expiry_result:
+                expiry_actions.append(expiry_result)
+                if expiry_result["action"] == "closed":
+                    continue  # position already closed, skip PnL update
+
             # Update unrealized PnL
             await self.ctx.db.update_unrealized_pnl(pos["trade_id"], current_price)
+
+        # Notify holding period expiry actions
+        for ea in expiry_actions:
+            if ea["action"] == "closed":
+                await self.broadcast("trade_exit", {
+                    "symbol": ea["symbol"], "reason": "holding_expiry",
+                })
+                await self.ctx.notify.send_exit_alert(
+                    ea["symbol"],
+                    f"Holding period expired ({ea['days_held']}d/{ea['expected_days']}d) — {ea['reason']}",
+                    ea.get("pnl", 0),
+                )
+            elif ea["action"] == "tightened":
+                await self.ctx.notify.send(
+                    f"Holding period expired for {ea['symbol']} "
+                    f"({ea['days_held']}d/{ea['expected_days']}d): "
+                    f"in profit — SL tightened to {ea['new_sl']:.2f}",
+                    alert_type="info",
+                )
 
         # Broadcast and notify target/stop hits
         for hit in targets_hit:
@@ -193,11 +234,14 @@ class PositionMonitorSkill(SkillBase):
 
         target_syms = [h["symbol"] for h in targets_hit]
         stop_syms = [h["symbol"] for h in stops_hit]
+        expiry_syms = [ea["symbol"] for ea in expiry_actions]
         logger.info(
             "position-monitor: %d positions — targets_hit=%s, stops_hit=%s, "
-            "trails_modified=%d, discrepancies=%d, ltp_failures=%d, recovered=%d",
+            "expiry_actions=%s, trails_modified=%d, discrepancies=%d, "
+            "ltp_failures=%d, recovered=%d",
             len(local_positions), target_syms or "none", stop_syms or "none",
-            trails_modified, len(discrepancies) if discrepancies else 0,
+            expiry_syms or "none", trails_modified,
+            len(discrepancies) if discrepancies else 0,
             len(ltp_failures), len(recovered),
         )
 
@@ -210,6 +254,7 @@ class PositionMonitorSkill(SkillBase):
                 "trails_modified": trails_modified,
                 "targets_hit": target_syms,
                 "stops_hit": stop_syms,
+                "expiry_actions": expiry_syms,
                 "discrepancies": len(discrepancies) if discrepancies else 0,
                 "ltp_failures": ltp_failures,
                 "ghost_recovered": recovered,
@@ -375,6 +420,117 @@ class PositionMonitorSkill(SkillBase):
                 pass
 
         return recovered
+
+    async def _check_holding_expiry(
+        self,
+        pos: dict[str, Any],
+        current_price: float,
+        entry: float,
+        now: Any,
+    ) -> dict[str, Any] | None:
+        """Check if a position has exceeded its expected holding period and act.
+
+        Returns None if no action needed, or a dict describing the action taken.
+        """
+        from datetime import datetime
+
+        cfg = self.ctx.config.risk.holding_expiry
+        if not cfg.enabled or cfg.action == "ignore":
+            return None
+
+        expected_days = pos.get("expected_holding_days")
+        if not expected_days or expected_days <= 0:
+            return None  # intraday or no holding period set (handled by square-off)
+
+        # Calculate trading days held
+        created_at_str = pos.get("created_at", "")
+        if not created_at_str:
+            return None
+        try:
+            created_at = datetime.fromisoformat(str(created_at_str))
+        except (ValueError, TypeError):
+            return None
+
+        # Approximate trading days: calendar days * 5/7 (excludes weekends)
+        calendar_days = (now.replace(tzinfo=None) - created_at.replace(tzinfo=None)).days
+        trading_days_held = max(0, int(calendar_days * 5 / 7))
+
+        # Cap at max_holding_days
+        effective_expiry = min(expected_days, cfg.max_holding_days)
+
+        if trading_days_held < effective_expiry:
+            return None  # not yet expired
+
+        symbol = pos["symbol"]
+        qty = pos.get("quantity", 0)
+
+        # Calculate unrealized PnL %
+        if pos["signal_type"] == "BUY":
+            pnl_pct = (current_price - entry) / entry * 100 if entry else 0
+        else:
+            pnl_pct = (entry - current_price) / entry * 100 if entry else 0
+
+        result_base = {
+            "symbol": symbol,
+            "days_held": trading_days_held,
+            "expected_days": expected_days,
+            "pnl_pct": round(pnl_pct, 2),
+        }
+
+        if cfg.action == "force_close":
+            # Close regardless of P&L
+            pnl = await self._close_expired_position(pos, current_price, entry, qty)
+            return {**result_base, "action": "closed", "reason": "force_close", "pnl": pnl}
+
+        # tighten_or_close logic
+        if pnl_pct > cfg.breakeven_buffer_pct:
+            # In profit — tighten SL to breakeven + buffer
+            buffer = entry * cfg.breakeven_buffer_pct / 100
+            if pos["signal_type"] == "BUY":
+                new_sl = entry + buffer
+            else:
+                new_sl = entry - buffer
+
+            if self._is_better_sl(pos["signal_type"], new_sl, pos["stop_loss_price"]):
+                await self.ctx.broker.modify_sl_order(pos.get("sl_order_id"), new_sl)
+                await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+                logger.info(
+                    "position-monitor: HOLDING EXPIRY %s — in profit (%.1f%%), "
+                    "SL tightened to %.2f",
+                    symbol, pnl_pct, new_sl,
+                )
+                return {**result_base, "action": "tightened", "new_sl": new_sl}
+            return None  # SL already tighter than breakeven
+
+        # At a loss or near breakeven — close the position
+        reason = "at_loss" if pnl_pct < cfg.loss_threshold_pct else "near_breakeven"
+        pnl = await self._close_expired_position(pos, current_price, entry, qty)
+        logger.info(
+            "position-monitor: HOLDING EXPIRY %s — %s (%.1f%%), closed at %.2f pnl=₹%.2f",
+            symbol, reason, pnl_pct, current_price, pnl,
+        )
+        return {**result_base, "action": "closed", "reason": reason, "pnl": pnl}
+
+    async def _close_expired_position(
+        self,
+        pos: dict[str, Any],
+        current_price: float,
+        entry: float,
+        qty: int,
+    ) -> float:
+        """Close a position due to holding period expiry."""
+        if pos["signal_type"] == "BUY":
+            gross_pnl = (current_price - entry) * qty
+        else:
+            gross_pnl = (entry - current_price) * qty
+        product = pos.get("product", "MIS")
+        costs = compute_transaction_costs(
+            entry, current_price, qty, product=product,
+            cost_config=self.ctx.config.transaction_costs,
+        )
+        pnl = round(gross_pnl - costs, 2)
+        await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+        return pnl
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:
         """Check if new SL is tighter (more protective) than current."""

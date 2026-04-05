@@ -2,6 +2,7 @@ export interface HealthResponse {
   status: "ok" | "degraded";
   database: boolean;
   mode: "paper" | "live";
+  timezone?: string;
 }
 
 export interface PortfolioState {
@@ -32,10 +33,18 @@ export interface Trade {
   mode: "paper" | "live";
   status: string;
   slippage: number;
+  estimated_costs: number | null;
   pnl: number | null;
   exit_price: number | null;
   created_at: string;
   closed_at: string | null;
+}
+
+export interface CostBreakdown {
+  brokerage: number;
+  stt: number;
+  other_charges: number;
+  total: number;
 }
 
 export interface LLMReview {
@@ -89,6 +98,7 @@ export interface TradeDetail extends Trade {
   prediction: Prediction | null;
   signal: Signal | null;
   audit_trail: AuditEntry[];
+  cost_breakdown?: CostBreakdown;
 }
 
 export interface EquityCurvePoint {
@@ -273,12 +283,27 @@ export interface PredictionDetail {
   symbol?: string;
   signal_type?: string;
   confidence_score?: number;
+  model_version?: string;
   created_at: string;
   prediction_end_time: string | null;
   actual_price: number | null;
   direction_correct: boolean | null;
   target_hit: boolean | null;
   actual_pnl_pct: number | null;
+}
+
+export interface PaginatedPredictions {
+  items: PredictionDetail[];
+  total: number;
+}
+
+export interface PredictionFilters {
+  symbol?: string;
+  direction?: "BUY" | "SELL";
+  direction_correct?: 0 | 1;
+  target_hit?: 0 | 1;
+  model?: string;
+  min_confidence?: number;
 }
 
 export interface RiskExposure {
@@ -473,6 +498,11 @@ export interface DryRunSignal {
   confidence_score: number;
   position_size: number | null;
   model_version: string | null;
+  holding_period: string | null;
+  expected_holding_days: number | null;
+  product: string | null;
+  estimated_costs: number | null;
+  volatility_score: number | null;
   composite_score: number | null;
   technical_score: number | null;
   volume_momentum_score: number | null;
@@ -495,6 +525,7 @@ export interface DryRunSummary {
   created_at: string;
   correct: number | null;
   scored: number;
+  strategy_mode: string | null;
 }
 
 export interface HoldingsResponse {
@@ -515,6 +546,7 @@ export interface HoldingEntry {
   day_change_percentage: number;
   isin?: string;
   t1_quantity?: number;
+  locked?: boolean;
 }
 
 export interface ManualOrder {
@@ -530,6 +562,7 @@ export interface ManualOrder {
 export interface DryRunResult {
   success: boolean;
   run_id: string;
+  mode?: string;
   universe_size: number;
   shortlist_size: number;
   signals: DryRunSignal[];

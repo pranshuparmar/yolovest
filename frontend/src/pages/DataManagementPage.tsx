@@ -10,6 +10,7 @@ import {
   useUnquarantineSymbol,
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
+import { parseUTC, getTimezone } from "../utils/datetime";
 
 const TABLE_INFO: Record<string, { label: string; description: string; defaultDays: number }> = {
   ohlcv: { label: "OHLCV Candles", description: "Daily and intraday price bars", defaultDays: 730 },
@@ -30,8 +31,8 @@ function formatBytes(bytes: number): string {
 function formatDate(iso: string | null): string {
   if (!iso) return "--";
   try {
-    return new Date(iso).toLocaleDateString("en-IN", {
-      timeZone: "Asia/Kolkata",
+    return parseUTC(iso).toLocaleDateString("en-IN", {
+      timeZone: getTimezone(),
       day: "2-digit",
       month: "short",
       year: "numeric",
@@ -43,8 +44,8 @@ function formatDate(iso: string | null): string {
 
 function formatDateTime(iso: string): string {
   try {
-    return new Date(iso).toLocaleString("en-IN", {
-      timeZone: "Asia/Kolkata",
+    return parseUTC(iso).toLocaleString("en-IN", {
+      timeZone: getTimezone(),
       day: "2-digit",
       month: "short",
       year: "numeric",
@@ -178,8 +179,8 @@ function QuarantinedSymbolsSection() {
                   <td className="py-2 px-4 text-gray-400 text-xs max-w-xs truncate">{s.last_error}</td>
                   <td className="py-2 px-4 text-right text-gray-400 text-xs">
                     {s.quarantined_at
-                      ? new Date(s.quarantined_at).toLocaleString("en-IN", {
-                          timeZone: "Asia/Kolkata",
+                      ? parseUTC(s.quarantined_at).toLocaleString("en-IN", {
+                          timeZone: getTimezone(),
                           day: "2-digit",
                           month: "short",
                           hour: "2-digit",

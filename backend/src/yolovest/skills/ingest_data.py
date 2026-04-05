@@ -544,7 +544,8 @@ class IngestDataSkill(SkillBase):
 
             # Mark last full ingest time
             try:
-                await self.ctx.db.set_system_state("last_full_ingest", now_ist().isoformat())
+                from yolovest.timezone import now_utc
+                await self.ctx.db.set_system_state("last_full_ingest", now_utc().isoformat())
             except Exception:
                 pass
 

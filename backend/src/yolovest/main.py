@@ -405,6 +405,10 @@ def _sync_kite_data_token(ctx: "AppContext") -> None:
 
 async def async_main(args: argparse.Namespace) -> None:
     """Async entry point: load config, build context, run orchestrator."""
+    # Pre-create jugaad-data cache dir to avoid race condition in library
+    import os
+    os.makedirs(os.path.expanduser("~/.cache/nsehistory-stock"), exist_ok=True)
+
     # Load config
     try:
         config = load_config(args.config)

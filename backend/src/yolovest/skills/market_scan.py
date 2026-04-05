@@ -66,6 +66,7 @@ class MarketScanSkill(SkillBase):
                 + sub["volume_momentum_score"] * cfg.weights.volume_momentum
                 + sub["news_sentiment_score"] * cfg.weights.news_sentiment
                 + sub["fundamental_score"] * cfg.weights.fundamental
+                + sub["volatility_score"] * cfg.weights.volatility
             )
             scored.append({**stock, **sub, "composite_score": composite})
 
@@ -154,11 +155,17 @@ class MarketScanSkill(SkillBase):
         else:
             fund_score = (promoter / 100.0) * 0.4 + 0.3  # unknown PE gets neutral
 
+        # Volatility score: favor stocks with sufficient but not extreme daily range
+        atr_pct = stock.get("atr_pct") or 0.0
+        vol_cfg = self.ctx.config.strategy.volatility
+        volatility_score = self._compute_volatility_score(atr_pct, vol_cfg)
+
         return {
             "technical_score": tech,
             "volume_momentum_score": round(vol_score, 4),
             "news_sentiment_score": round(sent_score, 4),
             "fundamental_score": round(min(fund_score, 1.0), 4),
+            "volatility_score": round(volatility_score, 4),
         }
 
     @staticmethod
@@ -203,6 +210,27 @@ class MarketScanSkill(SkillBase):
             return 0.5  # no data → neutral
 
         return round(sum(signals) / len(signals), 4)
+
+    @staticmethod
+    def _compute_volatility_score(atr_pct: float, vol_cfg: Any) -> float:
+        """Compute a [0, 1] volatility score using a bell-curve preference.
+
+        Stocks in the ideal ATR% range (default 1.5%-3%) score highest.
+        Below minimum → 0 (won't move enough). Above maximum → penalized.
+        """
+        if atr_pct <= 0 or atr_pct < vol_cfg.min_atr_pct:
+            return 0.0
+        if atr_pct > vol_cfg.max_atr_pct:
+            return 0.3  # too volatile but still tradeable
+        if vol_cfg.ideal_min_atr_pct <= atr_pct <= vol_cfg.ideal_max_atr_pct:
+            return 1.0  # sweet spot
+        if atr_pct < vol_cfg.ideal_min_atr_pct:
+            # Linear ramp from min to ideal_min
+            rng = vol_cfg.ideal_min_atr_pct - vol_cfg.min_atr_pct
+            return 0.5 + 0.5 * ((atr_pct - vol_cfg.min_atr_pct) / rng) if rng > 0 else 0.5
+        # Between ideal_max and max — gradual decline
+        rng = vol_cfg.max_atr_pct - vol_cfg.ideal_max_atr_pct
+        return 0.3 + 0.7 * ((vol_cfg.max_atr_pct - atr_pct) / rng) if rng > 0 else 0.5
 
     def _analyze_sector_rotation(self, scored_stocks: list[dict[str, Any]]) -> dict[str, Any]:
         """Group by sector, compute avg scores, identify rotation."""

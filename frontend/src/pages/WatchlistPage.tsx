@@ -9,6 +9,7 @@ import {
   useRemoveUserWatchlistSymbol,
   useUniverseSymbols,
 } from "../hooks/queries";
+import { parseUTC, getTimezone } from "../utils/datetime";
 
 function score(n: number | null | undefined) {
   return n != null ? n.toFixed(2) : "--";
@@ -344,7 +345,7 @@ export function WatchlistPage() {
                         </td>
                         <td className="py-2 text-gray-500 text-xs">
                           {item.updated_at
-                            ? new Date(item.updated_at).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })
+                            ? parseUTC(item.updated_at).toLocaleDateString("en-IN", { timeZone: getTimezone() })
                             : "--"}
                         </td>
                       </tr>

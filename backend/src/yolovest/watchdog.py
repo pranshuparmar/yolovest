@@ -29,11 +29,15 @@ class HeartbeatWatchdog:
     - Normal: heartbeat completed within expected interval
     - Warning (2x overdue): sends alert, logs warning
     - Critical (3x overdue): sends CRITICAL alert every check cycle
+
+    Handles interval transitions (off-hours → market hours) by tracking
+    which interval was active at the last heartbeat.
     """
 
     def __init__(self, ctx: AppContext) -> None:
         self._ctx = ctx
         self._last_heartbeat: float = time.monotonic()
+        self._last_interval_sec: float = ctx.config.heartbeat.off_hours_interval_min * 60
         self._running = False
         self._alerted_warning = False
         self._alerted_critical = False
@@ -41,14 +45,23 @@ class HeartbeatWatchdog:
     def record_heartbeat(self) -> None:
         """Called by the orchestrator after each heartbeat completes."""
         self._last_heartbeat = time.monotonic()
+        # Record the interval that will be used for the NEXT sleep
+        if self._ctx.market_hours.is_market_hours():
+            self._last_interval_sec = self._ctx.config.heartbeat.market_hours_interval_min * 60
+        else:
+            self._last_interval_sec = self._ctx.config.heartbeat.off_hours_interval_min * 60
         self._alerted_warning = False
         self._alerted_critical = False
 
     def _expected_interval_sec(self) -> float:
-        """Get the currently expected heartbeat interval in seconds."""
-        if self._ctx.market_hours.is_market_hours():
-            return self._ctx.config.heartbeat.market_hours_interval_min * 60
-        return self._ctx.config.heartbeat.off_hours_interval_min * 60
+        """Get the expected interval based on what was active at last heartbeat.
+
+        This prevents false alarms during off-hours → market-hours transition:
+        the last heartbeat may have been 60min ago (off-hours interval), but
+        the current time is now market hours (15min interval). Using the
+        interval from last heartbeat avoids a spurious overdue warning.
+        """
+        return self._last_interval_sec
 
     async def start(self) -> None:
         """Run the watchdog loop. Runs until stopped."""

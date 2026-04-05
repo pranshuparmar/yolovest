@@ -19,7 +19,7 @@ Flow:
 import logging
 from typing import Any
 
-from yolovest.data.features import IndicatorConfig, compute_features
+from yolovest.data.features import IndicatorConfig, compute_features, merge_feedback_features
 from yolovest.models.schemas import OHLCVBar
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
@@ -50,9 +50,21 @@ class ModelRetrainSkill(SkillBase):
         cfg = self.ctx.config.retraining
         min_samples = self.ctx.config.strategy.min_training_samples
 
-        # Step 1-2: Load training data
+        # Step 1-2: Load training data and feedback
         training_data = await self.ctx.db.get_training_dataset()
         predictions_vs_actual = await self.ctx.db.get_prediction_outcomes()
+
+        # Load feedback data for the ML feedback loop
+        feedback_cfg = self.ctx.config.strategy.feedback
+        feedback_data: dict[str, dict[str, float]] | None = None
+        if feedback_cfg.enabled:
+            feedback_data = await self.ctx.db.get_feedback_data(
+                lookback_days=feedback_cfg.lookback_days,
+            )
+            logger.info(
+                "Feedback loop: loaded data for %d symbols (lookback=%dd)",
+                len(feedback_data), feedback_cfg.lookback_days,
+            )
 
         # Guard: minimum training data
         bar_count = len(training_data.get("bars", []))
@@ -75,9 +87,11 @@ class ModelRetrainSkill(SkillBase):
         lookahead_map = {"intraday": 1, "swing": 5}
 
         for model_type in ("intraday", "swing"):
-            # Build feature matrix with model-specific labeling
+            # Build feature matrix with model-specific labeling + feedback features
             lookahead = lookahead_map[model_type]
-            X, y, feat_names = self._prepare_training_data(training_data, lookahead_bars=lookahead)
+            X, y, feat_names, sample_weights = self._prepare_training_data(
+                training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
+            )
             if len(y) < min_samples:
                 logger.warning(
                     "Insufficient %s feature samples (%d, need %d), skipping",
@@ -94,8 +108,11 @@ class ModelRetrainSkill(SkillBase):
                     "status": "training",
                     "samples": len(y),
                 })
+                train_params: dict[str, Any] = {}
+                if sample_weights:
+                    train_params["sample_weights"] = sample_weights
                 metrics = await self.ctx.ml.train(
-                    model_type, X, y, {}, feature_names=feat_names,
+                    model_type, X, y, train_params, feature_names=feat_names,
                 )
                 version = await self.ctx.ml.save_model(model_type, metrics=metrics)
                 await self.broadcast("retrain_progress", {
@@ -153,8 +170,9 @@ class ModelRetrainSkill(SkillBase):
 
     def _prepare_training_data(
         self, training_data: dict[str, Any], lookahead_bars: int = 1,
-    ) -> tuple[list[list[float]], list[int], list[str]]:
-        """Convert raw OHLCV bars into feature matrix X and label array y.
+        feedback_data: dict[str, dict[str, float]] | None = None,
+    ) -> tuple[list[list[float]], list[int], list[str], list[float]]:
+        """Convert raw OHLCV bars into feature matrix X, labels y, and sample weights.
 
         Groups bars by symbol, computes technical features using a sliding window,
         and generates labels based on future price returns over lookahead_bars:
@@ -162,12 +180,17 @@ class ModelRetrainSkill(SkillBase):
           - SELL (0): return < -0.5%
           - HOLD (1): otherwise
 
+        When feedback_data is provided:
+          - Merges per-symbol feedback features (prediction accuracy, trade win rate, etc.)
+          - Computes sample weights: upweights symbols where the model recently performed poorly
+
         Args:
             training_data: Dict with "bars" key containing OHLCV row dicts.
             lookahead_bars: Number of bars to look ahead for labeling.
-                1 for intraday (next-bar), 5 for swing (5-bar).
+            feedback_data: Per-symbol feedback stats from get_feedback_data().
         """
         raw_bars = training_data.get("bars", [])
+        weight_boost = self.ctx.config.strategy.feedback.sample_weight_boost
 
         # Group bars by symbol, preserving time order
         by_symbol: dict[str, list[dict[str, Any]]] = {}
@@ -191,11 +214,24 @@ class ModelRetrainSkill(SkillBase):
         window_size = 50
         X: list[list[float]] = []
         y: list[int] = []
+        sample_weights: list[float] = []
         feature_names: list[str] = []
 
-        for _sym, rows in by_symbol.items():
+        for sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
                 continue
+
+            # Compute sample weight for this symbol based on recent performance
+            sym_weight = 1.0
+            if feedback_data and sym in feedback_data:
+                fb = feedback_data[sym]
+                # Upweight symbols where model accuracy was poor (< 50%)
+                pred_acc = fb.get("pred_accuracy", 0.5)
+                dry_acc = fb.get("dry_run_accuracy", 0.5)
+                # Use worst accuracy signal to determine weight
+                worst_acc = min(pred_acc, dry_acc)
+                if worst_acc < 0.5:
+                    sym_weight = weight_boost
 
             # Convert rows to OHLCVBar objects for compute_features
             bars = [
@@ -217,6 +253,10 @@ class ModelRetrainSkill(SkillBase):
                 if not features:
                     continue
 
+                # Merge feedback features for this symbol
+                if feedback_data:
+                    merge_feedback_features(features, sym, feedback_data)
+
                 # Label: future N-bar return
                 current_close = bars[i].close
                 future_close = bars[i + lookahead_bars].close
@@ -235,8 +275,9 @@ class ModelRetrainSkill(SkillBase):
                     feature_names = sorted_keys
                 X.append([features[k] for k in sorted_keys])
                 y.append(label)
+                sample_weights.append(sym_weight)
 
-        return X, y, feature_names
+        return X, y, feature_names, sample_weights
 
     async def _check_shadow_promotions(self) -> list[dict[str, Any]]:
         """Check if shadow models have completed trial period.

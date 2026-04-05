@@ -80,6 +80,11 @@ class SquareOffSkill(SkillBase):
         if not force:
             positions = [p for p in positions if p["product"] == "MIS"]
 
+        # Never auto-sell locked holdings (even on force/kill switch)
+        locked_symbols = await self.ctx.db.get_locked_symbols()
+        if locked_symbols:
+            positions = [p for p in positions if p["symbol"] not in locked_symbols]
+
         if not positions:
             return SkillResult(
                 success=True, skill_name=self.name,
