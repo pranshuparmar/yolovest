@@ -47,6 +47,7 @@ import type {
   ManualOrder,
   ConfigSections,
   ConfigUpdateResult,
+  HolidaysResponse,
 } from "../types/api";
 
 export const api = {
@@ -418,6 +419,18 @@ export const api = {
       `/api/skills/${skillName}/run`,
       { method: "POST" },
     ),
+
+  // Holidays
+  holidays: () => apiFetch<HolidaysResponse>("/api/holidays"),
+
+  addHoliday: (data: { date: string; early_close?: string }) =>
+    apiFetch<{ success: boolean; date: string; early_close?: string }>("/api/holidays", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  removeHoliday: (date: string) =>
+    apiFetch<{ success: boolean; date: string }>(`/api/holidays/${date}`, { method: "DELETE" }),
 
   // Config (UI-editable settings)
   getConfig: () => apiFetch<ConfigSections>("/api/config"),

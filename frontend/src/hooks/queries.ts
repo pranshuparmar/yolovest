@@ -733,6 +733,35 @@ export function useUnquarantineSymbol() {
   });
 }
 
+// Holidays
+export function useHolidays() {
+  return useQuery({
+    queryKey: ["holidays"],
+    queryFn: api.holidays,
+    staleTime: 60_000,
+  });
+}
+
+export function useAddHoliday() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { date: string; early_close?: string }) => api.addHoliday(data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["holidays"] });
+    },
+  });
+}
+
+export function useRemoveHoliday() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (date: string) => api.removeHoliday(date),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["holidays"] });
+    },
+  });
+}
+
 // Config (UI-editable settings)
 export function useConfig() {
   return useQuery({

@@ -94,6 +94,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("pending", self._cmd_pending))
         self._app.add_handler(CommandHandler("approve", self._cmd_approve))
         self._app.add_handler(CommandHandler("reject", self._cmd_reject))
+        self._app.add_handler(CommandHandler("holiday", self._cmd_holiday))
 
         logger.info("Telegram bot starting (polling)")
         await self._app.initialize()
@@ -175,7 +176,8 @@ class TelegramBot:
             "/kill — Square off everything\n"
             "/resume — Resume trading\n"
             "/auth <token> — Daily Kite auth\n"
-            "/dashboard — High-level overview"
+            "/dashboard — High-level overview\n"
+            "/holiday — Manage holidays"
         )
 
     async def _cmd_status(self, update: Any, context: Any) -> None:
@@ -438,3 +440,126 @@ class TelegramBot:
 
         await self._ctx.db.decide_pending_trade(trade_id, "rejected", "telegram")
         await update.message.reply_text(f"Rejected trade #{trade_id}.")
+
+    async def _cmd_holiday(self, update: Any, context: Any) -> None:
+        """Handle /holiday — manage NSE holidays.
+
+        /holiday              — list upcoming holidays
+        /holiday add 2026-04-14  — add a holiday
+        /holiday add 2026-04-14 13:00  — add early close day
+        /holiday rm 2026-04-14   — remove a holiday
+        """
+        import json as _json
+        import re as _re
+        from datetime import date
+
+        args = context.args or []
+
+        if not args:
+            # List holidays
+            holidays = sorted(self._ctx.config.market_hours.holidays)
+            ec = self._ctx.config.market_hours.early_close_days
+            today = date.today().isoformat()
+            upcoming = [h for h in holidays if h >= today]
+            upcoming_ec = {k: v for k, v in sorted(ec.items()) if k >= today}
+
+            lines = ["<b>NSE Holidays</b>"]
+            if upcoming:
+                for h in upcoming[:15]:
+                    d = date.fromisoformat(h)
+                    lines.append(f"  {h} ({d.strftime('%a')})")
+                if len(upcoming) > 15:
+                    lines.append(f"  ... and {len(upcoming) - 15} more")
+            else:
+                lines.append("  No upcoming holidays")
+
+            if upcoming_ec:
+                lines.append("\n<b>Early Close Days</b>")
+                for d_str, t in list(upcoming_ec.items())[:10]:
+                    d = date.fromisoformat(d_str)
+                    lines.append(f"  {d_str} ({d.strftime('%a')}) closes {t}")
+
+            lines.append(
+                "\n<i>/holiday add YYYY-MM-DD</i> — add holiday\n"
+                "<i>/holiday add YYYY-MM-DD HH:MM</i> — early close\n"
+                "<i>/holiday rm YYYY-MM-DD</i> — remove"
+            )
+            await update.message.reply_html("\n".join(lines))
+            return
+
+        action = args[0].lower()
+
+        if action == "add" and len(args) >= 2:
+            date_str = args[1]
+            if not _re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+                await update.message.reply_text("Invalid date. Use YYYY-MM-DD format.")
+                return
+
+            early_close = args[2] if len(args) >= 3 else None
+            if early_close and not _re.match(r"^\d{2}:\d{2}$", early_close):
+                await update.message.reply_text("Invalid time. Use HH:MM format.")
+                return
+
+            if early_close:
+                ec = dict(self._ctx.config.market_hours.early_close_days)
+                ec[date_str] = early_close
+                self._ctx.config.market_hours.early_close_days = ec
+                await self._ctx.db.set_config(
+                    "market_hours.early_close_days", _json.dumps(ec),
+                )
+                from yolovest.context import MarketHoursChecker
+                self._ctx.market_hours = MarketHoursChecker(self._ctx.config)
+                await update.message.reply_html(
+                    f"Added early close: <b>{date_str}</b> at {early_close}"
+                )
+            else:
+                holidays = list(self._ctx.config.market_hours.holidays)
+                if date_str not in holidays:
+                    holidays.append(date_str)
+                    holidays.sort()
+                self._ctx.config.market_hours.holidays = holidays
+                await self._ctx.db.set_config(
+                    "market_hours.holidays", _json.dumps(holidays),
+                )
+                from yolovest.context import MarketHoursChecker
+                self._ctx.market_hours = MarketHoursChecker(self._ctx.config)
+                d = date.fromisoformat(date_str)
+                await update.message.reply_html(
+                    f"Added holiday: <b>{date_str}</b> ({d.strftime('%A')})"
+                )
+            return
+
+        if action == "rm" and len(args) >= 2:
+            date_str = args[1]
+            removed = False
+
+            holidays = list(self._ctx.config.market_hours.holidays)
+            if date_str in holidays:
+                holidays.remove(date_str)
+                self._ctx.config.market_hours.holidays = holidays
+                await self._ctx.db.set_config(
+                    "market_hours.holidays", _json.dumps(holidays),
+                )
+                removed = True
+
+            ec = dict(self._ctx.config.market_hours.early_close_days)
+            if date_str in ec:
+                del ec[date_str]
+                self._ctx.config.market_hours.early_close_days = ec
+                await self._ctx.db.set_config(
+                    "market_hours.early_close_days", _json.dumps(ec),
+                )
+                removed = True
+
+            if removed:
+                from yolovest.context import MarketHoursChecker
+                self._ctx.market_hours = MarketHoursChecker(self._ctx.config)
+                await update.message.reply_html(f"Removed: <b>{date_str}</b>")
+            else:
+                await update.message.reply_text(f"{date_str} not found in holidays.")
+            return
+
+        await update.message.reply_text(
+            "Usage:\n/holiday — list\n/holiday add YYYY-MM-DD — add\n"
+            "/holiday add YYYY-MM-DD HH:MM — early close\n/holiday rm YYYY-MM-DD — remove"
+        )

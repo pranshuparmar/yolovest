@@ -982,6 +982,94 @@ def create_app(ctx: AppContext) -> FastAPI:
         return await ctx.db.get_earnings_events(symbol=symbol, days=days)
 
     # ------------------------------------------------------------------
+    # Holidays & Early Close Days
+    # ------------------------------------------------------------------
+
+    @app.get("/api/holidays")
+    async def get_holidays(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Return holidays and early close days from live config."""
+        return {
+            "holidays": ctx.config.market_hours.holidays,
+            "early_close_days": ctx.config.market_hours.early_close_days,
+        }
+
+    @app.post("/api/holidays")
+    async def add_holiday(
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Add a holiday or early close day.
+
+        Body: {"date": "YYYY-MM-DD"} for full holiday
+              {"date": "YYYY-MM-DD", "early_close": "13:00"} for early close
+        """
+        import re as _re
+
+        body = await request.json()
+        date_str: str = body.get("date", "").strip()
+        early_close: str | None = body.get("early_close")
+
+        if not _re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+            raise HTTPException(400, "Invalid date format, expected YYYY-MM-DD")
+
+        if early_close:
+            if not _re.match(r"^\d{2}:\d{2}$", early_close):
+                raise HTTPException(400, "Invalid time format, expected HH:MM")
+            ec = dict(ctx.config.market_hours.early_close_days)
+            ec[date_str] = early_close
+            ctx.config.market_hours.early_close_days = ec
+            # Persist to DB
+            import json as _json
+            await ctx.db.set_config("market_hours.early_close_days", _json.dumps(ec))
+        else:
+            holidays = list(ctx.config.market_hours.holidays)
+            if date_str not in holidays:
+                holidays.append(date_str)
+                holidays.sort()
+            ctx.config.market_hours.holidays = holidays
+            import json as _json
+            await ctx.db.set_config("market_hours.holidays", _json.dumps(holidays))
+
+        # Refresh market hours checker
+        ctx.market_hours = MarketHoursChecker(ctx.config)
+        logger.info("Holiday added: %s (early_close=%s)", date_str, early_close)
+        return {"success": True, "date": date_str, "early_close": early_close}
+
+    @app.delete("/api/holidays/{date_str}")
+    async def remove_holiday(
+        date_str: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Remove a holiday or early close day."""
+        import json as _json
+
+        removed = False
+        # Remove from holidays list
+        holidays = list(ctx.config.market_hours.holidays)
+        if date_str in holidays:
+            holidays.remove(date_str)
+            ctx.config.market_hours.holidays = holidays
+            await ctx.db.set_config("market_hours.holidays", _json.dumps(holidays))
+            removed = True
+
+        # Remove from early close days
+        ec = dict(ctx.config.market_hours.early_close_days)
+        if date_str in ec:
+            del ec[date_str]
+            ctx.config.market_hours.early_close_days = ec
+            await ctx.db.set_config("market_hours.early_close_days", _json.dumps(ec))
+            removed = True
+
+        if not removed:
+            raise HTTPException(404, f"Date {date_str} not found in holidays or early close days")
+
+        ctx.market_hours = MarketHoursChecker(ctx.config)
+        logger.info("Holiday removed: %s", date_str)
+        return {"success": True, "date": date_str}
+
+    # ------------------------------------------------------------------
     # News Feed & Sentiment
     # ------------------------------------------------------------------
 

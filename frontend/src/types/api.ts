@@ -569,6 +569,11 @@ export interface DryRunResult {
   warning?: string;
 }
 
+export interface HolidaysResponse {
+  holidays: string[];
+  early_close_days: Record<string, string>;
+}
+
 export interface ConfigSections {
   sections: Record<string, Record<string, unknown>>;
 }
