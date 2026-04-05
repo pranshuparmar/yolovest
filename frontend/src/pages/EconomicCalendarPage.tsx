@@ -252,7 +252,7 @@ function DayCell({
             >
               ✕
             </button>
-          ) : (
+          ) : !weekend && (
             <button
               onClick={() => onAddHoliday(dateStr)}
               className="text-gray-600 hover:text-gray-300 text-[10px] px-1 rounded hover:bg-gray-800"
@@ -345,7 +345,7 @@ function WeekView({
                 weekend && !events.some((e) => e.type === "holiday") && "bg-gray-800/40",
               )}
             >
-              {events.length === 0 && (
+              {events.length === 0 && !weekend && (
                 <button
                   onClick={() => onAddHoliday(ds)}
                   className="w-full text-center text-gray-700 hover:text-gray-400 text-xs py-8 hover:bg-gray-800/50 rounded transition-colors"

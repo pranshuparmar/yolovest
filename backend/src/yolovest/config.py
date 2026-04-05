@@ -482,6 +482,13 @@ FILE_ONLY_KEYS: set[str] = {
     "log.backup_count",
 }
 
+# Keys managed via dedicated UI (Calendar page), hidden from Settings page
+# but still stored in DB and editable via their own API endpoints.
+SETTINGS_HIDDEN_KEYS: set[str] = {
+    "market_hours.holidays",
+    "market_hours.early_close_days",
+}
+
 
 def _flatten_model(
     model: BaseModel, prefix: str = "",
@@ -598,7 +605,7 @@ def config_to_ui_sections(config: AppConfig) -> dict[str, dict[str, Any]]:
     flat = _flatten_model(config)
     sections: dict[str, dict[str, Any]] = {}
     for key, value in sorted(flat.items()):
-        if key in FILE_ONLY_KEYS:
+        if key in FILE_ONLY_KEYS or key in SETTINGS_HIDDEN_KEYS:
             continue
         section = key.split(".")[0]
         if section not in sections:
