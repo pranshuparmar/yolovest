@@ -456,6 +456,9 @@ async def async_main(args: argparse.Namespace) -> None:
                 db_values = await ctx.db.get_all_config()
                 ctx.config = apply_db_config(ctx.config, db_values)
                 ctx.market_hours = MarketHoursChecker(ctx.config)
+                # Update Notifier's config reference (it holds the old object)
+                if hasattr(ctx.notify, "_config"):
+                    ctx.notify._config = ctx.config
                 logger.info("Loaded %d config values from DB", len(db_values))
         except Exception:
             logger.warning("Failed to load config from DB, using file defaults", exc_info=True)

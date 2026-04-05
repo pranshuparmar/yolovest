@@ -2295,6 +2295,9 @@ def create_app(ctx: AppContext) -> FastAPI:
         old_config = ctx.config
         ctx.config = new_config
         ctx.market_hours = MarketHoursChecker(ctx.config)
+        # Sync Notifier's config reference
+        if hasattr(ctx.notify, "_config"):
+            ctx.notify._config = ctx.config
 
         # Side effects for specific keys
         if any(k.startswith("log.") for k in updates):
