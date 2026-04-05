@@ -481,8 +481,9 @@ class TelegramBot:
 
             lines.append(
                 "\n<i>/holiday add YYYY-MM-DD</i> — add holiday\n"
+                "<i>/holiday add today|tomorrow</i> — shorthand\n"
                 "<i>/holiday add YYYY-MM-DD HH:MM</i> — early close\n"
-                "<i>/holiday rm YYYY-MM-DD</i> — remove"
+                "<i>/holiday rm YYYY-MM-DD|today|tomorrow</i> — remove"
             )
             await update.message.reply_html("\n".join(lines))
             return
@@ -490,9 +491,15 @@ class TelegramBot:
         action = args[0].lower()
 
         if action == "add" and len(args) >= 2:
-            date_str = args[1]
+            date_str = args[1].lower()
+            # Support "today" and "tomorrow" aliases
+            from datetime import timedelta
+            if date_str == "today":
+                date_str = date.today().isoformat()
+            elif date_str == "tomorrow":
+                date_str = (date.today() + timedelta(days=1)).isoformat()
             if not _re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
-                await update.message.reply_text("Invalid date. Use YYYY-MM-DD format.")
+                await update.message.reply_text("Invalid date. Use YYYY-MM-DD, 'today', or 'tomorrow'.")
                 return
 
             early_close = args[2] if len(args) >= 3 else None
@@ -530,7 +537,12 @@ class TelegramBot:
             return
 
         if action == "rm" and len(args) >= 2:
-            date_str = args[1]
+            date_str = args[1].lower()
+            from datetime import timedelta
+            if date_str == "today":
+                date_str = date.today().isoformat()
+            elif date_str == "tomorrow":
+                date_str = (date.today() + timedelta(days=1)).isoformat()
             removed = False
 
             holidays = list(self._ctx.config.market_hours.holidays)
@@ -561,5 +573,7 @@ class TelegramBot:
 
         await update.message.reply_text(
             "Usage:\n/holiday — list\n/holiday add YYYY-MM-DD — add\n"
-            "/holiday add YYYY-MM-DD HH:MM — early close\n/holiday rm YYYY-MM-DD — remove"
+            "/holiday add today|tomorrow — shorthand\n"
+            "/holiday add YYYY-MM-DD HH:MM — early close\n"
+            "/holiday rm YYYY-MM-DD|today|tomorrow — remove"
         )
