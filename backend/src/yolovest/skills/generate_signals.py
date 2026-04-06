@@ -242,9 +242,9 @@ class GenerateSignalsSkill(SkillBase):
                 # Adjust SELL signals: force to MIS/intraday if user doesn't hold the stock
                 from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-                holding_period, product = adjust_sell_for_holdings(
+                holding_period, product, expected_days = adjust_sell_for_holdings(
                     prediction.signal_type, holding_period, product,
-                    symbol, held_symbols,
+                    symbol, held_symbols, expected_days,
                 )
 
                 # Override target/SL with ATR multipliers interpolated for holding duration

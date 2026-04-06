@@ -1940,9 +1940,9 @@ def create_app(ctx: AppContext) -> FastAPI:
                     continue
 
                 # Adjust SELL: force to MIS/intraday if user doesn't hold the stock
-                holding_period, product = adjust_sell_for_holdings(
+                holding_period, product, expected_days = adjust_sell_for_holdings(
                     prediction.signal_type, holding_period, product,
-                    symbol, held_symbols,
+                    symbol, held_symbols, expected_days,
                 )
 
                 # Apply ATR multipliers interpolated for holding duration

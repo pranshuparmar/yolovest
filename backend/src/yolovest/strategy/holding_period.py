@@ -205,7 +205,8 @@ def adjust_sell_for_holdings(
     product: str,
     symbol: str,
     held_symbols: set[str],
-) -> tuple[str, str]:
+    expected_days: int = 0,
+) -> tuple[str, str, int]:
     """Adjust SELL signals based on whether the user holds the stock.
 
     - If the user holds the stock, SELL can use any product/period (selling owned shares).
@@ -219,19 +220,20 @@ def adjust_sell_for_holdings(
         product: Current product decision (e.g. "CNC")
         symbol: Stock symbol
         held_symbols: Set of symbols the user currently holds (open positions + broker holdings)
+        expected_days: Current expected holding days
 
     Returns:
-        (holding_period, product) — possibly overridden to ("intraday", "MIS") for naked shorts
+        (holding_period, product, expected_days) — possibly overridden to ("intraday", "MIS", 0) for naked shorts
     """
     if signal_type != "SELL":
-        return (holding_period, product)
+        return (holding_period, product, expected_days)
 
     if symbol in held_symbols:
         # User owns the stock — SELL is exiting a position, any product/period is fine
-        return (holding_period, product)
+        return (holding_period, product, expected_days)
 
     # Short sell — must be intraday MIS (no overnight short positions for retail)
-    return ("intraday", "MIS")
+    return ("intraday", "MIS", 0)
 
 
 def get_atr_multipliers(holding_period: str, holding_period_config: Any) -> Any:

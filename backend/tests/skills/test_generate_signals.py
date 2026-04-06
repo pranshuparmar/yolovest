@@ -403,37 +403,42 @@ class TestSellHoldingsAdjustment:
     def test_sell_without_holdings_forced_to_mis(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product = adjust_sell_for_holdings("SELL", "short_term", "CNC", "BEL", held_symbols=set())
+        hp, product, days = adjust_sell_for_holdings("SELL", "short_term", "CNC", "BEL", held_symbols=set(), expected_days=4)
         assert hp == "intraday"
         assert product == "MIS"
+        assert days == 0
 
     def test_sell_with_holdings_keeps_cnc(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product = adjust_sell_for_holdings("SELL", "short_term", "CNC", "BEL", held_symbols={"BEL", "TCS"})
+        hp, product, days = adjust_sell_for_holdings("SELL", "short_term", "CNC", "BEL", held_symbols={"BEL", "TCS"}, expected_days=4)
         assert hp == "short_term"
         assert product == "CNC"
+        assert days == 4
 
     def test_sell_long_term_without_holdings_forced_to_mis(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product = adjust_sell_for_holdings("SELL", "long_term", "CNC", "RELIANCE", held_symbols=set())
+        hp, product, days = adjust_sell_for_holdings("SELL", "long_term", "CNC", "RELIANCE", held_symbols=set(), expected_days=10)
         assert hp == "intraday"
         assert product == "MIS"
+        assert days == 0
 
     def test_buy_unaffected_regardless_of_holdings(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product = adjust_sell_for_holdings("BUY", "short_term", "CNC", "RELIANCE", held_symbols=set())
+        hp, product, days = adjust_sell_for_holdings("BUY", "short_term", "CNC", "RELIANCE", held_symbols=set(), expected_days=4)
         assert hp == "short_term"
         assert product == "CNC"
+        assert days == 4
 
     def test_hold_unaffected(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product = adjust_sell_for_holdings("HOLD", "long_term", "CNC", "TCS", held_symbols=set())
+        hp, product, days = adjust_sell_for_holdings("HOLD", "long_term", "CNC", "TCS", held_symbols=set(), expected_days=10)
         assert hp == "long_term"
         assert product == "CNC"
+        assert days == 10
 
     async def test_sell_signal_gets_mis_in_pipeline(self, signal_skill):
         """Full pipeline: SELL signal for non-held stock -> MIS/intraday."""
