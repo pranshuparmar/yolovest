@@ -7,20 +7,24 @@ Flow:
 1. Load latest OHLCV, volume, news sentiment, and fundamental data from DB
 2. Scan NSE universe — apply volume filter (scanning.min_avg_daily_volume)
 3. Filter out: illiquid stocks, F&O ban list, pending corporate actions
-4. Score each stock using configurable weighted algorithm (scanning.weights):
-   - Technical score (default 40%): trend strength, breakout patterns
+4. Compute technical features (RSI, MACD, ATR, SuperTrend) from OHLCV bars
+5. Score each stock using configurable weighted algorithm (scanning.weights):
+   - Technical score (default 35%): trend strength, breakout patterns
    - Volume/momentum (default 25%): relative volume, delivery %, momentum indicators
-   - News sentiment (default 20%): Gemini sentiment from ingest-data
+   - News sentiment (default 15%): Gemini sentiment from ingest-data
    - Fundamental quality (default 15%): PE, debt ratio, promoter holding
-5. Rank and shortlist top N stocks (scanning.shortlist_size)
-6. Track sector rotation — flag sectors showing strength/weakness
-7. Use Gemini to cross-validate shortlist against market narrative
-8. Update dynamic watchlist in DB
+   - Volatility (default 10%): ATR% preference bell curve
+6. Rank and shortlist top N stocks (scanning.shortlist_size)
+7. Track sector rotation — flag sectors showing strength/weakness
+8. Use Gemini to cross-validate shortlist against market narrative
+9. Update dynamic watchlist in DB
 """
 
+import asyncio
 import logging
 from typing import Any
 
+from yolovest.data.features import IndicatorConfig, compute_features
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 logger = logging.getLogger(__name__)
@@ -57,7 +61,10 @@ class MarketScanSkill(SkillBase):
         # Step 3: Filter out banned / corporate action stocks
         filtered = self._apply_exclusion_filters(liquid)
 
-        # Step 4: Compute sub-scores and weighted composite
+        # Step 4: Enrich with technical indicators from OHLCV bars
+        filtered = await self._enrich_with_features(filtered)
+
+        # Step 5: Compute sub-scores and weighted composite
         scored = []
         for stock in filtered:
             sub = self._compute_sub_scores(stock)
@@ -125,6 +132,60 @@ class MarketScanSkill(SkillBase):
         # F&O ban list and corp actions would be fetched from NSE in production.
         # For now, pass through — the volume filter already removes illiquid stocks.
         return stocks
+
+    async def _enrich_with_features(
+        self, stocks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Compute technical indicators for each stock from OHLCV bars.
+
+        Fetches daily bars and runs compute_features() to add RSI, MACD,
+        ATR, SuperTrend, etc. to each stock dict for scoring. Stocks with
+        insufficient data are kept but will score neutral on technical.
+        """
+        indicator_cfg = IndicatorConfig(
+            rsi=self.ctx.config.strategy.indicators.rsi,
+            macd=self.ctx.config.strategy.indicators.macd,
+            bollinger_bands=self.ctx.config.strategy.indicators.bollinger_bands,
+            vwap=self.ctx.config.strategy.indicators.vwap,
+            atr=self.ctx.config.strategy.indicators.atr,
+            volume_profile=self.ctx.config.strategy.indicators.volume_profile,
+            obv=self.ctx.config.strategy.indicators.obv,
+            supertrend=self.ctx.config.strategy.indicators.supertrend,
+        )
+
+        async def _enrich_one(stock: dict[str, Any]) -> dict[str, Any]:
+            symbol = stock.get("symbol", "")
+            try:
+                bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=60)
+                if len(bars) < 20:
+                    return stock  # not enough data, keep with defaults
+                features = compute_features(bars, indicator_cfg)
+                if features:
+                    stock["rsi"] = features.get("rsi_14")
+                    stock["macd_histogram"] = features.get("macd_histogram")
+                    stock["supertrend_direction"] = features.get("supertrend_direction")
+                    stock["atr_pct"] = features.get("atr_pct", 0.0)
+                    # Relative volume: today's volume vs 20-day avg
+                    if bars and stock.get("avg_daily_volume"):
+                        today_vol = bars[-1].volume if bars[-1].volume else 0
+                        avg_vol = stock["avg_daily_volume"]
+                        if avg_vol > 0:
+                            stock["relative_volume"] = today_vol / avg_vol
+            except Exception as e:
+                logger.debug("Feature enrichment failed for %s: %s", symbol, e)
+            return stock
+
+        # Run enrichment concurrently (bounded to avoid overwhelming DB)
+        semaphore = asyncio.Semaphore(20)
+
+        async def _bounded(stock: dict[str, Any]) -> dict[str, Any]:
+            async with semaphore:
+                return await _enrich_one(stock)
+
+        enriched = await asyncio.gather(*[_bounded(s) for s in stocks])
+        enriched_count = sum(1 for s in enriched if s.get("rsi") is not None)
+        logger.info("Enriched %d/%d stocks with technical indicators", enriched_count, len(stocks))
+        return list(enriched)
 
     def _compute_sub_scores(self, stock: dict[str, Any]) -> dict[str, Any]:
         """Compute normalized [0, 1] sub-scores from raw data."""
