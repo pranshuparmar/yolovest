@@ -18,12 +18,12 @@ logger = logging.getLogger(__name__)
 # ATR multiplier interpolation anchors: (days, target_mult, sl_mult)
 # Used to interpolate ATR multipliers for any holding duration.
 _INTERP_ANCHORS = [
-    (0, 1.5, 0.75),   # intraday
-    (3, 2.0, 1.0),    # short swing
-    (5, 3.0, 1.5),    # week
-    (15, 4.0, 1.8),   # 2-3 weeks
-    (44, 5.0, 2.0),   # ~2 months
-    (66, 6.0, 2.5),   # ~3 months
+    (0, 0.75, 0.5),   # intraday — capture half the daily range
+    (3, 1.5, 0.75),   # short swing
+    (5, 2.5, 1.2),    # week
+    (15, 3.5, 1.5),   # 2-3 weeks
+    (44, 4.5, 2.0),   # ~2 months
+    (66, 5.5, 2.5),   # ~3 months
 ]
 
 
