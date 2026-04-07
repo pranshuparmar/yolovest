@@ -484,11 +484,12 @@ FILE_ONLY_KEYS: set[str] = {
     "log.backup_count",
 }
 
-# Keys managed via dedicated UI (Calendar page), hidden from Settings page
-# but still stored in DB and editable via their own API endpoints.
+# Keys managed via dedicated UI or internal-only, hidden from Settings page
+# but still stored in DB.
 SETTINGS_HIDDEN_KEYS: set[str] = {
     "market_hours.holidays",
     "market_hours.early_close_days",
+    "strategy.default_trade_type",  # legacy ML model selector, handled automatically
 }
 
 
