@@ -2325,16 +2325,22 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def list_skills(
         _user: str = Depends(verify_credentials),
     ) -> list[dict[str, str | None]]:
-        """List all registered skills with metadata."""
+        """List all registered skills with metadata and runtime schedules."""
         from yolovest.skills import SKILL_REGISTRY
 
         out = []
         for name, cls in sorted(SKILL_REGISTRY.items()):
+            # Instantiate to get runtime schedule (set from config in __init__)
+            try:
+                instance = cls(ctx)
+                schedule = instance.schedule
+            except Exception:
+                schedule = cls.schedule
             out.append({
                 "name": name,
                 "description": cls.description,
                 "trigger": cls.trigger.value,
-                "schedule": cls.schedule,
+                "schedule": schedule,
             })
         return out
 
