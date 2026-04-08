@@ -3527,7 +3527,15 @@ class Database:
             date_to: Optional end date (YYYY-MM-DD, exclusive).
         """
         query = (
-            "SELECT s.*, t.pnl, t.quantity, t.fill_price, t.slippage, "
+            "SELECT s.*, "
+            "COALESCE(t.pnl, CASE "
+            "  WHEN t.status = 'closed' AND t.exit_price IS NOT NULL THEN "
+            "    CASE WHEN s.signal_type = 'BUY' "
+            "      THEN (t.exit_price - t.fill_price) * t.quantity "
+            "      ELSE (t.fill_price - t.exit_price) * t.quantity "
+            "    END "
+            "END) as pnl, "
+            "t.quantity, t.fill_price, t.slippage, t.status as trade_status, "
             "COALESCE(w.sector, 'Unknown') as sector "
             "FROM signals s "
             "LEFT JOIN trades t ON t.trade_id = COALESCE("

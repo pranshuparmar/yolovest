@@ -418,6 +418,7 @@ export interface RiskSimParams {
 export interface RiskSimResult {
   params: RiskSimParams;
   signals_available: number;
+  signals_without_pnl: number;
   results: {
     trades_taken: number;
     trades_skipped: number;
