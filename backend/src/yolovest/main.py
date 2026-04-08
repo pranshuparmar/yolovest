@@ -650,9 +650,9 @@ async def async_main(args: argparse.Namespace) -> None:
     )
 
     await ctx.notify.send(
-        f"YoloVest started in {config.mode} mode. "
-        f"Heartbeat interval: {config.heartbeat.market_hours_interval_min}min (market hours), "
-        f"{config.heartbeat.off_hours_interval_min}min (off hours)."
+        f"YoloVest started in {ctx.config.mode} mode. "
+        f"Heartbeat interval: {ctx.config.heartbeat.market_hours_interval_min}min (market hours), "
+        f"{ctx.config.heartbeat.off_hours_interval_min}min (off hours)."
         + f"\nDashboard: {dashboard_url}"
     )
 
