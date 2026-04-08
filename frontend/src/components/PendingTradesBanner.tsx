@@ -7,6 +7,7 @@ function fmt(n: number, d = 2) {
 }
 
 interface Override {
+  [key: string]: unknown;
   signal_type?: string;
   entry_price?: number;
   target_price?: number;
