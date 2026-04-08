@@ -75,6 +75,20 @@ class LLMReviewSkill(SkillBase):
                     },
                 )
             elif review.decision == "RESIZE":
+                if not isinstance(review.adjusted_size, int) or review.adjusted_size <= 0:
+                    logger.warning(
+                        "llm-review: REJECT %s — LLM returned invalid adjusted_size=%s",
+                        signal["symbol"], review.adjusted_size,
+                    )
+                    return SkillResult(
+                        success=True,
+                        skill_name=self.name,
+                        data={
+                            "approved": False,
+                            "signal": signal,
+                            "llm_reasoning": f"Invalid adjusted_size: {review.adjusted_size}",
+                        },
+                    )
                 logger.info(
                     "llm-review: RESIZE %s %d→%d — %s",
                     signal["symbol"], signal["position_size"],

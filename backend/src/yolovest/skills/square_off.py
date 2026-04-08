@@ -196,9 +196,22 @@ class SquareOffSkill(SkillBase):
             product=pos.get("product", "MIS"),
         )
 
-        # Get fill price
-        order_status = await self.ctx.broker.get_order_status(exit_order_id)
-        exit_price = order_status.get("average_price")
+        # Get fill price — wait for fill if not immediate
+        exit_price = None
+        for _ in range(10):
+            order_status = await self.ctx.broker.get_order_status(exit_order_id)
+            exit_price = order_status.get("average_price")
+            if exit_price and exit_price > 0:
+                break
+            await asyncio.sleep(0.5)
+
+        if not exit_price or exit_price <= 0:
+            # Fallback: use last known price for PnL estimate
+            logger.warning(
+                "square-off: no fill price for %s exit order %s, using entry price",
+                pos["symbol"], exit_order_id,
+            )
+            exit_price = pos["entry_price"]
 
         # Compute PnL with transaction costs
         qty = pos["quantity"]
@@ -213,7 +226,7 @@ class SquareOffSkill(SkillBase):
             entry, exit_price, qty, product=product,
             cost_config=self.ctx.config.transaction_costs,
         )
-        pnl = gross_pnl - costs
+        pnl = round(gross_pnl - costs, 2)
 
         await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)
         return {"symbol": pos["symbol"], "pnl": pnl}

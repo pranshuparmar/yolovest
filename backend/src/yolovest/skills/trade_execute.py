@@ -251,8 +251,8 @@ class TradeExecuteSkill(SkillBase):
                     # Wait for first leg to fill
                     await asyncio.sleep(0.5)
                     leg1_status = await self.ctx.broker.get_order_status(leg1_order_id)
-                    leg1_filled = leg1_status.get("filled_quantity", leg1_qty)
-                    leg1_fill_price = leg1_status.get("average_price", order_price)
+                    leg1_filled = leg1_status.get("filled_quantity") or 0
+                    leg1_fill_price = leg1_status.get("average_price") or order_price
 
                     if leg1_filled == 0:
                         # First leg didn't fill — fall back to market order
@@ -266,8 +266,8 @@ class TradeExecuteSkill(SkillBase):
                         )
                         await asyncio.sleep(1)
                         leg1_status = await self.ctx.broker.get_order_status(leg1_order_id)
-                        leg1_filled = leg1_status.get("filled_quantity", leg1_qty)
-                        leg1_fill_price = leg1_status.get("average_price", order_price)
+                        leg1_filled = leg1_status.get("filled_quantity") or leg1_qty
+                        leg1_fill_price = leg1_status.get("average_price") or order_price
 
                     # Wait before placing second leg
                     await asyncio.sleep(scaled_cfg.second_leg_delay_sec)
@@ -294,9 +294,9 @@ class TradeExecuteSkill(SkillBase):
                     for _ in range(cfg.order_timeout_sec):
                         await asyncio.sleep(1)
                         leg2_status = await self.ctx.broker.get_order_status(leg2_order_id)
-                        leg2_filled = leg2_status.get("filled_quantity", 0)
+                        leg2_filled = leg2_status.get("filled_quantity") or 0
                         if leg2_filled >= leg2_qty:
-                            leg2_fill_price = leg2_status.get("average_price", leg2_price)
+                            leg2_fill_price = leg2_status.get("average_price") or leg2_price
                             break
 
                     if leg2_filled < leg2_qty:
@@ -317,12 +317,12 @@ class TradeExecuteSkill(SkillBase):
                         ) / actual_qty
                         order_id = leg1_order_id  # primary order for tracking
 
-                    # Place SL order for actual filled quantity
+                    # Place SL-M (stop-loss market) order for actual filled quantity
                     sl_order_id = await self.ctx.broker.place_order(
                         symbol=signal["symbol"],
                         side=sl_side,
                         quantity=actual_qty,
-                        order_type="SL",
+                        order_type="SL-M",
                         trigger_price=signal["stop_loss_price"],
                         product=product,
                     )
@@ -390,7 +390,7 @@ class TradeExecuteSkill(SkillBase):
                         symbol=signal["symbol"],
                         side="SELL" if signal["signal_type"] == "BUY" else "BUY",
                         quantity=signal["position_size"],
-                        order_type="SL",
+                        order_type="SL-M",
                         trigger_price=signal["stop_loss_price"],
                         product=product,
                     )
@@ -400,13 +400,13 @@ class TradeExecuteSkill(SkillBase):
                     order_status = await self.ctx.broker.get_order_status(order_id)
 
                     # Check for partial fill within timeout
-                    filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                    filled_qty = order_status.get("filled_quantity") or 0
                     if filled_qty < signal["position_size"]:
                         # Wait up to order_timeout_sec for full fill
                         for _ in range(cfg.order_timeout_sec):
                             await asyncio.sleep(1)
                             order_status = await self.ctx.broker.get_order_status(order_id)
-                            filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                            filled_qty = order_status.get("filled_quantity") or 0
                             if filled_qty >= signal["position_size"]:
                                 break
 
@@ -428,7 +428,7 @@ class TradeExecuteSkill(SkillBase):
                                 )
                                 await asyncio.sleep(1)
                                 order_status = await self.ctx.broker.get_order_status(order_id)
-                                filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                                filled_qty = order_status.get("filled_quantity") or signal["position_size"]
                             else:
                                 # Partial fill — adjust SL order to match filled quantity
                                 await self.ctx.broker.cancel_order(sl_order_id)
@@ -436,15 +436,15 @@ class TradeExecuteSkill(SkillBase):
                                     symbol=signal["symbol"],
                                     side="SELL" if signal["signal_type"] == "BUY" else "BUY",
                                     quantity=filled_qty,
-                                    order_type="SL",
+                                    order_type="SL-M",
                                     trigger_price=signal["stop_loss_price"],
                                     product=product,
                                 )
 
                     actual_qty = filled_qty if filled_qty > 0 else signal["position_size"]
 
-                    # Compute slippage
-                    fill_price = order_status.get("average_price", signal["entry_price"])
+                    # Compute slippage — use entry price if avg_price is 0/None (unfilled)
+                    fill_price = order_status.get("average_price") or signal["entry_price"]
                     slippage = abs(fill_price - signal["entry_price"])
 
                     trade = {

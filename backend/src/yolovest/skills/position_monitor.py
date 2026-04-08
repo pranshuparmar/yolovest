@@ -174,10 +174,16 @@ class PositionMonitorSkill(SkillBase):
                     else:
                         new_sl = min(entry, current_price + step)
 
-                    if self._is_better_sl(pos["signal_type"], new_sl, sl):
-                        await self.ctx.broker.modify_sl_order(pos["sl_order_id"], new_sl)
-                        await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
-                        trails_modified += 1
+                    if self._is_better_sl(pos["signal_type"], new_sl, sl) and pos.get("sl_order_id"):
+                        try:
+                            await self.ctx.broker.modify_sl_order(pos["sl_order_id"], new_sl)
+                            await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+                            trails_modified += 1
+                        except Exception:
+                            logger.warning(
+                                "Failed to trail SL for %s (will retry next cycle)",
+                                symbol, exc_info=True,
+                            )
 
             # Holding period expiry check
             expiry_result = await self._check_holding_expiry(
@@ -503,15 +509,21 @@ class PositionMonitorSkill(SkillBase):
             else:
                 new_sl = entry - buffer
 
-            if self._is_better_sl(pos["signal_type"], new_sl, pos["stop_loss_price"]):
-                await self.ctx.broker.modify_sl_order(pos.get("sl_order_id"), new_sl)
-                await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
-                logger.info(
-                    "position-monitor: HOLDING EXPIRY %s — in profit (%.1f%%), "
-                    "SL tightened to %.2f",
-                    symbol, pnl_pct, new_sl,
-                )
-                return {**result_base, "action": "tightened", "new_sl": new_sl}
+            if self._is_better_sl(pos["signal_type"], new_sl, pos["stop_loss_price"]) and pos.get("sl_order_id"):
+                try:
+                    await self.ctx.broker.modify_sl_order(pos["sl_order_id"], new_sl)
+                    await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+                    logger.info(
+                        "position-monitor: HOLDING EXPIRY %s — in profit (%.1f%%), "
+                        "SL tightened to %.2f",
+                        symbol, pnl_pct, new_sl,
+                    )
+                    return {**result_base, "action": "tightened", "new_sl": new_sl}
+                except Exception:
+                    logger.warning(
+                        "Failed to tighten SL for holding expiry %s (will retry)",
+                        symbol, exc_info=True,
+                    )
             return None  # SL already tighter than breakeven
 
         # At a loss or near breakeven — close the position

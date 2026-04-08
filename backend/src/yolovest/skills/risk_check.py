@@ -249,7 +249,7 @@ class RiskCheckSkill(SkillBase):
             penalty = min(excess * 10, 0.30)
             return penalty
         except Exception:
-            logger.debug("Slippage penalty calc failed for %s", signal.get("symbol"), exc_info=True)
+            logger.debug("Slippage penalty calc failed for %s", symbol, exc_info=True)
             return 0.0
 
     def _reject(self, signal: dict[str, Any], reason: str) -> SkillResult:
