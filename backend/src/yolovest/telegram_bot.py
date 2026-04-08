@@ -166,13 +166,35 @@ class TelegramBot:
     # ------------------------------------------------------------------
 
     async def _cmd_start(self, update: Any, context: Any) -> None:
-        """Handle /start — same as /help."""
-        await self._cmd_help(update, context)
+        """Handle /start — quick status summary."""
+        mode = self._ctx.config.mode.upper()
+        kill_active = await self._ctx.db.is_kill_switch_active()
+        positions = await self._ctx.db.get_open_positions()
+        trades = await self._ctx.db.get_todays_trades()
+        pending = await self._ctx.db.get_pending_trades()
+        total_pnl = sum(t.get("pnl", 0) for t in trades if t.get("pnl") is not None)
+        sign = "+" if total_pnl >= 0 else ""
+
+        msg = (
+            f"<b>YoloVest</b> — {mode}"
+            f"{' | PAUSED' if kill_active else ''}\n"
+            f"Positions: {len(positions)} | "
+            f"Trades today: {len(trades)} | "
+            f"PnL: {sign}₹{_fmt_inr(total_pnl)}\n"
+        )
+        if pending:
+            msg += f"<b>{len(pending)} pending</b> — /pending to review\n"
+        msg += "\nType /help for commands"
+        await update.message.reply_html(msg)
 
     async def _cmd_help(self, update: Any, context: Any) -> None:
         """Handle /help command — full command reference."""
         await update.message.reply_html(
             "<b>YoloVest Commands</b>\n\n"
+
+            "<b>General</b>\n"
+            "/start — Quick status summary\n"
+            "/help — This reference\n\n"
 
             "<b>Trading</b>\n"
             "/pending — Show pending trades\n"
