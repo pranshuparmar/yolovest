@@ -280,9 +280,11 @@ class ZerodhaBroker(BrokerBase):
             direction = 1 if side == "BUY" else -1
             fill_price *= 1 + direction * self._paper_slippage_pct
 
+        is_immediate = order_type == "MARKET"
         self._paper_orders[order_id] = {
             "order_id": order_id,
             "symbol": symbol,
+            "tradingsymbol": symbol,
             "side": side,
             "quantity": quantity,
             "order_type": order_type,
@@ -290,7 +292,9 @@ class ZerodhaBroker(BrokerBase):
             "price": price,
             "trigger_price": trigger_price,
             "fill_price": fill_price,
-            "status": "filled" if order_type == "MARKET" else "open",
+            "filled_quantity": quantity if is_immediate else 0,
+            "average_price": fill_price if is_immediate else 0,
+            "status": "COMPLETE" if is_immediate else "OPEN",
         }
 
         logger.info(
@@ -338,7 +342,7 @@ class ZerodhaBroker(BrokerBase):
     async def cancel_order(self, order_id: str) -> bool:
         if self._mode == "paper":
             if order_id in self._paper_orders:
-                self._paper_orders[order_id]["status"] = "cancelled"
+                self._paper_orders[order_id]["status"] = "CANCELLED"
                 return True
             return False
 
@@ -367,7 +371,7 @@ class ZerodhaBroker(BrokerBase):
         if self._mode == "paper":
             return [
                 o for o in self._paper_orders.values()
-                if o["status"] in ("filled", "open")
+                if o["status"] in ("filled", "open", "COMPLETE", "OPEN")
             ]
 
         async with self._rate_limiter:

@@ -116,22 +116,13 @@ class PositionMonitorSkill(SkillBase):
             if (pos["signal_type"] == "BUY" and current_price >= target) or (
                 pos["signal_type"] == "SELL" and current_price <= target
             ):
-                qty = pos.get("quantity", 0)
-                if pos["signal_type"] == "BUY":
-                    gross_pnl = (current_price - entry) * qty
-                else:
-                    gross_pnl = (entry - current_price) * qty
-                product = pos.get("product", "MIS")
-                costs = compute_transaction_costs(
-                    entry, current_price, qty, product=product,
-                    cost_config=self.ctx.config.transaction_costs,
+                exit_price, pnl = await self._close_position_on_broker(
+                    pos, current_price, entry, "target",
                 )
-                pnl = round(gross_pnl - costs, 2)
-                await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
                 targets_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
-                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
-                    symbol, current_price, pnl, costs,
+                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f",
+                    symbol, exit_price, pnl,
                 )
                 continue
 
@@ -139,22 +130,13 @@ class PositionMonitorSkill(SkillBase):
             if (pos["signal_type"] == "BUY" and current_price <= sl) or (
                 pos["signal_type"] == "SELL" and current_price >= sl
             ):
-                qty = pos.get("quantity", 0)
-                if pos["signal_type"] == "BUY":
-                    gross_pnl = (current_price - entry) * qty
-                else:
-                    gross_pnl = (entry - current_price) * qty
-                product = pos.get("product", "MIS")
-                costs = compute_transaction_costs(
-                    entry, current_price, qty, product=product,
-                    cost_config=self.ctx.config.transaction_costs,
+                exit_price, pnl = await self._close_position_on_broker(
+                    pos, current_price, entry, "stop_loss",
                 )
-                pnl = round(gross_pnl - costs, 2)
-                await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
                 stops_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
-                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
-                    symbol, current_price, pnl, costs,
+                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f",
+                    symbol, exit_price, pnl,
                 )
                 continue
 
@@ -535,6 +517,70 @@ class PositionMonitorSkill(SkillBase):
         )
         return {**result_base, "action": "closed", "reason": reason, "pnl": pnl}
 
+    async def _close_position_on_broker(
+        self,
+        pos: dict[str, Any],
+        current_price: float,
+        entry: float,
+        reason: str,
+    ) -> tuple[float, float]:
+        """Cancel SL order, place market exit, close in DB with actual fill price.
+
+        Returns (exit_price, pnl).
+        """
+        import asyncio
+
+        symbol = pos["symbol"]
+        qty = pos.get("quantity", 0)
+        product = pos.get("product", "MIS")
+
+        # 1. Cancel the SL-M order (best-effort — may already be triggered)
+        sl_order_id = pos.get("sl_order_id")
+        if sl_order_id:
+            try:
+                await self.ctx.broker.cancel_order(sl_order_id)
+            except Exception:
+                logger.debug("SL cancel for %s %s (may already be triggered)",
+                             symbol, reason, exc_info=True)
+
+        # 2. Place market exit order
+        exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
+        exit_price = current_price  # fallback
+        try:
+            exit_order_id = await self.ctx.broker.place_order(
+                symbol=symbol,
+                side=exit_side,
+                quantity=qty,
+                order_type="MARKET",
+                product=product,
+            )
+            # Wait for fill
+            for _ in range(10):
+                await asyncio.sleep(0.5)
+                status = await self.ctx.broker.get_order_status(exit_order_id)
+                fill = status.get("average_price")
+                if fill and fill > 0:
+                    exit_price = fill
+                    break
+        except Exception:
+            logger.warning(
+                "position-monitor: exit order failed for %s %s, using LTP",
+                symbol, reason, exc_info=True,
+            )
+
+        # 3. Calculate PnL and close in DB
+        if pos["signal_type"] == "BUY":
+            gross_pnl = (exit_price - entry) * qty
+        else:
+            gross_pnl = (entry - exit_price) * qty
+        costs = compute_transaction_costs(
+            entry, exit_price, qty, product=product,
+            cost_config=self.ctx.config.transaction_costs,
+        )
+        pnl = round(gross_pnl - costs, 2)
+        await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)
+        return exit_price, pnl
+
     async def _close_expired_position(
         self,
         pos: dict[str, Any],
@@ -543,17 +589,9 @@ class PositionMonitorSkill(SkillBase):
         qty: int,
     ) -> float:
         """Close a position due to holding period expiry."""
-        if pos["signal_type"] == "BUY":
-            gross_pnl = (current_price - entry) * qty
-        else:
-            gross_pnl = (entry - current_price) * qty
-        product = pos.get("product", "MIS")
-        costs = compute_transaction_costs(
-            entry, current_price, qty, product=product,
-            cost_config=self.ctx.config.transaction_costs,
+        _, pnl = await self._close_position_on_broker(
+            pos, current_price, entry, "holding_expiry",
         )
-        pnl = round(gross_pnl - costs, 2)
-        await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
         return pnl
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:
@@ -633,6 +671,7 @@ class PositionMonitorSkill(SkillBase):
             return False
 
         # Move SL to breakeven if configured
+        sl_moved = True
         if cfg.move_sl_to_breakeven:
             try:
                 sl_order_id = pos.get("sl_order_id")
@@ -640,10 +679,15 @@ class PositionMonitorSkill(SkillBase):
                     await self.ctx.broker.modify_sl_order(sl_order_id, entry)
                     await self.ctx.db.update_position_sl(position_id, entry)
             except Exception:
+                sl_moved = False
                 logger.exception(
-                    "position-monitor: Failed to move SL to breakeven for %s",
+                    "position-monitor: Failed to move SL to breakeven for %s — "
+                    "will NOT mark as booked so it retries next cycle",
                     pos["symbol"],
                 )
+
+        if not sl_moved:
+            return False  # Don't mark as booked — retry next cycle
 
         # Mark as partially booked
         await self.ctx.db.set_system_state(
