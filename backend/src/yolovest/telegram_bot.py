@@ -175,8 +175,8 @@ class TelegramBot:
             "/pnl — Today's PnL\n"
             "/positions — Open positions\n"
             "/pending — Trades awaiting approval\n"
-            "/approve <id> [overrides] — Approve trade (with optional override)\n"
-            "/reject <id> — Reject pending trade\n"
+            "/approve SYMBOL [overrides] — Approve trade (with optional override)\n"
+            "/reject SYMBOL — Reject pending trade\n"
             "/trade BUY/SELL SYMBOL ENTRY TARGET SL [product] [qty] — Manual trade\n"
             "/stop — Pause trading\n"
             "/kill — Square off everything\n"
@@ -391,58 +391,56 @@ class TelegramBot:
             )
         msg = "<b>Pending Trades</b>\n\n" + "\n\n".join(lines)
         msg += (
-            "\n\n<i>/approve &lt;id&gt;</i> — approve as-is\n"
-            "<i>/approve &lt;id&gt; BUY 422 427 420 [CNC] [qty]</i> — override\n"
-            "<i>/approve &lt;id&gt; target 427</i> — change target\n"
-            "<i>/approve &lt;id&gt; sl 420</i> — change SL\n"
-            "<i>/approve &lt;id&gt; qty 50</i> — change quantity\n"
-            "<i>/reject &lt;id&gt;</i>"
+            "\n\n<i>/approve SYMBOL</i> — approve as-is\n"
+            "<i>/approve SYMBOL BUY 422 427 420 [CNC] [qty]</i> — override\n"
+            "<i>/approve SYMBOL target 427</i> — change target\n"
+            "<i>/approve SYMBOL sl 420</i> — change SL\n"
+            "<i>/approve SYMBOL qty 50</i> — change quantity\n"
+            "<i>/reject SYMBOL</i>"
         )
         await update.message.reply_html(msg)
 
     async def _cmd_approve(self, update: Any, context: Any) -> None:
-        """Handle /approve <id> [overrides] — approve a pending trade with optional overrides.
+        """Handle /approve <symbol> [overrides] — approve a pending trade with optional overrides.
 
         Syntaxes:
-            /approve 5                                     — approve as-is
-            /approve 5 BUY 422.50 427.25 420.00            — full override
-            /approve 5 BUY 422.50 427.25 420.00 CNC        — full override + product
-            /approve 5 BUY 422.50 427.25 420.00 CNC 50     — full override + product + qty
-            /approve 5 target 427.25                       — override just target
-            /approve 5 sl 420.00                           — override just SL
-            /approve 5 qty 50                              — override just quantity
-            /approve 5 BUY                                 — override just direction (flip)
-            /approve 5 product CNC                         — override just product
+            /approve INFY                                   — approve as-is
+            /approve INFY BUY 422.50 427.25 420.00          — full override
+            /approve INFY BUY 422.50 427.25 420.00 CNC      — full override + product
+            /approve INFY BUY 422.50 427.25 420.00 CNC 50   — full override + product + qty
+            /approve INFY target 427.25                     — override just target
+            /approve INFY sl 420.00                         — override just SL
+            /approve INFY qty 50                            — override just quantity
+            /approve INFY BUY                               — override just direction (flip)
+            /approve INFY product CNC                       — override just product
         """
         args = context.args
         if not args:
             await update.message.reply_text(
                 "Usage:\n"
-                "/approve <id> — approve as-is\n"
-                "/approve <id> BUY/SELL — flip direction\n"
-                "/approve <id> target <price> — override target\n"
-                "/approve <id> sl <price> — override SL\n"
-                "/approve <id> qty <number> — override quantity\n"
-                "/approve <id> product MIS/CNC — override product\n"
-                "/approve <id> BUY 422.50 427.25 420.00 [CNC] [qty] — full override"
+                "/approve SYMBOL — approve as-is\n"
+                "/approve SYMBOL BUY/SELL — flip direction\n"
+                "/approve SYMBOL target <price> — override target\n"
+                "/approve SYMBOL sl <price> — override SL\n"
+                "/approve SYMBOL qty <number> — override quantity\n"
+                "/approve SYMBOL product MIS/CNC — override product\n"
+                "/approve SYMBOL BUY 422.50 427.25 420.00 [CNC] [qty] — full override"
             )
             return
 
-        try:
-            trade_id = int(args[0])
-        except ValueError:
-            await update.message.reply_text("Invalid trade ID.")
+        # Resolve symbol to pending trade ID
+        symbol = args[0].upper()
+        original = await self._ctx.db.get_pending_trade_by_symbol(symbol)
+        if original is None:
+            await update.message.reply_text(f"No pending trade found for {symbol}.")
             return
+        trade_id = original["id"]
 
         # Parse overrides from remaining args
         overrides: dict[str, Any] = {}
         override_notes: list[str] = []
 
         if len(args) > 1:
-            # Look up the original pending trade for context in override notes
-            pending = await self._ctx.db.get_pending_trades()
-            original = next((t for t in pending if t["id"] == trade_id), None)
-
             arg1 = args[1].upper()
 
             if arg1 in ("BUY", "SELL") and len(args) >= 5:
@@ -454,7 +452,7 @@ class TelegramBot:
                     overrides["stop_loss_price"] = float(args[4])
                 except ValueError:
                     await update.message.reply_text(
-                        "Invalid prices. Use: /approve <id> BUY/SELL <entry> <target> <SL> [product] [qty]"
+                        "Invalid prices. Use: /approve SYMBOL BUY/SELL <entry> <target> <SL> [product] [qty]"
                     )
                     return
                 if original and original["signal_type"] != arg1:
@@ -523,12 +521,12 @@ class TelegramBot:
             else:
                 await update.message.reply_text(
                     "Unrecognized override. Use:\n"
-                    "/approve <id> BUY/SELL — flip direction\n"
-                    "/approve <id> target <price>\n"
-                    "/approve <id> sl <price>\n"
-                    "/approve <id> qty <number>\n"
-                    "/approve <id> product MIS/CNC\n"
-                    "/approve <id> BUY 422.50 427.25 420.00 [CNC] [qty]"
+                    "/approve SYMBOL BUY/SELL — flip direction\n"
+                    "/approve SYMBOL target <price>\n"
+                    "/approve SYMBOL sl <price>\n"
+                    "/approve SYMBOL qty <number>\n"
+                    "/approve SYMBOL product MIS/CNC\n"
+                    "/approve SYMBOL BUY 422.50 427.25 420.00 [CNC] [qty]"
                 )
                 return
 
@@ -537,7 +535,7 @@ class TelegramBot:
             overrides=overrides if overrides else None,
         )
         if signal is None:
-            await update.message.reply_text(f"Trade #{trade_id} not found or already decided.")
+            await update.message.reply_text(f"Trade for {symbol} not found or already decided.")
             return
 
         # Execute the approved trade
@@ -561,26 +559,20 @@ class TelegramBot:
             await update.message.reply_text(f"Approved but execution failed: {result.error}")
 
     async def _cmd_reject(self, update: Any, context: Any) -> None:
-        """Handle /reject <id> — reject a pending trade."""
+        """Handle /reject <symbol> — reject a pending trade."""
         args = context.args
         if not args:
-            await update.message.reply_text("Usage: /reject <id>")
+            await update.message.reply_text("Usage: /reject SYMBOL")
             return
 
-        try:
-            trade_id = int(args[0])
-        except ValueError:
-            await update.message.reply_text("Invalid trade ID.")
+        symbol = args[0].upper()
+        trade = await self._ctx.db.get_pending_trade_by_symbol(symbol)
+        if trade is None:
+            await update.message.reply_text(f"No pending trade found for {symbol}.")
             return
 
-        # Check if trade exists and is pending before deciding
-        pending = await self._ctx.db.get_pending_trades()
-        if not any(t["id"] == trade_id for t in pending):
-            await update.message.reply_text(f"Trade #{trade_id} not found or already decided.")
-            return
-
-        await self._ctx.db.decide_pending_trade(trade_id, "rejected", "telegram")
-        await update.message.reply_text(f"Rejected trade #{trade_id}.")
+        await self._ctx.db.decide_pending_trade(trade["id"], "rejected", "telegram")
+        await update.message.reply_text(f"Rejected {trade['signal_type']} {symbol}.")
 
     async def _cmd_trade(self, update: Any, context: Any) -> None:
         """Handle /trade — place a manual trade.

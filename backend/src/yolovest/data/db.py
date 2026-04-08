@@ -2417,6 +2417,16 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](r) for r in rows]
 
+    async def get_pending_trade_by_symbol(self, symbol: str) -> dict[str, Any] | None:
+        """Get a pending trade by symbol (case-insensitive). Returns None if not found."""
+        cursor = await self.read_conn.execute(
+            "SELECT * FROM pending_trades WHERE status = 'pending' "
+            "AND UPPER(symbol) = UPPER(?) ORDER BY created_at DESC LIMIT 1",
+            (symbol,),
+        )
+        row = await cursor.fetchone()
+        return dict[str, Any](row) if row else None
+
     async def decide_pending_trade(
         self, trade_id: int, decision: str, decided_by: str,
         overrides: dict[str, Any] | None = None,
