@@ -30,13 +30,15 @@ function OverrideRow({
   const [target, setTarget] = useState(trade.target_price);
   const [sl, setSl] = useState(trade.stop_loss_price);
   const [product, setProduct] = useState(trade.product || "MIS");
+  const [qty, setQty] = useState(trade.position_size);
 
   const hasChanges =
     signalType !== trade.signal_type ||
     entry !== trade.entry_price ||
     target !== trade.target_price ||
     sl !== trade.stop_loss_price ||
-    product !== trade.product;
+    product !== trade.product ||
+    qty !== trade.position_size;
 
   const handleApprove = () => {
     const overrides: Override = {};
@@ -44,6 +46,7 @@ function OverrideRow({
     if (entry !== trade.entry_price) overrides.entry_price = entry;
     if (target !== trade.target_price) overrides.target_price = target;
     if (sl !== trade.stop_loss_price) overrides.stop_loss_price = sl;
+    if (qty !== trade.position_size) (overrides as Record<string, unknown>).position_size = qty;
     if (product !== trade.product) overrides.product = product;
     onApprove(Object.keys(overrides).length > 0 ? overrides : {});
   };
@@ -115,7 +118,19 @@ function OverrideRow({
           )}
         />
       </td>
-      <td className="py-2 px-3 text-right text-gray-400 text-xs">{trade.position_size}</td>
+      <td className="py-2 px-3">
+        <input
+          type="number"
+          step="1"
+          min="1"
+          value={qty}
+          onChange={(e) => setQty(parseInt(e.target.value, 10) || 1)}
+          className={clsx(
+            "w-16 bg-gray-800 rounded px-1.5 py-0.5 text-xs text-right text-gray-200 font-mono focus:outline-none focus:border-blue-500 border",
+            qty !== trade.position_size ? "border-amber-500" : "border-gray-700",
+          )}
+        />
+      </td>
       <td className="py-2 px-3 text-center">
         <div className="flex items-center justify-center gap-1.5">
           <button

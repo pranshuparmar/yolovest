@@ -2469,7 +2469,7 @@ class Database:
             # Apply overrides to the returned signal dict
             if overrides:
                 for key in ("signal_type", "entry_price", "target_price",
-                            "stop_loss_price", "product", "notes"):
+                            "stop_loss_price", "product", "position_size", "notes"):
                     if key in overrides:
                         signal[key] = overrides[key]
                 signal["is_override"] = True

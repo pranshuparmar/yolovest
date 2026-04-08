@@ -383,18 +383,20 @@ class TelegramBot:
         lines = []
         for t in pending:
             lines.append(
-                f"#{t['id']} {t['signal_type']} {t['symbol']} "
-                f"{t.get('product', 'MIS')} "
-                f"@ ₹{t['entry_price']:.2f} → T₹{t['target_price']:.2f} "
-                f"SL₹{t['stop_loss_price']:.2f} "
+                f"<b>#{t['id']}</b> {t['signal_type']} <b>{t['symbol']}</b> "
+                f"{t.get('product', 'MIS')} x{t.get('position_size', '?')}\n"
+                f"    Entry ₹{t['entry_price']:.2f} → Target ₹{t['target_price']:.2f} "
+                f"SL ₹{t['stop_loss_price']:.2f} "
                 f"(conf {(t.get('confidence_score') or 0):.0%})"
             )
-        msg = "<b>Pending Trades</b>\n\n" + "\n".join(lines)
+        msg = "<b>Pending Trades</b>\n\n" + "\n\n".join(lines)
         msg += (
-            "\n\n/approve &lt;id&gt; — approve as-is\n"
-            "/approve &lt;id&gt; BUY 422.50 427.25 420.00 — override\n"
-            "/approve &lt;id&gt; target 427.25 — partial override\n"
-            "/reject &lt;id&gt;"
+            "\n\n<i>/approve &lt;id&gt;</i> — approve as-is\n"
+            "<i>/approve &lt;id&gt; BUY 422 427 420 [CNC] [qty]</i> — override\n"
+            "<i>/approve &lt;id&gt; target 427</i> — change target\n"
+            "<i>/approve &lt;id&gt; sl 420</i> — change SL\n"
+            "<i>/approve &lt;id&gt; qty 50</i> — change quantity\n"
+            "<i>/reject &lt;id&gt;</i>"
         )
         await update.message.reply_html(msg)
 
@@ -402,13 +404,15 @@ class TelegramBot:
         """Handle /approve <id> [overrides] — approve a pending trade with optional overrides.
 
         Syntaxes:
-            /approve 5                              — approve as-is
-            /approve 5 BUY 422.50 427.25 420.00    — full override: direction entry target SL
-            /approve 5 BUY 422.50 427.25 420.00 CNC — full override with product
-            /approve 5 target 427.25               — override just target
-            /approve 5 sl 420.00                   — override just SL
-            /approve 5 BUY                         — override just direction (flip)
-            /approve 5 product CNC                 — override just product
+            /approve 5                                     — approve as-is
+            /approve 5 BUY 422.50 427.25 420.00            — full override
+            /approve 5 BUY 422.50 427.25 420.00 CNC        — full override + product
+            /approve 5 BUY 422.50 427.25 420.00 CNC 50     — full override + product + qty
+            /approve 5 target 427.25                       — override just target
+            /approve 5 sl 420.00                           — override just SL
+            /approve 5 qty 50                              — override just quantity
+            /approve 5 BUY                                 — override just direction (flip)
+            /approve 5 product CNC                         — override just product
         """
         args = context.args
         if not args:
@@ -418,8 +422,9 @@ class TelegramBot:
                 "/approve <id> BUY/SELL — flip direction\n"
                 "/approve <id> target <price> — override target\n"
                 "/approve <id> sl <price> — override SL\n"
+                "/approve <id> qty <number> — override quantity\n"
                 "/approve <id> product MIS/CNC — override product\n"
-                "/approve <id> BUY 422.50 427.25 420.00 [CNC] — full override"
+                "/approve <id> BUY 422.50 427.25 420.00 [CNC] [qty] — full override"
             )
             return
 
@@ -441,7 +446,7 @@ class TelegramBot:
             arg1 = args[1].upper()
 
             if arg1 in ("BUY", "SELL") and len(args) >= 5:
-                # Full override: signal_type entry target SL [product]
+                # Full override: signal_type entry target SL [product] [qty]
                 try:
                     overrides["signal_type"] = arg1
                     overrides["entry_price"] = float(args[2])
@@ -449,7 +454,7 @@ class TelegramBot:
                     overrides["stop_loss_price"] = float(args[4])
                 except ValueError:
                     await update.message.reply_text(
-                        "Invalid prices. Use: /approve <id> BUY/SELL <entry> <target> <SL> [product]"
+                        "Invalid prices. Use: /approve <id> BUY/SELL <entry> <target> <SL> [product] [qty]"
                     )
                     return
                 if original and original["signal_type"] != arg1:
@@ -461,13 +466,20 @@ class TelegramBot:
                     f"target={overrides['target_price']:.2f}, "
                     f"SL={overrides['stop_loss_price']:.2f}"
                 )
-                # Optional 5th arg: product
-                if len(args) >= 6 and args[5].upper() in ("MIS", "CNC"):
-                    overrides["product"] = args[5].upper()
-                    override_notes.append(f"product={overrides['product']}")
+                # Optional 6th arg: product or qty
+                for extra_arg in args[5:]:
+                    upper = extra_arg.upper()
+                    if upper in ("MIS", "CNC"):
+                        overrides["product"] = upper
+                        override_notes.append(f"product={upper}")
+                    else:
+                        try:
+                            overrides["position_size"] = int(extra_arg)
+                            override_notes.append(f"qty={overrides['position_size']}")
+                        except ValueError:
+                            pass
 
             elif arg1 in ("BUY", "SELL") and len(args) == 2:
-                # Direction-only override
                 overrides["signal_type"] = arg1
                 if original and original["signal_type"] != arg1:
                     override_notes.append(
@@ -492,6 +504,14 @@ class TelegramBot:
                     return
                 override_notes.append(f"SL={overrides['stop_loss_price']:.2f}")
 
+            elif arg1 == "QTY" and len(args) >= 3:
+                try:
+                    overrides["position_size"] = int(args[2])
+                except ValueError:
+                    await update.message.reply_text("Invalid quantity.")
+                    return
+                override_notes.append(f"qty={overrides['position_size']}")
+
             elif arg1 == "PRODUCT" and len(args) >= 3:
                 product = args[2].upper()
                 if product not in ("MIS", "CNC"):
@@ -506,8 +526,9 @@ class TelegramBot:
                     "/approve <id> BUY/SELL — flip direction\n"
                     "/approve <id> target <price>\n"
                     "/approve <id> sl <price>\n"
+                    "/approve <id> qty <number>\n"
                     "/approve <id> product MIS/CNC\n"
-                    "/approve <id> BUY 422.50 427.25 420.00 [CNC]"
+                    "/approve <id> BUY 422.50 427.25 420.00 [CNC] [qty]"
                 )
                 return
 
