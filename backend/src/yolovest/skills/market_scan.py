@@ -64,16 +64,52 @@ class MarketScanSkill(SkillBase):
         # Step 4: Enrich with technical indicators from OHLCV bars
         filtered = await self._enrich_with_features(filtered)
 
+        # Detect market regime (if enabled) before scoring
+        regime_cfg = self.ctx.config.strategy.market_regime
+        regime = "unknown"
+        if regime_cfg.enabled:
+            regime = await self._detect_market_regime()
+            logger.info("market-scan: detected market regime = %s", regime)
+
         # Step 5: Compute sub-scores and weighted composite
+        # Adjust weights based on market regime
+        w_technical = cfg.weights.technical
+        w_volume = cfg.weights.volume_momentum
+        w_sentiment = cfg.weights.news_sentiment
+        w_fundamental = cfg.weights.fundamental
+        w_volatility = cfg.weights.volatility
+
+        if regime_cfg.enabled and regime != "unknown":
+            if regime == "bull":
+                # Boost technical, reduce fundamental
+                w_technical *= 1.20
+                w_fundamental *= 0.80
+            elif regime == "bear":
+                # Boost fundamental, reduce technical
+                w_fundamental *= 1.20
+                w_technical *= 0.80
+            elif regime == "range":
+                # Boost volatility weight
+                w_volatility *= 1.50
+
+            # Re-normalize weights to sum to 1.0
+            w_total = w_technical + w_volume + w_sentiment + w_fundamental + w_volatility
+            if w_total > 0:
+                w_technical /= w_total
+                w_volume /= w_total
+                w_sentiment /= w_total
+                w_fundamental /= w_total
+                w_volatility /= w_total
+
         scored = []
         for stock in filtered:
             sub = self._compute_sub_scores(stock)
             composite = (
-                sub["technical_score"] * cfg.weights.technical
-                + sub["volume_momentum_score"] * cfg.weights.volume_momentum
-                + sub["news_sentiment_score"] * cfg.weights.news_sentiment
-                + sub["fundamental_score"] * cfg.weights.fundamental
-                + sub["volatility_score"] * cfg.weights.volatility
+                sub["technical_score"] * w_technical
+                + sub["volume_momentum_score"] * w_volume
+                + sub["news_sentiment_score"] * w_sentiment
+                + sub["fundamental_score"] * w_fundamental
+                + sub["volatility_score"] * w_volatility
             )
             scored.append({**stock, **sub, "composite_score": composite})
 
@@ -114,17 +150,21 @@ class MarketScanSkill(SkillBase):
             sector_analysis.get("weak", []),
         )
 
+        result_data: dict[str, Any] = {
+            "universe_size": len(universe),
+            "after_filters": len(filtered),
+            "shortlist_size": len(shortlist),
+            "top_stocks": [s["symbol"] for s in shortlist[:5]],
+            "strong_sectors": sector_analysis.get("strong", []),
+            "weak_sectors": sector_analysis.get("weak", []),
+        }
+        if regime_cfg.enabled:
+            result_data["market_regime"] = regime
+
         return SkillResult(
             success=True,
             skill_name=self.name,
-            data={
-                "universe_size": len(universe),
-                "after_filters": len(filtered),
-                "shortlist_size": len(shortlist),
-                "top_stocks": [s["symbol"] for s in shortlist[:5]],
-                "strong_sectors": sector_analysis.get("strong", []),
-                "weak_sectors": sector_analysis.get("weak", []),
-            },
+            data=result_data,
         )
 
     def _apply_exclusion_filters(self, stocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -323,3 +363,66 @@ class MarketScanSkill(SkillBase):
             "weak": weak,
             "rotation": sector_avgs,
         }
+
+    async def _detect_market_regime(self) -> str:
+        """Detect the current market regime (bull / bear / range) from index data.
+
+        Fetches recent OHLCV bars for the configured index symbol and classifies
+        the regime based on average daily returns and the current price position
+        within the recent trading range.
+
+        Returns:
+            "bull", "bear", "range", or "unknown" if insufficient data.
+        """
+        regime_cfg = self.ctx.config.strategy.market_regime
+        try:
+            bars = await self.ctx.db.get_ohlcv(
+                regime_cfg.index_symbol, "daily", days=regime_cfg.lookback_days,
+            )
+        except Exception as e:
+            logger.warning("Market regime detection failed (data fetch): %s", e)
+            return "unknown"
+
+        if len(bars) < 10:
+            logger.info(
+                "Market regime: insufficient data (%d bars < 10) for %s",
+                len(bars), regime_cfg.index_symbol,
+            )
+            return "unknown"
+
+        # Compute daily returns
+        returns = []
+        for i in range(1, len(bars)):
+            prev_close = bars[i - 1].close
+            if prev_close > 0:
+                returns.append(bars[i].close / prev_close - 1)
+
+        if not returns:
+            return "unknown"
+
+        avg_return = sum(returns) / len(returns)
+
+        # Price position within recent range
+        closes = [bar.close for bar in bars]
+        recent_high = max(closes)
+        recent_low = min(closes)
+        current = closes[-1]
+
+        if recent_high == recent_low:
+            position_in_range = 0.5
+        else:
+            position_in_range = (current - recent_low) / (recent_high - recent_low)
+
+        # Classify regime
+        if avg_return > 0.001 and position_in_range > 0.6:
+            regime = "bull"
+        elif avg_return < -0.001 and position_in_range < 0.4:
+            regime = "bear"
+        else:
+            regime = "range"
+
+        logger.debug(
+            "Market regime: %s (avg_return=%.4f, position_in_range=%.2f, index=%s)",
+            regime, avg_return, position_in_range, regime_cfg.index_symbol,
+        )
+        return regime
