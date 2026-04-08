@@ -4,12 +4,15 @@ All YoloVest skills extend SkillBase and implement execute().
 Skills are the discrete, independently invocable capabilities of the trading agent.
 """
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from yolovest.timezone import now_ist
 
@@ -81,6 +84,7 @@ class SkillBase(ABC):
             result.duration_ms = (time.monotonic() - start) * 1000
             return result
         except Exception as e:
+            logger.exception("Skill '%s' failed with unhandled exception", self.name)
             return SkillResult(
                 success=False,
                 skill_name=self.name,

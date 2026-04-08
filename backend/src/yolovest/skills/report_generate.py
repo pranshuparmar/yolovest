@@ -51,12 +51,13 @@ class ReportGenerateSkill(SkillBase):
         report_type = kwargs.get("type")
 
         if report_type is None:
-            # Auto-detect: run weekly on the configured weekly cron day (default Saturday)
+            # Auto-detect: run weekly on Friday (last trading day of the week)
+            # since the cron schedule only fires Mon-Fri
             from yolovest.timezone import now_ist
 
             today = now_ist().weekday()
-            # Saturday = 5; match against weekly_report_cron day
-            report_type = "weekly" if today == 5 else "daily"
+            # Friday = 4 (last weekday the cron fires on)
+            report_type = "weekly" if today == 4 else "daily"
 
         if report_type == "daily":
             return await self._generate_daily()
@@ -66,7 +67,9 @@ class ReportGenerateSkill(SkillBase):
     async def _generate_daily(self) -> SkillResult:
         """Daily report at market close."""
         trades = await self.ctx.db.get_todays_trades()
-        predictions = await self.ctx.db.get_todays_predictions()
+        predictions_result = await self.ctx.db.get_todays_predictions()
+        # get_todays_predictions returns paginated dict {"items": [...], "total": N}
+        predictions = predictions_result.get("items", []) if isinstance(predictions_result, dict) else predictions_result
 
         total_pnl = sum(t.get("pnl", 0) for t in trades if t.get("pnl") is not None)
         wins = [t for t in trades if (t.get("pnl") or 0) > 0]
