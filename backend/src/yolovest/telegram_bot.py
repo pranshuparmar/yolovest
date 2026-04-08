@@ -166,22 +166,11 @@ class TelegramBot:
     # ------------------------------------------------------------------
 
     async def _cmd_start(self, update: Any, context: Any) -> None:
-        """Handle /start command."""
-        chat_id = update.effective_chat.id
-        await update.message.reply_text(
-            f"YoloVest Bot\n"
-            f"Chat ID: {chat_id}\n\n"
-            "Quick commands:\n"
-            "/status — System status\n"
-            "/pnl — Today's PnL\n"
-            "/positions — Open positions\n"
-            "/pending — Trades awaiting approval\n"
-            "/dashboard — Overview\n\n"
-            "Type /help for full command reference"
-        )
+        """Handle /start — same as /help."""
+        await self._cmd_help(update, context)
 
     async def _cmd_help(self, update: Any, context: Any) -> None:
-        """Handle /help command — detailed command reference."""
+        """Handle /help command — full command reference."""
         await update.message.reply_html(
             "<b>YoloVest Commands</b>\n\n"
 
