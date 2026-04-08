@@ -160,6 +160,8 @@ class MarketScanSkill(SkillBase):
         }
         if regime_cfg.enabled:
             result_data["market_regime"] = regime
+            # Persist for downstream skills (generate-signals reads this)
+            await self.ctx.db.set_system_state("market_regime", regime)
 
         return SkillResult(
             success=True,

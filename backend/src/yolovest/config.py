@@ -294,7 +294,6 @@ class StrategyConfig(BaseModel):
     feedback: FeedbackConfig = Field(default_factory=FeedbackConfig)
     ema_periods: list[int] = Field(default_factory=lambda: [9, 21, 50, 200])
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
-    default_trade_type: Literal["intraday", "swing"] = "intraday"
     min_training_samples: int = 200
     market_regime: MarketRegimeConfig = Field(default_factory=MarketRegimeConfig)
 
@@ -324,7 +323,6 @@ class RiskConfig(BaseModel):
     llm_fallback_to_rules: bool = True
     max_same_sector_positions: int = Field(default=1, ge=1)
     kill_switch_enabled: bool = True
-    kill_switch_persistent: bool = True
     min_confidence_score: float = Field(default=0.65, ge=0, le=1)
     max_trades_per_day: int = Field(default=5, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
@@ -553,7 +551,6 @@ FILE_ONLY_KEYS: set[str] = {
 SETTINGS_HIDDEN_KEYS: set[str] = {
     "market_hours.holidays",
     "market_hours.early_close_days",
-    "strategy.default_trade_type",  # legacy ML model selector, handled automatically
 }
 
 

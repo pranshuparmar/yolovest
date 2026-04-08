@@ -39,6 +39,8 @@ def decide_holding_period(
     now_time: time,
     mode_days_range: tuple[int, int] | None = None,
     existing_positions: list[dict[str, Any]] | None = None,
+    market_regime: str | None = None,
+    bear_max_holding_days: int | None = None,
 ) -> tuple[str, str, int]:
     """Decide holding period, product type, and expected days based on stock characteristics.
 
@@ -50,6 +52,8 @@ def decide_holding_period(
         mode_days_range: (min_days, max_days) from the strategy mode config.
         existing_positions: Current open positions (for position-mix bias).
             Each dict should have "expected_holding_days" and optionally "product".
+        market_regime: Current market regime ("bull", "bear", "range", or None).
+        bear_max_holding_days: Cap holding days in bear markets (from config).
 
     Returns:
         (holding_period_label, product, expected_holding_days)
@@ -77,6 +81,10 @@ def decide_holding_period(
     # Apply position-mix bias — shorten if portfolio is heavy on long positions
     if existing_positions:
         days = _apply_position_mix_bias(days, min_days, max_days, existing_positions)
+
+    # Bear market cap — limit holding duration in downtrends
+    if market_regime == "bear" and bear_max_holding_days is not None:
+        days = min(days, bear_max_holding_days)
 
     # Classify into label
     label = _days_to_label(days)

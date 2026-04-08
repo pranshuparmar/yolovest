@@ -189,7 +189,7 @@ class GenerateSignalsSkill(SkillBase):
                     pass  # fall back to features["close"] in _predict()
 
                 # Decide holding period based on stock characteristics and strategy mode
-                holding_period, product, expected_days = self._decide_holding_period(
+                holding_period, product, expected_days = await self._decide_holding_period(
                     features, existing_positions=open_positions,
                 )
                 use_intraday = holding_period == "intraday"
@@ -395,7 +395,7 @@ class GenerateSignalsSkill(SkillBase):
             },
         )
 
-    def _decide_holding_period(
+    async def _decide_holding_period(
         self, features: dict, existing_positions: list[dict] | None = None,
     ) -> tuple[str, str, int]:
         """Decide holding period, product type, and expected days based on stock characteristics."""
@@ -407,10 +407,21 @@ class GenerateSignalsSkill(SkillBase):
         mode_days = _MODE_HOLDING_DAYS.get(mode)
         now_time = datetime.now(IST).time()
         vol_cfg = self.ctx.config.strategy.volatility
+
+        # Read market regime (persisted by market-scan skill)
+        regime_cfg = self.ctx.config.strategy.market_regime
+        regime = None
+        bear_max = None
+        if regime_cfg.enabled:
+            regime = await self.ctx.db.get_system_state("market_regime")
+            bear_max = regime_cfg.bear_max_holding_days
+
         return decide_holding_period(
             features, allowed, vol_cfg, now_time,
             mode_days_range=mode_days,
             existing_positions=existing_positions,
+            market_regime=regime,
+            bear_max_holding_days=bear_max,
         )
 
     async def _check_reentry_conditions(
