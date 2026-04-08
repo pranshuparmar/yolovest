@@ -173,7 +173,9 @@ class GenerateSignalsSkill(SkillBase):
                     pass  # fall back to features["close"] in _predict()
 
                 # Decide holding period based on stock characteristics and strategy mode
-                holding_period, product, expected_days = self._decide_holding_period(features)
+                holding_period, product, expected_days = self._decide_holding_period(
+                    features, existing_positions=open_positions,
+                )
                 use_intraday = holding_period == "intraday"
 
                 # Use latest intraday price for feature close during market hours
@@ -355,7 +357,9 @@ class GenerateSignalsSkill(SkillBase):
             },
         )
 
-    def _decide_holding_period(self, features: dict) -> tuple[str, str, int]:
+    def _decide_holding_period(
+        self, features: dict, existing_positions: list[dict] | None = None,
+    ) -> tuple[str, str, int]:
         """Decide holding period, product type, and expected days based on stock characteristics."""
         from yolovest.config import _MODE_HOLDING_DAYS
         from yolovest.strategy.holding_period import decide_holding_period
@@ -365,4 +369,8 @@ class GenerateSignalsSkill(SkillBase):
         mode_days = _MODE_HOLDING_DAYS.get(mode)
         now_time = datetime.now(IST).time()
         vol_cfg = self.ctx.config.strategy.volatility
-        return decide_holding_period(features, allowed, vol_cfg, now_time, mode_days_range=mode_days)
+        return decide_holding_period(
+            features, allowed, vol_cfg, now_time,
+            mode_days_range=mode_days,
+            existing_positions=existing_positions,
+        )

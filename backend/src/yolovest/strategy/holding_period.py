@@ -3,9 +3,10 @@
 Used by both the generate-signals skill (live pipeline) and the dry-run
 endpoint (signal preview). Keeps the decision logic in one place.
 
-Holding periods are now dynamic: instead of fixed "3d" or "1w" buckets,
-the system computes expected_holding_days per stock based on ATR and the
-target move, clamped to the mode's allowed range.
+Holding periods are dynamic: the system computes expected_holding_days
+per stock based on ATR%, trend strength, and volatility regime, clamped
+to the mode's allowed range. A position-mix bias shortens durations when
+existing portfolio positions are already long-dated.
 """
 
 import logging
@@ -26,6 +27,10 @@ _INTERP_ANCHORS = [
     (66, 5.5, 2.5),   # ~3 months
 ]
 
+# Reference ATR% for "normal" volatility (mid-cap average).
+# Stocks with higher ATR% need fewer days; lower ATR% need more.
+_REFERENCE_ATR_PCT = 0.02  # 2%
+
 
 def decide_holding_period(
     features: dict[str, Any],
@@ -33,50 +38,45 @@ def decide_holding_period(
     volatility_config: Any,
     now_time: time,
     mode_days_range: tuple[int, int] | None = None,
+    existing_positions: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str, int]:
     """Decide holding period, product type, and expected days based on stock characteristics.
 
     Args:
         features: Computed technical features dict (must include atr_pct, close, etc.)
-        allowed_periods: List of allowed holding period labels (e.g. ["intraday", "short_term"])
+        allowed_periods: List of allowed holding period labels
         volatility_config: VolatilityConfig instance with ATR% thresholds
         now_time: Current time (IST) for intraday time-of-day gating
         mode_days_range: (min_days, max_days) from the strategy mode config.
-            If None, derived from allowed_periods for backwards compatibility.
+        existing_positions: Current open positions (for position-mix bias).
+            Each dict should have "expected_holding_days" and optionally "product".
 
     Returns:
         (holding_period_label, product, expected_holding_days)
-        e.g. ("intraday", "MIS", 0) or ("short_term", "CNC", 4) or ("long_term", "CNC", 22)
     """
     atr_pct = features.get("atr_pct", 0.0)
     rel_vol = features.get("relative_volume", 1.0)
-    close = features.get("close", 0.0)
 
     # Resolve days range
     if mode_days_range is None:
         mode_days_range = _periods_to_days_range(allowed_periods)
     min_days, max_days = mode_days_range
 
-    # Pure intraday mode
+    # Pure intraday mode — always intraday regardless of conditions
     if max_days == 0:
-        has_volatility = atr_pct >= volatility_config.ideal_min_atr_pct
-        has_volume = rel_vol >= 1.5
-        has_time = now_time < time(14, 0)
-        if has_volatility and has_volume and has_time:
-            return ("intraday", "MIS", 0)
-        # Even in intraday mode, if conditions aren't met, still return intraday
         return ("intraday", "MIS", 0)
 
-    # Compute dynamic holding days from ATR
+    # For balanced mode: check if intraday is viable
+    if min_days == 0 and "intraday" in allowed_periods:
+        if _is_intraday_viable(atr_pct, rel_vol, now_time, volatility_config):
+            return ("intraday", "MIS", 0)
+
+    # Compute dynamic holding days
     days = _estimate_holding_days(features, min_days, max_days)
 
-    # For balanced mode: check if intraday is viable first
-    if min_days == 0 and "intraday" in allowed_periods:
-        has_volatility = atr_pct >= volatility_config.ideal_min_atr_pct
-        has_volume = rel_vol >= 1.5
-        has_time = now_time < time(14, 0)
-        if has_volatility and has_volume and has_time:
-            return ("intraday", "MIS", 0)
+    # Apply position-mix bias — shorten if portfolio is heavy on long positions
+    if existing_positions:
+        days = _apply_position_mix_bias(days, min_days, max_days, existing_positions)
 
     # Classify into label
     label = _days_to_label(days)
@@ -84,54 +84,144 @@ def decide_holding_period(
     return (label, product, days)
 
 
+def _is_intraday_viable(
+    atr_pct: float,
+    rel_vol: float,
+    now_time: time,
+    volatility_config: Any,
+) -> bool:
+    """Check if intraday trading conditions are met.
+
+    Relaxed from the original: requires decent volatility OR high volume
+    (not both), and allows until 2:30 PM instead of 2:00 PM.
+    """
+    has_volatility = atr_pct >= volatility_config.min_atr_pct  # 0.5% min (was ideal 1.5%)
+    has_good_volatility = atr_pct >= volatility_config.ideal_min_atr_pct  # 1.5% ideal
+    has_volume = rel_vol >= 1.2  # relaxed from 1.5
+    has_time = now_time < time(14, 30)  # relaxed from 14:00
+
+    if not has_time:
+        return False
+    if not has_volatility:
+        return False
+    # Either good volatility OR good volume (not both required)
+    return has_good_volatility or has_volume
+
+
 def _estimate_holding_days(
     features: dict[str, Any],
     min_days: int,
     max_days: int,
 ) -> int:
-    """Estimate optimal holding days for a stock based on ATR and trend strength.
+    """Estimate optimal holding days based on ATR%, trend strength, and volatility.
 
-    Logic: days_to_target = target_move / avg_daily_move
-    - Strong trend (EMA alignment) → can hold longer (target further out)
-    - Weak/choppy → shorter hold
-    - High ATR → moves faster → fewer days needed
+    Key fix: ATR now actually affects the result. High-ATR stocks move faster
+    and get shorter holding periods. Low-ATR stocks need longer to reach targets.
+
+    Formula: base_days (from trend) × volatility_factor (from ATR)
     """
     atr_pct = features.get("atr_pct", 0.0)
     if atr_pct <= 0:
         return min_days
 
-    # Trend strength from EMA alignment
-    ema_9 = features.get("ema_9", 0)
-    ema_21 = features.get("ema_21", 0)
-    ema_50 = features.get("ema_50", 0)
-    supertrend = features.get("supertrend_trend", 0)
+    # --- Trend strength (drives base duration) ---
+    trend_score = _compute_trend_score(features)
 
-    # Score trend alignment (0 to 1)
-    trend_score = 0.0
-    if ema_9 > 0 and ema_21 > 0 and ema_50 > 0:
-        if ema_9 > ema_21 > ema_50:
-            trend_score = 0.8  # bullish alignment
-        elif ema_9 < ema_21 < ema_50:
-            trend_score = 0.8  # bearish alignment
-        elif ema_9 > ema_21:
-            trend_score = 0.4  # partial alignment
-        else:
-            trend_score = 0.2  # choppy
-    if supertrend != 0:
-        trend_score = min(1.0, trend_score + 0.2)
+    # Base days from trend: weak trends → short hold, strong trends → longer hold
+    # Range: 2 days (choppy, trend_score=0) to 10 days (strong trend, trend_score=1)
+    base_days = 2 + trend_score * 8
 
-    # Target multiplier based on trend: strong trends get wider targets
-    # which means more days to reach them, but higher probability
-    target_atr_mult = 2.0 + trend_score * 4.0  # 2x to 6x ATR
+    # --- Volatility factor (high ATR → fewer days needed) ---
+    # A stock with 3% ATR moves 3× faster than one with 1% ATR,
+    # so it needs ~1/3 the time to reach the same ATR-multiple target.
+    volatility_factor = _REFERENCE_ATR_PCT / max(atr_pct, 0.003)
+    # Clamp factor to [0.4, 2.5] to prevent extremes
+    volatility_factor = max(0.4, min(2.5, volatility_factor))
 
-    # Days to reach target: target_move / daily_move
-    # ATR approximates daily range, actual directional move ~50-70% of ATR
-    directional_move_pct = atr_pct * 0.6
-    target_move_pct = atr_pct * target_atr_mult
-    raw_days = target_move_pct / directional_move_pct if directional_move_pct > 0 else min_days
+    raw_days = base_days * volatility_factor
+
+    # --- RSI-based adjustment ---
+    # Oversold/overbought stocks are likely to revert faster
+    rsi = features.get("rsi_14") or features.get("rsi")
+    if rsi is not None:
+        if rsi < 30 or rsi > 70:
+            raw_days *= 0.7  # strong mean-reversion signal → shorter hold
 
     # Clamp to allowed range
     days = max(min_days, min(max_days, round(raw_days)))
+    return days
+
+
+def _compute_trend_score(features: dict[str, Any]) -> float:
+    """Score trend alignment from 0 (choppy) to 1 (strong trending)."""
+    ema_9 = features.get("ema_9", 0)
+    ema_21 = features.get("ema_21", 0)
+    ema_50 = features.get("ema_50", 0)
+    ema_200 = features.get("ema_200", 0)
+    supertrend = features.get("supertrend_trend") or features.get("supertrend_direction", 0)
+
+    score = 0.0
+
+    if ema_9 > 0 and ema_21 > 0 and ema_50 > 0:
+        if ema_9 > ema_21 > ema_50:
+            score = 0.6  # bullish alignment
+        elif ema_9 < ema_21 < ema_50:
+            score = 0.6  # bearish alignment
+        elif ema_9 > ema_21:
+            score = 0.3  # partial alignment
+        else:
+            score = 0.1  # choppy
+
+        # Bonus for EMA-200 alignment (strong long-term trend)
+        if ema_200 > 0:
+            if (ema_9 > ema_200 and ema_50 > ema_200) or (ema_9 < ema_200 and ema_50 < ema_200):
+                score = min(1.0, score + 0.2)
+
+    if supertrend != 0:
+        score = min(1.0, score + 0.15)
+
+    return score
+
+
+def _apply_position_mix_bias(
+    days: int,
+    min_days: int,
+    max_days: int,
+    positions: list[dict[str, Any]],
+) -> int:
+    """Bias holding period toward capital rotation when portfolio is heavy on long trades.
+
+    If existing positions are mostly long-dated, reduce the new trade's
+    holding period to keep capital turning over. If positions are mostly
+    short-dated, allow longer holds.
+    """
+    if not positions:
+        return days
+
+    # Compute average remaining holding days of existing positions
+    total_expected = 0
+    count = 0
+    for pos in positions:
+        exp_days = pos.get("expected_holding_days")
+        if exp_days is not None and exp_days > 0:
+            total_expected += exp_days
+            count += 1
+
+    if count == 0:
+        return days
+
+    avg_existing_days = total_expected / count
+
+    # If average existing holding is > 5 days, bias new trade shorter
+    # If average existing holding is < 3 days, allow new trade to be longer
+    if avg_existing_days > 5:
+        # Reduce by 20-40% based on how heavy the portfolio is
+        reduction = min(0.4, (avg_existing_days - 5) * 0.05)
+        days = max(min_days, round(days * (1 - reduction)))
+    elif avg_existing_days < 3 and days < 3:
+        # Portfolio is very short-dated, allow this trade to go a bit longer
+        days = min(max_days, days + 1)
+
     return days
 
 
@@ -220,22 +310,13 @@ def adjust_sell_for_holdings(
       (Indian equity rules: retail short selling must be squared off same day).
     - BUY signals are never affected.
 
-    Args:
-        signal_type: "BUY", "SELL", or "HOLD"
-        holding_period: Current holding period decision (e.g. "short_term", "long_term")
-        product: Current product decision (e.g. "CNC")
-        symbol: Stock symbol
-        held_symbols: Set of symbols the user currently holds (open positions + broker holdings)
-        expected_days: Current expected holding days
-
     Returns:
-        (holding_period, product, expected_days) — possibly overridden to ("intraday", "MIS", 0) for naked shorts
+        (holding_period, product, expected_days)
     """
     if signal_type != "SELL":
         return (holding_period, product, expected_days)
 
     if symbol in held_symbols:
-        # User owns the stock — SELL is exiting a position, any product/period is fine
         return (holding_period, product, expected_days)
 
     # Short sell — must be intraday MIS (no overnight short positions for retail)
