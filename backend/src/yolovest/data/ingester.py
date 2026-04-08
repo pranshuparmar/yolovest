@@ -126,7 +126,7 @@ class MarketDataIngester(MarketDataBase):
     async def get_quote(self, symbol: str) -> dict[str, Any]:
         """Get latest quote with fallback."""
         providers = self._daily_providers.copy()
-        if self._intraday_provider:
+        if self._intraday_provider and self._intraday_provider not in providers:
             providers.insert(0, self._intraday_provider)
 
         last_error: Exception | None = None

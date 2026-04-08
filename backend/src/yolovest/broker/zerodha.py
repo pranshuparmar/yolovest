@@ -77,6 +77,10 @@ class ZerodhaBroker(BrokerBase):
     In live mode, orders are placed via Kite Connect SDK.
     """
 
+    # Shared rate limiter so KiteDataProvider uses the same concurrency
+    # pool (Kite aggregate limit is 10 req/s across all endpoints)
+    _shared_rate_limiter = asyncio.Semaphore(8)
+
     def __init__(
         self,
         api_key: str,
@@ -102,7 +106,8 @@ class ZerodhaBroker(BrokerBase):
         # This avoids a kite.profile() call on every heartbeat/page load.
         self._auth_cache_valid_until: float = 0.0
         # Rate limiter: 8 concurrent to stay under Kite's 10 req/s
-        self._rate_limiter = asyncio.Semaphore(8)
+        # Shared as class-level so KiteDataProvider can use the same limiter
+        self._rate_limiter = ZerodhaBroker._shared_rate_limiter
         # Circuit breaker: trip after 5 consecutive API failures, 30s cooldown
         self._circuit_breaker = BrokerCircuitBreaker(
             failure_threshold=5, cooldown_sec=30.0,

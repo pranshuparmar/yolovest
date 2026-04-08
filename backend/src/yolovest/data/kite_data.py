@@ -47,13 +47,15 @@ class KiteDataProvider(MarketDataBase):
         access_token: str | None = None,
         max_retries: int = 3,
         retry_base_delay: float = 1.0,
+        rate_limiter: asyncio.Semaphore | None = None,
     ) -> None:
         self._api_key = api_key
         self._access_token = access_token
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._kite: Any = None
-        self._rate_limiter = asyncio.Semaphore(8)  # stay under 10 req/s
+        # Share rate limiter with broker to respect Kite's 10 req/s aggregate limit
+        self._rate_limiter = rate_limiter or asyncio.Semaphore(8)
         # Instrument token cache: symbol -> instrument_token
         self._token_cache: dict[str, int] = {}
 
@@ -104,7 +106,7 @@ class KiteDataProvider(MarketDataBase):
             )
 
         instrument_token = await self._get_instrument_token(symbol)
-        end_date = date.today()
+        end_date = now_ist().date()
         start_date = end_date - timedelta(days=days)
 
         bars = await self._fetch_historical(

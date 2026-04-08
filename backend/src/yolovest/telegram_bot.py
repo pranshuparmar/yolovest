@@ -353,6 +353,9 @@ class TelegramBot:
         request_token = args[0]
         try:
             await self._ctx.broker.authenticate(request_token)
+            # Sync token to Kite data provider (paid data plan)
+            from yolovest.main import _sync_kite_data_token
+            _sync_kite_data_token(self._ctx)
             margins = await self._ctx.broker.get_margins()
             cash = margins.get("available_cash", margins.get("equity", {}).get("available", "?"))
             await update.message.reply_html(

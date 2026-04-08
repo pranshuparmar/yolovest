@@ -260,7 +260,16 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
             try:
                 from yolovest.data.kite_data import KiteDataProvider
 
-                kite_provider = KiteDataProvider(api_key=kite_key)
+                # Share rate limiter with broker to stay under Kite's 10 req/s
+                broker_limiter = None
+                try:
+                    from yolovest.broker.zerodha import ZerodhaBroker
+                    broker_limiter = ZerodhaBroker._shared_rate_limiter
+                except (ImportError, AttributeError):
+                    pass
+                kite_provider = KiteDataProvider(
+                    api_key=kite_key, rate_limiter=broker_limiter,
+                )
                 daily_providers.append(kite_provider)
                 logger.info("Kite Connect data provider enabled as primary")
             except Exception as e:
