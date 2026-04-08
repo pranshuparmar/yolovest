@@ -97,6 +97,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("reject", self._cmd_reject))
         self._app.add_handler(CommandHandler("trade", self._cmd_trade))
         self._app.add_handler(CommandHandler("holiday", self._cmd_holiday))
+        self._app.add_handler(CommandHandler("help", self._cmd_help))
 
         logger.info("Telegram bot starting (polling)")
         await self._app.initialize()
@@ -170,20 +171,51 @@ class TelegramBot:
         await update.message.reply_text(
             f"YoloVest Bot\n"
             f"Chat ID: {chat_id}\n\n"
-            "Commands:\n"
+            "Quick commands:\n"
             "/status — System status\n"
             "/pnl — Today's PnL\n"
             "/positions — Open positions\n"
             "/pending — Trades awaiting approval\n"
-            "/approve SYMBOL [overrides] — Approve trade (with optional override)\n"
-            "/reject SYMBOL — Reject pending trade\n"
-            "/trade BUY/SELL SYMBOL ENTRY TARGET SL [product] [qty] — Manual trade\n"
-            "/stop — Pause trading\n"
-            "/kill — Square off everything\n"
-            "/resume — Resume trading\n"
-            "/auth <token> — Daily Kite auth\n"
-            "/dashboard — High-level overview\n"
-            "/holiday — Manage holidays"
+            "/dashboard — Overview\n\n"
+            "Type /help for full command reference"
+        )
+
+    async def _cmd_help(self, update: Any, context: Any) -> None:
+        """Handle /help command — detailed command reference."""
+        await update.message.reply_html(
+            "<b>YoloVest Commands</b>\n\n"
+
+            "<b>Trading</b>\n"
+            "/pending — Show pending trades\n"
+            "/approve SYMBOL — Approve as-is\n"
+            "/approve SYMBOL BUY 422 427 420 — Full override\n"
+            "/approve SYMBOL BUY 422 427 420 CNC 50 — Override + product + qty\n"
+            "/approve SYMBOL target 427 — Change target\n"
+            "/approve SYMBOL sl 420 — Change SL\n"
+            "/approve SYMBOL qty 50 — Change quantity\n"
+            "/approve SYMBOL product CNC — Change product\n"
+            "/approve SYMBOL BUY — Flip direction\n"
+            "/reject SYMBOL — Skip trade\n"
+            "/trade BUY RELIANCE 2500 2550 2475 — Manual trade\n"
+            "/trade SELL INFY 422 415 427 CNC 50 — With product + qty\n\n"
+
+            "<b>Monitoring</b>\n"
+            "/status — System status + integrations\n"
+            "/pnl — Today's PnL summary\n"
+            "/positions — Open positions\n"
+            "/dashboard — Full overview\n\n"
+
+            "<b>Controls</b>\n"
+            "/stop — Pause trading (kill switch)\n"
+            "/kill — Square off everything + pause\n"
+            "/resume — Resume trading\n\n"
+
+            "<b>Setup</b>\n"
+            "/auth TOKEN — Daily Kite auth\n"
+            "/holiday — List holidays\n"
+            "/holiday add YYYY-MM-DD — Add holiday\n"
+            "/holiday add today — Add today\n"
+            "/holiday rm YYYY-MM-DD — Remove holiday"
         )
 
     async def _cmd_status(self, update: Any, context: Any) -> None:
