@@ -241,19 +241,19 @@ class TelegramBot:
         try:
             gemini_ok = await self._ctx.llm.ping()
         except Exception:
-            pass
+            logger.debug("Gemini ping failed during /status", exc_info=True)
 
         broker_ok = False
         try:
             broker_ok = await self._ctx.broker.is_authenticated()
         except Exception:
-            pass
+            logger.debug("Broker auth check failed during /status", exc_info=True)
 
         market_data_ok = False
         try:
             market_data_ok = await self._ctx.market_data.health_check()
         except Exception:
-            pass
+            logger.debug("Market data health check failed during /status", exc_info=True)
 
         def icon(ok: bool) -> str:
             return "OK" if ok else "DOWN"

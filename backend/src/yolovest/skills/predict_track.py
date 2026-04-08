@@ -109,6 +109,7 @@ class PredictTrackSkill(SkillBase):
                 try:
                     actual_price = await self.ctx.market_data.get_ltp(symbol)
                 except Exception:
+                    logger.debug("LTP unavailable for prediction scoring %s, using bar close", symbol)
                     # Fall back to latest OHLCV close
                     bars = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=1)
                     if bars:

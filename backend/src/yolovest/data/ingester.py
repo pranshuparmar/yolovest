@@ -163,6 +163,7 @@ class MarketDataIngester(MarketDataBase):
                 if await provider.health_check():
                     return True
             except Exception:
+                logger.debug("Health check failed for provider %s", type(provider).__name__, exc_info=True)
                 continue
         return False
 

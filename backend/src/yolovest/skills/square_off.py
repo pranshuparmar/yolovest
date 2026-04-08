@@ -47,6 +47,7 @@ class SquareOffSkill(SkillBase):
             h, m = int(parts[0]), int(parts[1])
             self.schedule = f"{m} {h} * * 1-5"  # weekdays only
         except (ValueError, IndexError):
+            logger.warning("Invalid square_off time %r, using default 15:15", sq_time)
             self.schedule = "15 15 * * 1-5"  # fallback default
 
     def should_run(self) -> bool:

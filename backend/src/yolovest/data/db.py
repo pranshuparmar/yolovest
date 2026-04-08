@@ -223,6 +223,7 @@ class Database:
             await self.conn.execute("SELECT 1")
             return True
         except Exception:
+            logger.exception("Database health check failed")
             return False
 
     # ------------------------------------------------------------------
@@ -422,6 +423,7 @@ class Database:
             await self.conn.commit()
             return True
         except Exception:
+            logger.warning("Failed to add %s to watchlist", symbol, exc_info=True)
             return False
 
     async def remove_watchlist_symbol(self, symbol: str) -> bool:
@@ -461,6 +463,7 @@ class Database:
             await self.conn.commit()
             return True
         except Exception:
+            logger.warning("Failed to add %s to user watchlist", symbol, exc_info=True)
             return False
 
     async def remove_user_watchlist_symbol(self, symbol: str) -> bool:
@@ -676,7 +679,7 @@ class Database:
                 )
                 inserted += 1
             except Exception:
-                pass  # Skip duplicates silently
+                logger.debug("Skipped duplicate news article", exc_info=True)
         await self.conn.commit()
         return inserted
 
@@ -755,7 +758,7 @@ class Database:
                 )
                 inserted += 1
             except Exception:
-                pass  # Skip duplicates silently
+                logger.debug("Skipped duplicate economic event", exc_info=True)
         await self.conn.commit()
         return inserted
 
@@ -1026,7 +1029,7 @@ class Database:
                 await self.delete_model_version(row["model_type"], row["version"])
                 deleted += 1
             except Exception:
-                pass
+                logger.warning("Failed to delete retired model %s/%s", row.get("model_type"), row.get("version"), exc_info=True)
         return deleted
 
     async def reshadow_model(self, model_type: str, version: str) -> bool:
@@ -2562,6 +2565,7 @@ class Database:
                     "newest": newest,
                 }
             except Exception:
+                logger.debug("Failed to get stats for table %s", table, exc_info=True)
                 stats[table] = {"row_count": 0, "oldest": None, "newest": None}
 
         # Database file size
@@ -2903,6 +2907,7 @@ class Database:
                 cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
                 deleted[table] = cursor.rowcount
             except Exception:
+                logger.debug("Could not reset table %s (may not exist)", table)
                 deleted[table] = 0  # Table may not exist yet
         await self.conn.commit()
         # Reclaim disk space

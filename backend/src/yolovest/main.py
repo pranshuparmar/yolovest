@@ -524,7 +524,7 @@ async def async_main(args: argparse.Namespace) -> None:
                         shadow["model_type"], shadow["version"], e,
                     )
         except Exception:
-            pass
+            logger.warning("Failed to load shadow models", exc_info=True)
 
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
@@ -555,7 +555,7 @@ async def async_main(args: argparse.Namespace) -> None:
         ):
             ctx.event_bus.subscribe(event_type, _ws_bridge)
     except Exception:
-        pass
+        logger.warning("Failed to set up WebSocket event bridge", exc_info=True)
 
     # Build CRON scheduler sharing the same skill instances
     cron_scheduler = CronScheduler(ctx, orchestrator._skills)

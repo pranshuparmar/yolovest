@@ -429,7 +429,7 @@ class PositionMonitorSkill(SkillBase):
                     output_summary={"pnl": pnl, "costs": costs},
                 )
             except Exception:
-                pass
+                logger.debug("Failed to log audit for ghost position recovery", exc_info=True)
 
         return recovered
 

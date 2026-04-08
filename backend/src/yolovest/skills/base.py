@@ -74,7 +74,7 @@ class SkillBase(ABC):
             from yolovest.events import Event
             await self.ctx.event_bus.publish(Event(event_type=event_type, data=data))
         except Exception:
-            pass
+            logger.debug("Failed to broadcast event %s", event_type, exc_info=True)
 
     async def safe_execute(self, **kwargs: Any) -> SkillResult:
         """Wrapper that catches exceptions and returns error SkillResult."""

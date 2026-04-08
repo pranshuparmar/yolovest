@@ -153,7 +153,7 @@ class RiskCheckSkill(SkillBase):
                     signal["symbol"], entry, fresh_ltp, drift_pct * 100,
                 )
         except Exception:
-            pass  # LTP unavailable — proceed with signal's entry_price
+            logger.debug("LTP unavailable for %s price drift check", signal["symbol"])
 
         # Position sizing based on max risk per trade
         risk_amount = capital * cfg.max_risk_per_trade_pct
@@ -249,6 +249,7 @@ class RiskCheckSkill(SkillBase):
             penalty = min(excess * 10, 0.30)
             return penalty
         except Exception:
+            logger.debug("Slippage penalty calc failed for %s", signal.get("symbol"), exc_info=True)
             return 0.0
 
     def _reject(self, signal: dict[str, Any], reason: str) -> SkillResult:
@@ -337,6 +338,7 @@ class RiskCheckSkill(SkillBase):
                     sym, days=cfg.lookback_days,
                 )
             except Exception:
+                logger.debug("Failed to get OHLCV for correlation check: %s", sym)
                 continue
 
             if not sym_bars:

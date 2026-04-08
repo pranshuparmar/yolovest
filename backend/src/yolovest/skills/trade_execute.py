@@ -79,6 +79,7 @@ class TradeExecuteSkill(SkillBase):
         try:
             entry = await self.ctx.market_data.get_ltp(signal["symbol"])
         except Exception:
+            logger.debug("LTP unavailable for paper trade %s, using signal price", signal["symbol"])
             entry = signal["entry_price"]
         slippage_pct = self.ctx.config.execution.paper_slippage_pct
 
@@ -221,6 +222,7 @@ class TradeExecuteSkill(SkillBase):
                     },
                 )
         except Exception:
+            logger.debug("LTP unavailable for live trade %s, using signal price", signal["symbol"])
             order_price = signal["entry_price"]
 
         scaled_cfg = cfg.scaled_entry

@@ -217,7 +217,7 @@ class HeartbeatOrchestrator:
             from yolovest.events import Event
             await self._ctx.event_bus.publish(Event(event_type=event_type, data=data))
         except Exception:
-            pass
+            logger.debug("Failed to broadcast event %s", event_type, exc_info=True)
 
     async def _execute_signal_chain(
         self, signal: object, index: int
@@ -363,7 +363,7 @@ class HeartbeatOrchestrator:
                 duration_ms=result.duration_ms,
             )
         except Exception:
-            pass
+            logger.debug("Failed to log audit for skill %s", name, exc_info=True)
 
         # Broadcast skill completion to WebSocket clients
         if self._on_skill_complete is not None:
@@ -378,7 +378,7 @@ class HeartbeatOrchestrator:
                     if result.data else {},
                 })
             except Exception:
-                pass  # Never let broadcast failures affect the pipeline
+                logger.debug("Skill completion broadcast failed for %s", name, exc_info=True)
 
         return result
 

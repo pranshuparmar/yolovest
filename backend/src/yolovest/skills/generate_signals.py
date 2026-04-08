@@ -153,7 +153,7 @@ class GenerateSignalsSkill(SkillBase):
                             )
                             continue
                 except (ValueError, TypeError):
-                    pass
+                    logger.debug("Cooldown check parse error for %s", symbol, exc_info=True)
 
             try:
                 # Step 2: Fetch OHLCV and compute features
@@ -186,7 +186,7 @@ class GenerateSignalsSkill(SkillBase):
                 try:
                     current_price = await self.ctx.market_data.get_ltp(symbol)
                 except Exception:
-                    pass  # fall back to features["close"] in _predict()
+                    logger.debug("LTP unavailable for %s, falling back to bar close", symbol)
 
                 # Decide holding period based on stock characteristics and strategy mode
                 holding_period, product, expected_days = await self._decide_holding_period(
@@ -475,6 +475,7 @@ class GenerateSignalsSkill(SkillBase):
             try:
                 current_price = await self.ctx.market_data.get_ltp(symbol)
             except Exception:
+                logger.debug("LTP unavailable for %s re-entry check, using bar close", symbol)
                 # Fall back to last bar close
                 if bars:
                     current_price = bars[-1].close
@@ -532,4 +533,5 @@ class GenerateSignalsSkill(SkillBase):
                         return float(conf)
             return None
         except Exception:
+            logger.debug("Failed to get last trade confidence for %s", symbol, exc_info=True)
             return None

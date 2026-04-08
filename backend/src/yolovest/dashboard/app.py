@@ -279,7 +279,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             if saved_pw:
                 _password["current"] = saved_pw
         except Exception:
-            pass
+            logger.warning("Failed to load persisted dashboard password", exc_info=True)
 
     def verify_credentials(
         request: Request,
@@ -346,7 +346,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                     if broker_capital > 0:
                         await ctx.db.set_system_state("initial_capital", str(broker_capital))
         except Exception:
-            pass  # Broker not configured or API failed — use DB value
+            logger.debug("Broker capital sync failed, using DB value", exc_info=True)
 
         portfolio = await ctx.db.get_portfolio_state()
         return portfolio
@@ -406,6 +406,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         try:
             authenticated = await ctx.broker.is_authenticated()
         except Exception:
+            logger.debug("Broker auth check failed for holdings request", exc_info=True)
             authenticated = False
 
         if not authenticated:
@@ -795,7 +796,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             try:
                 broker_authenticated = await ctx.broker.is_authenticated()
             except Exception:
-                pass
+                logger.debug("Broker auth check failed on integrations page", exc_info=True)
         broker_margins: dict[str, Any] | None = None
         results["zerodha"] = {
             "configured": broker_configured,
@@ -846,6 +847,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             ok = await ctx.llm.ping()
             return {"success": ok}
         except Exception as exc:
+            logger.warning("Gemini ping failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
     @app.post("/api/integrations/zerodha/authenticate")
@@ -867,7 +869,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 try:
                     margins = await ctx.broker.get_margins()
                 except Exception:
-                    pass
+                    logger.debug("Failed to fetch margins after Zerodha auth", exc_info=True)
             return {"success": ok, "margins": margins}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
@@ -899,7 +901,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 try:
                     await ctx.notify.send("Kite authenticated successfully.")
                 except Exception:
-                    pass
+                    logger.debug("Failed to send Kite auth success notification", exc_info=True)
                 return RedirectResponse(url="/integrations?zerodha_auth=success")
             else:
                 return RedirectResponse(url="/integrations?zerodha_auth=failed")
@@ -926,7 +928,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "transaction_type": body.get("transaction_type"),
             })
         except Exception:
-            pass
+            logger.debug("Failed to broadcast order update via WebSocket", exc_info=True)
 
         return {"status": "ok"}
 
@@ -1121,17 +1123,17 @@ def create_app(ctx: AppContext) -> FastAPI:
                 if model:
                     result["production"][model_type] = model
             except Exception:
-                pass
+                logger.debug("Failed to get production model for %s", model_type, exc_info=True)
         try:
             shadow_models = await ctx.db.get_all_shadow_models()
             result["shadow"] = shadow_models
         except Exception:
-            pass
+            logger.debug("Failed to get shadow models", exc_info=True)
         try:
             retired_models = await ctx.db.get_retired_models()
             result["retired"] = retired_models
         except Exception:
-            pass
+            logger.debug("Failed to get retired models", exc_info=True)
         return result
 
     @app.post("/api/ml-models/{model_type}/{version}/promote")
@@ -1427,7 +1429,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 else:
                     llm_reviewed_today += cnt
         except Exception:
-            pass
+            logger.debug("Failed to fetch LLM review counts", exc_info=True)
 
         return {
             "kill_switch_active": kill_switch,
@@ -1903,7 +1905,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 try:
                     current_price = await ctx.market_data.get_ltp(symbol)
                 except Exception:
-                    pass  # fall back to features["close"] in _predict()
+                    logger.debug("LTP unavailable for dry-run %s, using bar close", symbol)
 
                 # Decide holding period based on features and selected strategy mode
                 now_time = dt.now(IST).time()
@@ -2371,6 +2373,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 instance = cls(ctx)
                 schedule = instance.schedule
             except Exception:
+                logger.debug("Failed to instantiate skill %s for schedule", name, exc_info=True)
                 schedule = cls.schedule
             out.append({
                 "name": name,
@@ -2431,7 +2434,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                         duration_ms=result.duration_ms,
                     )
                 except Exception:
-                    pass
+                    logger.debug("Failed to log audit for manual skill %s", skill_name, exc_info=True)
                 await broadcast_ws("skill_completed", {
                     "skill": skill_name,
                     "success": result.success,

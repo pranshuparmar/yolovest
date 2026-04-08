@@ -136,7 +136,7 @@ class ZerodhaBroker(BrokerBase):
                 try:
                     await self._db.set_system_state("kite_access_token", self._access_token)
                 except Exception:
-                    pass
+                    logger.debug("Failed to persist kite access token", exc_info=True)
             logger.info("Kite Connect authenticated successfully (valid until ~6:00 AM IST)")
             return True
         except Exception:
@@ -174,7 +174,7 @@ class ZerodhaBroker(BrokerBase):
                 try:
                     await self._db.set_system_state("kite_access_token", "")
                 except Exception:
-                    pass
+                    logger.debug("Failed to clear stale kite token", exc_info=True)
             return False
 
     def _create_kite_session(self, request_token: str) -> Any:
@@ -233,6 +233,7 @@ class ZerodhaBroker(BrokerBase):
             self._update_auth_cache()
             return True
         except Exception:
+            logger.debug("Kite auth verification failed, invalidating cache", exc_info=True)
             self._auth_cache_valid_until = 0.0  # Invalidate cache
             return False
 
@@ -406,7 +407,7 @@ class ZerodhaBroker(BrokerBase):
                     margins = await asyncio.to_thread(self._kite.margins)
                 return margins
             except Exception:
-                pass
+                logger.debug("Failed to fetch Kite margins, using fallback", exc_info=True)
         # Fallback for unauthenticated or paper-only
         return {"available": {"cash": 0}, "equity": {"available": {"cash": 0}}}
 

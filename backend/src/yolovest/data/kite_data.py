@@ -193,4 +193,5 @@ class KiteDataProvider(MarketDataBase):
                 await asyncio.to_thread(kite.profile)
             return True
         except Exception:
+            logger.debug("Kite data health check failed", exc_info=True)
             return False

@@ -72,6 +72,7 @@ class IngestDataSkill(SkillBase):
                 # Intraday: fresh if within cache_ttl_minutes
                 return (now - latest) < timedelta(minutes=ttl)
         except Exception:
+            logger.debug("Freshness check failed for %s/%s", symbol, interval, exc_info=True)
             return False
 
     async def _get_active_symbols(self) -> list[str]:
@@ -87,7 +88,7 @@ class IngestDataSkill(SkillBase):
             if watchlist:
                 return [s["symbol"] for s in watchlist]
         except Exception:
-            pass
+            logger.warning("Failed to get watchlist, using seed_symbols", exc_info=True)
         return self.ctx.config.scanning.seed_symbols
 
     async def execute(self, **kwargs: Any) -> SkillResult:
@@ -236,7 +237,7 @@ class IngestDataSkill(SkillBase):
                     logger.debug("Skipping expensive fetches (last full ingest %.0fs ago)",
                                  (now_ist() - last_ts).total_seconds())
         except Exception:
-            pass
+            logger.debug("Failed to check last full ingest time", exc_info=True)
 
         # --- Expensive fetches: news, scrapers, sentiment ---
         # Run concurrently with per-source timeouts and an overall budget
@@ -547,7 +548,7 @@ class IngestDataSkill(SkillBase):
                 from yolovest.timezone import now_utc
                 await self.ctx.db.set_system_state("last_full_ingest", now_utc().isoformat())
             except Exception:
-                pass
+                logger.warning("Failed to persist last_full_ingest timestamp", exc_info=True)
 
         # --- Phase 2: Sentiment (depends on news, runs after) ---
         if self.ctx.config.llm.enabled and deduped:
