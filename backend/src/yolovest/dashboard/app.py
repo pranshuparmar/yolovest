@@ -1640,6 +1640,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         stock_exposure: dict[str, float] = {}
         trades_taken = 0
         trades_skipped = 0
+        signals_without_pnl = 0
         total_pnl = 0.0
         wins = 0
         losses = 0
@@ -1649,6 +1650,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         for sig in signals:
             pnl = sig.get("pnl")
             if pnl is None:
+                signals_without_pnl += 1
                 continue
 
             qty = sig.get("quantity", sig.get("position_size", 0))
@@ -1671,6 +1673,9 @@ def create_app(ctx: AppContext) -> FastAPI:
 
             # Take trade
             trades_taken += 1
+            exposure += value
+            stock_exposure[symbol] = stock_exposure.get(symbol, 0) + value
+            open_pos += 1
             capital += pnl
             total_pnl += pnl
             if pnl > 0:
@@ -1695,6 +1700,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "date_to": date_to,
             },
             "signals_available": len(signals),
+            "signals_without_pnl": signals_without_pnl,
             "results": {
                 "trades_taken": trades_taken,
                 "trades_skipped": trades_skipped,

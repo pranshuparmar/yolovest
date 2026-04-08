@@ -103,6 +103,14 @@ export function RiskSimulatorPage() {
               <> to {simulate.data.params.date_to}</>
             )}
           </p>
+          {r.trades_taken === 0 && r.trades_skipped === 0 && (simulate.data?.signals_without_pnl ?? 0) > 0 && (
+            <div className="bg-amber-900/30 border border-amber-700 rounded-lg p-3">
+              <p className="text-sm text-amber-400">
+                {simulate.data?.signals_without_pnl} signal(s) found but none have trade outcome data (PnL).
+                Signals need to be executed and positions closed before they appear in simulation results.
+              </p>
+            </div>
+          )}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
               <p className="text-xs text-gray-500">Final Capital</p>
