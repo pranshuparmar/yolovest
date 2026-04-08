@@ -231,7 +231,7 @@ class FeedbackConfig(BaseModel):
 class PartialProfitConfig(BaseModel):
     """Partial profit booking — close a portion of the position at intermediate targets."""
 
-    enabled: bool = False
+    enabled: bool = True
     first_target_pct: float = Field(default=0.5, gt=0, le=1)  # book at 50% of target
     first_close_pct: float = Field(default=0.5, gt=0, le=1)  # close 50% of position
     move_sl_to_breakeven: bool = True  # after first booking, move SL to entry price
@@ -249,7 +249,7 @@ class ScaledEntryConfig(BaseModel):
 class MarketRegimeConfig(BaseModel):
     """Market regime detection — adjust strategy based on market conditions."""
 
-    enabled: bool = False
+    enabled: bool = True
     index_symbol: str = "NIFTY 50"  # benchmark index for regime detection
     lookback_days: int = Field(default=20, ge=5, le=60)
     bull_bias_intraday_pct: float = Field(default=0.3, ge=0, le=1)  # 30% preference for shorter trades in bull
@@ -260,7 +260,7 @@ class MarketRegimeConfig(BaseModel):
 class ConvictionSizingConfig(BaseModel):
     """Conviction-based position sizing — scale size by ML confidence."""
 
-    enabled: bool = False
+    enabled: bool = True
     min_multiplier: float = Field(default=0.6, gt=0, le=1)  # size at min confidence
     max_multiplier: float = Field(default=1.5, ge=1, le=3)  # size at max confidence
     confidence_floor: float = Field(default=0.65, ge=0, le=1)  # maps to min_multiplier
@@ -279,7 +279,7 @@ class CorrelationLimitConfig(BaseModel):
 class ReentryConfig(BaseModel):
     """Smart re-entry — allow re-entering after SL hit if conditions improve."""
 
-    enabled: bool = False
+    enabled: bool = True
     min_bars_after_exit: int = Field(default=3, ge=1, le=20)  # wait at least N bars
     min_price_move_pct: float = Field(default=0.02, ge=0, le=0.10)  # price must move 2% from exit
     max_reentries_per_symbol: int = Field(default=1, ge=1, le=3)  # max re-entries per symbol per day
