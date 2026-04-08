@@ -43,10 +43,11 @@ class ConsoleNotifier(NotifierBase):
         msg = _format_trade_alert(trade)
         await self.send(msg)
 
-    async def send_exit_alert(self, symbol: str, reason: str, pnl: float) -> None:
+    async def send_exit_alert(self, symbol: str, reason: str, pnl: float, product: str = "") -> None:
         """Send a trade exit alert."""
-        emoji = "+" if pnl >= 0 else ""
-        await self.send(f"Exit: {symbol} — {reason} — PnL: {emoji}{pnl:.2f}")
+        sign = "+" if pnl >= 0 else ""
+        prod_str = f" [{product}]" if product else ""
+        await self.send(f"Exit: {symbol}{prod_str} — {reason} — PnL: {sign}{pnl:.2f}")
 
     async def send_error_alert(self, error: str) -> None:
         """Send an error alert."""
@@ -136,10 +137,11 @@ class Notifier:
         msg = _format_trade_alert(trade)
         await self.send(msg, alert_type="trade_entry")
 
-    async def send_exit_alert(self, symbol: str, reason: str, pnl: float) -> None:
+    async def send_exit_alert(self, symbol: str, reason: str, pnl: float, product: str = "") -> None:
         """Send a trade exit alert (target/SL hit, square-off)."""
-        emoji = "+" if pnl >= 0 else ""
-        msg = f"Exit: {symbol} — {reason} — PnL: {emoji}{pnl:.2f}"
+        sign = "+" if pnl >= 0 else ""
+        prod_str = f" [{product}]" if product else ""
+        msg = f"Exit: {symbol}{prod_str} — {reason} — PnL: {sign}{pnl:.2f}"
         await self.send(msg, alert_type="trade_exit")
 
     async def send_error_alert(self, error: str) -> None:
@@ -162,7 +164,13 @@ def _format_trade_alert(trade: dict[str, Any]) -> str:
     sl = trade.get("stop_loss_price", 0)
     target = trade.get("target_price", 0)
     mode = trade.get("mode", "paper")
+    product = trade.get("product", "MIS")
+    hold_days = trade.get("expected_holding_days")
+    hold_str = f" ({hold_days}d)" if hold_days is not None else ""
+    override = " [OVERRIDE]" if trade.get("is_override") else ""
+    manual = " [MANUAL]" if trade.get("is_manual") else ""
     return (
-        f"Trade Alert [{mode.upper()}]: {signal_type} {symbol} "
-        f"qty={qty} @ {fill:.2f} SL={sl:.2f} T={target:.2f}"
+        f"Trade [{mode.upper()}]: {signal_type} {symbol} "
+        f"{product}{hold_str} qty={qty} @ {fill:.2f} "
+        f"SL={sl:.2f} T={target:.2f}{override}{manual}"
     )

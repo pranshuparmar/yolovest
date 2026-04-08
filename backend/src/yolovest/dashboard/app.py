@@ -2159,10 +2159,16 @@ def create_app(ctx: AppContext) -> FastAPI:
     @app.post("/api/pending-trades/{trade_id}/approve")
     async def approve_pending_trade(
         trade_id: int,
+        request: Request,
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Approve a pending trade for execution."""
-        signal = await ctx.db.decide_pending_trade(trade_id, "approved", "dashboard")
+        """Approve a pending trade for execution, with optional overrides."""
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        overrides = body.get("overrides")  # optional: {signal_type, entry_price, target_price, stop_loss_price, product}
+
+        signal = await ctx.db.decide_pending_trade(
+            trade_id, "approved", "dashboard", overrides=overrides,
+        )
         if signal is None:
             raise HTTPException(status_code=404, detail="Trade not found or already decided")
 
@@ -2177,6 +2183,30 @@ def create_app(ctx: AppContext) -> FastAPI:
                         trade_id, trade.get("signal_type"), trade.get("symbol"))
             return {"success": True, "trade": trade}
         return {"success": False, "error": result.error}
+
+    @app.post("/api/manual-trade")
+    async def create_manual_trade(
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Place a manual trade directly (not from ML prediction)."""
+        body = await request.json()
+        required = ["symbol", "signal_type", "entry_price", "target_price", "stop_loss_price"]
+        missing = [k for k in required if k not in body]
+        if missing:
+            raise HTTPException(400, f"Missing fields: {missing}")
+
+        body["decided_by"] = "dashboard"
+        trade_id = await ctx.db.insert_manual_trade(body)
+
+        # Execute immediately
+        from yolovest.skills.trade_execute import TradeExecuteSkill
+        signal = {**body, "position_size": body.get("position_size", 1)}
+        skill = TradeExecuteSkill(ctx)
+        result = await skill.execute(signal=signal)
+
+        trade = result.data.get("trade", {}) if result.data else {}
+        return {"success": result.success, "trade": trade, "pending_id": trade_id, "error": result.error}
 
     @app.post("/api/pending-trades/{trade_id}/reject")
     async def reject_pending_trade(

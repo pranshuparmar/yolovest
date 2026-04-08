@@ -2419,6 +2419,7 @@ class Database:
 
     async def decide_pending_trade(
         self, trade_id: int, decision: str, decided_by: str,
+        overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Approve or reject a pending trade. Returns the signal data if approved."""
         import json
@@ -2430,17 +2431,73 @@ class Database:
         if not row:
             return None
 
-        await self.conn.execute(
-            "UPDATE pending_trades SET status = ?, decided_by = ?, "
-            "decided_at = datetime('now') WHERE id = ?",
-            (decision, decided_by, trade_id),
-        )
+        if decision == "approved" and overrides:
+            # Store user overrides in dedicated columns and flag as override
+            override_cols = {
+                "signal_type": "user_signal_type",
+                "entry_price": "user_entry_price",
+                "target_price": "user_target_price",
+                "stop_loss_price": "user_stop_loss_price",
+                "product": "user_product",
+                "notes": "user_notes",
+            }
+            set_parts = [
+                "status = ?", "decided_by = ?", "decided_at = datetime('now')",
+                "is_override = 1",
+            ]
+            params: list[Any] = [decision, decided_by]
+            for key, col in override_cols.items():
+                if key in overrides:
+                    set_parts.append(f"{col} = ?")
+                    params.append(overrides[key])
+            params.append(trade_id)
+            await self.conn.execute(
+                f"UPDATE pending_trades SET {', '.join(set_parts)} WHERE id = ?",
+                tuple(params),
+            )
+        else:
+            await self.conn.execute(
+                "UPDATE pending_trades SET status = ?, decided_by = ?, "
+                "decided_at = datetime('now') WHERE id = ?",
+                (decision, decided_by, trade_id),
+            )
         await self.conn.commit()
 
         if decision == "approved":
             signal_data = row["signal_data"]
-            return json.loads(signal_data) if signal_data else dict[str, Any](row)
+            signal = json.loads(signal_data) if signal_data else dict[str, Any](row)
+            # Apply overrides to the returned signal dict
+            if overrides:
+                for key in ("signal_type", "entry_price", "target_price",
+                            "stop_loss_price", "product", "notes"):
+                    if key in overrides:
+                        signal[key] = overrides[key]
+                signal["is_override"] = True
+            return signal
         return None
+
+    async def insert_manual_trade(self, trade_data: dict[str, Any]) -> int:
+        """Insert a manually initiated trade (not from ML prediction)."""
+        import json
+        cursor = await self.conn.execute(
+            "INSERT INTO pending_trades "
+            "(symbol, signal_type, entry_price, target_price, stop_loss_price, "
+            "position_size, product, signal_data, status, decided_by, decided_at, is_manual) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, datetime('now'), 1)",
+            (
+                trade_data["symbol"],
+                trade_data["signal_type"],
+                trade_data["entry_price"],
+                trade_data["target_price"],
+                trade_data["stop_loss_price"],
+                trade_data.get("position_size", 1),
+                trade_data.get("product", "MIS"),
+                json.dumps(trade_data),
+                trade_data.get("decided_by", "manual"),
+            ),
+        )
+        await self.conn.commit()
+        return cursor.lastrowid or 0
 
     async def expire_pending_trades(self, max_age_minutes: int = 30) -> int:
         """Expire pending trades older than max_age_minutes."""

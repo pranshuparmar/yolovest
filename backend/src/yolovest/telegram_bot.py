@@ -12,6 +12,7 @@ alongside the heartbeat orchestrator.
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 from yolovest.context import AppContext
@@ -94,6 +95,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("pending", self._cmd_pending))
         self._app.add_handler(CommandHandler("approve", self._cmd_approve))
         self._app.add_handler(CommandHandler("reject", self._cmd_reject))
+        self._app.add_handler(CommandHandler("trade", self._cmd_trade))
         self._app.add_handler(CommandHandler("holiday", self._cmd_holiday))
 
         logger.info("Telegram bot starting (polling)")
@@ -172,6 +174,10 @@ class TelegramBot:
             "/status — System status\n"
             "/pnl — Today's PnL\n"
             "/positions — Open positions\n"
+            "/pending — Trades awaiting approval\n"
+            "/approve <id> [overrides] — Approve trade (with optional override)\n"
+            "/reject <id> — Reject pending trade\n"
+            "/trade BUY/SELL SYMBOL ENTRY TARGET SL [product] [qty] — Manual trade\n"
             "/stop — Pause trading\n"
             "/kill — Square off everything\n"
             "/resume — Resume trading\n"
@@ -378,18 +384,43 @@ class TelegramBot:
         for t in pending:
             lines.append(
                 f"#{t['id']} {t['signal_type']} {t['symbol']} "
-                f"@ ₹{t['entry_price']:.2f} "
+                f"{t.get('product', 'MIS')} "
+                f"@ ₹{t['entry_price']:.2f} → T₹{t['target_price']:.2f} "
+                f"SL₹{t['stop_loss_price']:.2f} "
                 f"(conf {(t.get('confidence_score') or 0):.0%})"
             )
         msg = "<b>Pending Trades</b>\n\n" + "\n".join(lines)
-        msg += "\n\n/approve <id> or /reject <id>"
+        msg += (
+            "\n\n/approve &lt;id&gt; — approve as-is\n"
+            "/approve &lt;id&gt; BUY 422.50 427.25 420.00 — override\n"
+            "/approve &lt;id&gt; target 427.25 — partial override\n"
+            "/reject &lt;id&gt;"
+        )
         await update.message.reply_html(msg)
 
     async def _cmd_approve(self, update: Any, context: Any) -> None:
-        """Handle /approve <id> — approve a pending trade for execution."""
+        """Handle /approve <id> [overrides] — approve a pending trade with optional overrides.
+
+        Syntaxes:
+            /approve 5                              — approve as-is
+            /approve 5 BUY 422.50 427.25 420.00    — full override: direction entry target SL
+            /approve 5 BUY 422.50 427.25 420.00 CNC — full override with product
+            /approve 5 target 427.25               — override just target
+            /approve 5 sl 420.00                   — override just SL
+            /approve 5 BUY                         — override just direction (flip)
+            /approve 5 product CNC                 — override just product
+        """
         args = context.args
         if not args:
-            await update.message.reply_text("Usage: /approve <id>")
+            await update.message.reply_text(
+                "Usage:\n"
+                "/approve <id> — approve as-is\n"
+                "/approve <id> BUY/SELL — flip direction\n"
+                "/approve <id> target <price> — override target\n"
+                "/approve <id> sl <price> — override SL\n"
+                "/approve <id> product MIS/CNC — override product\n"
+                "/approve <id> BUY 422.50 427.25 420.00 [CNC] — full override"
+            )
             return
 
         try:
@@ -398,8 +429,91 @@ class TelegramBot:
             await update.message.reply_text("Invalid trade ID.")
             return
 
+        # Parse overrides from remaining args
+        overrides: dict[str, Any] = {}
+        override_notes: list[str] = []
+
+        if len(args) > 1:
+            # Look up the original pending trade for context in override notes
+            pending = await self._ctx.db.get_pending_trades()
+            original = next((t for t in pending if t["id"] == trade_id), None)
+
+            arg1 = args[1].upper()
+
+            if arg1 in ("BUY", "SELL") and len(args) >= 5:
+                # Full override: signal_type entry target SL [product]
+                try:
+                    overrides["signal_type"] = arg1
+                    overrides["entry_price"] = float(args[2])
+                    overrides["target_price"] = float(args[3])
+                    overrides["stop_loss_price"] = float(args[4])
+                except ValueError:
+                    await update.message.reply_text(
+                        "Invalid prices. Use: /approve <id> BUY/SELL <entry> <target> <SL> [product]"
+                    )
+                    return
+                if original and original["signal_type"] != arg1:
+                    override_notes.append(
+                        f"direction flipped from {original['signal_type']} to {arg1}"
+                    )
+                override_notes.append(
+                    f"entry={overrides['entry_price']:.2f}, "
+                    f"target={overrides['target_price']:.2f}, "
+                    f"SL={overrides['stop_loss_price']:.2f}"
+                )
+                # Optional 5th arg: product
+                if len(args) >= 6 and args[5].upper() in ("MIS", "CNC"):
+                    overrides["product"] = args[5].upper()
+                    override_notes.append(f"product={overrides['product']}")
+
+            elif arg1 in ("BUY", "SELL") and len(args) == 2:
+                # Direction-only override
+                overrides["signal_type"] = arg1
+                if original and original["signal_type"] != arg1:
+                    override_notes.append(
+                        f"direction flipped from {original['signal_type']} to {arg1}"
+                    )
+                else:
+                    override_notes.append(f"direction set to {arg1}")
+
+            elif arg1 == "TARGET" and len(args) >= 3:
+                try:
+                    overrides["target_price"] = float(args[2])
+                except ValueError:
+                    await update.message.reply_text("Invalid target price.")
+                    return
+                override_notes.append(f"target={overrides['target_price']:.2f}")
+
+            elif arg1 == "SL" and len(args) >= 3:
+                try:
+                    overrides["stop_loss_price"] = float(args[2])
+                except ValueError:
+                    await update.message.reply_text("Invalid stop-loss price.")
+                    return
+                override_notes.append(f"SL={overrides['stop_loss_price']:.2f}")
+
+            elif arg1 == "PRODUCT" and len(args) >= 3:
+                product = args[2].upper()
+                if product not in ("MIS", "CNC"):
+                    await update.message.reply_text("Invalid product. Use MIS or CNC.")
+                    return
+                overrides["product"] = product
+                override_notes.append(f"product={product}")
+
+            else:
+                await update.message.reply_text(
+                    "Unrecognized override. Use:\n"
+                    "/approve <id> BUY/SELL — flip direction\n"
+                    "/approve <id> target <price>\n"
+                    "/approve <id> sl <price>\n"
+                    "/approve <id> product MIS/CNC\n"
+                    "/approve <id> BUY 422.50 427.25 420.00 [CNC]"
+                )
+                return
+
         signal = await self._ctx.db.decide_pending_trade(
             trade_id, "approved", "telegram",
+            overrides=overrides if overrides else None,
         )
         if signal is None:
             await update.message.reply_text(f"Trade #{trade_id} not found or already decided.")
@@ -412,10 +526,16 @@ class TelegramBot:
 
         if result.success:
             trade = result.data.get("trade", {}) if result.data else {}
-            await update.message.reply_html(
+            msg = (
                 f"Approved & executed: {trade.get('signal_type')} {trade.get('symbol')} "
-                f"qty={trade.get('quantity')} @ ₹{trade.get('fill_price', 0):.2f}"
+                f"{trade.get('product', 'MIS')} qty={trade.get('quantity')} "
+                f"@ ₹{trade.get('fill_price', 0):.2f}\n"
+                f"  Target: ₹{trade.get('target_price', 0):.2f} | "
+                f"SL: ₹{trade.get('stop_loss_price', 0):.2f}"
             )
+            if override_notes:
+                msg += f"\n  [OVERRIDE: {'; '.join(override_notes)}]"
+            await update.message.reply_html(msg)
         else:
             await update.message.reply_text(f"Approved but execution failed: {result.error}")
 
@@ -440,6 +560,140 @@ class TelegramBot:
 
         await self._ctx.db.decide_pending_trade(trade_id, "rejected", "telegram")
         await update.message.reply_text(f"Rejected trade #{trade_id}.")
+
+    async def _cmd_trade(self, update: Any, context: Any) -> None:
+        """Handle /trade — place a manual trade.
+
+        Syntax:
+            /trade BUY RELIANCE 2500 2550 2475         — BUY symbol entry target SL (MIS)
+            /trade SELL INFY 422.50 415.80 427.00 CNC  — with explicit product
+            /trade BUY TCS 3500 3600 3450 CNC 50       — with product and qty
+        """
+        args = context.args
+        if not args or len(args) < 5:
+            await update.message.reply_text(
+                "Usage: /trade BUY/SELL SYMBOL ENTRY TARGET SL [product] [qty]\n\n"
+                "Examples:\n"
+                "/trade BUY RELIANCE 2500 2550 2475\n"
+                "/trade SELL INFY 422.50 415.80 427.00 CNC\n"
+                "/trade BUY TCS 3500 3600 3450 CNC 50"
+            )
+            return
+
+        # Parse signal_type
+        signal_type = args[0].upper()
+        if signal_type not in ("BUY", "SELL"):
+            await update.message.reply_text("First argument must be BUY or SELL.")
+            return
+
+        # Parse symbol
+        symbol = args[1].upper()
+
+        # Parse prices
+        try:
+            entry_price = float(args[2])
+            target_price = float(args[3])
+            stop_loss_price = float(args[4])
+        except ValueError:
+            await update.message.reply_text(
+                "Invalid price values. Entry, target, and SL must be numbers."
+            )
+            return
+
+        if entry_price <= 0 or target_price <= 0 or stop_loss_price <= 0:
+            await update.message.reply_text("All prices must be positive.")
+            return
+
+        # Validate SL direction
+        if signal_type == "BUY" and stop_loss_price >= entry_price:
+            await update.message.reply_text("For BUY, stop-loss must be below entry price.")
+            return
+        if signal_type == "SELL" and stop_loss_price <= entry_price:
+            await update.message.reply_text("For SELL, stop-loss must be above entry price.")
+            return
+
+        # Parse optional product (default MIS)
+        product = "MIS"
+        explicit_qty: int | None = None
+        if len(args) >= 6:
+            if args[5].upper() in ("MIS", "CNC"):
+                product = args[5].upper()
+            else:
+                # Maybe it's qty directly (no product specified)
+                try:
+                    explicit_qty = int(args[5])
+                except ValueError:
+                    await update.message.reply_text(
+                        f"Invalid product or qty: '{args[5]}'. Product must be MIS or CNC."
+                    )
+                    return
+
+        # Parse optional qty
+        if len(args) >= 7 and explicit_qty is None:
+            try:
+                explicit_qty = int(args[6])
+            except ValueError:
+                await update.message.reply_text(f"Invalid qty: '{args[6]}'. Must be an integer.")
+                return
+
+        # Compute position size if not provided
+        if explicit_qty is not None:
+            position_size = explicit_qty
+        else:
+            # qty = floor(capital * risk_per_trade / abs(entry - sl))
+            try:
+                cap_str = await self._ctx.db.get_system_state("initial_capital")
+                capital = float(cap_str) if cap_str else 100_000.0
+            except (ValueError, TypeError):
+                capital = 100_000.0
+
+            risk_pct = self._ctx.config.risk.max_risk_per_trade_pct
+            risk_per_share = abs(entry_price - stop_loss_price)
+            if risk_per_share <= 0:
+                await update.message.reply_text("Entry and SL prices cannot be equal.")
+                return
+            position_size = max(1, math.floor(capital * risk_pct / risk_per_share))
+
+        # Build signal dict
+        signal = {
+            "symbol": symbol,
+            "signal_type": signal_type,
+            "entry_price": entry_price,
+            "target_price": target_price,
+            "stop_loss_price": stop_loss_price,
+            "position_size": position_size,
+            "product": product,
+            "source": "manual_telegram",
+        }
+
+        try:
+            # Insert as manual trade (pre-approved)
+            await self._ctx.db.insert_manual_trade(
+                {**signal, "decided_by": "telegram"},
+            )
+
+            # Execute via TradeExecuteSkill
+            from yolovest.skills.trade_execute import TradeExecuteSkill
+            skill = TradeExecuteSkill(self._ctx)
+            result = await skill.execute(signal=signal)
+
+            if result.success:
+                trade = result.data.get("trade", {}) if result.data else {}
+                await update.message.reply_html(
+                    f"<b>Manual trade executed</b>\n"
+                    f"{trade.get('signal_type', signal_type)} {trade.get('symbol', symbol)} "
+                    f"{trade.get('product', product)} "
+                    f"qty={trade.get('quantity', position_size)} "
+                    f"@ ₹{trade.get('fill_price', entry_price):.2f}\n"
+                    f"  Target: ₹{target_price:.2f} | SL: ₹{stop_loss_price:.2f}"
+                )
+            else:
+                await update.message.reply_text(
+                    f"Trade recorded but execution failed: {result.error}"
+                )
+        except Exception as e:
+            logger.error("Manual trade failed: %s", e, exc_info=True)
+            await update.message.reply_text(f"Trade failed: {e}")
 
     async def _cmd_holiday(self, update: Any, context: Any) -> None:
         """Handle /holiday — manage NSE holidays.

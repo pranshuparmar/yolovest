@@ -624,9 +624,22 @@ export function usePendingTrades() {
 export function useApprovePendingTrade() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: api.approvePendingTrade,
+    mutationFn: ({ tradeId, overrides }: { tradeId: number; overrides?: Record<string, unknown> }) =>
+      api.approvePendingTrade(tradeId, overrides),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pending-trades"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+    },
+  });
+}
+
+export function useManualTrade() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (trade: { symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; product?: string; position_size?: number }) =>
+      api.manualTrade(trade),
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["positions"] });
       qc.invalidateQueries({ queryKey: ["trades"] });
     },
