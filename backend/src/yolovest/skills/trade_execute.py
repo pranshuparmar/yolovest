@@ -22,6 +22,7 @@ Flow:
 import asyncio
 import hashlib
 import logging
+import math
 from typing import Any
 
 from yolovest.costs import compute_transaction_costs
@@ -72,6 +73,7 @@ class TradeExecuteSkill(SkillBase):
 
         Applies configurable simulated slippage from execution.paper_slippage_pct.
         Uses fresh LTP when available for realistic fill simulation.
+        Supports scaled entry (splitting into multiple legs) when enabled.
         """
         # Use fresh LTP for realistic paper fills
         try:
@@ -79,17 +81,55 @@ class TradeExecuteSkill(SkillBase):
         except Exception:
             entry = signal["entry_price"]
         slippage_pct = self.ctx.config.execution.paper_slippage_pct
-        # BUY fills slightly higher, SELL fills slightly lower
-        if signal["signal_type"] == "BUY":
-            fill_price = entry * (1 + slippage_pct)
+
+        scaled_cfg = self.ctx.config.execution.scaled_entry
+        total_qty = signal["position_size"]
+        is_scaled = scaled_cfg.enabled and scaled_cfg.legs > 1 and total_qty >= 2
+
+        if is_scaled:
+            # Scaled entry: split into two legs
+            leg1_qty = math.ceil(total_qty * 0.5)
+            leg2_qty = total_qty - leg1_qty
+
+            # Leg 1: market fill with slippage
+            if signal["signal_type"] == "BUY":
+                leg1_fill = entry * (1 + slippage_pct)
+            else:
+                leg1_fill = entry * (1 - slippage_pct)
+
+            # Wait for second leg
+            await asyncio.sleep(scaled_cfg.second_leg_delay_sec)
+
+            # Leg 2: simulate limit fill at offset price
+            offset = scaled_cfg.second_leg_offset_pct
+            if signal["signal_type"] == "BUY":
+                leg2_fill = entry * (1 - offset)  # limit below market for BUY
+            else:
+                leg2_fill = entry * (1 + offset)  # limit above market for SELL
+
+            # Average fill across both legs
+            fill_price = (leg1_fill * leg1_qty + leg2_fill * leg2_qty) / total_qty
+            actual_qty = total_qty
+
+            logger.info(
+                "trade-execute: PAPER scaled entry %s %s leg1=%d@%.2f leg2=%d@%.2f avg=%.2f",
+                signal["signal_type"], signal["symbol"],
+                leg1_qty, leg1_fill, leg2_qty, leg2_fill, fill_price,
+            )
         else:
-            fill_price = entry * (1 - slippage_pct)
+            # Standard single-order fill
+            if signal["signal_type"] == "BUY":
+                fill_price = entry * (1 + slippage_pct)
+            else:
+                fill_price = entry * (1 - slippage_pct)
+            actual_qty = total_qty
+
         slippage = abs(fill_price - entry)
 
         # Estimate transaction costs for realistic paper PnL
         product = signal.get("product", "MIS")
         est_costs = compute_transaction_costs(
-            fill_price, signal["target_price"], signal["position_size"],
+            fill_price, signal["target_price"], actual_qty,
             product=product, cost_config=self.ctx.config.transaction_costs,
         )
 
@@ -98,7 +138,7 @@ class TradeExecuteSkill(SkillBase):
             "signal_type": signal["signal_type"],
             "entry_price": entry,
             "fill_price": round(fill_price, 2),
-            "quantity": signal["position_size"],
+            "quantity": actual_qty,
             "stop_loss_price": signal["stop_loss_price"],
             "target_price": signal["target_price"],
             "product": signal.get("product", "MIS"),
@@ -108,6 +148,9 @@ class TradeExecuteSkill(SkillBase):
             "estimated_costs": est_costs,
             "expected_holding_days": signal.get("expected_holding_days"),
         }
+
+        if is_scaled:
+            trade["scaled_entry"] = True
 
         trade_id = await self.ctx.db.insert_trade(trade)
         trade["trade_id"] = trade_id
@@ -122,9 +165,10 @@ class TradeExecuteSkill(SkillBase):
         })
 
         logger.info(
-            "trade-execute: PAPER %s %s qty=%d fill=%.2f slippage=%.2f (id=%s)",
+            "trade-execute: PAPER %s %s qty=%d fill=%.2f slippage=%.2f (id=%s)%s",
             trade["signal_type"], trade["symbol"], trade["quantity"],
             trade["fill_price"], trade["slippage"], trade_id,
+            " [scaled]" if is_scaled else "",
         )
 
         return SkillResult(

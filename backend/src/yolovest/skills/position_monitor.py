@@ -100,6 +100,18 @@ class PositionMonitorSkill(SkillBase):
                 )
                 continue
 
+            # Partial profit booking (before target/SL checks)
+            partial_booked = await self._check_partial_profit_booking(
+                pos, current_price,
+            )
+            if partial_booked:
+                # Update unrealized PnL for remaining position and move on;
+                # skip target/SL checks this cycle to let the partial order settle
+                await self.ctx.db.update_unrealized_pnl(
+                    pos["trade_id"], current_price,
+                )
+                continue
+
             # Target hit?
             if (pos["signal_type"] == "BUY" and current_price >= target) or (
                 pos["signal_type"] == "SELL" and current_price <= target
@@ -537,3 +549,105 @@ class PositionMonitorSkill(SkillBase):
         if signal_type == "BUY":
             return new_sl > current_sl
         return new_sl < current_sl
+
+    async def _check_partial_profit_booking(
+        self,
+        pos: dict[str, Any],
+        current_price: float,
+    ) -> bool:
+        """Book partial profits at an intermediate target level.
+
+        Returns True if a partial booking was executed this cycle (caller
+        should skip target/SL checks to let the order settle), False otherwise.
+        """
+        cfg = self.ctx.config.risk.partial_profit
+        if not cfg.enabled:
+            return False
+
+        position_id = pos["trade_id"]
+
+        # Check if this position already had a partial booking
+        already_booked = await self.ctx.db.get_system_state(
+            f"partial_booked_{position_id}",
+        )
+        if already_booked:
+            return False
+
+        entry = pos["entry_price"]
+        target = pos["target_price"]
+        signal_type = pos["signal_type"]
+
+        # Calculate intermediate target
+        if signal_type == "BUY":
+            intermediate_target = entry + (target - entry) * cfg.first_target_pct
+            crossed = current_price >= intermediate_target
+        else:
+            intermediate_target = entry - (entry - target) * cfg.first_target_pct
+            crossed = current_price <= intermediate_target
+
+        if not crossed:
+            return False
+
+        qty = pos.get("quantity", 0)
+        close_qty = round(qty * cfg.first_close_pct)
+        if close_qty <= 0:
+            return False
+
+        # Place the partial exit order
+        try:
+            if signal_type == "BUY":
+                await self.ctx.broker.place_order(
+                    symbol=pos["symbol"],
+                    side="SELL",
+                    quantity=close_qty,
+                    price=current_price,
+                    order_type="MARKET",
+                    product=pos.get("product", "MIS"),
+                )
+            else:
+                await self.ctx.broker.place_order(
+                    symbol=pos["symbol"],
+                    side="BUY",
+                    quantity=close_qty,
+                    price=current_price,
+                    order_type="MARKET",
+                    product=pos.get("product", "MIS"),
+                )
+        except Exception:
+            logger.exception(
+                "position-monitor: PARTIAL PROFIT order failed for %s",
+                pos["symbol"],
+            )
+            return False
+
+        # Move SL to breakeven if configured
+        if cfg.move_sl_to_breakeven:
+            try:
+                sl_order_id = pos.get("sl_order_id")
+                if sl_order_id:
+                    await self.ctx.broker.modify_sl_order(sl_order_id, entry)
+                    await self.ctx.db.update_position_sl(position_id, entry)
+            except Exception:
+                logger.exception(
+                    "position-monitor: Failed to move SL to breakeven for %s",
+                    pos["symbol"],
+                )
+
+        # Mark as partially booked
+        await self.ctx.db.set_system_state(
+            f"partial_booked_{position_id}", "true",
+        )
+
+        logger.info(
+            "position-monitor: PARTIAL PROFIT BOOKED %s — "
+            "closed %d/%d shares at %.2f (intermediate target %.2f), "
+            "SL moved to breakeven=%s",
+            pos["symbol"],
+            close_qty,
+            qty,
+            current_price,
+            intermediate_target,
+            cfg.move_sl_to_breakeven,
+        )
+
+        return True

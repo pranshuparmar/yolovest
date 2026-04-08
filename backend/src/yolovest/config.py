@@ -228,6 +228,64 @@ class FeedbackConfig(BaseModel):
     sources: FeedbackSourcesConfig = Field(default_factory=FeedbackSourcesConfig)
 
 
+class PartialProfitConfig(BaseModel):
+    """Partial profit booking — close a portion of the position at intermediate targets."""
+
+    enabled: bool = False
+    first_target_pct: float = Field(default=0.5, gt=0, le=1)  # book at 50% of target
+    first_close_pct: float = Field(default=0.5, gt=0, le=1)  # close 50% of position
+    move_sl_to_breakeven: bool = True  # after first booking, move SL to entry price
+
+
+class ScaledEntryConfig(BaseModel):
+    """Scaled entry — split orders into legs for better average entry."""
+
+    enabled: bool = False
+    legs: int = Field(default=2, ge=1, le=4)  # number of entry legs
+    second_leg_offset_pct: float = Field(default=0.005, ge=0, le=0.05)  # 0.5% below entry for BUY
+    second_leg_delay_sec: int = Field(default=30, ge=0, le=300)  # wait before second leg
+
+
+class MarketRegimeConfig(BaseModel):
+    """Market regime detection — adjust strategy based on market conditions."""
+
+    enabled: bool = False
+    index_symbol: str = "NIFTY 50"  # benchmark index for regime detection
+    lookback_days: int = Field(default=20, ge=5, le=60)
+    bull_bias_intraday_pct: float = Field(default=0.3, ge=0, le=1)  # 30% preference for shorter trades in bull
+    bear_max_holding_days: int = Field(default=5, ge=1, le=15)  # cap holding days in bear market
+    range_prefer_mean_reversion: bool = True  # prefer oversold/overbought entries in range
+
+
+class ConvictionSizingConfig(BaseModel):
+    """Conviction-based position sizing — scale size by ML confidence."""
+
+    enabled: bool = False
+    min_multiplier: float = Field(default=0.6, gt=0, le=1)  # size at min confidence
+    max_multiplier: float = Field(default=1.5, ge=1, le=3)  # size at max confidence
+    confidence_floor: float = Field(default=0.65, ge=0, le=1)  # maps to min_multiplier
+    confidence_ceiling: float = Field(default=0.90, ge=0, le=1)  # maps to max_multiplier
+
+
+class CorrelationLimitConfig(BaseModel):
+    """Correlation-aware position limits — beyond simple sector counts."""
+
+    enabled: bool = False
+    max_correlated_positions: int = Field(default=2, ge=1, le=5)
+    correlation_threshold: float = Field(default=0.7, ge=0.3, le=1)  # pairs above this are "correlated"
+    lookback_days: int = Field(default=60, ge=20, le=252)
+
+
+class ReentryConfig(BaseModel):
+    """Smart re-entry — allow re-entering after SL hit if conditions improve."""
+
+    enabled: bool = False
+    min_bars_after_exit: int = Field(default=3, ge=1, le=20)  # wait at least N bars
+    min_price_move_pct: float = Field(default=0.02, ge=0, le=0.10)  # price must move 2% from exit
+    max_reentries_per_symbol: int = Field(default=1, ge=1, le=3)  # max re-entries per symbol per day
+    require_higher_confidence: bool = True  # new signal must have higher confidence than original
+
+
 class StrategyConfig(BaseModel):
     mode: Literal["intraday", "short_term", "balanced", "long_term"] = "balanced"
     allowed_holding_periods: list[str] | None = None
@@ -238,6 +296,7 @@ class StrategyConfig(BaseModel):
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     default_trade_type: Literal["intraday", "swing"] = "intraday"
     min_training_samples: int = 200
+    market_regime: MarketRegimeConfig = Field(default_factory=MarketRegimeConfig)
 
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "StrategyConfig":
@@ -275,6 +334,10 @@ class RiskConfig(BaseModel):
     margin_usage_enabled: bool = False  # when False, position value capped by available cash (no leverage)
     weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
     holding_expiry: HoldingExpiryConfig = Field(default_factory=HoldingExpiryConfig)
+    partial_profit: PartialProfitConfig = Field(default_factory=PartialProfitConfig)
+    conviction_sizing: ConvictionSizingConfig = Field(default_factory=ConvictionSizingConfig)
+    correlation_limit: CorrelationLimitConfig = Field(default_factory=CorrelationLimitConfig)
+    reentry: ReentryConfig = Field(default_factory=ReentryConfig)
 
 
 class MarketHoursConfig(BaseModel):
@@ -318,6 +381,7 @@ class MarketHoursConfig(BaseModel):
 
 class ExecutionConfig(BaseModel):
     max_order_retries: int = 3
+    scaled_entry: ScaledEntryConfig = Field(default_factory=ScaledEntryConfig)
     retry_base_delay_sec: int = 2
     paper_slippage_pct: float = Field(default=0.001, ge=0)
     order_timeout_sec: int = 30
