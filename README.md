@@ -27,7 +27,7 @@ YoloVest is a fully autonomous AI-driven stock trading platform for the Indian m
 
 ## Paper Mode vs Live Mode
 
-YoloVest has two operating modes, controlled by the `mode` setting (changeable via the Settings page or config file):
+YoloVest has two operating modes, controlled by the `mode` setting (changeable via the Settings page):
 
 ### Paper Mode (default)
 
@@ -43,7 +43,7 @@ Use paper mode to evaluate the system's performance before committing real capit
 
 - Orders are placed directly via Zerodha Kite Connect API
 - Real positions, margins, and order lifecycle are tracked
-- Requires valid Zerodha API credentials and **daily re-authentication** (token expires at 6 AM IST)
+- Requires valid Zerodha API credentials and **daily re-authentication** (Zerodha expires tokens at 6 AM IST)
 - Price drift rejection prevents stale signals from executing at unexpected prices
 - All safety mechanisms (kill switch, circuit breakers, exposure caps) are active
 
@@ -133,12 +133,11 @@ npm run build   # Outputs to dist/
 
 ## Daily Kite Re-Authentication
 
-Zerodha's API tokens expire daily at 6:00 AM IST. If you're using Kite Connect (paper with real data, or live mode), you need to re-authenticate each trading day:
+Zerodha expires API tokens daily at 6:00 AM IST. If you're using Kite Connect (paper with real data, or live mode), you need to re-authenticate each trading day:
 
-1. The system sends you a Telegram message at **8:30 AM IST** (configurable) with a login link
-2. Click the link, log in to Zerodha, and copy the `request_token` from the redirect URL
-3. Send it to the bot: `/auth <request_token>`
-4. Alternatively, paste the token on the **Integrations** page in the dashboard
+1. The system sends you a Telegram message at **8:30 AM IST** (configurable) with a Kite login link
+2. Click the link and log in to Zerodha — the app receives the token automatically via OAuth redirect
+3. As a fallback (e.g., if the redirect doesn't work), you can also send the token manually via `/auth <request_token>` on Telegram or paste it on the **Integrations** page
 
 The token is cached in the database and restored automatically if you restart the app during the day.
 
@@ -294,41 +293,36 @@ Kill switch state persists across restarts.
 
 If you're setting this up for the first time, here's a suggested timeline:
 
-### Week 1-2: Setup and Observation
+### Week 1: Setup and Observation
 
 1. Deploy with Docker or run locally. Don't set Kite credentials yet — the system works fully in paper mode with free market data.
 2. Set `GEMINI_API_KEY` if you want LLM features (sentiment, trade review). This is optional but improves signal quality.
 3. Set up the Telegram bot — it's the easiest way to monitor the system without opening the dashboard.
 4. Watch the dashboard daily. Use the **Dry-Run** page to see what signals the system generates. Don't change any risk parameters yet.
 
-### Week 3-4: Paper Trading
+### Week 2: Paper Trading
 
 1. Let the system run through several market days. It generates signals and executes paper trades automatically.
 2. Check the **Predictions** page to see how signal accuracy tracks over time.
 3. Review the **Trades** page to understand the system's behavior — entry/exit logic, position sizing, stop-loss placement.
 4. Use the **Risk Simulator** to replay historical signals under different risk parameters and see how outcomes change.
 
-### Week 5-8: Model Improvement
+### Week 3: Model Retraining
 
-1. After ~200 predictions accumulate (check the ML Models page), the weekly retraining kicks in automatically (Saturday 6 AM by default).
+1. After enough predictions accumulate, the weekly retraining kicks in automatically (Saturday 6 AM by default). You can also trigger it manually from the **Skills** page.
 2. New models enter **shadow mode** for 7 days — running predictions alongside production without affecting trades.
-3. If the shadow model outperforms, it's automatically promoted. Watch the ML Models page for promotion events.
-4. Use the **Strategy** page to track win rate, Sharpe ratio, and drawdowns over time.
-5. Tune risk parameters based on what you observe. Start conservative (lower exposure, fewer positions) and loosen gradually.
+3. If the shadow model outperforms, it's automatically promoted. Watch the **ML Models** page for promotion events.
+4. Tune risk parameters based on what you observe. Start conservative (lower exposure, fewer positions) and loosen gradually.
 
-### When to Consider Live Mode
+### Week 4: Evaluate and Decide
 
-Switch to live mode only when you can answer "yes" to all of these:
+1. Use the **Strategy** page to review win rate, Sharpe ratio, and drawdowns.
+2. Check that the model has been retrained at least once with real prediction feedback.
+3. Verify that paper PnL shows positive returns after transaction costs across different market conditions.
+4. Set up the **kill switch** via Telegram and test that `/stop` and `/resume` work.
+5. Make sure you're comfortable with the daily Kite re-authentication routine.
 
-- You've run paper mode for **at least 4-6 weeks** across different market conditions
-- The model has been **retrained at least 3-4 times** with real prediction feedback
-- Paper PnL shows **consistent positive returns** after transaction costs
-- You understand **every setting** in the risk section and have tuned them for your risk tolerance
-- You've set up the **kill switch** via Telegram and tested it works
-- You're comfortable with the **daily Kite re-authentication** routine
-- You've set a **daily loss limit** you can genuinely afford to lose
-
-To switch: go to **Settings** in the dashboard, change `mode` to `live`, and set your `capital.initial_amount` to the actual capital in your Zerodha account. Start with a small amount.
+If you're confident in the system, switch to live mode from **Settings**. Use the **Sync with Zerodha** button on the Integrations page to pull your actual account capital. Start with a small amount and a conservative daily loss limit you can genuinely afford to lose.
 
 ---
 
@@ -347,9 +341,3 @@ To switch: go to **Settings** in the dashboard, change `mode` to `live`, and set
 cd backend
 PYTHONPATH=src python -m pytest tests/ -v
 ```
-
----
-
-## License
-
-This project is for personal use. No warranty is provided, express or implied. Use at your own risk.
