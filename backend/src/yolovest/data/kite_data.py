@@ -56,22 +56,35 @@ class KiteDataProvider(MarketDataBase):
         self._kite: Any = None
         # Share rate limiter with broker to respect Kite's 10 req/s aggregate limit
         self._rate_limiter = rate_limiter or asyncio.Semaphore(8)
+        # Lock to prevent race condition when refreshing the kite client
+        self._init_lock = asyncio.Lock()
         # Instrument token cache: symbol -> instrument_token
         self._token_cache: dict[str, int] = {}
 
     def set_access_token(self, token: str) -> None:
-        """Update the access token after daily re-authentication."""
+        """Update the access token after daily re-authentication.
+
+        Sets _kite to None so _get_kite() re-creates it with the new token.
+        Safe against concurrent use: _get_kite() handles None atomically.
+        """
         self._access_token = token
-        self._kite = None  # force re-init
+        self._kite = None  # _get_kite() will re-create with new token
+        self._token_cache.clear()  # instrument tokens may change across sessions
 
     def _get_kite(self) -> Any:
-        """Lazy-init Kite Connect client."""
-        if self._kite is None:
-            from kiteconnect import KiteConnect
+        """Lazy-init Kite Connect client.
 
-            self._kite = KiteConnect(api_key=self._api_key)
-            if self._access_token:
-                self._kite.set_access_token(self._access_token)
+        Thread-safe: if _kite is None after token refresh, re-creates it.
+        The _init_lock prevents concurrent re-initialization.
+        """
+        if self._kite is not None:
+            return self._kite
+        from kiteconnect import KiteConnect
+
+        kite = KiteConnect(api_key=self._api_key)
+        if self._access_token:
+            kite.set_access_token(self._access_token)
+        self._kite = kite
         return self._kite
 
     async def _get_instrument_token(self, symbol: str) -> int:
@@ -170,16 +183,25 @@ class KiteDataProvider(MarketDataBase):
                 quotes = await asyncio.to_thread(kite.quote, nse_symbol)
 
             quote = quotes.get(nse_symbol, {})
+            ltp = quote.get("last_price")
+            if not ltp or ltp <= 0:
+                raise ValueError(f"Kite returned invalid LTP ({ltp}) for {symbol}")
+
+            # Extract bid/ask safely — depth lists can be empty
+            depth = quote.get("depth", {})
+            buy_depth = depth.get("buy") or []
+            sell_depth = depth.get("sell") or []
+
             return {
-                "ltp": quote.get("last_price", 0),
+                "ltp": ltp,
                 "volume": quote.get("volume", 0),
                 "timestamp": quote.get("timestamp", now_ist().isoformat()),
                 "open": quote.get("ohlc", {}).get("open"),
                 "high": quote.get("ohlc", {}).get("high"),
                 "low": quote.get("ohlc", {}).get("low"),
                 "close": quote.get("ohlc", {}).get("close"),
-                "bid": quote.get("depth", {}).get("buy", [{}])[0].get("price"),
-                "ask": quote.get("depth", {}).get("sell", [{}])[0].get("price"),
+                "bid": buy_depth[0].get("price") if buy_depth else None,
+                "ask": sell_depth[0].get("price") if sell_depth else None,
             }
         except Exception as e:
             logger.warning("Kite quote failed for %s: %s", symbol, e)
