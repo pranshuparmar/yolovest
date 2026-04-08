@@ -1671,6 +1671,9 @@ def create_app(ctx: AppContext) -> FastAPI:
 
             # Take trade
             trades_taken += 1
+            exposure += value
+            stock_exposure[symbol] = stock_exposure.get(symbol, 0) + value
+            open_pos += 1
             capital += pnl
             total_pnl += pnl
             if pnl > 0:
