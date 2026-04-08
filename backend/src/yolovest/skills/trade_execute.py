@@ -223,115 +223,263 @@ class TradeExecuteSkill(SkillBase):
         except Exception:
             order_price = signal["entry_price"]
 
+        scaled_cfg = cfg.scaled_entry
+        total_qty = signal["position_size"]
+        is_scaled = scaled_cfg.enabled and scaled_cfg.legs > 1 and total_qty >= 2
+
         for attempt in range(cfg.max_order_retries + 1):
             try:
-                # Place primary order
-                order_id = await self.ctx.broker.place_order(
-                    symbol=signal["symbol"],
-                    side="BUY" if signal["signal_type"] == "BUY" else "SELL",
-                    quantity=signal["position_size"],
-                    order_type="LIMIT",
-                    price=order_price,
-                    product=product,
-                )
+                if is_scaled:
+                    # --- Scaled entry: two-leg order placement ---
+                    leg1_qty = math.ceil(total_qty * 0.5)
+                    leg2_qty = total_qty - leg1_qty
+                    side = "BUY" if signal["signal_type"] == "BUY" else "SELL"
+                    sl_side = "SELL" if signal["signal_type"] == "BUY" else "BUY"
 
-                # Place stop-loss order
-                sl_order_id = await self.ctx.broker.place_order(
-                    symbol=signal["symbol"],
-                    side="SELL" if signal["signal_type"] == "BUY" else "BUY",
-                    quantity=signal["position_size"],
-                    order_type="SL",
-                    trigger_price=signal["stop_loss_price"],
-                    product=product,
-                )
+                    # Leg 1: place at market price
+                    leg1_order_id = await self.ctx.broker.place_order(
+                        symbol=signal["symbol"],
+                        side=side,
+                        quantity=leg1_qty,
+                        order_type="LIMIT",
+                        price=order_price,
+                        product=product,
+                    )
 
-                # Track order status, handle partial fills
-                await asyncio.sleep(0.5)  # brief wait for fill
-                order_status = await self.ctx.broker.get_order_status(order_id)
+                    # Wait for first leg to fill
+                    await asyncio.sleep(0.5)
+                    leg1_status = await self.ctx.broker.get_order_status(leg1_order_id)
+                    leg1_filled = leg1_status.get("filled_quantity", leg1_qty)
+                    leg1_fill_price = leg1_status.get("average_price", order_price)
 
-                # Check for partial fill within timeout
-                filled_qty = order_status.get("filled_quantity", signal["position_size"])
-                if filled_qty < signal["position_size"]:
-                    # Wait up to order_timeout_sec for full fill
+                    if leg1_filled == 0:
+                        # First leg didn't fill — fall back to market order
+                        await self.ctx.broker.cancel_order(leg1_order_id)
+                        leg1_order_id = await self.ctx.broker.place_order(
+                            symbol=signal["symbol"],
+                            side=side,
+                            quantity=leg1_qty,
+                            order_type="MARKET",
+                            product=product,
+                        )
+                        await asyncio.sleep(1)
+                        leg1_status = await self.ctx.broker.get_order_status(leg1_order_id)
+                        leg1_filled = leg1_status.get("filled_quantity", leg1_qty)
+                        leg1_fill_price = leg1_status.get("average_price", order_price)
+
+                    # Wait before placing second leg
+                    await asyncio.sleep(scaled_cfg.second_leg_delay_sec)
+
+                    # Leg 2: place limit order at offset price
+                    offset = scaled_cfg.second_leg_offset_pct
+                    if signal["signal_type"] == "BUY":
+                        leg2_price = round(order_price * (1 - offset), 2)
+                    else:
+                        leg2_price = round(order_price * (1 + offset), 2)
+
+                    leg2_order_id = await self.ctx.broker.place_order(
+                        symbol=signal["symbol"],
+                        side=side,
+                        quantity=leg2_qty,
+                        order_type="LIMIT",
+                        price=leg2_price,
+                        product=product,
+                    )
+
+                    # Wait for second leg fill within order_timeout
+                    leg2_filled = 0
+                    leg2_fill_price = leg2_price
                     for _ in range(cfg.order_timeout_sec):
                         await asyncio.sleep(1)
-                        order_status = await self.ctx.broker.get_order_status(order_id)
-                        filled_qty = order_status.get("filled_quantity", signal["position_size"])
-                        if filled_qty >= signal["position_size"]:
+                        leg2_status = await self.ctx.broker.get_order_status(leg2_order_id)
+                        leg2_filled = leg2_status.get("filled_quantity", 0)
+                        if leg2_filled >= leg2_qty:
+                            leg2_fill_price = leg2_status.get("average_price", leg2_price)
                             break
 
-                    if filled_qty < signal["position_size"]:
-                        await self.ctx.broker.cancel_order(order_id)
+                    if leg2_filled < leg2_qty:
+                        # Second leg didn't fill — cancel and proceed with leg 1 only
+                        await self.ctx.broker.cancel_order(leg2_order_id)
+                        logger.info(
+                            "trade-execute: LIVE scaled leg2 unfilled for %s, proceeding with leg1 only",
+                            signal["symbol"],
+                        )
+                        actual_qty = leg1_filled if leg1_filled > 0 else leg1_qty
+                        fill_price = leg1_fill_price
+                        order_id = leg1_order_id
+                    else:
+                        # Both legs filled — compute weighted average price
+                        actual_qty = leg1_filled + leg2_filled
+                        fill_price = (
+                            leg1_fill_price * leg1_filled + leg2_fill_price * leg2_filled
+                        ) / actual_qty
+                        order_id = leg1_order_id  # primary order for tracking
 
-                        if filled_qty == 0:
-                            # Zero fills — retry with MARKET order for guaranteed execution
-                            logger.warning(
-                                "trade-execute: LIMIT order unfilled for %s, retrying with MARKET",
-                                signal["symbol"],
-                            )
-                            order_id = await self.ctx.broker.place_order(
-                                symbol=signal["symbol"],
-                                side="BUY" if signal["signal_type"] == "BUY" else "SELL",
-                                quantity=signal["position_size"],
-                                order_type="MARKET",
-                                product=product,
-                            )
+                    # Place SL order for actual filled quantity
+                    sl_order_id = await self.ctx.broker.place_order(
+                        symbol=signal["symbol"],
+                        side=sl_side,
+                        quantity=actual_qty,
+                        order_type="SL",
+                        trigger_price=signal["stop_loss_price"],
+                        product=product,
+                    )
+
+                    slippage = abs(fill_price - signal["entry_price"])
+
+                    trade = {
+                        "symbol": signal["symbol"],
+                        "signal_type": signal["signal_type"],
+                        "entry_price": signal["entry_price"],
+                        "fill_price": fill_price,
+                        "quantity": actual_qty,
+                        "stop_loss_price": signal["stop_loss_price"],
+                        "target_price": signal["target_price"],
+                        "order_id": order_id,
+                        "sl_order_id": sl_order_id,
+                        "product": product,
+                        "status": "filled",
+                        "mode": "live",
+                        "slippage": slippage,
+                        "scaled_entry": True,
+                    }
+
+                    # Verify the primary order
+                    verified_status = await self._verify_fill(order_id, timeout_sec=5)
+                    if verified_status in ("REJECTED", "CANCELLED"):
+                        logger.error(
+                            "trade-execute: scaled leg1 order %s was %s for %s — cancelling SL",
+                            order_id, verified_status, signal["symbol"],
+                        )
+                        await self.ctx.broker.cancel_order(sl_order_id)
+                        await self.ctx.notify.send(
+                            f"Scaled order REJECTED/CANCELLED for {signal['symbol']} "
+                            f"(order={order_id}, status={verified_status})",
+                            alert_type="errors",
+                        )
+                        raise RuntimeError(
+                            f"Order {order_id} {verified_status} by exchange"
+                        )
+
+                    trade["status"] = verified_status.lower() if verified_status else "filled"
+
+                    logger.info(
+                        "trade-execute: LIVE scaled %s %s leg1=%d@%.2f leg2=%d@%.2f avg=%.2f (id=%s)",
+                        signal["signal_type"], signal["symbol"],
+                        leg1_filled, leg1_fill_price,
+                        leg2_filled if leg2_filled >= leg2_qty else 0, leg2_fill_price,
+                        fill_price, order_id,
+                    )
+
+                else:
+                    # --- Standard single-order placement ---
+                    # Place primary order
+                    order_id = await self.ctx.broker.place_order(
+                        symbol=signal["symbol"],
+                        side="BUY" if signal["signal_type"] == "BUY" else "SELL",
+                        quantity=signal["position_size"],
+                        order_type="LIMIT",
+                        price=order_price,
+                        product=product,
+                    )
+
+                    # Place stop-loss order
+                    sl_order_id = await self.ctx.broker.place_order(
+                        symbol=signal["symbol"],
+                        side="SELL" if signal["signal_type"] == "BUY" else "BUY",
+                        quantity=signal["position_size"],
+                        order_type="SL",
+                        trigger_price=signal["stop_loss_price"],
+                        product=product,
+                    )
+
+                    # Track order status, handle partial fills
+                    await asyncio.sleep(0.5)  # brief wait for fill
+                    order_status = await self.ctx.broker.get_order_status(order_id)
+
+                    # Check for partial fill within timeout
+                    filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                    if filled_qty < signal["position_size"]:
+                        # Wait up to order_timeout_sec for full fill
+                        for _ in range(cfg.order_timeout_sec):
                             await asyncio.sleep(1)
                             order_status = await self.ctx.broker.get_order_status(order_id)
                             filled_qty = order_status.get("filled_quantity", signal["position_size"])
-                        else:
-                            # Partial fill — adjust SL order to match filled quantity
-                            await self.ctx.broker.cancel_order(sl_order_id)
-                            sl_order_id = await self.ctx.broker.place_order(
-                                symbol=signal["symbol"],
-                                side="SELL" if signal["signal_type"] == "BUY" else "BUY",
-                                quantity=filled_qty,
-                                order_type="SL",
-                                trigger_price=signal["stop_loss_price"],
-                                product=product,
-                            )
+                            if filled_qty >= signal["position_size"]:
+                                break
 
-                actual_qty = filled_qty if filled_qty > 0 else signal["position_size"]
+                        if filled_qty < signal["position_size"]:
+                            await self.ctx.broker.cancel_order(order_id)
 
-                # Compute slippage
-                fill_price = order_status.get("average_price", signal["entry_price"])
-                slippage = abs(fill_price - signal["entry_price"])
+                            if filled_qty == 0:
+                                # Zero fills — retry with MARKET order for guaranteed execution
+                                logger.warning(
+                                    "trade-execute: LIMIT order unfilled for %s, retrying with MARKET",
+                                    signal["symbol"],
+                                )
+                                order_id = await self.ctx.broker.place_order(
+                                    symbol=signal["symbol"],
+                                    side="BUY" if signal["signal_type"] == "BUY" else "SELL",
+                                    quantity=signal["position_size"],
+                                    order_type="MARKET",
+                                    product=product,
+                                )
+                                await asyncio.sleep(1)
+                                order_status = await self.ctx.broker.get_order_status(order_id)
+                                filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                            else:
+                                # Partial fill — adjust SL order to match filled quantity
+                                await self.ctx.broker.cancel_order(sl_order_id)
+                                sl_order_id = await self.ctx.broker.place_order(
+                                    symbol=signal["symbol"],
+                                    side="SELL" if signal["signal_type"] == "BUY" else "BUY",
+                                    quantity=filled_qty,
+                                    order_type="SL",
+                                    trigger_price=signal["stop_loss_price"],
+                                    product=product,
+                                )
 
-                trade = {
-                    "symbol": signal["symbol"],
-                    "signal_type": signal["signal_type"],
-                    "entry_price": signal["entry_price"],
-                    "fill_price": fill_price,
-                    "quantity": actual_qty,
-                    "stop_loss_price": signal["stop_loss_price"],
-                    "target_price": signal["target_price"],
-                    "order_id": order_id,
-                    "sl_order_id": sl_order_id,
-                    "product": product,
-                    "status": order_status.get("status", "open"),
-                    "mode": "live",
-                    "slippage": slippage,
-                }
+                    actual_qty = filled_qty if filled_qty > 0 else signal["position_size"]
 
-                # Final fill verification: confirm order is in a terminal state
-                verified_status = await self._verify_fill(order_id, timeout_sec=5)
-                if verified_status in ("REJECTED", "CANCELLED"):
-                    logger.error(
-                        "trade-execute: order %s was %s after placement for %s — "
-                        "cancelling SL order",
-                        order_id, verified_status, signal["symbol"],
-                    )
-                    await self.ctx.broker.cancel_order(sl_order_id)
-                    await self.ctx.notify.send(
-                        f"Order REJECTED/CANCELLED for {signal['symbol']} "
-                        f"(order={order_id}, status={verified_status})",
-                        alert_type="errors",
-                    )
-                    raise RuntimeError(
-                        f"Order {order_id} {verified_status} by exchange"
-                    )
+                    # Compute slippage
+                    fill_price = order_status.get("average_price", signal["entry_price"])
+                    slippage = abs(fill_price - signal["entry_price"])
 
-                trade["status"] = verified_status.lower() if verified_status else "filled"
+                    trade = {
+                        "symbol": signal["symbol"],
+                        "signal_type": signal["signal_type"],
+                        "entry_price": signal["entry_price"],
+                        "fill_price": fill_price,
+                        "quantity": actual_qty,
+                        "stop_loss_price": signal["stop_loss_price"],
+                        "target_price": signal["target_price"],
+                        "order_id": order_id,
+                        "sl_order_id": sl_order_id,
+                        "product": product,
+                        "status": order_status.get("status", "open"),
+                        "mode": "live",
+                        "slippage": slippage,
+                    }
+
+                    # Final fill verification: confirm order is in a terminal state
+                    verified_status = await self._verify_fill(order_id, timeout_sec=5)
+                    if verified_status in ("REJECTED", "CANCELLED"):
+                        logger.error(
+                            "trade-execute: order %s was %s after placement for %s — "
+                            "cancelling SL order",
+                            order_id, verified_status, signal["symbol"],
+                        )
+                        await self.ctx.broker.cancel_order(sl_order_id)
+                        await self.ctx.notify.send(
+                            f"Order REJECTED/CANCELLED for {signal['symbol']} "
+                            f"(order={order_id}, status={verified_status})",
+                            alert_type="errors",
+                        )
+                        raise RuntimeError(
+                            f"Order {order_id} {verified_status} by exchange"
+                        )
+
+                    trade["status"] = verified_status.lower() if verified_status else "filled"
 
                 trade_id = await self.ctx.db.insert_trade(trade)
                 trade["trade_id"] = trade_id
@@ -339,19 +487,20 @@ class TradeExecuteSkill(SkillBase):
                 await self.broadcast("trade_executed", {
                     "symbol": trade["symbol"],
                     "signal_type": trade["signal_type"],
-                    "fill_price": fill_price,
-                    "quantity": actual_qty,
-                    "slippage": slippage,
+                    "fill_price": trade["fill_price"],
+                    "quantity": trade["quantity"],
+                    "slippage": trade["slippage"],
                     "mode": "live",
                     "trade_id": trade_id,
                 })
 
                 logger.info(
                     "trade-execute: LIVE %s %s qty=%d fill=%.2f slippage=%.2f "
-                    "attempt=%d status=%s (id=%s, order=%s)",
-                    trade["signal_type"], trade["symbol"], actual_qty,
-                    fill_price, slippage, attempt + 1, trade["status"],
-                    trade_id, order_id,
+                    "attempt=%d status=%s (id=%s, order=%s)%s",
+                    trade["signal_type"], trade["symbol"], trade["quantity"],
+                    trade["fill_price"], trade["slippage"], attempt + 1, trade["status"],
+                    trade_id, trade.get("order_id", "N/A"),
+                    " [scaled]" if trade.get("scaled_entry") else "",
                 )
 
                 return SkillResult(
