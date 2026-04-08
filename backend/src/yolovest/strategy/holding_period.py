@@ -139,8 +139,12 @@ def _days_to_label(days: int) -> str:
     """Convert expected holding days to a human-readable label."""
     if days == 0:
         return "intraday"
-    elif days <= 5:
+    elif days <= 2:
         return "short_term"
+    elif days <= 5:
+        return "swing"
+    elif days <= 15:
+        return "positional"
     else:
         return "long_term"
 
@@ -151,9 +155,11 @@ def _periods_to_days_range(periods: list[str]) -> tuple[int, int]:
         return (0, 5)
     _label_days = {
         "intraday": 0,
+        "short_term": 2,
         "3d": 3,
-        "short_term": 3,
+        "swing": 5,
         "1w": 5,
+        "positional": 15,
         "long_term": 22,
     }
     day_values = [_label_days.get(p, 5) for p in periods]
@@ -244,9 +250,9 @@ def get_atr_multipliers(holding_period: str, holding_period_config: Any) -> Any:
     """
     if holding_period == "intraday":
         return holding_period_config.intraday
-    elif holding_period == "long_term":
+    elif holding_period in ("long_term", "positional"):
         return holding_period_config.long
-    elif holding_period in ("1w", "week"):
+    elif holding_period in ("1w", "week", "swing"):
         return holding_period_config.week
     else:
         return holding_period_config.short_swing

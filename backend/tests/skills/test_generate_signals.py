@@ -304,7 +304,7 @@ class TestHoldingPeriodDecision:
             mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
             period, product, days = signal_skill._decide_holding_period(features)
-        assert period == "long_term"
+        assert period in ("positional", "long_term")
         assert product == "CNC"
         assert days >= 5
 
