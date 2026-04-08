@@ -30,6 +30,7 @@ import { ExecutionQualityPage } from "./pages/ExecutionQualityPage";
 import { DataManagementPage } from "./pages/DataManagementPage";
 import { DryRunPage } from "./pages/DryRunPage";
 import { SkillsPage } from "./pages/SkillsPage";
+import SettingsPage from "./pages/SettingsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -91,6 +92,7 @@ function AppRoutes() {
         <Route path="/data" element={<DataManagementPage />} />
         <Route path="/skills" element={<SkillsPage />} />
         <Route path="/integrations" element={<IntegrationsPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

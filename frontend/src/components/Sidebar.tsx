@@ -53,7 +53,8 @@ const groups: NavGroup[] = [
       { to: "/audit", label: "Audit Log", icon: "L" },
       { to: "/data", label: "Data Mgmt", icon: "B" },
       { to: "/skills", label: "Skills", icon: "K" },
-      { to: "/integrations", label: "Settings", icon: "I" },
+      { to: "/integrations", label: "Integrations", icon: "I" },
+      { to: "/settings", label: "Settings", icon: "G" },
     ],
   },
 ];

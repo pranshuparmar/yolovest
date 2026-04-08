@@ -252,6 +252,59 @@ class Database:
         return row[0] if row else None
 
     # ------------------------------------------------------------------
+    # Config (UI-editable settings)
+    # ------------------------------------------------------------------
+
+    async def get_all_config(self) -> dict[str, str]:
+        """Return all config key-value pairs from the config table."""
+        cursor = await self.read_conn.execute(
+            "SELECT key, value FROM config ORDER BY key"
+        )
+        rows = await cursor.fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    async def get_config(self, key: str) -> str | None:
+        """Get a single config value by key."""
+        cursor = await self.read_conn.execute(
+            "SELECT value FROM config WHERE key = ?", (key,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def set_config(self, key: str, value: str) -> None:
+        """Upsert a single config value."""
+        await self.conn.execute(
+            "INSERT INTO config (key, value, updated_at) VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, value),
+        )
+        await self.conn.commit()
+
+    async def set_config_bulk(self, items: dict[str, str]) -> int:
+        """Upsert multiple config values in a single transaction. Returns count."""
+        if not items:
+            return 0
+        await self.conn.execute("BEGIN")
+        try:
+            for key, value in items.items():
+                await self.conn.execute(
+                    "INSERT INTO config (key, value, updated_at) VALUES (?, ?, datetime('now')) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    (key, value),
+                )
+            await self.conn.commit()
+        except Exception:
+            await self.conn.rollback()
+            raise
+        return len(items)
+
+    async def is_config_empty(self) -> bool:
+        """Check if the config table has any rows."""
+        cursor = await self.read_conn.execute("SELECT COUNT(*) FROM config")
+        row = await cursor.fetchone()
+        return row[0] == 0
+
+    # ------------------------------------------------------------------
     # OHLCV Data
     # ------------------------------------------------------------------
 
@@ -2364,8 +2417,19 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](r) for r in rows]
 
+    async def get_pending_trade_by_symbol(self, symbol: str) -> dict[str, Any] | None:
+        """Get a pending trade by symbol (case-insensitive). Returns None if not found."""
+        cursor = await self.read_conn.execute(
+            "SELECT * FROM pending_trades WHERE status = 'pending' "
+            "AND UPPER(symbol) = UPPER(?) ORDER BY created_at DESC LIMIT 1",
+            (symbol,),
+        )
+        row = await cursor.fetchone()
+        return dict[str, Any](row) if row else None
+
     async def decide_pending_trade(
         self, trade_id: int, decision: str, decided_by: str,
+        overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Approve or reject a pending trade. Returns the signal data if approved."""
         import json
@@ -2377,17 +2441,73 @@ class Database:
         if not row:
             return None
 
-        await self.conn.execute(
-            "UPDATE pending_trades SET status = ?, decided_by = ?, "
-            "decided_at = datetime('now') WHERE id = ?",
-            (decision, decided_by, trade_id),
-        )
+        if decision == "approved" and overrides:
+            # Store user overrides in dedicated columns and flag as override
+            override_cols = {
+                "signal_type": "user_signal_type",
+                "entry_price": "user_entry_price",
+                "target_price": "user_target_price",
+                "stop_loss_price": "user_stop_loss_price",
+                "product": "user_product",
+                "notes": "user_notes",
+            }
+            set_parts = [
+                "status = ?", "decided_by = ?", "decided_at = datetime('now')",
+                "is_override = 1",
+            ]
+            params: list[Any] = [decision, decided_by]
+            for key, col in override_cols.items():
+                if key in overrides:
+                    set_parts.append(f"{col} = ?")
+                    params.append(overrides[key])
+            params.append(trade_id)
+            await self.conn.execute(
+                f"UPDATE pending_trades SET {', '.join(set_parts)} WHERE id = ?",
+                tuple(params),
+            )
+        else:
+            await self.conn.execute(
+                "UPDATE pending_trades SET status = ?, decided_by = ?, "
+                "decided_at = datetime('now') WHERE id = ?",
+                (decision, decided_by, trade_id),
+            )
         await self.conn.commit()
 
         if decision == "approved":
             signal_data = row["signal_data"]
-            return json.loads(signal_data) if signal_data else dict[str, Any](row)
+            signal = json.loads(signal_data) if signal_data else dict[str, Any](row)
+            # Apply overrides to the returned signal dict
+            if overrides:
+                for key in ("signal_type", "entry_price", "target_price",
+                            "stop_loss_price", "product", "position_size", "notes"):
+                    if key in overrides:
+                        signal[key] = overrides[key]
+                signal["is_override"] = True
+            return signal
         return None
+
+    async def insert_manual_trade(self, trade_data: dict[str, Any]) -> int:
+        """Insert a manually initiated trade (not from ML prediction)."""
+        import json
+        cursor = await self.conn.execute(
+            "INSERT INTO pending_trades "
+            "(symbol, signal_type, entry_price, target_price, stop_loss_price, "
+            "position_size, product, signal_data, status, decided_by, decided_at, is_manual) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, datetime('now'), 1)",
+            (
+                trade_data["symbol"],
+                trade_data["signal_type"],
+                trade_data["entry_price"],
+                trade_data["target_price"],
+                trade_data["stop_loss_price"],
+                trade_data.get("position_size", 1),
+                trade_data.get("product", "MIS"),
+                json.dumps(trade_data),
+                trade_data.get("decided_by", "manual"),
+            ),
+        )
+        await self.conn.commit()
+        return cursor.lastrowid or 0
 
     async def expire_pending_trades(self, max_age_minutes: int = 30) -> int:
         """Expire pending trades older than max_age_minutes."""

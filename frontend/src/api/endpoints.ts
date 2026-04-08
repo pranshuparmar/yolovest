@@ -45,6 +45,9 @@ import type {
   DryRunSignal,
   HoldingsResponse,
   ManualOrder,
+  ConfigSections,
+  ConfigUpdateResult,
+  HolidaysResponse,
 } from "../types/api";
 
 export const api = {
@@ -364,13 +367,22 @@ export const api = {
 
   // Pending Trades (manual approval)
   pendingTrades: () =>
-    apiFetch<{ id: number; symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; position_size: number; confidence_score: number; product: string; created_at: string }[]>("/api/pending-trades"),
+    apiFetch<{ id: number; symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; position_size: number; confidence_score: number; product: string; created_at: string; is_override?: boolean; is_manual?: boolean }[]>("/api/pending-trades"),
 
-  approvePendingTrade: (tradeId: number) =>
-    apiFetch<{ success: boolean; trade?: Record<string, unknown> }>(`/api/pending-trades/${tradeId}/approve`, { method: "POST" }),
+  approvePendingTrade: (tradeId: number, overrides?: Record<string, unknown>) =>
+    apiFetch<{ success: boolean; trade?: Record<string, unknown> }>(`/api/pending-trades/${tradeId}/approve`, {
+      method: "POST",
+      body: JSON.stringify(overrides ? { overrides } : {}),
+    }),
 
   rejectPendingTrade: (tradeId: number) =>
     apiFetch<{ success: boolean }>(`/api/pending-trades/${tradeId}/reject`, { method: "POST" }),
+
+  manualTrade: (trade: { symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; product?: string; position_size?: number }) =>
+    apiFetch<{ success: boolean; trade?: Record<string, unknown>; error?: string | null }>("/api/manual-trade", {
+      method: "POST",
+      body: JSON.stringify(trade),
+    }),
 
   reloadConfig: () =>
     apiFetch<{ status: string; reloaded: string[] }>("/api/config/reload", { method: "POST" }),
@@ -416,4 +428,25 @@ export const api = {
       `/api/skills/${skillName}/run`,
       { method: "POST" },
     ),
+
+  // Holidays
+  holidays: () => apiFetch<HolidaysResponse>("/api/holidays"),
+
+  addHoliday: (data: { date: string; early_close?: string }) =>
+    apiFetch<{ success: boolean; date: string; early_close?: string }>("/api/holidays", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  removeHoliday: (date: string) =>
+    apiFetch<{ success: boolean; date: string }>(`/api/holidays/${date}`, { method: "DELETE" }),
+
+  // Config (UI-editable settings)
+  getConfig: () => apiFetch<ConfigSections>("/api/config"),
+
+  updateConfig: (updates: Record<string, unknown>) =>
+    apiFetch<ConfigUpdateResult>("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ updates }),
+    }),
 };

@@ -56,10 +56,11 @@ def integration_config():
             "seed_symbols": ["RELIANCE", "TCS"],
             "shortlist_size": 5,
             "weights": {
-                "technical": 0.40,
+                "technical": 0.35,
                 "volume_momentum": 0.25,
-                "news_sentiment": 0.20,
+                "news_sentiment": 0.15,
                 "fundamental": 0.15,
+                "volatility": 0.10,
             },
         },
         risk={

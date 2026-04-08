@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
-from yolovest.context import AppContext
+from yolovest.context import AppContext, MarketHoursChecker
 
 logger = logging.getLogger(__name__)
 
@@ -982,6 +982,94 @@ def create_app(ctx: AppContext) -> FastAPI:
         return await ctx.db.get_earnings_events(symbol=symbol, days=days)
 
     # ------------------------------------------------------------------
+    # Holidays & Early Close Days
+    # ------------------------------------------------------------------
+
+    @app.get("/api/holidays")
+    async def get_holidays(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Return holidays and early close days from live config."""
+        return {
+            "holidays": ctx.config.market_hours.holidays,
+            "early_close_days": ctx.config.market_hours.early_close_days,
+        }
+
+    @app.post("/api/holidays")
+    async def add_holiday(
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Add a holiday or early close day.
+
+        Body: {"date": "YYYY-MM-DD"} for full holiday
+              {"date": "YYYY-MM-DD", "early_close": "13:00"} for early close
+        """
+        import re as _re
+
+        body = await request.json()
+        date_str: str = body.get("date", "").strip()
+        early_close: str | None = body.get("early_close")
+
+        if not _re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+            raise HTTPException(400, "Invalid date format, expected YYYY-MM-DD")
+
+        if early_close:
+            if not _re.match(r"^\d{2}:\d{2}$", early_close):
+                raise HTTPException(400, "Invalid time format, expected HH:MM")
+            ec = dict(ctx.config.market_hours.early_close_days)
+            ec[date_str] = early_close
+            ctx.config.market_hours.early_close_days = ec
+            # Persist to DB
+            import json as _json
+            await ctx.db.set_config("market_hours.early_close_days", _json.dumps(ec))
+        else:
+            holidays = list(ctx.config.market_hours.holidays)
+            if date_str not in holidays:
+                holidays.append(date_str)
+                holidays.sort()
+            ctx.config.market_hours.holidays = holidays
+            import json as _json
+            await ctx.db.set_config("market_hours.holidays", _json.dumps(holidays))
+
+        # Refresh market hours checker
+        ctx.market_hours = MarketHoursChecker(ctx.config)
+        logger.info("Holiday added: %s (early_close=%s)", date_str, early_close)
+        return {"success": True, "date": date_str, "early_close": early_close}
+
+    @app.delete("/api/holidays/{date_str}")
+    async def remove_holiday(
+        date_str: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Remove a holiday or early close day."""
+        import json as _json
+
+        removed = False
+        # Remove from holidays list
+        holidays = list(ctx.config.market_hours.holidays)
+        if date_str in holidays:
+            holidays.remove(date_str)
+            ctx.config.market_hours.holidays = holidays
+            await ctx.db.set_config("market_hours.holidays", _json.dumps(holidays))
+            removed = True
+
+        # Remove from early close days
+        ec = dict(ctx.config.market_hours.early_close_days)
+        if date_str in ec:
+            del ec[date_str]
+            ctx.config.market_hours.early_close_days = ec
+            await ctx.db.set_config("market_hours.early_close_days", _json.dumps(ec))
+            removed = True
+
+        if not removed:
+            raise HTTPException(404, f"Date {date_str} not found in holidays or early close days")
+
+        ctx.market_hours = MarketHoursChecker(ctx.config)
+        logger.info("Holiday removed: %s", date_str)
+        return {"success": True, "date": date_str}
+
+    # ------------------------------------------------------------------
     # News Feed & Sentiment
     # ------------------------------------------------------------------
 
@@ -1852,9 +1940,9 @@ def create_app(ctx: AppContext) -> FastAPI:
                     continue
 
                 # Adjust SELL: force to MIS/intraday if user doesn't hold the stock
-                holding_period, product = adjust_sell_for_holdings(
+                holding_period, product, expected_days = adjust_sell_for_holdings(
                     prediction.signal_type, holding_period, product,
-                    symbol, held_symbols,
+                    symbol, held_symbols, expected_days,
                 )
 
                 # Apply ATR multipliers interpolated for holding duration
@@ -2071,10 +2159,16 @@ def create_app(ctx: AppContext) -> FastAPI:
     @app.post("/api/pending-trades/{trade_id}/approve")
     async def approve_pending_trade(
         trade_id: int,
+        request: Request,
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Approve a pending trade for execution."""
-        signal = await ctx.db.decide_pending_trade(trade_id, "approved", "dashboard")
+        """Approve a pending trade for execution, with optional overrides."""
+        body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+        overrides = body.get("overrides")  # optional: {signal_type, entry_price, target_price, stop_loss_price, product}
+
+        signal = await ctx.db.decide_pending_trade(
+            trade_id, "approved", "dashboard", overrides=overrides,
+        )
         if signal is None:
             raise HTTPException(status_code=404, detail="Trade not found or already decided")
 
@@ -2089,6 +2183,30 @@ def create_app(ctx: AppContext) -> FastAPI:
                         trade_id, trade.get("signal_type"), trade.get("symbol"))
             return {"success": True, "trade": trade}
         return {"success": False, "error": result.error}
+
+    @app.post("/api/manual-trade")
+    async def create_manual_trade(
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Place a manual trade directly (not from ML prediction)."""
+        body = await request.json()
+        required = ["symbol", "signal_type", "entry_price", "target_price", "stop_loss_price"]
+        missing = [k for k in required if k not in body]
+        if missing:
+            raise HTTPException(400, f"Missing fields: {missing}")
+
+        body["decided_by"] = "dashboard"
+        trade_id = await ctx.db.insert_manual_trade(body)
+
+        # Execute immediately
+        from yolovest.skills.trade_execute import TradeExecuteSkill
+        signal = {**body, "position_size": body.get("position_size", 1)}
+        skill = TradeExecuteSkill(ctx)
+        result = await skill.execute(signal=signal)
+
+        trade = result.data.get("trade", {}) if result.data else {}
+        return {"success": result.success, "trade": trade, "pending_id": trade_id, "error": result.error}
 
     @app.post("/api/pending-trades/{trade_id}/reject")
     async def reject_pending_trade(
@@ -2137,6 +2255,99 @@ def create_app(ctx: AppContext) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
 
     # ------------------------------------------------------------------
+    # Config (UI-editable settings)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/config")
+    async def get_config(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Return all DB-editable config values grouped by section."""
+        from yolovest.config import config_to_ui_sections, FILE_ONLY_KEYS
+        sections = config_to_ui_sections(ctx.config)
+        return {"sections": sections}
+
+    @app.put("/api/config")
+    async def update_config(
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Update config values. Body: {"updates": {"risk.max_open_positions": 5, ...}}
+
+        Validates all changes through Pydantic before persisting.
+        Returns the updated config sections.
+        """
+        from yolovest.config import (
+            FILE_ONLY_KEYS,
+            apply_db_config,
+            config_to_ui_sections,
+            _flatten_model,
+        )
+
+        body = await request.json()
+        updates: dict[str, Any] = body.get("updates", {})
+        if not updates:
+            raise HTTPException(status_code=400, detail="No updates provided")
+
+        # Reject file-only keys
+        rejected = [k for k in updates if k in FILE_ONLY_KEYS]
+        if rejected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot modify file-only keys via UI: {rejected}",
+            )
+
+        # Convert all values to strings for DB storage
+        import json as _json
+
+        str_updates: dict[str, str] = {}
+        for k, v in updates.items():
+            if isinstance(v, (bool, list, dict)) or v is None:
+                str_updates[k] = _json.dumps(v)
+            else:
+                str_updates[k] = str(v)
+
+        # Load current DB config, overlay updates, validate via Pydantic
+        db_values = await ctx.db.get_all_config()
+        db_values.update(str_updates)
+        try:
+            new_config = apply_db_config(ctx.config, db_values)
+        except Exception as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Validation failed: {e}",
+            )
+
+        # Persist to DB
+        await ctx.db.set_config_bulk(str_updates)
+
+        # Hot-apply to running config
+        old_config = ctx.config
+        ctx.config = new_config
+        ctx.market_hours = MarketHoursChecker(ctx.config)
+        # Sync Notifier's config reference
+        if hasattr(ctx.notify, "_config"):
+            ctx.notify._config = ctx.config
+
+        # Side effects for specific keys
+        if any(k.startswith("log.") for k in updates):
+            try:
+                from yolovest.main import setup_logging
+                setup_logging(ctx.config)
+                logger.info("Log levels reloaded: console=%s, file=%s",
+                            ctx.config.log.level, ctx.config.log.file_level)
+            except Exception as e:
+                logger.warning("Failed to reload log levels: %s", e)
+
+        if "mode" in updates:
+            logger.info("Trading mode changed: %s -> %s", old_config.mode, new_config.mode)
+
+        logger.info("Config updated via UI: %s", list(updates.keys()))
+
+        sections = config_to_ui_sections(ctx.config)
+        return {"status": "ok", "updated": list(updates.keys()), "sections": sections}
+
+    # ------------------------------------------------------------------
     # Manual Skill Trigger
     # ------------------------------------------------------------------
 
@@ -2144,16 +2355,22 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def list_skills(
         _user: str = Depends(verify_credentials),
     ) -> list[dict[str, str | None]]:
-        """List all registered skills with metadata."""
+        """List all registered skills with metadata and runtime schedules."""
         from yolovest.skills import SKILL_REGISTRY
 
         out = []
         for name, cls in sorted(SKILL_REGISTRY.items()):
+            # Instantiate to get runtime schedule (set from config in __init__)
+            try:
+                instance = cls(ctx)
+                schedule = instance.schedule
+            except Exception:
+                schedule = cls.schedule
             out.append({
                 "name": name,
                 "description": cls.description,
                 "trigger": cls.trigger.value,
-                "schedule": cls.schedule,
+                "schedule": schedule,
             })
         return out
 

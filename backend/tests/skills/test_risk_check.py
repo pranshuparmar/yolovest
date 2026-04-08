@@ -9,6 +9,8 @@ from yolovest.skills.risk_check import RiskCheckSkill
 
 @pytest.fixture
 def risk_skill(app_context):
+    # Disable conviction sizing for predictable test sizing
+    app_context.config.risk.conviction_sizing.enabled = False
     return RiskCheckSkill(app_context)
 
 

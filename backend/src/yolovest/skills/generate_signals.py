@@ -117,6 +117,9 @@ class GenerateSignalsSkill(SkillBase):
                 continue
 
             # Symbol cooldown: hard block if traded within cooldown_days
+            # With smart re-entry enabled, allow re-entry under specific conditions
+            reentry_cfg = self.ctx.config.risk.reentry
+            is_reentry = False
             if symbol in recently_traded and cooldown_days > 0:
                 last_trade_str = recently_traded[symbol]
                 try:
@@ -125,17 +128,30 @@ class GenerateSignalsSkill(SkillBase):
                         last_trade_dt = last_trade_dt.replace(tzinfo=IST)
                     days_since = (now - last_trade_dt).days
                     if days_since < cooldown_days:
-                        filter_counts.setdefault("cooldown", 0)
-                        filter_counts["cooldown"] += 1
-                        rejection_details.append({
-                            "symbol": symbol, "reason": "cooldown",
-                            "detail": f"traded {days_since}d ago, cooldown={cooldown_days}d",
-                        })
-                        logger.info(
-                            "Cooldown for %s: traded %dd ago (cooldown=%dd)",
-                            symbol, days_since, cooldown_days,
-                        )
-                        continue
+                        # Check if smart re-entry can override the cooldown
+                        reentry_allowed = False
+                        if reentry_cfg.enabled:
+                            reentry_allowed = await self._check_reentry_conditions(
+                                symbol, reentry_cfg,
+                            )
+                        if reentry_allowed:
+                            is_reentry = True
+                            logger.info(
+                                "Re-entry allowed for %s: traded %dd ago (cooldown=%dd), conditions met",
+                                symbol, days_since, cooldown_days,
+                            )
+                        else:
+                            filter_counts.setdefault("cooldown", 0)
+                            filter_counts["cooldown"] += 1
+                            rejection_details.append({
+                                "symbol": symbol, "reason": "cooldown",
+                                "detail": f"traded {days_since}d ago, cooldown={cooldown_days}d",
+                            })
+                            logger.info(
+                                "Cooldown for %s: traded %dd ago (cooldown=%dd)",
+                                symbol, days_since, cooldown_days,
+                            )
+                            continue
                 except (ValueError, TypeError):
                     pass
 
@@ -173,7 +189,9 @@ class GenerateSignalsSkill(SkillBase):
                     pass  # fall back to features["close"] in _predict()
 
                 # Decide holding period based on stock characteristics and strategy mode
-                holding_period, product, expected_days = self._decide_holding_period(features)
+                holding_period, product, expected_days = await self._decide_holding_period(
+                    features, existing_positions=open_positions,
+                )
                 use_intraday = holding_period == "intraday"
 
                 # Use latest intraday price for feature close during market hours
@@ -242,9 +260,9 @@ class GenerateSignalsSkill(SkillBase):
                 # Adjust SELL signals: force to MIS/intraday if user doesn't hold the stock
                 from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-                holding_period, product = adjust_sell_for_holdings(
+                holding_period, product, expected_days = adjust_sell_for_holdings(
                     prediction.signal_type, holding_period, product,
-                    symbol, held_symbols,
+                    symbol, held_symbols, expected_days,
                 )
 
                 # Override target/SL with ATR multipliers interpolated for holding duration
@@ -284,6 +302,9 @@ class GenerateSignalsSkill(SkillBase):
                     "model_version": prediction.model_version,
                 }
 
+                if is_reentry:
+                    signal["reentry"] = True
+
                 # Step 5: Confidence filter
                 # Use elevated threshold for recently traded symbols
                 effective_min = min_confidence
@@ -292,6 +313,25 @@ class GenerateSignalsSkill(SkillBase):
                     effective_min = max(min_confidence, repeat_min_conf)
 
                 if signal["confidence_score"] >= effective_min:
+                    # Re-entry: require higher confidence than original trade
+                    if is_reentry and reentry_cfg.require_higher_confidence:
+                        orig_conf = await self._get_last_trade_confidence(symbol)
+                        if orig_conf is not None and prediction.confidence <= orig_conf:
+                            filter_counts.setdefault("reentry_low_confidence", 0)
+                            filter_counts["reentry_low_confidence"] += 1
+                            rejection_details.append({
+                                "symbol": symbol, "reason": "reentry_low_confidence",
+                                "detail": (
+                                    f"re-entry {prediction.signal_type} @ {prediction.confidence:.2f} "
+                                    f"<= original {orig_conf:.2f}"
+                                ),
+                            })
+                            logger.info(
+                                "Re-entry blocked for %s: confidence %.2f <= original %.2f",
+                                symbol, prediction.confidence, orig_conf,
+                            )
+                            continue
+
                     filter_counts["passed"] += 1
                     await self.ctx.db.insert_signal(signal)
                     signals_generated.append(signal)
@@ -355,7 +395,9 @@ class GenerateSignalsSkill(SkillBase):
             },
         )
 
-    def _decide_holding_period(self, features: dict) -> tuple[str, str, int]:
+    async def _decide_holding_period(
+        self, features: dict, existing_positions: list[dict] | None = None,
+    ) -> tuple[str, str, int]:
         """Decide holding period, product type, and expected days based on stock characteristics."""
         from yolovest.config import _MODE_HOLDING_DAYS
         from yolovest.strategy.holding_period import decide_holding_period
@@ -365,4 +407,129 @@ class GenerateSignalsSkill(SkillBase):
         mode_days = _MODE_HOLDING_DAYS.get(mode)
         now_time = datetime.now(IST).time()
         vol_cfg = self.ctx.config.strategy.volatility
-        return decide_holding_period(features, allowed, vol_cfg, now_time, mode_days_range=mode_days)
+
+        # Read market regime (persisted by market-scan skill)
+        regime_cfg = self.ctx.config.strategy.market_regime
+        regime = None
+        bear_max = None
+        if regime_cfg.enabled:
+            regime = await self.ctx.db.get_system_state("market_regime")
+            bear_max = regime_cfg.bear_max_holding_days
+
+        return decide_holding_period(
+            features, allowed, vol_cfg, now_time,
+            mode_days_range=mode_days,
+            existing_positions=existing_positions,
+            market_regime=regime,
+            bear_max_holding_days=bear_max,
+        )
+
+    async def _check_reentry_conditions(
+        self, symbol: str, reentry_cfg: Any,
+    ) -> bool:
+        """Check whether smart re-entry conditions are met for a symbol in cooldown.
+
+        Evaluates:
+        1. min_bars_after_exit: enough bars have passed since the last trade closed
+        2. min_price_move_pct: price has moved sufficiently from the exit price
+        3. max_reentries_per_symbol: haven't exceeded re-entry limit for today
+
+        Returns True if all conditions are met and re-entry should be allowed.
+        """
+        try:
+            # Get last closed trade for this symbol
+            trades = await self.ctx.db.get_symbol_trades(symbol, limit=5)
+            closed_trades = [
+                t for t in trades
+                if t.get("closed_at") is not None and t.get("status") in ("closed", "filled", "squared_off")
+            ]
+            if not closed_trades:
+                return False
+
+            last_trade = closed_trades[0]  # most recent closed trade
+
+            # Condition 1: min_bars_after_exit
+            exit_date_str = last_trade.get("closed_at")
+            if not exit_date_str:
+                return False
+
+            exit_dt = datetime.fromisoformat(exit_date_str)
+            if exit_dt.tzinfo is None:
+                exit_dt = exit_dt.replace(tzinfo=IST)
+
+            # Count bars since exit using OHLCV data
+            bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=reentry_cfg.min_bars_after_exit + 5)
+            bars_after_exit = sum(1 for bar in bars if bar.timestamp > exit_dt)
+            if bars_after_exit < reentry_cfg.min_bars_after_exit:
+                logger.debug(
+                    "Re-entry blocked for %s: only %d bars after exit (need %d)",
+                    symbol, bars_after_exit, reentry_cfg.min_bars_after_exit,
+                )
+                return False
+
+            # Condition 2: min_price_move_pct
+            exit_price = last_trade.get("fill_price") or last_trade.get("entry_price")
+            if not exit_price or exit_price <= 0:
+                return False
+
+            try:
+                current_price = await self.ctx.market_data.get_ltp(symbol)
+            except Exception:
+                # Fall back to last bar close
+                if bars:
+                    current_price = bars[-1].close
+                else:
+                    return False
+
+            price_move_pct = abs(current_price - exit_price) / exit_price
+            if price_move_pct < reentry_cfg.min_price_move_pct:
+                logger.debug(
+                    "Re-entry blocked for %s: price move %.2f%% < %.2f%% required",
+                    symbol, price_move_pct * 100, reentry_cfg.min_price_move_pct * 100,
+                )
+                return False
+
+            # Condition 3: max_reentries_per_symbol
+            todays_trades = await self.ctx.db.get_todays_trades()
+            symbol_trades_today = sum(
+                1 for t in todays_trades if t.get("symbol") == symbol
+            )
+            if symbol_trades_today >= reentry_cfg.max_reentries_per_symbol:
+                logger.debug(
+                    "Re-entry blocked for %s: %d trades today >= max %d",
+                    symbol, symbol_trades_today, reentry_cfg.max_reentries_per_symbol,
+                )
+                return False
+
+            # Note: require_higher_confidence is checked downstream during
+            # the confidence filter, since we don't have the new signal's
+            # confidence yet at this point. We store the original confidence
+            # for comparison later.
+
+            logger.info(
+                "Re-entry conditions met for %s: bars_after_exit=%d, price_move=%.2f%%, "
+                "today_trades=%d",
+                symbol, bars_after_exit, price_move_pct * 100, symbol_trades_today,
+            )
+            return True
+
+        except Exception as e:
+            logger.warning("Re-entry condition check failed for %s: %s", symbol, e)
+            return False
+
+    async def _get_last_trade_confidence(self, symbol: str) -> float | None:
+        """Get the confidence score of the last closed trade for a symbol.
+
+        Used by the smart re-entry feature to enforce require_higher_confidence.
+        Returns None if no trade is found or confidence is unavailable.
+        """
+        try:
+            trades = await self.ctx.db.get_symbol_trades(symbol, limit=5)
+            for t in trades:
+                if t.get("closed_at") is not None:
+                    conf = t.get("confidence_score")
+                    if conf is not None:
+                        return float(conf)
+            return None
+        except Exception:
+            return None

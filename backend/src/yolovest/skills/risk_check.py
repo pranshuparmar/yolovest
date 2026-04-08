@@ -24,6 +24,7 @@ All thresholds read from config.risk.* — zero hardcoded values.
 """
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
@@ -110,6 +111,14 @@ class RiskCheckSkill(SkillBase):
                 f"Sector limit ({stock_sector}: {cfg.max_same_sector_positions})",
             )
 
+        # Correlation-aware position limit (beyond simple sector counts)
+        if cfg.correlation_limit.enabled:
+            corr_rejection = await self._check_correlation_limit(
+                signal, cfg.correlation_limit,
+            )
+            if corr_rejection:
+                return self._reject(signal, corr_rejection)
+
         # Mandatory stop-loss
         if cfg.mandatory_stop_loss and not signal.get("stop_loss_price"):
             return self._reject(signal, "No stop-loss set (mandatory)")
@@ -182,6 +191,19 @@ class RiskCheckSkill(SkillBase):
                 signal["symbol"], slippage_penalty * 100,
             )
 
+        # Conviction-based sizing — scale position by ML confidence
+        if cfg.conviction_sizing.enabled:
+            multiplier = self._compute_conviction_multiplier(
+                signal, cfg.conviction_sizing,
+            )
+            position_size = max(1, int(position_size * multiplier))
+            logger.info(
+                "risk-check: conviction sizing for %s — confidence=%.2f, multiplier=%.2f",
+                signal["symbol"],
+                signal.get("confidence_score", 0),
+                multiplier,
+            )
+
         if position_size <= 0:
             return self._reject(signal, "Computed position size is 0")
 
@@ -240,3 +262,112 @@ class RiskCheckSkill(SkillBase):
                 "rejection_reason": reason,
             },
         )
+
+    def _compute_conviction_multiplier(
+        self,
+        signal: dict[str, Any],
+        cfg: Any,
+    ) -> float:
+        """Linear interpolation of position size multiplier based on confidence.
+
+        Maps confidence_floor -> min_multiplier and
+        confidence_ceiling -> max_multiplier.
+        Values outside the range are clamped to min/max.
+        """
+        confidence = signal.get("confidence_score", 0.0)
+
+        if confidence <= cfg.confidence_floor:
+            return cfg.min_multiplier
+        if confidence >= cfg.confidence_ceiling:
+            return cfg.max_multiplier
+
+        # Linear interpolation
+        ratio = (confidence - cfg.confidence_floor) / (
+            cfg.confidence_ceiling - cfg.confidence_floor
+        )
+        return cfg.min_multiplier + ratio * (cfg.max_multiplier - cfg.min_multiplier)
+
+    async def _check_correlation_limit(
+        self,
+        signal: dict[str, Any],
+        cfg: Any,
+    ) -> str | None:
+        """Check if adding this symbol would exceed the correlated-positions limit.
+
+        Returns a rejection reason string if the limit is breached, or None if OK.
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            logger.warning(
+                "risk-check: numpy not installed — skipping correlation limit check",
+            )
+            return None
+
+        open_positions = await self.ctx.db.get_open_positions()
+        if not open_positions:
+            return None
+
+        open_symbols = [p["symbol"] for p in open_positions]
+        new_symbol = signal["symbol"]
+
+        # Fetch daily close prices for the new symbol
+        try:
+            new_bars = await self.ctx.market_data.get_ohlcv(
+                new_symbol, days=cfg.lookback_days,
+            )
+        except Exception:
+            logger.warning(
+                "risk-check: could not fetch OHLCV for %s — skipping correlation check",
+                new_symbol,
+            )
+            return None
+
+        if not new_bars or len(new_bars) < 10:
+            return None
+
+        new_closes = [b["close"] if isinstance(b, dict) else b.close for b in new_bars]
+
+        correlated_count = 0
+        correlated_symbols: list[str] = []
+
+        for sym in open_symbols:
+            try:
+                sym_bars = await self.ctx.market_data.get_ohlcv(
+                    sym, days=cfg.lookback_days,
+                )
+            except Exception:
+                continue
+
+            if not sym_bars:
+                continue
+
+            sym_closes = [
+                b["close"] if isinstance(b, dict) else b.close for b in sym_bars
+            ]
+
+            # Align lengths to the shorter series
+            min_len = min(len(new_closes), len(sym_closes))
+            if min_len < 10:
+                continue
+
+            a = np.array(new_closes[:min_len], dtype=float)
+            b = np.array(sym_closes[:min_len], dtype=float)
+
+            # Pearson correlation
+            corr_matrix = np.corrcoef(a, b)
+            corr = float(corr_matrix[0, 1])
+
+            if abs(corr) >= cfg.correlation_threshold:
+                correlated_count += 1
+                correlated_symbols.append(f"{sym}({corr:.2f})")
+
+        if correlated_count >= cfg.max_correlated_positions:
+            return (
+                f"Correlation limit: {new_symbol} highly correlated with "
+                f"{correlated_count} open positions "
+                f"(max={cfg.max_correlated_positions}): "
+                f"{', '.join(correlated_symbols)}"
+            )
+
+        return None

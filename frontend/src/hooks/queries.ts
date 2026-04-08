@@ -624,9 +624,22 @@ export function usePendingTrades() {
 export function useApprovePendingTrade() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: api.approvePendingTrade,
+    mutationFn: ({ tradeId, overrides }: { tradeId: number; overrides?: Record<string, unknown> }) =>
+      api.approvePendingTrade(tradeId, overrides),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pending-trades"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+    },
+  });
+}
+
+export function useManualTrade() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (trade: { symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; product?: string; position_size?: number }) =>
+      api.manualTrade(trade),
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["positions"] });
       qc.invalidateQueries({ queryKey: ["trades"] });
     },
@@ -729,6 +742,55 @@ export function useUnquarantineSymbol() {
     mutationFn: api.unquarantineSymbol,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["quarantined-symbols"] });
+    },
+  });
+}
+
+// Holidays
+export function useHolidays() {
+  return useQuery({
+    queryKey: ["holidays"],
+    queryFn: api.holidays,
+    staleTime: 60_000,
+  });
+}
+
+export function useAddHoliday() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { date: string; early_close?: string }) => api.addHoliday(data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["holidays"] });
+    },
+  });
+}
+
+export function useRemoveHoliday() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (date: string) => api.removeHoliday(date),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["holidays"] });
+    },
+  });
+}
+
+// Config (UI-editable settings)
+export function useConfig() {
+  return useQuery({
+    queryKey: ["config"],
+    queryFn: api.getConfig,
+    staleTime: 60_000,
+  });
+}
+
+export function useUpdateConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (updates: Record<string, unknown>) => api.updateConfig(updates),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["config"] });
+      qc.invalidateQueries({ queryKey: ["system-state"] });
     },
   });
 }

@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 from yolovest.broker.zerodha import ZerodhaBroker
-from yolovest.config import AppConfig, load_config
+from yolovest.config import AppConfig, apply_db_config, get_db_editable_defaults, load_config
 from yolovest.context import AppContext, MarketHoursChecker
 from yolovest.cron_scheduler import CronScheduler
 from yolovest.data.db import Database
@@ -445,6 +445,23 @@ async def async_main(args: argparse.Namespace) -> None:
     # Initialize database if real (not stub)
     if isinstance(ctx.db, Database):
         await ctx.db.initialize()
+
+        # Populate or load DB-editable config
+        try:
+            if await ctx.db.is_config_empty():
+                defaults = get_db_editable_defaults()
+                await ctx.db.set_config_bulk(defaults)
+                logger.info("Populated %d config defaults into DB", len(defaults))
+            else:
+                db_values = await ctx.db.get_all_config()
+                ctx.config = apply_db_config(ctx.config, db_values)
+                ctx.market_hours = MarketHoursChecker(ctx.config)
+                # Update Notifier's config reference (it holds the old object)
+                if hasattr(ctx.notify, "_config"):
+                    ctx.notify._config = ctx.config
+                logger.info("Loaded %d config values from DB", len(db_values))
+        except Exception:
+            logger.warning("Failed to load config from DB, using file defaults", exc_info=True)
 
     # Restore Zerodha session from persisted access token
     if isinstance(ctx.broker, ZerodhaBroker):

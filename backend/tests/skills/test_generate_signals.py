@@ -208,7 +208,7 @@ class TestGenerateSignalsDiagnostics:
 class TestHoldingPeriodDecision:
     """Test the intelligent holding period decision logic."""
 
-    def test_intraday_when_high_vol_and_volume_and_morning(self, signal_skill):
+    async def test_intraday_when_high_vol_and_volume_and_morning(self, signal_skill):
         """High ATR%, high relative volume, morning → intraday/MIS."""
         signal_skill.ctx.config.strategy.mode = "balanced"
         features = {
@@ -220,12 +220,12 @@ class TestHoldingPeriodDecision:
         with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            period, product, days = signal_skill._decide_holding_period(features)
+            period, product, days = await signal_skill._decide_holding_period(features)
         assert period == "intraday"
         assert product == "MIS"
         assert days == 0
 
-    def test_no_intraday_after_1400(self, signal_skill):
+    async def test_no_intraday_after_1400(self, signal_skill):
         """After 14:00 IST, intraday should not be selected in balanced mode."""
         signal_skill.ctx.config.strategy.mode = "balanced"
         features = {
@@ -237,12 +237,12 @@ class TestHoldingPeriodDecision:
         with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 3, 30, 14, 30, tzinfo=IST)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            period, product, days = signal_skill._decide_holding_period(features)
+            period, product, days = await signal_skill._decide_holding_period(features)
         assert period != "intraday"
         assert product == "CNC"
         assert days > 0
 
-    def test_1w_when_strong_trend(self, signal_skill):
+    async def test_1w_when_strong_trend(self, signal_skill):
         """Strong EMA alignment + SuperTrend → longer hold / CNC."""
         signal_skill.ctx.config.strategy.mode = "balanced"
         features = {
@@ -254,11 +254,11 @@ class TestHoldingPeriodDecision:
         with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            period, product, days = signal_skill._decide_holding_period(features)
+            period, product, days = await signal_skill._decide_holding_period(features)
         assert product == "CNC"
         assert days >= 2
 
-    def test_3d_default_fallback(self, signal_skill):
+    async def test_3d_default_fallback(self, signal_skill):
         """Weak trend in balanced mode → short-term hold."""
         signal_skill.ctx.config.strategy.mode = "balanced"
         features = {
@@ -270,11 +270,11 @@ class TestHoldingPeriodDecision:
         with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            period, product, days = signal_skill._decide_holding_period(features)
+            period, product, days = await signal_skill._decide_holding_period(features)
         assert product == "CNC"
         assert days >= 1
 
-    def test_intraday_mode_only_returns_intraday(self, signal_skill):
+    async def test_intraday_mode_only_returns_intraday(self, signal_skill):
         """With mode=intraday, only intraday is allowed."""
         signal_skill.ctx.config.strategy.mode = "intraday"
         signal_skill.ctx.config.strategy.allowed_holding_periods = ["intraday"]
@@ -285,12 +285,12 @@ class TestHoldingPeriodDecision:
         with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            period, product, days = signal_skill._decide_holding_period(features)
+            period, product, days = await signal_skill._decide_holding_period(features)
         assert period == "intraday"
         assert product == "MIS"
         assert days == 0
 
-    def test_long_term_mode_only_returns_1w(self, signal_skill):
+    async def test_long_term_mode_only_returns_1w(self, signal_skill):
         """With mode=long_term, holding days >= 5."""
         signal_skill.ctx.config.strategy.mode = "long_term"
         signal_skill.ctx.config.strategy.allowed_holding_periods = ["long_term"]
@@ -303,8 +303,8 @@ class TestHoldingPeriodDecision:
         with patch("yolovest.skills.generate_signals.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 3, 30, 10, 0, tzinfo=IST)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            period, product, days = signal_skill._decide_holding_period(features)
-        assert period == "long_term"
+            period, product, days = await signal_skill._decide_holding_period(features)
+        assert period in ("positional", "long_term")
         assert product == "CNC"
         assert days >= 5
 
@@ -403,37 +403,42 @@ class TestSellHoldingsAdjustment:
     def test_sell_without_holdings_forced_to_mis(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product = adjust_sell_for_holdings("SELL", "short_term", "CNC", "BEL", held_symbols=set())
+        hp, product, days = adjust_sell_for_holdings("SELL", "short_term", "CNC", "BEL", held_symbols=set(), expected_days=4)
         assert hp == "intraday"
         assert product == "MIS"
+        assert days == 0
 
     def test_sell_with_holdings_keeps_cnc(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product = adjust_sell_for_holdings("SELL", "short_term", "CNC", "BEL", held_symbols={"BEL", "TCS"})
+        hp, product, days = adjust_sell_for_holdings("SELL", "short_term", "CNC", "BEL", held_symbols={"BEL", "TCS"}, expected_days=4)
         assert hp == "short_term"
         assert product == "CNC"
+        assert days == 4
 
     def test_sell_long_term_without_holdings_forced_to_mis(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product = adjust_sell_for_holdings("SELL", "long_term", "CNC", "RELIANCE", held_symbols=set())
+        hp, product, days = adjust_sell_for_holdings("SELL", "long_term", "CNC", "RELIANCE", held_symbols=set(), expected_days=10)
         assert hp == "intraday"
         assert product == "MIS"
+        assert days == 0
 
     def test_buy_unaffected_regardless_of_holdings(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product = adjust_sell_for_holdings("BUY", "short_term", "CNC", "RELIANCE", held_symbols=set())
+        hp, product, days = adjust_sell_for_holdings("BUY", "short_term", "CNC", "RELIANCE", held_symbols=set(), expected_days=4)
         assert hp == "short_term"
         assert product == "CNC"
+        assert days == 4
 
     def test_hold_unaffected(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product = adjust_sell_for_holdings("HOLD", "long_term", "CNC", "TCS", held_symbols=set())
+        hp, product, days = adjust_sell_for_holdings("HOLD", "long_term", "CNC", "TCS", held_symbols=set(), expected_days=10)
         assert hp == "long_term"
         assert product == "CNC"
+        assert days == 10
 
     async def test_sell_signal_gets_mis_in_pipeline(self, signal_skill):
         """Full pipeline: SELL signal for non-held stock -> MIS/intraday."""

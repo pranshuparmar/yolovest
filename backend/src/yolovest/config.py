@@ -97,6 +97,8 @@ class HeartbeatConfig(BaseModel):
     market_hours_interval_min: int = 15
     off_hours_interval_min: int = 60
     max_consecutive_skips: int = 3
+    auth_broker_cron: str = "30 8 * * 1-5"  # daily broker re-auth
+    ingest_premarket_cron: str = "30 8 * * 1-5"  # pre-market data fetch
 
 
 class ScanningWeights(BaseModel):
@@ -156,13 +158,13 @@ class HoldingPeriodConfig(BaseModel):
     """
 
     intraday: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=1.5, stop_loss=0.75),
+        default_factory=lambda: ATRMultipliers(target=0.75, stop_loss=0.5),
     )
     short_swing: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=2.0, stop_loss=1.0),
+        default_factory=lambda: ATRMultipliers(target=1.5, stop_loss=0.75),
     )
     week: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=3.0, stop_loss=1.5),
+        default_factory=lambda: ATRMultipliers(target=2.5, stop_loss=1.2),
     )
     long: ATRMultipliers = Field(
         default_factory=lambda: ATRMultipliers(target=5.0, stop_loss=2.0),
@@ -226,6 +228,64 @@ class FeedbackConfig(BaseModel):
     sources: FeedbackSourcesConfig = Field(default_factory=FeedbackSourcesConfig)
 
 
+class PartialProfitConfig(BaseModel):
+    """Partial profit booking — close a portion of the position at intermediate targets."""
+
+    enabled: bool = True
+    first_target_pct: float = Field(default=0.5, gt=0, le=1)  # book at 50% of target
+    first_close_pct: float = Field(default=0.5, gt=0, le=1)  # close 50% of position
+    move_sl_to_breakeven: bool = True  # after first booking, move SL to entry price
+
+
+class ScaledEntryConfig(BaseModel):
+    """Scaled entry — split orders into legs for better average entry."""
+
+    enabled: bool = False
+    legs: int = Field(default=2, ge=1, le=4)  # number of entry legs
+    second_leg_offset_pct: float = Field(default=0.005, ge=0, le=0.05)  # 0.5% below entry for BUY
+    second_leg_delay_sec: int = Field(default=30, ge=0, le=300)  # wait before second leg
+
+
+class MarketRegimeConfig(BaseModel):
+    """Market regime detection — adjust strategy based on market conditions."""
+
+    enabled: bool = True
+    index_symbol: str = "NIFTY 50"  # benchmark index for regime detection
+    lookback_days: int = Field(default=20, ge=5, le=60)
+    bull_bias_intraday_pct: float = Field(default=0.3, ge=0, le=1)  # 30% preference for shorter trades in bull
+    bear_max_holding_days: int = Field(default=5, ge=1, le=15)  # cap holding days in bear market
+    range_prefer_mean_reversion: bool = True  # prefer oversold/overbought entries in range
+
+
+class ConvictionSizingConfig(BaseModel):
+    """Conviction-based position sizing — scale size by ML confidence."""
+
+    enabled: bool = True
+    min_multiplier: float = Field(default=0.6, gt=0, le=1)  # size at min confidence
+    max_multiplier: float = Field(default=1.5, ge=1, le=3)  # size at max confidence
+    confidence_floor: float = Field(default=0.65, ge=0, le=1)  # maps to min_multiplier
+    confidence_ceiling: float = Field(default=0.90, ge=0, le=1)  # maps to max_multiplier
+
+
+class CorrelationLimitConfig(BaseModel):
+    """Correlation-aware position limits — beyond simple sector counts."""
+
+    enabled: bool = False
+    max_correlated_positions: int = Field(default=2, ge=1, le=5)
+    correlation_threshold: float = Field(default=0.7, ge=0.3, le=1)  # pairs above this are "correlated"
+    lookback_days: int = Field(default=60, ge=20, le=252)
+
+
+class ReentryConfig(BaseModel):
+    """Smart re-entry — allow re-entering after SL hit if conditions improve."""
+
+    enabled: bool = True
+    min_bars_after_exit: int = Field(default=3, ge=1, le=20)  # wait at least N bars
+    min_price_move_pct: float = Field(default=0.02, ge=0, le=0.10)  # price must move 2% from exit
+    max_reentries_per_symbol: int = Field(default=1, ge=1, le=3)  # max re-entries per symbol per day
+    require_higher_confidence: bool = True  # new signal must have higher confidence than original
+
+
 class StrategyConfig(BaseModel):
     mode: Literal["intraday", "short_term", "balanced", "long_term"] = "balanced"
     allowed_holding_periods: list[str] | None = None
@@ -234,8 +294,8 @@ class StrategyConfig(BaseModel):
     feedback: FeedbackConfig = Field(default_factory=FeedbackConfig)
     ema_periods: list[int] = Field(default_factory=lambda: [9, 21, 50, 200])
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
-    default_trade_type: Literal["intraday", "swing"] = "intraday"
     min_training_samples: int = 200
+    market_regime: MarketRegimeConfig = Field(default_factory=MarketRegimeConfig)
 
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "StrategyConfig":
@@ -263,7 +323,6 @@ class RiskConfig(BaseModel):
     llm_fallback_to_rules: bool = True
     max_same_sector_positions: int = Field(default=1, ge=1)
     kill_switch_enabled: bool = True
-    kill_switch_persistent: bool = True
     min_confidence_score: float = Field(default=0.65, ge=0, le=1)
     max_trades_per_day: int = Field(default=5, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
@@ -273,6 +332,10 @@ class RiskConfig(BaseModel):
     margin_usage_enabled: bool = False  # when False, position value capped by available cash (no leverage)
     weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
     holding_expiry: HoldingExpiryConfig = Field(default_factory=HoldingExpiryConfig)
+    partial_profit: PartialProfitConfig = Field(default_factory=PartialProfitConfig)
+    conviction_sizing: ConvictionSizingConfig = Field(default_factory=ConvictionSizingConfig)
+    correlation_limit: CorrelationLimitConfig = Field(default_factory=CorrelationLimitConfig)
+    reentry: ReentryConfig = Field(default_factory=ReentryConfig)
 
 
 class MarketHoursConfig(BaseModel):
@@ -316,6 +379,7 @@ class MarketHoursConfig(BaseModel):
 
 class ExecutionConfig(BaseModel):
     max_order_retries: int = 3
+    scaled_entry: ScaledEntryConfig = Field(default_factory=ScaledEntryConfig)
     retry_base_delay_sec: int = 2
     paper_slippage_pct: float = Field(default=0.001, ge=0)
     order_timeout_sec: int = 30
@@ -454,3 +518,161 @@ def load_config(path: str) -> AppConfig:
 
     expanded = _expand_env_vars(raw)
     return AppConfig.model_validate(expanded)
+
+
+# ---------------------------------------------------------------------------
+# File-only keys — never stored in DB or exposed via UI.
+# These require secrets, filesystem paths, or server restart to change.
+# ---------------------------------------------------------------------------
+
+FILE_ONLY_KEYS: set[str] = {
+    # Secrets (must come from env vars)
+    "broker.api_key",
+    "broker.api_secret",
+    "llm.api_key",
+    "notifications.telegram.bot_token",
+    "notifications.telegram.chat_id",
+    # Filesystem paths (hardcoded by Docker volume mounts)
+    "database.path",
+    "database.backup_dir",
+    "market_data.bhavcopy_dir",
+    # Server binding (hardcoded by Docker EXPOSE / nginx proxy)
+    "dashboard.host",
+    "dashboard.port",
+    "dashboard.password",
+    # Logging paths/rotation (hardcoded by Docker volume mounts)
+    "log.log_dir",
+    "log.max_bytes",
+    "log.backup_count",
+}
+
+# Keys managed via dedicated UI or internal-only, hidden from Settings page
+# but still stored in DB.
+SETTINGS_HIDDEN_KEYS: set[str] = {
+    "market_hours.holidays",
+    "market_hours.early_close_days",
+}
+
+
+def _flatten_model(
+    model: BaseModel, prefix: str = "",
+) -> dict[str, str]:
+    """Flatten a Pydantic model to dot-notation key-value pairs.
+
+    Values are JSON-encoded for non-scalar types (lists, dicts).
+    SecretStr fields are skipped.
+    """
+    import json as _json
+
+    result: dict[str, str] = {}
+    for field_name, field_info in model.model_fields.items():
+        key = f"{prefix}{field_name}" if prefix else field_name
+        value = getattr(model, field_name)
+
+        if isinstance(value, SecretStr):
+            continue  # never persist secrets
+        if isinstance(value, BaseModel):
+            result.update(_flatten_model(value, prefix=f"{key}."))
+        elif isinstance(value, (list, dict)):
+            result[key] = _json.dumps(value)
+        elif isinstance(value, bool):
+            result[key] = _json.dumps(value)  # "true"/"false" not "True"/"False"
+        elif value is None:
+            result[key] = _json.dumps(None)
+        else:
+            result[key] = str(value)
+    return result
+
+
+def get_db_editable_defaults() -> dict[str, str]:
+    """Return the default values for all DB-editable config keys.
+
+    Builds a default AppConfig, flattens it, then removes file-only keys.
+    """
+    defaults = _flatten_model(AppConfig())
+    return {k: v for k, v in defaults.items() if k not in FILE_ONLY_KEYS}
+
+
+def _set_nested(data: dict[str, Any], dotted_key: str, value: Any) -> None:
+    """Set a value in a nested dict using dot-notation key."""
+    parts = dotted_key.split(".")
+    obj = data
+    for part in parts[:-1]:
+        if part not in obj:
+            obj[part] = {}
+        obj = obj[part]
+    obj[parts[-1]] = value
+
+
+def _parse_db_value(key: str, raw: str) -> Any:
+    """Parse a DB string value back to its Python type using the model schema."""
+    import json as _json
+
+    # Try JSON first (handles booleans, lists, dicts, null)
+    try:
+        parsed = _json.loads(raw)
+        # JSON parsed successfully — return as-is for booleans, lists, dicts, null
+        if isinstance(parsed, (bool, list, dict)) or parsed is None:
+            return parsed
+        # For numbers that came through JSON, return them
+        if isinstance(parsed, (int, float)):
+            return parsed
+        # For strings that happen to be valid JSON strings, return raw
+        return raw
+    except (ValueError, _json.JSONDecodeError):
+        pass
+
+    # Try numeric conversion
+    try:
+        if "." in raw:
+            return float(raw)
+        return int(raw)
+    except ValueError:
+        pass
+
+    return raw
+
+
+def apply_db_config(base_config: AppConfig, db_values: dict[str, str]) -> AppConfig:
+    """Merge DB config values into an AppConfig, returning a new instance.
+
+    Builds a nested dict from the base config, overlays DB values,
+    then re-validates through Pydantic.
+    """
+    # Start with the full base config as a dict
+    data = base_config.model_dump()
+
+    # Overlay DB values
+    for key, raw_value in db_values.items():
+        if key in FILE_ONLY_KEYS:
+            continue
+        parsed = _parse_db_value(key, raw_value)
+        _set_nested(data, key, parsed)
+
+    # Re-validate (this runs all Pydantic validators)
+    merged = AppConfig.model_validate(data)
+
+    # Preserve SecretStr fields from the original config (they aren't in DB)
+    merged.broker.api_key = base_config.broker.api_key
+    merged.broker.api_secret = base_config.broker.api_secret
+    merged.llm.api_key = base_config.llm.api_key
+    merged.notifications.telegram.bot_token = base_config.notifications.telegram.bot_token
+    merged.dashboard.password = base_config.dashboard.password
+    return merged
+
+
+def config_to_ui_sections(config: AppConfig) -> dict[str, dict[str, Any]]:
+    """Convert the DB-editable portion of config into UI-friendly sections.
+
+    Returns a dict of section_name -> {key: value} for the frontend.
+    """
+    flat = _flatten_model(config)
+    sections: dict[str, dict[str, Any]] = {}
+    for key, value in sorted(flat.items()):
+        if key in FILE_ONLY_KEYS or key in SETTINGS_HIDDEN_KEYS:
+            continue
+        section = key.split(".")[0]
+        if section not in sections:
+            sections[section] = {}
+        sections[section][key] = _parse_db_value(key, value)
+    return sections

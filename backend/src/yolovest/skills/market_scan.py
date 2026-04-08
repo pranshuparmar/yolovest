@@ -7,20 +7,24 @@ Flow:
 1. Load latest OHLCV, volume, news sentiment, and fundamental data from DB
 2. Scan NSE universe — apply volume filter (scanning.min_avg_daily_volume)
 3. Filter out: illiquid stocks, F&O ban list, pending corporate actions
-4. Score each stock using configurable weighted algorithm (scanning.weights):
-   - Technical score (default 40%): trend strength, breakout patterns
+4. Compute technical features (RSI, MACD, ATR, SuperTrend) from OHLCV bars
+5. Score each stock using configurable weighted algorithm (scanning.weights):
+   - Technical score (default 35%): trend strength, breakout patterns
    - Volume/momentum (default 25%): relative volume, delivery %, momentum indicators
-   - News sentiment (default 20%): Gemini sentiment from ingest-data
+   - News sentiment (default 15%): Gemini sentiment from ingest-data
    - Fundamental quality (default 15%): PE, debt ratio, promoter holding
-5. Rank and shortlist top N stocks (scanning.shortlist_size)
-6. Track sector rotation — flag sectors showing strength/weakness
-7. Use Gemini to cross-validate shortlist against market narrative
-8. Update dynamic watchlist in DB
+   - Volatility (default 10%): ATR% preference bell curve
+6. Rank and shortlist top N stocks (scanning.shortlist_size)
+7. Track sector rotation — flag sectors showing strength/weakness
+8. Use Gemini to cross-validate shortlist against market narrative
+9. Update dynamic watchlist in DB
 """
 
+import asyncio
 import logging
 from typing import Any
 
+from yolovest.data.features import IndicatorConfig, compute_features
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 logger = logging.getLogger(__name__)
@@ -57,16 +61,55 @@ class MarketScanSkill(SkillBase):
         # Step 3: Filter out banned / corporate action stocks
         filtered = self._apply_exclusion_filters(liquid)
 
-        # Step 4: Compute sub-scores and weighted composite
+        # Step 4: Enrich with technical indicators from OHLCV bars
+        filtered = await self._enrich_with_features(filtered)
+
+        # Detect market regime (if enabled) before scoring
+        regime_cfg = self.ctx.config.strategy.market_regime
+        regime = "unknown"
+        if regime_cfg.enabled:
+            regime = await self._detect_market_regime()
+            logger.info("market-scan: detected market regime = %s", regime)
+
+        # Step 5: Compute sub-scores and weighted composite
+        # Adjust weights based on market regime
+        w_technical = cfg.weights.technical
+        w_volume = cfg.weights.volume_momentum
+        w_sentiment = cfg.weights.news_sentiment
+        w_fundamental = cfg.weights.fundamental
+        w_volatility = cfg.weights.volatility
+
+        if regime_cfg.enabled and regime != "unknown":
+            if regime == "bull":
+                # Boost technical, reduce fundamental
+                w_technical *= 1.20
+                w_fundamental *= 0.80
+            elif regime == "bear":
+                # Boost fundamental, reduce technical
+                w_fundamental *= 1.20
+                w_technical *= 0.80
+            elif regime == "range":
+                # Boost volatility weight
+                w_volatility *= 1.50
+
+            # Re-normalize weights to sum to 1.0
+            w_total = w_technical + w_volume + w_sentiment + w_fundamental + w_volatility
+            if w_total > 0:
+                w_technical /= w_total
+                w_volume /= w_total
+                w_sentiment /= w_total
+                w_fundamental /= w_total
+                w_volatility /= w_total
+
         scored = []
         for stock in filtered:
             sub = self._compute_sub_scores(stock)
             composite = (
-                sub["technical_score"] * cfg.weights.technical
-                + sub["volume_momentum_score"] * cfg.weights.volume_momentum
-                + sub["news_sentiment_score"] * cfg.weights.news_sentiment
-                + sub["fundamental_score"] * cfg.weights.fundamental
-                + sub["volatility_score"] * cfg.weights.volatility
+                sub["technical_score"] * w_technical
+                + sub["volume_momentum_score"] * w_volume
+                + sub["news_sentiment_score"] * w_sentiment
+                + sub["fundamental_score"] * w_fundamental
+                + sub["volatility_score"] * w_volatility
             )
             scored.append({**stock, **sub, "composite_score": composite})
 
@@ -107,17 +150,23 @@ class MarketScanSkill(SkillBase):
             sector_analysis.get("weak", []),
         )
 
+        result_data: dict[str, Any] = {
+            "universe_size": len(universe),
+            "after_filters": len(filtered),
+            "shortlist_size": len(shortlist),
+            "top_stocks": [s["symbol"] for s in shortlist[:5]],
+            "strong_sectors": sector_analysis.get("strong", []),
+            "weak_sectors": sector_analysis.get("weak", []),
+        }
+        if regime_cfg.enabled:
+            result_data["market_regime"] = regime
+            # Persist for downstream skills (generate-signals reads this)
+            await self.ctx.db.set_system_state("market_regime", regime)
+
         return SkillResult(
             success=True,
             skill_name=self.name,
-            data={
-                "universe_size": len(universe),
-                "after_filters": len(filtered),
-                "shortlist_size": len(shortlist),
-                "top_stocks": [s["symbol"] for s in shortlist[:5]],
-                "strong_sectors": sector_analysis.get("strong", []),
-                "weak_sectors": sector_analysis.get("weak", []),
-            },
+            data=result_data,
         )
 
     def _apply_exclusion_filters(self, stocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -125,6 +174,60 @@ class MarketScanSkill(SkillBase):
         # F&O ban list and corp actions would be fetched from NSE in production.
         # For now, pass through — the volume filter already removes illiquid stocks.
         return stocks
+
+    async def _enrich_with_features(
+        self, stocks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Compute technical indicators for each stock from OHLCV bars.
+
+        Fetches daily bars and runs compute_features() to add RSI, MACD,
+        ATR, SuperTrend, etc. to each stock dict for scoring. Stocks with
+        insufficient data are kept but will score neutral on technical.
+        """
+        indicator_cfg = IndicatorConfig(
+            rsi=self.ctx.config.strategy.indicators.rsi,
+            macd=self.ctx.config.strategy.indicators.macd,
+            bollinger_bands=self.ctx.config.strategy.indicators.bollinger_bands,
+            vwap=self.ctx.config.strategy.indicators.vwap,
+            atr=self.ctx.config.strategy.indicators.atr,
+            volume_profile=self.ctx.config.strategy.indicators.volume_profile,
+            obv=self.ctx.config.strategy.indicators.obv,
+            supertrend=self.ctx.config.strategy.indicators.supertrend,
+        )
+
+        async def _enrich_one(stock: dict[str, Any]) -> dict[str, Any]:
+            symbol = stock.get("symbol", "")
+            try:
+                bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=60)
+                if len(bars) < 20:
+                    return stock  # not enough data, keep with defaults
+                features = compute_features(bars, indicator_cfg)
+                if features:
+                    stock["rsi"] = features.get("rsi_14")
+                    stock["macd_histogram"] = features.get("macd_histogram")
+                    stock["supertrend_direction"] = features.get("supertrend_direction")
+                    stock["atr_pct"] = features.get("atr_pct", 0.0)
+                    # Relative volume: today's volume vs 20-day avg
+                    if bars and stock.get("avg_daily_volume"):
+                        today_vol = bars[-1].volume if bars[-1].volume else 0
+                        avg_vol = stock["avg_daily_volume"]
+                        if avg_vol > 0:
+                            stock["relative_volume"] = today_vol / avg_vol
+            except Exception as e:
+                logger.debug("Feature enrichment failed for %s: %s", symbol, e)
+            return stock
+
+        # Run enrichment concurrently (bounded to avoid overwhelming DB)
+        semaphore = asyncio.Semaphore(20)
+
+        async def _bounded(stock: dict[str, Any]) -> dict[str, Any]:
+            async with semaphore:
+                return await _enrich_one(stock)
+
+        enriched = await asyncio.gather(*[_bounded(s) for s in stocks])
+        enriched_count = sum(1 for s in enriched if s.get("rsi") is not None)
+        logger.info("Enriched %d/%d stocks with technical indicators", enriched_count, len(stocks))
+        return list(enriched)
 
     def _compute_sub_scores(self, stock: dict[str, Any]) -> dict[str, Any]:
         """Compute normalized [0, 1] sub-scores from raw data."""
@@ -262,3 +365,66 @@ class MarketScanSkill(SkillBase):
             "weak": weak,
             "rotation": sector_avgs,
         }
+
+    async def _detect_market_regime(self) -> str:
+        """Detect the current market regime (bull / bear / range) from index data.
+
+        Fetches recent OHLCV bars for the configured index symbol and classifies
+        the regime based on average daily returns and the current price position
+        within the recent trading range.
+
+        Returns:
+            "bull", "bear", "range", or "unknown" if insufficient data.
+        """
+        regime_cfg = self.ctx.config.strategy.market_regime
+        try:
+            bars = await self.ctx.db.get_ohlcv(
+                regime_cfg.index_symbol, "daily", days=regime_cfg.lookback_days,
+            )
+        except Exception as e:
+            logger.warning("Market regime detection failed (data fetch): %s", e)
+            return "unknown"
+
+        if len(bars) < 10:
+            logger.info(
+                "Market regime: insufficient data (%d bars < 10) for %s",
+                len(bars), regime_cfg.index_symbol,
+            )
+            return "unknown"
+
+        # Compute daily returns
+        returns = []
+        for i in range(1, len(bars)):
+            prev_close = bars[i - 1].close
+            if prev_close > 0:
+                returns.append(bars[i].close / prev_close - 1)
+
+        if not returns:
+            return "unknown"
+
+        avg_return = sum(returns) / len(returns)
+
+        # Price position within recent range
+        closes = [bar.close for bar in bars]
+        recent_high = max(closes)
+        recent_low = min(closes)
+        current = closes[-1]
+
+        if recent_high == recent_low:
+            position_in_range = 0.5
+        else:
+            position_in_range = (current - recent_low) / (recent_high - recent_low)
+
+        # Classify regime
+        if avg_return > 0.001 and position_in_range > 0.6:
+            regime = "bull"
+        elif avg_return < -0.001 and position_in_range < 0.4:
+            regime = "bear"
+        else:
+            regime = "range"
+
+        logger.debug(
+            "Market regime: %s (avg_return=%.4f, position_in_range=%.2f, index=%s)",
+            regime, avg_return, position_in_range, regime_cfg.index_symbol,
+        )
+        return regime

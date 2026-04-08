@@ -25,7 +25,11 @@ class IngestPremarketSkill(SkillBase):
     name = "ingest-premarket"
     description = "Fetch pre-market global cues and overnight data"
     trigger = SkillTrigger.CRON
-    schedule = "30 8 * * 1-5"  # 8:30 AM IST, weekdays
+    schedule = None  # set from config in __init__
+
+    def __init__(self, ctx: Any) -> None:
+        super().__init__(ctx)
+        self.schedule = ctx.config.heartbeat.ingest_premarket_cron
 
     def should_run(self) -> bool:
         return bool(self.ctx.market_hours.is_premarket_window())

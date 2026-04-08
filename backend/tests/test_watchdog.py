@@ -31,7 +31,12 @@ class TestRecordHeartbeat:
 
 class TestExpectedInterval:
     def test_market_hours_interval(self, watchdog):
+        # _expected_interval_sec returns _last_interval_sec which is set
+        # during record_heartbeat based on current market hours state.
+        # Patch is_market_hours before calling record_heartbeat so the
+        # stored interval reflects market hours.
         with patch.object(watchdog._ctx.market_hours, "is_market_hours", return_value=True):
+            watchdog.record_heartbeat()
             interval = watchdog._expected_interval_sec()
         assert interval == watchdog._ctx.config.heartbeat.market_hours_interval_min * 60
 
