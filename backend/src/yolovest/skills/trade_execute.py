@@ -143,7 +143,7 @@ class TradeExecuteSkill(SkillBase):
             "stop_loss_price": signal["stop_loss_price"],
             "target_price": signal["target_price"],
             "product": signal.get("product", "MIS"),
-            "status": "filled",
+            "status": "open",
             "mode": "paper",
             "slippage": round(slippage, 2),
             "estimated_costs": est_costs,
@@ -340,7 +340,7 @@ class TradeExecuteSkill(SkillBase):
                         "order_id": order_id,
                         "sl_order_id": sl_order_id,
                         "product": product,
-                        "status": "filled",
+                        "status": "open",
                         "mode": "live",
                         "slippage": slippage,
                         "scaled_entry": True,
@@ -363,7 +363,8 @@ class TradeExecuteSkill(SkillBase):
                             f"Order {order_id} {verified_status} by exchange"
                         )
 
-                    trade["status"] = verified_status.lower() if verified_status else "filled"
+                    # COMPLETE/filled from Kite means the order filled — position is "open"
+                    trade["status"] = "open"
 
                     logger.info(
                         "trade-execute: LIVE scaled %s %s leg1=%d@%.2f leg2=%d@%.2f avg=%.2f (id=%s)",
@@ -458,7 +459,7 @@ class TradeExecuteSkill(SkillBase):
                         "order_id": order_id,
                         "sl_order_id": sl_order_id,
                         "product": product,
-                        "status": order_status.get("status", "open"),
+                        "status": "open",  # position is open until target/SL/square-off closes it
                         "mode": "live",
                         "slippage": slippage,
                     }
@@ -481,7 +482,8 @@ class TradeExecuteSkill(SkillBase):
                             f"Order {order_id} {verified_status} by exchange"
                         )
 
-                    trade["status"] = verified_status.lower() if verified_status else "filled"
+                    # COMPLETE/filled from Kite means the order filled — position is "open"
+                    trade["status"] = "open"
 
                 trade_id = await self.ctx.db.insert_trade(trade)
                 trade["trade_id"] = trade_id
