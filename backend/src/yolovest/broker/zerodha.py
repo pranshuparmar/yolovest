@@ -499,9 +499,24 @@ class ZerodhaBroker(BrokerBase):
     # ------------------------------------------------------------------
 
     async def _retry_api_call(self, fn: Any) -> Any:
-        """Retry with exponential backoff and circuit breaker protection."""
+        """Retry with exponential backoff and circuit breaker protection.
+
+        Only retries transient errors (network, rate limits). Permanent errors
+        (validation, auth, input errors) are raised immediately.
+        """
         # Fail fast if circuit breaker is open
         self._circuit_breaker.check()
+
+        # Error messages that indicate permanent failures — never retry these
+        _PERMANENT_ERRORS = (
+            "market protection",
+            "not allowed",
+            "invalid",
+            "insufficient",
+            "order not found",
+            "margin",
+            "quantity",
+        )
 
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
@@ -512,6 +527,13 @@ class ZerodhaBroker(BrokerBase):
                 return result
             except Exception as e:
                 last_error = e
+                err_msg = str(e).lower()
+
+                # Don't retry permanent errors
+                if any(keyword in err_msg for keyword in _PERMANENT_ERRORS):
+                    logger.error("API call failed with permanent error (no retry): %s", e)
+                    raise
+
                 self._circuit_breaker.record_failure()
                 # If circuit just opened, don't retry — fail fast
                 if self._circuit_breaker.state == "OPEN":
