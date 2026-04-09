@@ -289,8 +289,8 @@ class HeartbeatOrchestrator:
             await self._ctx.notify.send(
                 f"Pending approval: {sig_type} {symbol} @ ₹{entry:.2f} "
                 f"(conf {conf:.0%})\n"
-                f"Approve: /approve {pending_id}\n"
-                f"Reject: /reject {pending_id}",
+                f"Approve: /approve {symbol}\n"
+                f"Reject: /reject {symbol}",
                 alert_type="trade_entry",
             )
             results[f"{prefix}/pending"] = SkillResult(
