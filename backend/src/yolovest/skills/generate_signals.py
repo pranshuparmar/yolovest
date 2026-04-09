@@ -84,7 +84,7 @@ class GenerateSignalsSkill(SkillBase):
 
         # Build set of currently held symbols (open positions)
         # Used to decide if SELL = exit-owned-stock (CNC ok) vs short-sell (force MIS)
-        open_positions = await self.ctx.db.get_open_positions()
+        open_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
         held_symbols = {p["symbol"] for p in open_positions}
 
         # Load locked symbols — SELL signals for these will be skipped entirely

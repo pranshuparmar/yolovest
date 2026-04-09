@@ -41,7 +41,7 @@ class PositionMonitorSkill(SkillBase):
         from yolovest.timezone import now_ist
 
         cfg = self.ctx.config.risk
-        local_positions = await self.ctx.db.get_open_positions()
+        local_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
         broker_positions = await self.ctx.broker.get_positions()
 
         discrepancies = self._reconcile(local_positions, broker_positions)

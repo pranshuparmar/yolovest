@@ -46,6 +46,7 @@ class RiskCheckSkill(SkillBase):
         cfg = self.ctx.config.risk
         portfolio = await self.ctx.db.get_portfolio_state(
             weekly_reset_day=cfg.weekly_reset_day,
+            mode=self.ctx.config.mode,
         )
 
         # Kill switch
@@ -318,7 +319,7 @@ class RiskCheckSkill(SkillBase):
             )
             return None
 
-        open_positions = await self.ctx.db.get_open_positions()
+        open_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
         if not open_positions:
             return None
 

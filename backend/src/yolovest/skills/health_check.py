@@ -107,7 +107,7 @@ class HealthCheckSkill(SkillBase):
 
         # Graceful degradation — protect positions on critical failure
         if critical_failures and self.ctx.market_hours.is_market_hours():
-            open_positions = await self.ctx.db.get_open_positions()
+            open_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
             if open_positions:
                 await self.ctx.notify.send(
                     f"CRITICAL: {len(critical_failures)} system failures detected. "

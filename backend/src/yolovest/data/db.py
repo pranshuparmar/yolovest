@@ -518,11 +518,18 @@ class Database:
     # Positions (read from trades table)
     # ------------------------------------------------------------------
 
-    async def get_open_positions(self) -> list[dict[str, Any]]:
-        """Get trades with status 'open' or 'partially_filled'."""
-        cursor = await self.read_conn.execute(
-            "SELECT * FROM trades WHERE status IN ('open', 'partially_filled')"
-        )
+    async def get_open_positions(self, mode: str | None = None) -> list[dict[str, Any]]:
+        """Get trades with status 'open' or 'partially_filled'.
+
+        Args:
+            mode: Filter by trading mode ('paper' or 'live'). None = all modes.
+        """
+        query = "SELECT * FROM trades WHERE status IN ('open', 'partially_filled')"
+        params: list[Any] = []
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        cursor = await self.read_conn.execute(query, params)
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
@@ -1229,7 +1236,9 @@ class Database:
     # Portfolio State
     # ------------------------------------------------------------------
 
-    async def get_portfolio_state(self, weekly_reset_day: str = "monday") -> dict[str, Any]:
+    async def get_portfolio_state(
+        self, weekly_reset_day: str = "monday", mode: str | None = None,
+    ) -> dict[str, Any]:
         """Build portfolio state dict[str, Any] for risk checks.
 
         Computes total capital, exposure, per-stock/sector counts,
@@ -1237,11 +1246,15 @@ class Database:
 
         Args:
             weekly_reset_day: Day name when weekly PnL resets (e.g. "monday").
+            mode: Filter by trading mode ('paper' or 'live'). None = all modes.
         """
         from datetime import timedelta
 
         now = now_ist()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC).isoformat()
+
+        mode_clause = " AND mode = ?" if mode else ""
+        mode_params: list[Any] = [mode] if mode else []
 
         # Get initial capital from system_state or fallback
         initial_capital = 100_000.0
@@ -1253,7 +1266,7 @@ class Database:
                 pass
 
         # Open positions
-        positions = await self.get_open_positions()
+        positions = await self.get_open_positions(mode=mode)
         open_count = len(positions)
 
         # Stock exposures and sector counts
@@ -1274,7 +1287,8 @@ class Database:
 
         # total_capital = initial + all realized PnL
         cursor = await self.conn.execute(
-            "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE pnl IS NOT NULL"
+            f"SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE pnl IS NOT NULL{mode_clause}",
+            mode_params,
         )
         row = await cursor.fetchone()
         all_time_pnl = row[0] if row else 0
@@ -1292,17 +1306,17 @@ class Database:
 
         # Today's trades count
         cursor = await self.conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE created_at >= ?",
-            (today_start,),
+            f"SELECT COUNT(*) FROM trades WHERE created_at >= ?{mode_clause}",
+            [today_start, *mode_params],
         )
         row = await cursor.fetchone()
         trades_today = row[0] if row else 0
 
         # Daily realized PnL
         cursor = await self.conn.execute(
-            "SELECT COALESCE(SUM(pnl), 0) FROM trades "
-            "WHERE closed_at >= ? AND pnl IS NOT NULL",
-            (today_start,),
+            f"SELECT COALESCE(SUM(pnl), 0) FROM trades "
+            f"WHERE closed_at >= ? AND pnl IS NOT NULL{mode_clause}",
+            [today_start, *mode_params],
         )
         row = await cursor.fetchone()
         daily_pnl = row[0] if row else 0
@@ -1319,9 +1333,9 @@ class Database:
             hour=9, minute=15, second=0, microsecond=0
         )
         cursor = await self.conn.execute(
-            "SELECT COALESCE(SUM(pnl), 0) FROM trades "
-            "WHERE closed_at >= ? AND pnl IS NOT NULL",
-            (week_start.isoformat(),),
+            f"SELECT COALESCE(SUM(pnl), 0) FROM trades "
+            f"WHERE closed_at >= ? AND pnl IS NOT NULL{mode_clause}",
+            [week_start.isoformat(), *mode_params],
         )
         row = await cursor.fetchone()
         weekly_pnl = row[0] if row else 0
@@ -1329,9 +1343,10 @@ class Database:
 
         # Minutes since last loss
         cursor = await self.conn.execute(
-            "SELECT closed_at FROM trades "
-            "WHERE pnl IS NOT NULL AND pnl < 0 "
-            "ORDER BY closed_at DESC LIMIT 1"
+            f"SELECT closed_at FROM trades "
+            f"WHERE pnl IS NOT NULL AND pnl < 0{mode_clause} "
+            f"ORDER BY closed_at DESC LIMIT 1",
+            mode_params,
         )
         row = await cursor.fetchone()
         if row and row[0]:
@@ -1423,15 +1438,18 @@ class Database:
     # Today's Trades
     # ------------------------------------------------------------------
 
-    async def get_todays_trades(self) -> list[dict[str, Any]]:
+    async def get_todays_trades(self, mode: str | None = None) -> list[dict[str, Any]]:
         """Get all trades created today (IST market day)."""
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).astimezone(UTC).isoformat()
-        cursor = await self.conn.execute(
-            "SELECT * FROM trades WHERE created_at >= ? ORDER BY created_at",
-            (today_start,),
-        )
+        query = "SELECT * FROM trades WHERE created_at >= ?"
+        params: list[Any] = [today_start]
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        query += " ORDER BY created_at"
+        cursor = await self.conn.execute(query, params)
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 

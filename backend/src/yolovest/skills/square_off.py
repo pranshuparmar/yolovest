@@ -75,7 +75,7 @@ class SquareOffSkill(SkillBase):
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         force = kwargs.get("force", False)  # True when called from kill-switch
-        positions = await self.ctx.db.get_open_positions()
+        positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
 
         # Filter to MIS (intraday) only, unless force=True (kill switch closes everything)
         if not force:

@@ -348,7 +348,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         except Exception:
             logger.debug("Broker capital sync failed, using DB value", exc_info=True)
 
-        portfolio = await ctx.db.get_portfolio_state()
+        portfolio = await ctx.db.get_portfolio_state(mode=ctx.config.mode)
         return portfolio
 
     @app.post("/api/capital")
@@ -385,9 +385,12 @@ def create_app(ctx: AppContext) -> FastAPI:
             return {"success": False, "error": str(e)}
 
     @app.get("/api/positions")
-    async def get_positions(user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
+    async def get_positions(
+        user: str = Depends(verify_credentials),
+        mode: str | None = Query(None, description="Filter by mode: paper, live, or omit for current"),
+    ) -> list[dict[str, Any]]:
         """Current open positions."""
-        return await ctx.db.get_open_positions()
+        return await ctx.db.get_open_positions(mode=mode or ctx.config.mode)
 
     # Track whether we've already sent a broker-expired Telegram alert this session
     # to avoid spamming on every page load / auto-refresh.
@@ -566,9 +569,12 @@ def create_app(ctx: AppContext) -> FastAPI:
             return {"success": False, "error": str(e)}
 
     @app.get("/api/trades/today")
-    async def get_todays_trades(user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
+    async def get_todays_trades(
+        user: str = Depends(verify_credentials),
+        mode: str | None = Query(None, description="Filter by mode: paper, live, or omit for current"),
+    ) -> list[dict[str, Any]]:
         """Today's trades."""
-        return await ctx.db.get_todays_trades()
+        return await ctx.db.get_todays_trades(mode=mode or ctx.config.mode)
 
     @app.get("/api/trades")
     async def get_trades(
@@ -1296,8 +1302,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Portfolio risk breakdown by stock and sector."""
-        portfolio = await ctx.db.get_portfolio_state()
-        positions = await ctx.db.get_open_positions()
+        portfolio = await ctx.db.get_portfolio_state(mode=ctx.config.mode)
+        positions = await ctx.db.get_open_positions(mode=ctx.config.mode)
         stock_exposures = portfolio.get("stock_exposures", {})
         sector_counts = portfolio.get("sector_counts", {})
 
@@ -1516,7 +1522,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Correlation matrix for open positions' symbols."""
-        positions = await ctx.db.get_open_positions()
+        positions = await ctx.db.get_open_positions(mode=ctx.config.mode)
         watchlist = await ctx.db.get_watchlist()
         # Use symbols from positions + top watchlist
         symbols = list({p.get("symbol", "") for p in positions if p.get("symbol")})
