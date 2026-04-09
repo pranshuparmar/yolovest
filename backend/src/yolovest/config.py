@@ -345,6 +345,7 @@ class MarketHoursConfig(BaseModel):
     order_end: str = "15:15"
     square_off: str = "15:15"
     square_off_extension: str = "00:05"
+    intraday_cutoff: str = "14:30"  # No new intraday signals after this time
     timezone: str = "Asia/Kolkata"
     holidays: list[str] = Field(default_factory=list)  # YYYY-MM-DD strings
     early_close_days: dict[str, str] = Field(default_factory=dict)

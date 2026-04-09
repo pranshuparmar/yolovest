@@ -279,6 +279,24 @@ class GenerateSignalsSkill(SkillBase):
                     symbol, held_symbols, expected_days,
                 )
 
+                # Intraday cutoff: skip intraday signals after configured time
+                if holding_period == "intraday":
+                    cutoff_str = self.ctx.config.market_hours.intraday_cutoff
+                    cutoff_parts = cutoff_str.split(":")
+                    cutoff_time = time(int(cutoff_parts[0]), int(cutoff_parts[1]))
+                    if datetime.now(IST).time() >= cutoff_time:
+                        filter_counts.setdefault("intraday_cutoff", 0)
+                        filter_counts["intraday_cutoff"] += 1
+                        rejection_details.append({
+                            "symbol": symbol, "reason": "intraday_cutoff",
+                            "detail": f"intraday signal after {cutoff_str} cutoff",
+                        })
+                        logger.info(
+                            "Intraday cutoff: skipping %s %s (after %s)",
+                            prediction.signal_type, symbol, cutoff_str,
+                        )
+                        continue
+
                 # Override target/SL with ATR multipliers interpolated for holding duration
                 from yolovest.strategy.holding_period import interpolate_atr_multipliers
 
@@ -425,6 +443,30 @@ class GenerateSignalsSkill(SkillBase):
         """
         from yolovest.config import _MODE_HOLDING_DAYS
         from yolovest.strategy.holding_period import decide_holding_period
+
+        # Check intraday cutoff — if past cutoff, skip intraday model entirely
+        cutoff_str = self.ctx.config.market_hours.intraday_cutoff
+        cutoff_parts = cutoff_str.split(":")
+        past_intraday_cutoff = datetime.now(IST).time() >= time(int(cutoff_parts[0]), int(cutoff_parts[1]))
+
+        if past_intraday_cutoff:
+            # Only run swing model
+            try:
+                swing_pred = await self.ctx.ml.predict_swing(symbol, daily_features, current_price=current_price)
+            except Exception as e:
+                logger.debug("Balanced: swing model failed for %s: %s", symbol, e)
+                swing_pred = None
+            if swing_pred and swing_pred.signal_type != "HOLD":
+                mode_days = _MODE_HOLDING_DAYS.get("balanced", (0, 15))
+                vol_cfg = self.ctx.config.strategy.volatility
+                now_time = datetime.now(IST).time()
+                _, product, expected_days = decide_holding_period(
+                    daily_features, ["short_term", "long_term"], vol_cfg, now_time,
+                    mode_days_range=(max(1, mode_days[0]), mode_days[1]),
+                )
+                label = "swing" if expected_days <= 5 else "positional" if expected_days <= 15 else "long_term"
+                return swing_pred, label, "CNC", expected_days
+            return swing_pred or intraday_features, fallback_period, fallback_product, fallback_days
 
         # Run both models concurrently
         intra_feat = intraday_features or daily_features
