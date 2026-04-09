@@ -656,6 +656,19 @@ export function useRejectPendingTrade() {
   });
 }
 
+export function useClearTodaysSignals() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.clearTodaysSignals,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pending-trades"] });
+      qc.invalidateQueries({ queryKey: ["signals"] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+      qc.invalidateQueries({ queryKey: ["system-status"] });
+    },
+  });
+}
+
 export function useResetAllData() {
   const qc = useQueryClient();
   return useMutation({

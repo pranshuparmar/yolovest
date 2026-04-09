@@ -378,6 +378,9 @@ export const api = {
   rejectPendingTrade: (tradeId: number) =>
     apiFetch<{ success: boolean }>(`/api/pending-trades/${tradeId}/reject`, { method: "POST" }),
 
+  clearTodaysSignals: () =>
+    apiFetch<{ success: boolean; signals_deleted: number; pending_deleted: number }>("/api/clear-signals", { method: "POST" }),
+
   manualTrade: (trade: { symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; product?: string; position_size?: number }) =>
     apiFetch<{ success: boolean; trade?: Record<string, unknown>; error?: string | null }>("/api/manual-trade", {
       method: "POST",

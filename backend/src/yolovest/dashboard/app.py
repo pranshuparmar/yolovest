@@ -2229,6 +2229,14 @@ def create_app(ctx: AppContext) -> FastAPI:
             logger.info("Expired %d stale pending trades", expired)
         return await ctx.db.get_pending_trades()
 
+    @app.post("/api/clear-signals")
+    async def clear_todays_signals(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Clear today's signals and pending trades to allow signal regeneration."""
+        result = await ctx.db.clear_todays_signals()
+        return {"success": True, **result}
+
     @app.post("/api/pending-trades/{trade_id}/approve")
     async def approve_pending_trade(
         trade_id: int,

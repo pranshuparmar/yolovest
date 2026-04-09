@@ -857,6 +857,32 @@ class Database:
         positioned = {row[0] for row in await cursor.fetchall()}
         return signaled | positioned
 
+    async def clear_todays_signals(self) -> dict[str, int]:
+        """Clear today's signals and expired/pending trades to allow regeneration.
+
+        Returns counts of deleted rows per table.
+        """
+        today_start = now_ist().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).astimezone(UTC).isoformat()
+
+        cursor = await self.conn.execute(
+            "DELETE FROM signals WHERE created_at >= ?", (today_start,),
+        )
+        signals_deleted = cursor.rowcount
+
+        cursor = await self.conn.execute(
+            "DELETE FROM pending_trades WHERE status IN ('pending', 'expired')",
+        )
+        pending_deleted = cursor.rowcount
+
+        await self.conn.commit()
+        logger.info(
+            "Cleared %d signals (today) and %d pending/expired trades",
+            signals_deleted, pending_deleted,
+        )
+        return {"signals_deleted": signals_deleted, "pending_deleted": pending_deleted}
+
     async def get_recently_traded_symbols(self, lookback_days: int) -> dict[str, str]:
         """Get symbols traded in the last N days with their most recent trade date.
 

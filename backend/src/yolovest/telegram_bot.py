@@ -96,6 +96,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("approve", self._cmd_approve))
         self._app.add_handler(CommandHandler("reject", self._cmd_reject))
         self._app.add_handler(CommandHandler("trade", self._cmd_trade))
+        self._app.add_handler(CommandHandler("clear", self._cmd_clear_signals))
         self._app.add_handler(CommandHandler("holiday", self._cmd_holiday))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
 
@@ -198,6 +199,7 @@ class TelegramBot:
 
             "<b>Trading</b>\n"
             "/pending — Show pending trades\n"
+            "/clear — Clear today's signals &amp; regenerate\n"
             "/approve SYMBOL — Approve as-is\n"
             "/approve SYMBOL BUY 422 427 420 — Full override\n"
             "/approve SYMBOL BUY 422 427 420 CNC 50 — Override + product + qty\n"
@@ -445,6 +447,18 @@ class TelegramBot:
             "<i>/reject SYMBOL</i>"
         )
         await update.message.reply_html(msg)
+
+    async def _cmd_clear_signals(self, update: Any, context: Any) -> None:
+        """Handle /clear — clear today's signals and pending trades to allow regeneration."""
+        result = await self._ctx.db.clear_todays_signals()
+        sig = result["signals_deleted"]
+        pend = result["pending_deleted"]
+        await update.message.reply_html(
+            f"<b>Cleared</b>\n"
+            f"Signals deleted: {sig}\n"
+            f"Pending trades deleted: {pend}\n\n"
+            f"Next heartbeat will regenerate fresh signals."
+        )
 
     async def _cmd_approve(self, update: Any, context: Any) -> None:
         """Handle /approve <symbol> [overrides] — approve a pending trade with optional overrides.
