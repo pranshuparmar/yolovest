@@ -2390,11 +2390,12 @@ class Database:
     async def insert_pending_trade(self, signal: dict[str, Any]) -> int:
         """Queue a trade signal for manual approval. Returns the pending trade ID."""
         import json
+        ts_now = now_utc().isoformat()
         cursor = await self.conn.execute(
             "INSERT INTO pending_trades "
             "(symbol, signal_type, entry_price, target_price, stop_loss_price, "
-            "position_size, confidence_score, model_version, product, signal_data) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "position_size, confidence_score, model_version, product, signal_data, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 signal.get("symbol"),
                 signal.get("signal_type"),
@@ -2406,10 +2407,17 @@ class Database:
                 signal.get("model_version"),
                 signal.get("product", "MIS"),
                 json.dumps(signal),
+                ts_now,
             ),
         )
         await self.conn.commit()
-        return cursor.lastrowid or 0
+        pending_id = cursor.lastrowid or 0
+        logger.info(
+            "Inserted pending trade #%d: %s %s @ %.2f (created_at=%s)",
+            pending_id, signal.get("signal_type"), signal.get("symbol"),
+            signal.get("entry_price", 0), ts_now,
+        )
+        return pending_id
 
     async def get_pending_trades(self) -> list[dict[str, Any]]:
         """Get all pending trades awaiting approval."""
@@ -2513,13 +2521,22 @@ class Database:
         return cursor.lastrowid or 0
 
     async def expire_pending_trades(self, max_age_minutes: int = 30) -> int:
-        """Expire pending trades older than max_age_minutes."""
+        """Expire pending trades older than max_age_minutes.
+
+        Uses both ISO format (2026-04-09T06:00:00+00:00) and SQLite format
+        (2026-04-09 06:00:00) for comparison to handle legacy rows.
+        """
         from datetime import timedelta
-        cutoff = (now_utc() - timedelta(minutes=max_age_minutes)).isoformat()
+        cutoff_dt = now_utc() - timedelta(minutes=max_age_minutes)
+        # Compare against both formats to handle legacy rows with SQLite datetime('now')
+        cutoff_iso = cutoff_dt.isoformat()
+        cutoff_sql = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
         cursor = await self.conn.execute(
             "UPDATE pending_trades SET status = 'expired' "
-            "WHERE status = 'pending' AND created_at < ?",
-            (cutoff,),
+            "WHERE status = 'pending' AND ("
+            "  created_at < ? OR created_at < ?"
+            ")",
+            (cutoff_iso, cutoff_sql),
         )
         await self.conn.commit()
         return cursor.rowcount
