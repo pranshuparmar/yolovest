@@ -12,6 +12,7 @@ Flow:
 6. Emit signals as events for risk-check skill to consume
 """
 
+import asyncio
 import logging
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -193,15 +194,28 @@ class GenerateSignalsSkill(SkillBase):
                     features, existing_positions=open_positions,
                 )
                 use_intraday = holding_period == "intraday"
+                is_balanced = self.ctx.config.strategy.mode == "balanced"
 
                 # Use latest intraday price for feature close during market hours
-                if use_intraday:
+                intraday_features = None
+                if use_intraday or is_balanced:
                     intraday_bars = await self.ctx.db.get_ohlcv(symbol, "5minute", days=1)
                     if intraday_bars:
-                        features["close"] = intraday_bars[-1].close
+                        intraday_features = {**features, "close": intraday_bars[-1].close}
 
-                # Step 3: Run ML model (features for classification, current_price for entry/target/SL)
-                if use_intraday:
+                # Step 3: Run ML model(s)
+                if is_balanced:
+                    # Balanced mode: run BOTH models, pick higher confidence
+                    prediction, holding_period, product, expected_days = (
+                        await self._predict_balanced(
+                            symbol, features, intraday_features,
+                            current_price, holding_period, product, expected_days,
+                        )
+                    )
+                    use_intraday = holding_period == "intraday"
+                elif use_intraday:
+                    if intraday_features:
+                        features = intraday_features
                     prediction = await self.ctx.ml.predict_intraday(
                         symbol, features, current_price=current_price,
                     )
@@ -394,6 +408,77 @@ class GenerateSignalsSkill(SkillBase):
                 },
             },
         )
+
+    async def _predict_balanced(
+        self,
+        symbol: str,
+        daily_features: dict,
+        intraday_features: dict | None,
+        current_price: float | None,
+        fallback_period: str,
+        fallback_product: str,
+        fallback_days: int,
+    ) -> tuple[Any, str, str, int]:
+        """Balanced mode: run both intraday and swing models, pick higher confidence.
+
+        Returns (prediction, holding_period, product, expected_days).
+        """
+        from yolovest.config import _MODE_HOLDING_DAYS
+        from yolovest.strategy.holding_period import decide_holding_period
+
+        # Run both models concurrently
+        intra_feat = intraday_features or daily_features
+        intra_pred, swing_pred = await asyncio.gather(
+            self.ctx.ml.predict_intraday(symbol, intra_feat, current_price=current_price),
+            self.ctx.ml.predict_swing(symbol, daily_features, current_price=current_price),
+            return_exceptions=True,
+        )
+
+        # Resolve exceptions to None
+        if isinstance(intra_pred, BaseException):
+            logger.debug("Balanced: intraday model failed for %s: %s", symbol, intra_pred)
+            intra_pred = None
+        if isinstance(swing_pred, BaseException):
+            logger.debug("Balanced: swing model failed for %s: %s", symbol, swing_pred)
+            swing_pred = None
+
+        # Filter out HOLD signals (confidence is meaningless for HOLD)
+        intra_conf = intra_pred.confidence if intra_pred and intra_pred.signal_type != "HOLD" else -1
+        swing_conf = swing_pred.confidence if swing_pred and swing_pred.signal_type != "HOLD" else -1
+
+        if intra_conf < 0 and swing_conf < 0:
+            # Both HOLD or both failed — return the swing HOLD (or intraday if no swing)
+            prediction = swing_pred or intra_pred
+            return prediction, fallback_period, fallback_product, fallback_days
+
+        if intra_conf >= swing_conf:
+            # Intraday wins
+            logger.debug(
+                "Balanced %s: intraday wins (%.2f %s) vs swing (%.2f %s)",
+                symbol, intra_conf, intra_pred.signal_type,
+                swing_conf, swing_pred.signal_type if swing_pred else "N/A",
+            )
+            return intra_pred, "intraday", "MIS", 0
+        else:
+            # Swing wins — compute proper holding days
+            mode_days = _MODE_HOLDING_DAYS.get("balanced", (0, 15))
+            vol_cfg = self.ctx.config.strategy.volatility
+            now_time = datetime.now(IST).time()
+            _, product, expected_days = decide_holding_period(
+                daily_features,
+                ["short_term", "long_term"],  # exclude intraday since swing won
+                vol_cfg,
+                now_time,
+                mode_days_range=(max(1, mode_days[0]), mode_days[1]),
+            )
+            label = "swing" if expected_days <= 5 else "positional" if expected_days <= 15 else "long_term"
+            logger.debug(
+                "Balanced %s: swing wins (%.2f %s) vs intraday (%.2f %s) — %s (%dd)",
+                symbol, swing_conf, swing_pred.signal_type,
+                intra_conf, intra_pred.signal_type if intra_pred else "N/A",
+                label, expected_days,
+            )
+            return swing_pred, label, "CNC", expected_days
 
     async def _decide_holding_period(
         self, features: dict, existing_positions: list[dict] | None = None,

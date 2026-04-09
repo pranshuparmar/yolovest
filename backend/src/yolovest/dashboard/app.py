@@ -1914,8 +1914,46 @@ def create_app(ctx: AppContext) -> FastAPI:
                     mode_days_range=mode_days_range,
                 )
                 use_intraday = holding_period == "intraday"
+                is_balanced = effective_mode == "balanced"
 
-                if use_intraday:
+                if is_balanced:
+                    # Balanced mode: run both models, pick higher confidence
+                    import asyncio as _aio
+
+                    intra_feat = {**features}
+                    intraday_bars = await ctx.db.get_ohlcv(symbol, "5minute", days=1)
+                    if intraday_bars:
+                        intra_feat["close"] = intraday_bars[-1].close
+
+                    intra_pred, swing_pred = await _aio.gather(
+                        ctx.ml.predict_intraday(symbol, intra_feat, current_price=current_price),
+                        ctx.ml.predict_swing(symbol, features, current_price=current_price),
+                        return_exceptions=True,
+                    )
+                    if isinstance(intra_pred, BaseException):
+                        intra_pred = None
+                    if isinstance(swing_pred, BaseException):
+                        swing_pred = None
+
+                    intra_conf = intra_pred.confidence if intra_pred and intra_pred.signal_type != "HOLD" else -1
+                    swing_conf = swing_pred.confidence if swing_pred and swing_pred.signal_type != "HOLD" else -1
+
+                    if intra_conf < 0 and swing_conf < 0:
+                        prediction = swing_pred or intra_pred
+                    elif intra_conf >= swing_conf:
+                        prediction = intra_pred
+                        holding_period, product, expected_days = "intraday", "MIS", 0
+                    else:
+                        prediction = swing_pred
+                        _, product, expected_days = decide_holding_period(
+                            features, ["short_term", "long_term"],
+                            cfg.strategy.volatility, now_time,
+                            mode_days_range=(max(1, mode_days_range[0]) if mode_days_range else 1, mode_days_range[1] if mode_days_range else 15),
+                        )
+                        holding_period = "swing" if expected_days <= 5 else "positional" if expected_days <= 15 else "long_term"
+                        product = "CNC"
+                    use_intraday = holding_period == "intraday"
+                elif use_intraday:
                     prediction = await ctx.ml.predict_intraday(
                         symbol, features, current_price=current_price,
                     )
