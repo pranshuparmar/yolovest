@@ -97,6 +97,8 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("reject", self._cmd_reject))
         self._app.add_handler(CommandHandler("trade", self._cmd_trade))
         self._app.add_handler(CommandHandler("clear", self._cmd_clear_signals))
+        self._app.add_handler(CommandHandler("skills", self._cmd_skills))
+        self._app.add_handler(CommandHandler("run", self._cmd_run_skill))
         self._app.add_handler(CommandHandler("holiday", self._cmd_holiday))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
 
@@ -222,6 +224,10 @@ class TelegramBot:
             "/stop — Pause trading (kill switch)\n"
             "/kill — Square off everything + pause\n"
             "/resume — Resume trading\n\n"
+
+            "<b>Skills</b>\n"
+            "/skills — List all skills\n"
+            "/run SKILL — Execute a skill\n\n"
 
             "<b>Setup</b>\n"
             "/auth TOKEN — Daily Kite auth\n"
@@ -459,6 +465,61 @@ class TelegramBot:
             f"Pending trades deleted: {pend}\n\n"
             f"Next heartbeat will regenerate fresh signals."
         )
+
+    async def _cmd_skills(self, update: Any, context: Any) -> None:
+        """Handle /skills — list all registered skills."""
+        from yolovest.skills import SKILL_REGISTRY
+
+        lines = []
+        for name in sorted(SKILL_REGISTRY):
+            cls = SKILL_REGISTRY[name]
+            trigger = cls.trigger.value
+            lines.append(f"<b>{name}</b> ({trigger}) — {cls.description}")
+
+        msg = "<b>Available Skills</b>\n\n" + "\n".join(lines)
+        msg += "\n\n<i>/run SKILL_NAME</i> to execute"
+        await update.message.reply_html(msg)
+
+    async def _cmd_run_skill(self, update: Any, context: Any) -> None:
+        """Handle /run <skill_name> — execute a skill and report result."""
+        from yolovest.skills import SKILL_REGISTRY
+
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "Usage: /run SKILL_NAME\nUse /skills to see available skills."
+            )
+            return
+
+        skill_name = args[0].lower()
+        if skill_name not in SKILL_REGISTRY:
+            await update.message.reply_text(
+                f"Unknown skill: {skill_name}\n"
+                f"Available: {', '.join(sorted(SKILL_REGISTRY.keys()))}"
+            )
+            return
+
+        await update.message.reply_text(f"Running {skill_name}...")
+
+        skill_cls = SKILL_REGISTRY[skill_name]
+        skill = skill_cls(self._ctx)
+        result = await skill.safe_execute()
+
+        if result.success:
+            # Extract key metrics from result data
+            summary_parts = []
+            if result.data:
+                for k, v in result.data.items():
+                    if isinstance(v, (str, int, float, bool)) and k not in ("mode",):
+                        summary_parts.append(f"{k}: {v}")
+            summary = "\n".join(summary_parts[:10]) if summary_parts else "No details"
+            await update.message.reply_html(
+                f"<b>{skill_name}</b> completed in {result.duration_ms:.0f}ms\n\n{summary}"
+            )
+        else:
+            await update.message.reply_text(
+                f"{skill_name} FAILED ({result.duration_ms:.0f}ms):\n{result.error}"
+            )
 
     async def _cmd_approve(self, update: Any, context: Any) -> None:
         """Handle /approve <symbol> [overrides] — approve a pending trade with optional overrides.
