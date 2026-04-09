@@ -436,17 +436,6 @@ async def async_main(args: argparse.Namespace) -> None:
         config.mode = args.mode
 
     logger.info("YoloVest starting in %s mode", config.mode)
-    logger.info(
-        "Config toggles: llm.enabled=%s, telegram.enabled=%s, "
-        "news_enabled=%s, scrapers_enabled=%s, kite_data_enabled=%s, "
-        "llm_review_enabled=%s",
-        config.llm.enabled,
-        config.notifications.telegram.enabled,
-        config.market_data.news_enabled,
-        config.market_data.scrapers_enabled,
-        config.market_data.kite_data_enabled,
-        config.risk.llm_review_enabled,
-    )
 
     # Build context
     ctx = build_context(config)
@@ -464,13 +453,31 @@ async def async_main(args: argparse.Namespace) -> None:
             else:
                 db_values = await ctx.db.get_all_config()
                 ctx.config = apply_db_config(ctx.config, db_values)
+                config = ctx.config  # update local ref for downstream use
                 ctx.market_hours = MarketHoursChecker(ctx.config)
-                # Update Notifier's config reference (it holds the old object)
                 if hasattr(ctx.notify, "_config"):
                     ctx.notify._config = ctx.config
+                # Sync broker mode from DB config
+                if hasattr(ctx.broker, "_mode"):
+                    ctx.broker._mode = ctx.config.mode
                 logger.info("Loaded %d config values from DB", len(db_values))
         except Exception:
             logger.warning("Failed to load config from DB, using file defaults", exc_info=True)
+
+    # Log effective config (after DB overrides are applied)
+    logger.info(
+        "Config toggles: mode=%s, llm.enabled=%s, telegram.enabled=%s, "
+        "news_enabled=%s, scrapers_enabled=%s, kite_data_enabled=%s, "
+        "llm_review_enabled=%s, transaction_mode=%s",
+        config.mode,
+        config.llm.enabled,
+        config.notifications.telegram.enabled,
+        config.market_data.news_enabled,
+        config.market_data.scrapers_enabled,
+        config.market_data.kite_data_enabled,
+        config.risk.llm_review_enabled,
+        config.execution.transaction_mode,
+    )
 
     # Restore Zerodha session from persisted access token
     if isinstance(ctx.broker, ZerodhaBroker):
