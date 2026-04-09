@@ -53,6 +53,18 @@ export function useTradesToday() {
   });
 }
 
+export function useDeleteTrade() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.deleteTrade,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["trades"] });
+      qc.invalidateQueries({ queryKey: ["portfolio"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+    },
+  });
+}
+
 export function useTrades(params?: {
   start?: string;
   end?: string;
@@ -652,6 +664,16 @@ export function useRejectPendingTrade() {
     mutationFn: api.rejectPendingTrade,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pending-trades"] });
+    },
+  });
+}
+
+export function useBulkDelete() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.bulkDelete,
+    onSuccess: () => {
+      qc.invalidateQueries();
     },
   });
 }

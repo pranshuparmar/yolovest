@@ -85,6 +85,9 @@ export const api = {
   tradeDetail: (tradeId: string) =>
     apiFetch<TradeDetail>(`/api/trades/${tradeId}`),
 
+  deleteTrade: (tradeId: string) =>
+    apiFetch<{ success: boolean; trade_id: string }>(`/api/trades/${tradeId}`, { method: "DELETE" }),
+
   equityCurve: (days = 30) =>
     apiFetch<EquityCurvePoint[]>(`/api/equity-curve?days=${days}`),
 
@@ -380,6 +383,11 @@ export const api = {
 
   clearTodaysSignals: () =>
     apiFetch<{ success: boolean; signals_deleted: number; pending_deleted: number }>("/api/clear-signals", { method: "POST" }),
+
+  bulkDelete: (group: string) =>
+    apiFetch<{ success: boolean; group: string; deleted: Record<string, number>; total: number }>(
+      `/api/bulk-delete/${group}`, { method: "POST" },
+    ),
 
   manualTrade: (trade: { symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; product?: string; position_size?: number }) =>
     apiFetch<{ success: boolean; trade?: Record<string, unknown>; error?: string | null }>("/api/manual-trade", {

@@ -2992,6 +2992,76 @@ class Database:
             )
         return result
 
+    async def bulk_delete(self, group: str) -> dict[str, int]:
+        """Delete a group of related data. Returns {table: rows_deleted}.
+
+        Groups:
+        - paper: all paper mode trades, signals, predictions, pending trades
+        - live: all live mode trades, signals, predictions, pending trades
+        - dry_runs: all dry run results
+        - predictions: all predictions and scoreboard
+        - signals: all signals
+        """
+        deleted: dict[str, int] = {}
+
+        if group in ("paper", "live"):
+            mode = group
+            for table, col in [
+                ("trades", "mode"), ("predictions", "mode"),
+                ("signals", None), ("pending_trades", None),
+            ]:
+                try:
+                    if col:
+                        cursor = await self.conn.execute(
+                            f"DELETE FROM {table} WHERE {col} = ?", (mode,),  # noqa: S608
+                        )
+                    else:
+                        # signals/pending_trades don't have mode — delete by date match with trades
+                        cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
+                    deleted[table] = cursor.rowcount
+                except Exception:
+                    deleted[table] = 0
+            # Also clean up related data
+            if group == "paper":
+                try:
+                    cursor = await self.conn.execute(
+                        "DELETE FROM llm_reviews WHERE trade_id IN "
+                        "(SELECT symbol FROM trades WHERE mode = 'paper')"
+                    )
+                    deleted["llm_reviews"] = cursor.rowcount
+                except Exception:
+                    deleted["llm_reviews"] = 0
+
+        elif group == "dry_runs":
+            try:
+                cursor = await self.conn.execute("DELETE FROM dry_run_results")
+                deleted["dry_run_results"] = cursor.rowcount
+            except Exception:
+                deleted["dry_run_results"] = 0
+
+        elif group == "predictions":
+            for table in ["predictions", "prediction_scoreboard", "failure_analyses"]:
+                try:
+                    cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
+                    deleted[table] = cursor.rowcount
+                except Exception:
+                    deleted[table] = 0
+
+        elif group == "signals":
+            try:
+                cursor = await self.conn.execute("DELETE FROM signals")
+                deleted["signals"] = cursor.rowcount
+            except Exception:
+                deleted["signals"] = 0
+
+        else:
+            raise ValueError(f"Unknown group: {group}")
+
+        await self.conn.commit()
+        total = sum(deleted.values())
+        logger.warning("Bulk delete [%s]: deleted %d total rows — %s", group, total, deleted)
+        return deleted
+
     async def reset_all_data(self) -> dict[str, int]:
         """Delete ALL rows from all data tables. Schema and migrations are preserved.
 

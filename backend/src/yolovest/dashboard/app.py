@@ -611,6 +611,20 @@ def create_app(ctx: AppContext) -> FastAPI:
     # Trade Detail View
     # ------------------------------------------------------------------
 
+    @app.delete("/api/trades/{trade_id}")
+    async def delete_trade(
+        trade_id: str, user: str = Depends(verify_credentials)
+    ) -> dict[str, Any]:
+        """Delete a specific trade record (e.g., ghost/paper trades with wrong mode)."""
+        cursor = await ctx.db.conn.execute(
+            "DELETE FROM trades WHERE trade_id = ?", (trade_id,),
+        )
+        await ctx.db.conn.commit()
+        if cursor.rowcount > 0:
+            logger.info("Deleted trade %s", trade_id)
+            return {"success": True, "trade_id": trade_id}
+        raise HTTPException(status_code=404, detail="Trade not found")
+
     @app.get("/api/trades/{trade_id}")
     async def get_trade_detail(
         trade_id: str, user: str = Depends(verify_credentials)
@@ -2196,6 +2210,20 @@ def create_app(ctx: AppContext) -> FastAPI:
             backup_dir, filename, model_dir=_model_dir(),
         )
         return {"success": True, **result}
+
+    @app.post("/api/bulk-delete/{group}")
+    async def bulk_delete(
+        group: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete a group of related data: paper, live, dry_runs, predictions, signals."""
+        try:
+            deleted = await ctx.db.bulk_delete(group)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        total = sum(deleted.values())
+        logger.info("Bulk delete [%s]: %d rows", group, total)
+        return {"success": True, "group": group, "deleted": deleted, "total": total}
 
     @app.post("/api/reset")
     async def reset_all_data(_user: str = Depends(verify_credentials)) -> dict[str, Any]:

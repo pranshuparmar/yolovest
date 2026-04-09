@@ -9,6 +9,7 @@ import {
   useQuarantinedSymbols,
   useUnquarantineSymbol,
   useSetReplacementSymbol,
+  useBulkDelete,
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
@@ -177,6 +178,56 @@ function ReplacementInput({ symbol, current }: { symbol: string; current: string
       {!dirty && current && (
         <span className="text-[10px] text-green-500">active</span>
       )}
+    </div>
+  );
+}
+
+const BULK_GROUPS = [
+  { id: "paper", label: "Paper Mode Data", description: "All paper trades, predictions, signals, pending trades", color: "amber" },
+  { id: "live", label: "Live Mode Data", description: "All live trades, predictions, signals, pending trades", color: "red" },
+  { id: "dry_runs", label: "Dry Runs", description: "All dry run signal previews", color: "amber" },
+  { id: "predictions", label: "Predictions", description: "All predictions, scoreboard, and failure analyses", color: "amber" },
+  { id: "signals", label: "Signals", description: "All generated signals (today's dedup will reset)", color: "amber" },
+] as const;
+
+function BulkDeleteSection() {
+  const bulkDelete = useBulkDelete();
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-800">
+        <h3 className="text-sm font-semibold text-gray-300">Bulk Delete</h3>
+        <p className="text-xs text-gray-500 mt-0.5">Delete groups of related data. Individual trades can be deleted from the trade detail page.</p>
+      </div>
+      <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        {BULK_GROUPS.map((g) => (
+          <div key={g.id} className="flex items-center justify-between border border-gray-800 rounded px-3 py-2">
+            <div>
+              <p className="text-sm text-gray-200">{g.label}</p>
+              <p className="text-[10px] text-gray-500">{g.description}</p>
+            </div>
+            <button
+              onClick={() => {
+                const msg = g.id === "live"
+                  ? `DELETE ALL LIVE DATA? This includes real trades and cannot be undone!`
+                  : `Delete all ${g.label.toLowerCase()}? This cannot be undone.`;
+                if (!window.confirm(msg)) return;
+                if (g.id === "live" && !window.confirm("Are you absolutely sure? This deletes REAL trade history.")) return;
+                bulkDelete.mutate(g.id, {
+                  onSuccess: (data) => alert(`Deleted ${data.total} rows from: ${Object.entries(data.deleted).filter(([,v]) => v > 0).map(([k,v]) => `${k}(${v})`).join(", ") || "nothing"}`),
+                });
+              }}
+              disabled={bulkDelete.isPending}
+              className={`px-2 py-1 rounded text-xs shrink-0 disabled:opacity-50 transition-colors ${
+                g.color === "red"
+                  ? "bg-red-900/60 hover:bg-red-800 text-red-400"
+                  : "bg-amber-900/60 hover:bg-amber-800 text-amber-400"
+              }`}
+            >
+              {bulkDelete.isPending ? "..." : "Delete"}
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -532,6 +583,9 @@ export function DataManagementPage() {
 
       {/* Quarantined Symbols */}
       <QuarantinedSymbolsSection />
+
+      {/* Bulk Delete */}
+      <BulkDeleteSection />
 
       {/* Factory Reset - Danger Zone */}
       <div className="bg-gray-900 border border-red-900/50 rounded-lg overflow-hidden">
