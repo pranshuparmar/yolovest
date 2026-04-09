@@ -739,7 +739,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Slippage analysis."""
-        return await ctx.db.get_slippage_stats(symbol=symbol, days=days)
+        return await ctx.db.get_slippage_stats(symbol=symbol, days=days, mode=ctx.config.mode)
 
     @app.get("/api/llm-accuracy")
     async def get_llm_accuracy(
@@ -747,7 +747,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """LLM review accuracy vs actual trade outcomes."""
-        return await ctx.db.get_llm_review_accuracy(days=days)
+        return await ctx.db.get_llm_review_accuracy(days=days, mode=ctx.config.mode)
 
     @app.get("/api/audit")
     async def get_audit_log(
@@ -1482,14 +1482,14 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Trades for a specific symbol."""
-        return await ctx.db.get_symbol_trades(symbol.upper(), limit)
+        return await ctx.db.get_symbol_trades(symbol.upper(), limit, mode=ctx.config.mode)
 
     @app.get("/api/symbol/{symbol}/predictions")
     async def get_symbol_predictions(
         symbol: str, user: str = Depends(verify_credentials)
     ) -> list[dict[str, Any]]:
         """Predictions for a specific symbol."""
-        return await ctx.db.get_symbol_predictions(symbol.upper())
+        return await ctx.db.get_symbol_predictions(symbol.upper(), mode=ctx.config.mode)
 
     # ------------------------------------------------------------------
     # Strategy Performance (Feature #5)
@@ -1500,7 +1500,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Aggregate trade performance by signal type, product, sector, time, holding period."""
-        return await ctx.db.get_strategy_performance()
+        return await ctx.db.get_strategy_performance(mode=ctx.config.mode)
 
     # ------------------------------------------------------------------
     # Execution Quality (Feature #8)
@@ -1512,7 +1512,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Detailed execution quality metrics: slippage by hour/size, fill rate."""
-        return await ctx.db.get_execution_quality(days=days)
+        return await ctx.db.get_execution_quality(days=days, mode=ctx.config.mode)
 
     # ------------------------------------------------------------------
     # Correlation Data (Feature #7)
