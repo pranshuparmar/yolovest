@@ -63,6 +63,17 @@ class TradeExecuteSkill(SkillBase):
         signal = kwargs["signal"]
         is_paper = self.ctx.config.mode == "paper"
 
+        # Safety check: verify broker mode matches config mode
+        broker_mode = getattr(self.ctx.broker, "_mode", None)
+        if broker_mode and broker_mode != self.ctx.config.mode:
+            logger.error(
+                "trade-execute: MODE MISMATCH — config.mode=%s but broker._mode=%s. "
+                "Syncing broker to config. This may indicate a hot-reload missed the broker.",
+                self.ctx.config.mode, broker_mode,
+            )
+            self.ctx.broker._mode = self.ctx.config.mode
+            is_paper = self.ctx.config.mode == "paper"
+
         logger.info(
             "trade-execute: mode=%s for %s %s",
             "PAPER" if is_paper else "LIVE",

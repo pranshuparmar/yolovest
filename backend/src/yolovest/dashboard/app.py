@@ -2433,6 +2433,10 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         if "mode" in updates:
             logger.info("Trading mode changed: %s -> %s", old_config.mode, new_config.mode)
+            # Sync to broker — it stores its own _mode for order routing
+            if hasattr(ctx.broker, "_mode"):
+                ctx.broker._mode = new_config.mode
+                logger.info("Broker mode synced to: %s", new_config.mode)
 
         logger.info("Config updated via UI: %s", list(updates.keys()))
 

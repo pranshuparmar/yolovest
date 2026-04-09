@@ -597,6 +597,12 @@ async def async_main(args: argparse.Namespace) -> None:
         ctx.config.news_digest = new_config.news_digest
         # Update market hours checker with new config
         ctx.market_hours = MarketHoursChecker(ctx.config)
+        # Sync mode to broker
+        if new_config.mode != ctx.config.mode:
+            ctx.config.mode = new_config.mode
+            if hasattr(ctx.broker, "_mode"):
+                ctx.broker._mode = new_config.mode
+                logger.info("Broker mode synced to: %s", new_config.mode)
         reloaded = [
             "risk", "scanning", "heartbeat", "market_hours", "execution",
             "transaction_costs", "strategy", "notifications", "reports",
