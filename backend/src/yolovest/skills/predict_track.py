@@ -77,6 +77,7 @@ class PredictTrackSkill(SkillBase):
             "model_version": signal.get("model_version"),
             "trade_id": trade_id,
             "entry_price": signal.get("entry_price"),
+            "mode": self.ctx.config.mode,
         }
         pred_id = await self.ctx.db.insert_prediction(prediction)
 
@@ -95,7 +96,7 @@ class PredictTrackSkill(SkillBase):
 
     async def _score_elapsed_predictions(self) -> SkillResult:
         """Score predictions whose timeframe has elapsed."""
-        pending = await self.ctx.db.get_unscored_predictions()
+        pending = await self.ctx.db.get_unscored_predictions(mode=self.ctx.config.mode)
         scored = 0
         correct = 0
 

@@ -1232,7 +1232,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Today's predictions with linked symbols and confidence."""
         return await ctx.db.get_todays_predictions(
             limit=limit, offset=offset, symbol=symbol,
-            direction=direction, model=model,
+            direction=direction, model=model, mode=ctx.config.mode,
         )
 
     @app.get("/api/predictions/unscored")
@@ -1286,7 +1286,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """This week's predictions."""
-        return await ctx.db.get_weekly_predictions()
+        return await ctx.db.get_weekly_predictions(mode=ctx.config.mode)
 
     @app.get("/api/weekly/llm-reviews")
     async def get_weekly_llm_reviews(

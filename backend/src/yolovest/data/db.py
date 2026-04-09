@@ -1622,11 +1622,12 @@ class Database:
         await self.conn.execute(
             "INSERT INTO predictions (prediction_id, signal_id, trade_id, symbol, "
             "created_at, prediction_end_time, actual_price, direction_correct, "
-            "target_hit, actual_pnl_pct) "
-            "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+            "target_hit, actual_pnl_pct, mode) "
+            "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)",
             (
                 pred_id, signal_id, prediction.get("trade_id"),
                 prediction.get("symbol"), ts_now, end_time.isoformat(),
+                prediction.get("mode", "paper"),
             ),
         )
 
@@ -1741,29 +1742,31 @@ class Database:
 
         return result
 
-    async def get_unscored_predictions(self) -> list[dict[str, Any]]:
+    async def get_unscored_predictions(self, mode: str | None = None) -> list[dict[str, Any]]:
         """Get predictions whose holding period has elapsed but haven't been scored.
 
         Used by the predict-track skill to know which predictions are ready to score.
         """
         ts_now = now_utc().isoformat()
+        mode_clause = " AND p.mode = ?" if mode else ""
+        mode_params: list[Any] = [mode] if mode else []
         cursor = await self.conn.execute(
-            "SELECT p.prediction_id as id, p.trade_id, p.created_at, "
-            "p.prediction_end_time, "
-            "COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
-            "COALESCE(s.signal_type, t.signal_type) as predicted_direction, "
-            "COALESCE(s.entry_price, t.entry_price) as entry_price, "
-            "COALESCE(s.target_price, t.target_price) as predicted_target, "
-            "COALESCE(s.stop_loss_price, t.stop_loss_price) as predicted_stop_loss, "
-            "s.confidence_score as confidence, "
-            "s.model_version "
-            "FROM predictions p "
-            "LEFT JOIN signals s ON p.signal_id = s.id "
-            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
-            "WHERE p.actual_price IS NULL "
-            "AND p.prediction_end_time <= ? "
-            "ORDER BY p.created_at",
-            (ts_now,),
+            f"SELECT p.prediction_id as id, p.trade_id, p.created_at, "
+            f"p.prediction_end_time, "
+            f"COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+            f"COALESCE(s.signal_type, t.signal_type) as predicted_direction, "
+            f"COALESCE(s.entry_price, t.entry_price) as entry_price, "
+            f"COALESCE(s.target_price, t.target_price) as predicted_target, "
+            f"COALESCE(s.stop_loss_price, t.stop_loss_price) as predicted_stop_loss, "
+            f"s.confidence_score as confidence, "
+            f"s.model_version "
+            f"FROM predictions p "
+            f"LEFT JOIN signals s ON p.signal_id = s.id "
+            f"LEFT JOIN trades t ON p.trade_id = t.trade_id "
+            f"WHERE p.actual_price IS NULL "
+            f"AND p.prediction_end_time <= ?{mode_clause} "
+            f"ORDER BY p.created_at",
+            [ts_now, *mode_params],
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
@@ -1979,7 +1982,7 @@ class Database:
     async def get_todays_predictions(
         self, *, limit: int = 50, offset: int = 0,
         symbol: str | None = None, direction: str | None = None,
-        model: str | None = None,
+        model: str | None = None, mode: str | None = None,
     ) -> dict[str, Any]:
         """Get predictions created today (IST market day) with pagination and filters."""
         today_start = now_ist().replace(
@@ -1987,6 +1990,9 @@ class Database:
         ).astimezone(UTC).isoformat()
         where = "WHERE p.created_at >= ?"
         params: list[Any] = [today_start]
+        if mode:
+            where += " AND p.mode = ?"
+            params.append(mode)
         where, params = self._apply_prediction_filters(
             where, params, symbol=symbol, direction=direction, model=model,
         )
@@ -2036,7 +2042,7 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
-    async def get_weekly_predictions(self) -> list[dict[str, Any]]:
+    async def get_weekly_predictions(self, mode: str | None = None) -> list[dict[str, Any]]:
         """Get predictions for the current week."""
         from datetime import timedelta
 
@@ -2045,15 +2051,17 @@ class Database:
         monday = (now - timedelta(days=days_since_monday)).replace(
             hour=9, minute=15, second=0, microsecond=0
         ).astimezone(UTC)
+        mode_clause = " AND p.mode = ?" if mode else ""
+        mode_params: list[Any] = [mode] if mode else []
         cursor = await self.conn.execute(
-            "SELECT p.*, COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
-            "COALESCE(s.signal_type, t.signal_type) as signal_type, "
-            "s.confidence_score "
-            "FROM predictions p "
-            "LEFT JOIN signals s ON p.signal_id = s.id "
-            "LEFT JOIN trades t ON p.trade_id = t.trade_id "
-            "WHERE p.created_at >= ? ORDER BY p.created_at",
-            (monday.isoformat(),),
+            f"SELECT p.*, COALESCE(p.symbol, s.symbol, t.symbol) as symbol, "
+            f"COALESCE(s.signal_type, t.signal_type) as signal_type, "
+            f"s.confidence_score "
+            f"FROM predictions p "
+            f"LEFT JOIN signals s ON p.signal_id = s.id "
+            f"LEFT JOIN trades t ON p.trade_id = t.trade_id "
+            f"WHERE p.created_at >= ?{mode_clause} ORDER BY p.created_at",
+            [monday.isoformat(), *mode_params],
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]

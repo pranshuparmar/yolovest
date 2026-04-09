@@ -66,8 +66,9 @@ class ReportGenerateSkill(SkillBase):
 
     async def _generate_daily(self) -> SkillResult:
         """Daily report at market close."""
-        trades = await self.ctx.db.get_todays_trades()
-        predictions_result = await self.ctx.db.get_todays_predictions()
+        mode = self.ctx.config.mode
+        trades = await self.ctx.db.get_todays_trades(mode=mode)
+        predictions_result = await self.ctx.db.get_todays_predictions(mode=mode)
         # get_todays_predictions returns paginated dict {"items": [...], "total": N}
         predictions = predictions_result.get("items", []) if isinstance(predictions_result, dict) else predictions_result
 
@@ -118,8 +119,9 @@ class ReportGenerateSkill(SkillBase):
 
     async def _generate_weekly(self) -> SkillResult:
         """Weekly cumulative report."""
-        trades = await self.ctx.db.get_weekly_trades()
-        predictions = await self.ctx.db.get_weekly_predictions()
+        mode = self.ctx.config.mode
+        trades = await self.ctx.db.get_weekly_trades(mode=mode)
+        predictions = await self.ctx.db.get_weekly_predictions(mode=mode)
         llm_reviews = await self.ctx.db.get_weekly_llm_reviews()
 
         total_pnl = sum(t.get("pnl", 0) for t in trades if t.get("pnl") is not None)
