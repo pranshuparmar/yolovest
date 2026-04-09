@@ -44,6 +44,27 @@ class PositionMonitorSkill(SkillBase):
         local_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
         broker_positions = await self.ctx.broker.get_positions()
 
+        # Also include CNC holdings (delivery stocks held overnight)
+        try:
+            holdings = await self.ctx.broker.get_holdings()
+            for h in holdings:
+                qty = h.get("quantity", 0) or h.get("opening_quantity", 0)
+                if qty > 0 and h.get("tradingsymbol"):
+                    # Only add if not already in positions (avoid duplicates)
+                    pos_symbols = {
+                        (bp.get("tradingsymbol") or bp.get("symbol", ""))
+                        for bp in broker_positions
+                    }
+                    if h["tradingsymbol"] not in pos_symbols:
+                        broker_positions.append({
+                            "tradingsymbol": h["tradingsymbol"],
+                            "quantity": qty,
+                            "average_price": h.get("average_price", 0),
+                            "product": "CNC",
+                        })
+        except Exception:
+            logger.debug("Holdings fetch failed for adoption check", exc_info=True)
+
         discrepancies = self._reconcile(local_positions, broker_positions)
 
         # Recover ghost positions: local DB says open, broker says closed.
@@ -52,13 +73,23 @@ class PositionMonitorSkill(SkillBase):
             local_positions, broker_positions,
         )
 
+        # Adopt untracked broker positions into local DB
+        # (e.g., bought directly on Kite, or from failed order retries)
+        locked_symbols = await self.ctx.db.get_locked_symbols()
+        adopted = await self._adopt_untracked_positions(
+            local_positions, broker_positions, locked_symbols,
+        )
+        if adopted:
+            # Refresh local positions to include newly adopted ones
+            local_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
+
         if discrepancies:
-            await self.ctx.notify.send(
-                f"Position discrepancy detected:\n"
-                + "\n".join(discrepancies)
-                + (f"\nAuto-recovered: {', '.join(recovered)}" if recovered else ""),
-                alert_type="errors",
-            )
+            parts = [f"Position discrepancy detected:\n" + "\n".join(discrepancies)]
+            if recovered:
+                parts.append(f"Auto-recovered: {', '.join(recovered)}")
+            if adopted:
+                parts.append(f"Auto-adopted: {', '.join(adopted)}")
+            await self.ctx.notify.send("\n".join(parts), alert_type="errors")
 
         trails_modified = 0
         targets_hit: list[dict[str, Any]] = []
@@ -68,9 +99,6 @@ class PositionMonitorSkill(SkillBase):
 
         # Skip positions that were just recovered (already closed in DB)
         recovered_set = set(recovered)
-
-        # Load locked symbols — these should not be auto-sold (target/SL/trail)
-        locked_symbols = await self.ctx.db.get_locked_symbols()
 
         for pos in local_positions:
             symbol = pos["symbol"]
@@ -285,6 +313,114 @@ class PositionMonitorSkill(SkillBase):
             if attempt < max_retries - 1:
                 await asyncio.sleep(base_delay * (2 ** attempt))
         return None
+
+    async def _adopt_untracked_positions(
+        self,
+        local_positions: list[dict[str, Any]],
+        broker_positions: list[dict[str, Any]],
+        locked_symbols: set[str],
+    ) -> list[str]:
+        """Adopt broker positions that aren't tracked locally.
+
+        Creates trade records for positions found on the broker but missing
+        from the local DB (e.g., bought directly on Kite, or from failed
+        order retries). Locked holdings are skipped.
+
+        Returns list of adopted symbol names.
+        """
+        local_symbols = {pos.get("symbol", "") for pos in local_positions}
+        adopted: list[str] = []
+
+        for bp in broker_positions:
+            sym = bp.get("tradingsymbol") or bp.get("symbol", "")
+            qty = bp.get("quantity", bp.get("net_quantity", 0))
+
+            if not sym or qty == 0 or sym in local_symbols or sym in locked_symbols:
+                continue
+
+            # Determine direction from quantity sign (positive = long/BUY, negative = short/SELL)
+            signal_type = "BUY" if qty > 0 else "SELL"
+            abs_qty = abs(qty)
+            entry_price = bp.get("average_price", 0) or bp.get("buy_price", 0)
+            product = bp.get("product", "CNC")
+
+            if entry_price <= 0:
+                logger.warning("Cannot adopt %s: no valid average_price from broker", sym)
+                continue
+
+            # Compute SL/target from ATR
+            sl_price, target_price = await self._compute_atr_levels(sym, entry_price, signal_type)
+
+            trade = {
+                "symbol": sym,
+                "signal_type": signal_type,
+                "entry_price": entry_price,
+                "fill_price": entry_price,
+                "quantity": abs_qty,
+                "stop_loss_price": sl_price,
+                "target_price": target_price,
+                "order_id": f"ADOPTED-{sym}",
+                "sl_order_id": None,
+                "product": product,
+                "status": "open",
+                "mode": self.ctx.config.mode,
+                "slippage": 0,
+                "origin": "adopted",
+            }
+
+            try:
+                trade_id = await self.ctx.db.insert_trade(trade)
+                adopted.append(sym)
+                logger.info(
+                    "position-monitor: ADOPTED %s %s qty=%d entry=%.2f SL=%.2f target=%.2f (id=%s)",
+                    signal_type, sym, abs_qty, entry_price, sl_price, target_price, trade_id,
+                )
+                await self.ctx.notify.send(
+                    f"Adopted untracked position: {signal_type} {sym} x{abs_qty} "
+                    f"@ ₹{entry_price:.2f} (SL=₹{sl_price:.2f}, Target=₹{target_price:.2f})",
+                    alert_type="trade_entry",
+                )
+            except Exception:
+                logger.exception("Failed to adopt position %s", sym)
+
+        return adopted
+
+    async def _compute_atr_levels(
+        self, symbol: str, entry_price: float, signal_type: str,
+    ) -> tuple[float, float]:
+        """Compute SL and target prices using ATR for an adopted position.
+
+        Returns (stop_loss, target).
+        """
+        from yolovest.data.features import compute_features
+
+        sl_mult = 1.5  # default ATR multipliers
+        target_mult = 2.5
+
+        try:
+            bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=60)
+            if bars and len(bars) >= 14:
+                indicator_cfg = self.ctx.config.strategy.indicators
+                features = compute_features(bars, indicator_cfg)
+                atr = features.get("atr_14", 0) if features else 0
+                if atr > 0:
+                    if signal_type == "BUY":
+                        return (
+                            round(max(entry_price - sl_mult * atr, 0.01), 2),
+                            round(entry_price + target_mult * atr, 2),
+                        )
+                    else:
+                        return (
+                            round(entry_price + sl_mult * atr, 2),
+                            round(max(entry_price - target_mult * atr, 0.01), 2),
+                        )
+        except Exception:
+            logger.debug("ATR computation failed for %s, using percentage fallback", symbol)
+
+        # Fallback: 3% SL, 5% target
+        if signal_type == "BUY":
+            return (round(entry_price * 0.97, 2), round(entry_price * 1.05, 2))
+        return (round(entry_price * 1.03, 2), round(entry_price * 0.95, 2))
 
     def _reconcile(self, local: list[dict[str, Any]], broker: list[dict[str, Any]]) -> list[str]:
         """Compare local DB positions with broker positions."""

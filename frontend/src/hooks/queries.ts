@@ -114,6 +114,15 @@ export function useUnlockHolding() {
   });
 }
 
+export function useBulkLockHoldings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ symbols, action, notes }: { symbols: string[]; action: "lock" | "unlock"; notes?: string }) =>
+      api.bulkLockHoldings(symbols, action, notes),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["holdings"] }),
+  });
+}
+
 export function useTradeDetail(tradeId: string) {
   return useQuery({
     queryKey: ["trade", tradeId],

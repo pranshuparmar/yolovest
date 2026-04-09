@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding } from "../hooks/queries";
+import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLockHoldings } from "../hooks/queries";
 import clsx from "clsx";
 import type { ManualOrder } from "../types/api";
 
@@ -195,6 +195,21 @@ export function HoldingsPage() {
 
   const lockHolding = useLockHolding();
   const unlockHolding = useUnlockHolding();
+  const bulkLock = useBulkLockHoldings();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const toggleSelect = (sym: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(sym)) next.delete(sym); else next.add(sym);
+      return next;
+    });
+  };
+  const toggleAll = () => {
+    if (!holdings) return;
+    if (selected.size === holdings.length) setSelected(new Set());
+    else setSelected(new Set(holdings.map((h) => h.tradingsymbol)));
+  };
 
   const holdings = response?.holdings;
   const brokerAuthenticated = response?.broker_authenticated ?? true;
@@ -327,10 +342,36 @@ export function HoldingsPage() {
         </div>
       ) : (
         <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+          {selected.size > 0 && (
+            <div className="px-4 py-2 bg-blue-900/20 border-b border-blue-800/50 flex items-center gap-3">
+              <span className="text-xs text-blue-300">{selected.size} selected</span>
+              <button
+                onClick={() => {
+                  bulkLock.mutate({ symbols: [...selected], action: "lock" }, { onSuccess: () => setSelected(new Set()) });
+                }}
+                disabled={bulkLock.isPending}
+                className="px-2 py-0.5 rounded text-xs bg-amber-900/50 text-amber-400 hover:bg-amber-800 disabled:opacity-50"
+              >Lock Selected</button>
+              <button
+                onClick={() => {
+                  bulkLock.mutate({ symbols: [...selected], action: "unlock" }, { onSuccess: () => setSelected(new Set()) });
+                }}
+                disabled={bulkLock.isPending}
+                className="px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-300 hover:bg-gray-600 disabled:opacity-50"
+              >Unlock Selected</button>
+              <button
+                onClick={() => setSelected(new Set())}
+                className="px-2 py-0.5 rounded text-xs text-gray-500 hover:text-gray-300"
+              >Clear</button>
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                  <th className="py-2 px-2 text-center w-8">
+                    <input type="checkbox" checked={holdings.length > 0 && selected.size === holdings.length} onChange={toggleAll} className="rounded bg-gray-800 border-gray-600" />
+                  </th>
                   <th className="py-2 px-3 text-left">Symbol</th>
                   <th className="py-2 px-3 text-right">Qty</th>
                   <th className="py-2 px-3 text-right">Avg Price</th>
@@ -354,6 +395,9 @@ export function HoldingsPage() {
                       key={h.tradingsymbol}
                       className="border-b border-gray-800/50 hover:bg-gray-800/30"
                     >
+                      <td className="py-2.5 px-2 text-center w-8">
+                        <input type="checkbox" checked={selected.has(h.tradingsymbol)} onChange={() => toggleSelect(h.tradingsymbol)} className="rounded bg-gray-800 border-gray-600" />
+                      </td>
                       <td className="py-2.5 px-3">
                         <span className="font-medium text-gray-200">
                           {h.tradingsymbol}

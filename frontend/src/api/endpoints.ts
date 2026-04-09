@@ -435,6 +435,12 @@ export const api = {
   unlockHolding: (symbol: string) =>
     apiFetch<{ success: boolean; symbol: string; locked: boolean }>(`/api/locked-holdings/${symbol}`, { method: "DELETE" }),
 
+  bulkLockHoldings: (symbols: string[], action: "lock" | "unlock", notes?: string) =>
+    apiFetch<{ success: boolean; action: string; results: Record<string, string> }>(
+      "/api/locked-holdings/bulk",
+      { method: "POST", body: JSON.stringify({ symbols, action, notes }) },
+    ),
+
   listSkills: () =>
     apiFetch<{ name: string; description: string; trigger: string; schedule: string | null }[]>(
       "/api/skills",

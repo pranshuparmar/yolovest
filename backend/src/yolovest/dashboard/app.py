@@ -479,6 +479,32 @@ def create_app(ctx: AppContext) -> FastAPI:
         logger.info("Locked holding: %s (notes: %s)", symbol, notes)
         return {"success": True, "symbol": symbol.upper(), "locked": True}
 
+    @app.post("/api/locked-holdings/bulk")
+    async def bulk_lock_holdings(
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Bulk lock or unlock multiple holdings.
+
+        Body: {"symbols": ["SYM1", "SYM2"], "action": "lock" | "unlock", "notes": "optional"}
+        """
+        symbols = body.get("symbols", [])
+        action = body.get("action", "lock")
+        notes = body.get("notes")
+        if not symbols:
+            raise HTTPException(status_code=400, detail="symbols list is required")
+        results = {}
+        for sym in symbols:
+            sym = sym.upper()
+            if action == "lock":
+                await ctx.db.lock_symbol(sym, notes)
+                results[sym] = "locked"
+            else:
+                removed = await ctx.db.unlock_symbol(sym)
+                results[sym] = "unlocked" if removed else "not_found"
+        logger.info("Bulk %s: %s", action, results)
+        return {"success": True, "action": action, "results": results}
+
     @app.delete("/api/locked-holdings/{symbol}")
     async def unlock_holding(
         symbol: str,
