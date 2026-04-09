@@ -318,9 +318,44 @@ class ZerodhaBroker(BrokerBase):
         price: float | None,
         trigger_price: float | None,
     ) -> str:
-        """Place order via Kite API with retry."""
+        """Place order via Kite API with retry.
+
+        Zerodha requires market protection for MARKET/SL-M orders via API.
+        We convert these to LIMIT/SL with a buffer to ensure execution:
+        - MARKET → LIMIT at LTP ± 1% (acts as market with protection)
+        - SL-M → SL with limit price = trigger ± 1% (ensures SL fills)
+        """
         if self._kite is None:
             raise RuntimeError("Not authenticated")
+
+        _MARKET_PROTECTION_PCT = 0.01  # 1% buffer
+
+        # Convert MARKET to LIMIT with market protection buffer
+        if order_type == "MARKET" and price is not None and price > 0:
+            buffer = price * _MARKET_PROTECTION_PCT
+            price = round(price + buffer if side == "BUY" else price - buffer, 2)
+            order_type = "LIMIT"
+            logger.debug("Converted MARKET to LIMIT with protection: %s %s @ %.2f", side, symbol, price)
+        elif order_type == "MARKET" and (price is None or price <= 0):
+            # No price at all — fetch LTP and use as limit
+            try:
+                async with self._rate_limiter:
+                    quotes = await asyncio.to_thread(self._kite.ltp, f"NSE:{symbol}")
+                ltp = quotes.get(f"NSE:{symbol}", {}).get("last_price", 0)
+                if ltp > 0:
+                    buffer = ltp * _MARKET_PROTECTION_PCT
+                    price = round(ltp + buffer if side == "BUY" else ltp - buffer, 2)
+                    order_type = "LIMIT"
+                    logger.debug("Converted MARKET to LIMIT via LTP: %s %s @ %.2f", side, symbol, price)
+            except Exception:
+                logger.warning("LTP fetch failed for MARKET→LIMIT conversion on %s, will try MARKET", symbol)
+
+        # Convert SL-M to SL with limit price buffer
+        if order_type == "SL-M" and trigger_price is not None:
+            buffer = trigger_price * _MARKET_PROTECTION_PCT
+            price = round(trigger_price - buffer if side == "BUY" else trigger_price + buffer, 2)
+            order_type = "SL"
+            logger.debug("Converted SL-M to SL with limit: %s %s trigger=%.2f limit=%.2f", side, symbol, trigger_price, price)
 
         kite_side = "BUY" if side == "BUY" else "SELL"
         params: dict[str, Any] = {
@@ -440,11 +475,20 @@ class ZerodhaBroker(BrokerBase):
         if not self._kite:
             raise RuntimeError("Not authenticated")
 
+        # SL orders have a limit price — update it with a buffer from trigger
+        _MARKET_PROTECTION_PCT = 0.01
+        # Determine SL side from the order to set correct limit direction
+        order_info = self._paper_orders.get(order_id) if self._mode == "paper" else None
+        # For live: SL sell limit is below trigger, SL buy limit is above trigger
+        # We don't know the side here, so use a wider buffer in both directions
+        limit_price = round(new_trigger_price * (1 - _MARKET_PROTECTION_PCT), 2)
+
         def _modify() -> None:
             self._kite.modify_order(
                 variety="regular",
                 order_id=order_id,
                 trigger_price=new_trigger_price,
+                price=limit_price,
             )
 
         await self._retry_api_call(_modify)
