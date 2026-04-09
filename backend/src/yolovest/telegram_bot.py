@@ -601,22 +601,37 @@ class TelegramBot:
         # Execute the approved trade
         from yolovest.skills.trade_execute import TradeExecuteSkill
         skill = TradeExecuteSkill(self._ctx)
-        result = await skill.execute(signal=signal)
+        mode = self._ctx.config.mode
+        logger.info(
+            "Executing approved trade: %s %s (mode=%s)",
+            signal.get("signal_type"), signal.get("symbol"), mode,
+        )
+        result = await skill.safe_execute(signal=signal)
 
         if result.success:
             trade = result.data.get("trade", {}) if result.data else {}
+            exec_mode = result.data.get("mode", mode) if result.data else mode
             msg = (
-                f"Approved & executed: {trade.get('signal_type')} {trade.get('symbol')} "
+                f"<b>Executed ({exec_mode.upper()})</b>: "
+                f"{trade.get('signal_type')} <b>{trade.get('symbol')}</b> "
                 f"{trade.get('product', 'MIS')} qty={trade.get('quantity')} "
                 f"@ ₹{trade.get('fill_price', 0):.2f}\n"
                 f"  Target: ₹{trade.get('target_price', 0):.2f} | "
-                f"SL: ₹{trade.get('stop_loss_price', 0):.2f}"
+                f"SL: ₹{trade.get('stop_loss_price', 0):.2f}\n"
+                f"  Order: {trade.get('order_id', 'N/A')} | "
+                f"Trade: {trade.get('trade_id', 'N/A')}"
             )
             if override_notes:
                 msg += f"\n  [OVERRIDE: {'; '.join(override_notes)}]"
             await update.message.reply_html(msg)
         else:
-            await update.message.reply_text(f"Approved but execution failed: {result.error}")
+            logger.error(
+                "Trade execution failed for %s: %s",
+                signal.get("symbol"), result.error,
+            )
+            await update.message.reply_text(
+                f"FAILED: {signal.get('symbol')} execution error:\n{result.error}"
+            )
 
     async def _cmd_reject(self, update: Any, context: Any) -> None:
         """Handle /reject <symbol> — reject a pending trade."""

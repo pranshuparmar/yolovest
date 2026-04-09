@@ -63,6 +63,12 @@ class TradeExecuteSkill(SkillBase):
         signal = kwargs["signal"]
         is_paper = self.ctx.config.mode == "paper"
 
+        logger.info(
+            "trade-execute: mode=%s for %s %s",
+            "PAPER" if is_paper else "LIVE",
+            signal.get("signal_type"), signal.get("symbol"),
+        )
+
         if is_paper:
             return await self._execute_paper(signal)
         else:
@@ -183,6 +189,12 @@ class TradeExecuteSkill(SkillBase):
         cfg = self.ctx.config.execution
         last_error = None
         product = signal.get("product", "MIS")
+
+        logger.info(
+            "trade-execute: LIVE START %s %s qty=%s product=%s entry=%.2f",
+            signal.get("signal_type"), signal.get("symbol"),
+            signal.get("position_size"), product, signal.get("entry_price", 0),
+        )
 
         # Idempotency check: prevent duplicate orders on crash/restart.
         # Uses agent_memory with a TTL to track in-flight executions.

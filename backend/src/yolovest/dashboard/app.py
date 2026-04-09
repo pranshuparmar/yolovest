@@ -2256,13 +2256,24 @@ def create_app(ctx: AppContext) -> FastAPI:
         # Execute the trade
         from yolovest.skills.trade_execute import TradeExecuteSkill
         skill = TradeExecuteSkill(ctx)
-        result = await skill.execute(signal=signal)
+        logger.info(
+            "Executing approved trade #%d: %s %s (mode=%s)",
+            trade_id, signal.get("signal_type"), signal.get("symbol"), ctx.config.mode,
+        )
+        result = await skill.safe_execute(signal=signal)
 
         if result.success:
             trade = result.data.get("trade", {}) if result.data else {}
-            logger.info("Approved and executed pending trade #%d: %s %s",
-                        trade_id, trade.get("signal_type"), trade.get("symbol"))
-            return {"success": True, "trade": trade}
+            exec_mode = result.data.get("mode", ctx.config.mode) if result.data else ctx.config.mode
+            logger.info(
+                "Trade #%d executed: %s %s mode=%s order=%s trade_id=%s",
+                trade_id, trade.get("signal_type"), trade.get("symbol"),
+                exec_mode, trade.get("order_id", "N/A"), trade.get("trade_id", "N/A"),
+            )
+            return {"success": True, "trade": trade, "mode": exec_mode}
+        logger.error(
+            "Trade #%d execution failed: %s", trade_id, result.error,
+        )
         return {"success": False, "error": result.error}
 
     @app.post("/api/manual-trade")
