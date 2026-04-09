@@ -542,7 +542,35 @@ class TradeExecuteSkill(SkillBase):
                     "trade-execute: %s %s attempt %d failed: %s",
                     signal["signal_type"], signal["symbol"], attempt + 1, e,
                 )
-                if attempt < cfg.max_order_retries:
+                # CRITICAL: Before retrying, check if the "failed" order actually
+                # went through on the broker. Zerodha sometimes returns errors
+                # AFTER placing the order, causing duplicate orders on retry.
+                if attempt < cfg.max_order_retries and self.ctx.config.mode == "live":
+                    try:
+                        recent_orders = await asyncio.to_thread(self.ctx.broker._kite.orders)
+                        symbol_orders = [
+                            o for o in (recent_orders or [])
+                            if o.get("tradingsymbol") == signal["symbol"]
+                            and o.get("status") in ("COMPLETE", "OPEN", "TRIGGER PENDING")
+                            and o.get("transaction_type") == ("BUY" if signal["signal_type"] == "BUY" else "SELL")
+                        ]
+                        # Check for orders placed in the last 2 minutes
+                        from datetime import datetime, timedelta
+                        cutoff = datetime.now() - timedelta(minutes=2)
+                        recent = [
+                            o for o in symbol_orders
+                            if o.get("order_timestamp") and o["order_timestamp"] > cutoff
+                        ]
+                        if recent:
+                            logger.error(
+                                "trade-execute: ABORT RETRY — found %d recent %s orders for %s on broker "
+                                "despite error. The 'failed' order likely executed. Not retrying.",
+                                len(recent), signal["signal_type"], signal["symbol"],
+                            )
+                            break
+                    except Exception:
+                        logger.debug("Could not check broker orders before retry", exc_info=True)
+
                     delay = cfg.retry_base_delay_sec * (2**attempt)
                     await asyncio.sleep(delay)
 
