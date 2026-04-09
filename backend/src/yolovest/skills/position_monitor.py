@@ -371,6 +371,10 @@ class PositionMonitorSkill(SkillBase):
             try:
                 trade_id = await self.ctx.db.insert_trade(trade)
                 adopted.append(sym)
+
+                # Ensure symbol is on the watchlist so it gets ML signals
+                await self.ctx.db.add_watchlist_symbol(sym)
+
                 logger.info(
                     "position-monitor: ADOPTED %s %s qty=%d entry=%.2f SL=%.2f target=%.2f (id=%s)",
                     signal_type, sym, abs_qty, entry_price, sl_price, target_price, trade_id,
