@@ -629,23 +629,21 @@ class TelegramBot:
                 "Trade execution failed for %s: %s",
                 signal.get("symbol"), result.error,
             )
-            # Remove signal so it can be retried next heartbeat
-            sym = signal.get("symbol", "")
+            # Revert pending trade back to 'pending' so user can retry
+            sym = signal.get("symbol", "?")
             try:
-                from yolovest.timezone import UTC, now_ist
-                today_start = now_ist().replace(
-                    hour=0, minute=0, second=0, microsecond=0,
-                ).astimezone(UTC).isoformat()
                 await self._ctx.db.conn.execute(
-                    "DELETE FROM signals WHERE symbol = ? AND created_at >= ?",
-                    (sym, today_start),
+                    "UPDATE pending_trades SET status = 'pending', decided_at = NULL, "
+                    "decided_by = NULL WHERE id = ? AND status = 'approved'",
+                    (trade_id,),
                 )
                 await self._ctx.db.conn.commit()
+                logger.info("Reverted pending trade #%d (%s) back to pending after execution failure", trade_id, sym)
             except Exception:
-                pass
+                logger.debug("Failed to revert pending trade #%d", trade_id, exc_info=True)
             await update.message.reply_text(
                 f"FAILED: {sym} execution error:\n{result.error}\n\n"
-                f"Signal removed — will retry on next heartbeat."
+                f"Trade reverted to pending — /approve {sym} to retry."
             )
 
     async def _cmd_reject(self, update: Any, context: Any) -> None:

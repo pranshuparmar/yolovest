@@ -2310,7 +2310,18 @@ def create_app(ctx: AppContext) -> FastAPI:
         logger.error(
             "Trade #%d execution failed: %s", trade_id, result.error,
         )
-        return {"success": False, "error": result.error}
+        # Revert pending trade back to 'pending' so user can retry
+        try:
+            await ctx.db.conn.execute(
+                "UPDATE pending_trades SET status = 'pending', decided_at = NULL, "
+                "decided_by = NULL WHERE id = ? AND status = 'approved'",
+                (trade_id,),
+            )
+            await ctx.db.conn.commit()
+            logger.info("Reverted pending trade #%d back to pending", trade_id)
+        except Exception:
+            logger.debug("Failed to revert pending trade #%d", trade_id, exc_info=True)
+        return {"success": False, "error": result.error, "reverted": True}
 
     @app.post("/api/manual-trade")
     async def create_manual_trade(
