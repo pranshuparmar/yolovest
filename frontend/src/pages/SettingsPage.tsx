@@ -515,13 +515,23 @@ function formatHint(fullKey: string): string | null {
 // ---------------------------------------------------------------------------
 
 function InfoIcon({ description }: { description?: string }) {
+  const [open, setOpen] = useState(false);
   if (!description) return null;
   return (
-    <span
-      className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-gray-800 text-gray-500 text-[9px] font-bold cursor-help shrink-0 hover:bg-gray-700 hover:text-gray-300"
-      title={description}
-    >
-      i
+    <span className="relative inline-flex shrink-0">
+      <button
+        type="button"
+        className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-gray-800 text-gray-500 text-[9px] font-bold cursor-help shrink-0 hover:bg-gray-700 hover:text-gray-300"
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        onBlur={() => setOpen(false)}
+      >
+        i
+      </button>
+      {open && (
+        <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-50 w-56 px-2.5 py-1.5 rounded bg-gray-800 border border-gray-700 text-[11px] text-gray-300 leading-snug shadow-lg whitespace-normal">
+          {description}
+        </span>
+      )}
     </span>
   );
 }

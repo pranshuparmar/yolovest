@@ -407,10 +407,16 @@ export const api = {
     apiFetch<{ success: boolean; deleted: number }>(`/api/dry-run/${runId}`, { method: "DELETE" }),
 
   quarantinedSymbols: () =>
-    apiFetch<{ symbol: string; consecutive_failures: number; last_error: string; quarantined_at: string; updated_at: string }[]>("/api/quarantined-symbols"),
+    apiFetch<{ symbol: string; consecutive_failures: number; last_error: string; quarantined_at: string; updated_at: string; replacement_symbol: string | null }[]>("/api/quarantined-symbols"),
 
   unquarantineSymbol: (symbol: string) =>
     apiFetch<{ success: boolean; symbol: string }>(`/api/quarantined-symbols/${symbol}`, { method: "DELETE" }),
+
+  setReplacementSymbol: (symbol: string, replacement: string | null) =>
+    apiFetch<{ success: boolean; symbol: string; replacement: string | null }>(
+      `/api/quarantined-symbols/${symbol}/replacement`,
+      { method: "PUT", body: JSON.stringify({ replacement }) },
+    ),
 
   lockHolding: (symbol: string) =>
     apiFetch<{ success: boolean; symbol: string; locked: boolean }>(`/api/locked-holdings/${symbol}`, { method: "POST" }),

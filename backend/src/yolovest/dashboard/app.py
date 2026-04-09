@@ -2097,6 +2097,33 @@ def create_app(ctx: AppContext) -> FastAPI:
             logger.info("Unquarantined symbol %s", symbol.upper())
         return {"success": removed, "symbol": symbol.upper()}
 
+    @app.put("/api/quarantined-symbols/{symbol}/replacement")
+    async def set_replacement_symbol(
+        symbol: str,
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Set a replacement symbol for a quarantined symbol.
+
+        Send {"replacement": "NEWNAME"} to set, or {"replacement": null} to clear.
+        """
+        replacement = body.get("replacement")
+        if replacement is not None:
+            replacement = str(replacement).strip().upper()
+            if not replacement:
+                replacement = None
+        updated = await ctx.db.set_replacement_symbol(symbol, replacement)
+        if updated:
+            logger.info(
+                "Set replacement for quarantined %s -> %s",
+                symbol.upper(), replacement,
+            )
+        return {
+            "success": updated,
+            "symbol": symbol.upper(),
+            "replacement": replacement,
+        }
+
     def _model_dir() -> str:
         return getattr(ctx.config.strategy, "model_dir", "./models")
 

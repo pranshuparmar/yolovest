@@ -8,6 +8,7 @@ import {
   useResetAllData,
   useQuarantinedSymbols,
   useUnquarantineSymbol,
+  useSetReplacementSymbol,
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
@@ -141,6 +142,45 @@ function TableRow({
   );
 }
 
+function ReplacementInput({ symbol, current }: { symbol: string; current: string | null }) {
+  const [value, setValue] = useState(current ?? "");
+  const [dirty, setDirty] = useState(false);
+  const setReplacement = useSetReplacementSymbol();
+
+  const save = () => {
+    const trimmed = value.trim().toUpperCase();
+    setReplacement.mutate(
+      { symbol, replacement: trimmed || null },
+      { onSuccess: () => setDirty(false) },
+    );
+  };
+
+  return (
+    <div className="flex items-center gap-1">
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => { setValue(e.target.value); setDirty(true); }}
+        onKeyDown={(e) => { if (e.key === "Enter") save(); }}
+        placeholder="e.g. TMPV"
+        className="w-20 px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-xs text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+      />
+      {dirty && (
+        <button
+          onClick={save}
+          disabled={setReplacement.isPending}
+          className="px-1.5 py-0.5 rounded text-[10px] bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-30"
+        >
+          {setReplacement.isPending ? "..." : "Set"}
+        </button>
+      )}
+      {!dirty && current && (
+        <span className="text-[10px] text-green-500">active</span>
+      )}
+    </div>
+  );
+}
+
 function QuarantinedSymbolsSection() {
   const { data: symbols, isLoading } = useQuarantinedSymbols();
   const unquarantine = useUnquarantineSymbol();
@@ -150,7 +190,7 @@ function QuarantinedSymbolsSection() {
       <div className="px-4 py-3 border-b border-gray-800">
         <h3 className="text-sm font-semibold text-gray-300">Quarantined Symbols</h3>
         <p className="text-xs text-gray-500 mt-0.5">
-          Symbols auto-blocked after 3 consecutive data fetch failures. Excluded from all pipelines until manually unblocked.
+          Symbols auto-blocked after 3 consecutive data fetch failures. Set a replacement symbol to use an alternative instead of skipping.
         </p>
       </div>
       {isLoading ? (
@@ -166,6 +206,7 @@ function QuarantinedSymbolsSection() {
               <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
                 <th className="py-2 px-4 text-left">Symbol</th>
                 <th className="py-2 px-4 text-right">Failures</th>
+                <th className="py-2 px-4 text-left">Replacement</th>
                 <th className="py-2 px-4 text-left">Last Error</th>
                 <th className="py-2 px-4 text-right">Quarantined</th>
                 <th className="py-2 px-4 text-center">Actions</th>
@@ -176,6 +217,9 @@ function QuarantinedSymbolsSection() {
                 <tr key={s.symbol} className="border-b border-gray-800 hover:bg-gray-800/30">
                   <td className="py-2 px-4 font-medium text-gray-200">{s.symbol}</td>
                   <td className="py-2 px-4 text-right text-red-400">{s.consecutive_failures}</td>
+                  <td className="py-2 px-4">
+                    <ReplacementInput symbol={s.symbol} current={s.replacement_symbol} />
+                  </td>
                   <td className="py-2 px-4 text-gray-400 text-xs max-w-xs truncate">{s.last_error}</td>
                   <td className="py-2 px-4 text-right text-gray-400 text-xs">
                     {s.quarantined_at

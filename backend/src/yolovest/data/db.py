@@ -2674,7 +2674,7 @@ class Database:
         """Get all quarantined symbols."""
         cursor = await self.conn.execute(
             "SELECT symbol, consecutive_failures, last_error, "
-            "quarantined_at, updated_at "
+            "quarantined_at, updated_at, replacement_symbol "
             "FROM quarantined_symbols WHERE quarantined_at IS NOT NULL "
             "ORDER BY quarantined_at DESC"
         )
@@ -2697,6 +2697,30 @@ class Database:
         )
         rows = await cursor.fetchall()
         return {r[0] for r in rows}
+
+    async def set_replacement_symbol(
+        self, quarantined: str, replacement: str | None,
+    ) -> bool:
+        """Set (or clear) a replacement symbol for a quarantined symbol."""
+        cursor = await self.conn.execute(
+            "UPDATE quarantined_symbols SET replacement_symbol = ? "
+            "WHERE symbol = ? AND quarantined_at IS NOT NULL",
+            (replacement.upper() if replacement else None, quarantined.upper()),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def get_quarantine_replacements(self) -> dict[str, str]:
+        """Get mapping of quarantined symbol -> replacement symbol.
+
+        Only includes entries where a replacement is set.
+        """
+        cursor = await self.conn.execute(
+            "SELECT symbol, replacement_symbol FROM quarantined_symbols "
+            "WHERE quarantined_at IS NOT NULL AND replacement_symbol IS NOT NULL"
+        )
+        rows = await cursor.fetchall()
+        return {r[0]: r[1] for r in rows}
 
     # ------------------------------------------------------------------
     # Dry-Run Signal Preview

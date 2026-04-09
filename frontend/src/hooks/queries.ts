@@ -746,6 +746,17 @@ export function useUnquarantineSymbol() {
   });
 }
 
+export function useSetReplacementSymbol() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ symbol, replacement }: { symbol: string; replacement: string | null }) =>
+      api.setReplacementSymbol(symbol, replacement),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["quarantined-symbols"] });
+    },
+  });
+}
+
 // Holidays
 export function useHolidays() {
   return useQuery({

@@ -98,15 +98,31 @@ class IngestDataSkill(SkillBase):
             "cache_hits": 0, "quarantined": 0,
         }
 
-        # Load quarantined symbols for fast skip
+        # Load quarantined symbols and their replacements
         quarantined = await self.ctx.db.get_all_quarantined_symbol_set()
-        active_symbols = [s for s in symbols if s not in quarantined]
-        results["quarantined"] = len(symbols) - len(active_symbols)
-        if results["quarantined"] > 0:
+        replacements = await self.ctx.db.get_quarantine_replacements()
+
+        # Swap quarantined symbols with replacements; skip those without one
+        active_symbols: list[str] = []
+        replaced_count = 0
+        skipped_quarantined: list[str] = []
+        for s in symbols:
+            if s not in quarantined:
+                active_symbols.append(s)
+            elif s in replacements:
+                active_symbols.append(replacements[s])
+                replaced_count += 1
+                logger.info("ingest-data: using replacement %s -> %s", s, replacements[s])
+            else:
+                skipped_quarantined.append(s)
+
+        results["quarantined"] = len(skipped_quarantined)
+        results["replaced"] = replaced_count
+        if skipped_quarantined:
             logger.info(
-                "ingest-data: skipping %d quarantined symbols: %s",
-                results["quarantined"],
-                sorted(quarantined & set(symbols)),
+                "ingest-data: skipping %d quarantined symbols (no replacement): %s",
+                len(skipped_quarantined),
+                sorted(skipped_quarantined),
             )
 
         # --- OHLCV Data (primary + fallback) — fetched concurrently ---
