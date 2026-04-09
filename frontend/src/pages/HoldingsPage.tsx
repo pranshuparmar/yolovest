@@ -198,7 +198,7 @@ export function HoldingsPage() {
   const bulkLock = useBulkLockHoldings();
   const review = useReviewHoldings();
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  type Rec = { symbol: string; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number };
+  type Rec = { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number };
 
   const toggleSelect = (sym: string) => {
     setSelected((prev) => {
@@ -296,11 +296,12 @@ export function HoldingsPage() {
                     <td className="py-2 px-3 font-medium text-gray-200">{r.symbol}</td>
                     <td className="py-2 px-3 text-center">
                       <span className={clsx("px-1.5 py-0.5 rounded text-xs font-medium", {
-                        "bg-red-900/40 text-red-400": r.action === "SELL",
-                        "bg-emerald-900/40 text-emerald-400": r.action === "BUY_MORE",
+                        "bg-red-900/40 text-red-400": r.action === "SELL" || r.action === "SHORT",
+                        "bg-emerald-900/40 text-emerald-400": r.action === "BUY_MORE" || r.action === "BUY",
                         "bg-amber-900/40 text-amber-400": r.action === "TIGHTEN_SL",
                         "bg-gray-800 text-gray-400": r.action === "HOLD",
                       })}>{r.action.replace("_", " ")}</span>
+                      {!r.held && <span className="text-[10px] text-gray-600 ml-1">not held</span>}
                     </td>
                     <td className="py-2 px-3 text-right font-mono text-gray-300">{(r.confidence * 100).toFixed(0)}%</td>
                     <td className={clsx("py-2 px-3 text-right font-mono", r.pnl_pct >= 0 ? "text-emerald-400" : "text-red-400")}>
@@ -308,13 +309,13 @@ export function HoldingsPage() {
                     </td>
                     <td className="py-2 px-3 text-gray-400 text-xs max-w-xs">{r.reasoning}</td>
                     <td className="py-2 px-3 text-center">
-                      {r.action === "SELL" && (
+                      {(r.action === "SELL" || r.action === "SHORT") && (
                         <button
                           onClick={() => setOrderForm({ symbol: r.symbol, side: "SELL" })}
                           className="px-2 py-0.5 rounded text-xs bg-red-900/40 text-red-400 hover:bg-red-800/50"
                         >Sell</button>
                       )}
-                      {r.action === "BUY_MORE" && (
+                      {(r.action === "BUY_MORE" || r.action === "BUY") && (
                         <button
                           onClick={() => setOrderForm({ symbol: r.symbol, side: "BUY" })}
                           className="px-2 py-0.5 rounded text-xs bg-emerald-900/40 text-emerald-400 hover:bg-emerald-800/50"

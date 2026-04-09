@@ -461,45 +461,48 @@ def create_app(ctx: AppContext) -> FastAPI:
                 detail=f"Broker error: {e}. Token may be expired — re-authenticate via Settings.",
             )
 
-    @app.post("/api/holdings/review")
-    async def review_holdings(
+    @app.post("/api/review")
+    async def review_symbols(
         body: dict[str, Any] | None = None,
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Run ML review on holdings and return recommendations.
+        """Run ML review on any symbols and return recommendations.
 
-        Body: {"symbols": ["SYM1", "SYM2"]} or omit for all holdings.
-        Returns per-symbol recommendation: SELL, BUY_MORE, HOLD, TIGHTEN_SL.
+        Body: {"symbols": ["SYM1", "SYM2"]} — review specific symbols.
+        Omit body or symbols to review all current holdings.
+        Works for any NSE symbol, whether held or not.
         """
         from yolovest.data.features import compute_features
-        from yolovest.timezone import IST
-        from datetime import datetime as dt
 
         body = body or {}
         requested = body.get("symbols")
 
-        # Get holdings from broker
-        holdings = await ctx.broker.get_holdings()
-        if not holdings:
-            return {"recommendations": [], "error": "No holdings found"}
+        # Get holdings context (for P&L display, not for filtering)
+        holdings = []
+        try:
+            holdings = await ctx.broker.get_holdings()
+        except Exception:
+            pass
+        holding_map = {h["tradingsymbol"]: h for h in (holdings or []) if h.get("quantity", 0) > 0}
 
-        holding_map = {h["tradingsymbol"]: h for h in holdings if h.get("quantity", 0) > 0}
-        symbols = [s.upper() for s in requested] if requested else list(holding_map.keys())
-        symbols = [s for s in symbols if s in holding_map]
-
-        if not symbols:
-            return {"recommendations": [], "error": "No matching holdings"}
+        if requested:
+            symbols = [s.upper() for s in requested]
+        elif holding_map:
+            symbols = list(holding_map.keys())
+        else:
+            return {"recommendations": [], "error": "Provide symbols or authenticate with Kite for holdings review"}
 
         indicator_cfg = ctx.config.strategy.indicators
         recommendations = []
 
         for symbol in symbols:
-            h = holding_map[symbol]
+            held = holding_map.get(symbol)
             rec: dict[str, Any] = {
                 "symbol": symbol,
-                "quantity": h.get("quantity", 0),
-                "average_price": h.get("average_price", 0),
-                "last_price": h.get("last_price", 0),
+                "held": held is not None,
+                "quantity": held.get("quantity", 0) if held else 0,
+                "average_price": held.get("average_price", 0) if held else 0,
+                "last_price": held.get("last_price", 0) if held else 0,
                 "pnl_pct": 0,
                 "action": "HOLD",
                 "confidence": 0,
@@ -507,8 +510,17 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "reasoning": "",
             }
 
-            entry = h.get("average_price", 0)
-            ltp = h.get("last_price", 0)
+            entry = rec["average_price"]
+            ltp = rec["last_price"]
+
+            # Fetch LTP if not from holdings
+            if ltp <= 0:
+                try:
+                    ltp = await ctx.market_data.get_ltp(symbol)
+                    rec["last_price"] = ltp
+                except Exception:
+                    pass
+
             if entry > 0 and ltp > 0:
                 rec["pnl_pct"] = round((ltp - entry) / entry * 100, 2)
 
@@ -530,11 +542,11 @@ def create_app(ctx: AppContext) -> FastAPI:
                 swing_pred = None
                 if ctx.ml:
                     try:
-                        swing_pred = await ctx.ml.predict_swing(symbol, features, current_price=ltp)
+                        swing_pred = await ctx.ml.predict_swing(symbol, features, current_price=ltp or None)
                     except Exception:
                         pass
                     try:
-                        intra_pred = await ctx.ml.predict_intraday(symbol, features, current_price=ltp)
+                        intra_pred = await ctx.ml.predict_intraday(symbol, features, current_price=ltp or None)
                     except Exception:
                         pass
 
@@ -547,9 +559,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                         pred = intra_pred
 
                 if pred is None:
-                    # Both models say HOLD — check technical indicators for reasoning
                     rsi = features.get("rsi_14", 50)
-                    atr_pct = features.get("atr_pct", 0)
                     rec["action"] = "HOLD"
                     rec["confidence"] = max(
                         (swing_pred.confidence if swing_pred else 0),
@@ -560,34 +570,31 @@ def create_app(ctx: AppContext) -> FastAPI:
                         parts.append("oversold (RSI %.0f)" % rsi)
                     elif rsi > 70:
                         parts.append("overbought (RSI %.0f)" % rsi)
-                    if rec["pnl_pct"] > 10:
+                    if held and rec["pnl_pct"] > 10:
                         parts.append("consider partial profit booking (%.1f%% up)" % rec["pnl_pct"])
                         rec["action"] = "TIGHTEN_SL"
-                    elif rec["pnl_pct"] < -10:
+                    elif held and rec["pnl_pct"] < -10:
                         parts.append("significant drawdown (%.1f%%)" % rec["pnl_pct"])
                     rec["reasoning"] = "; ".join(parts) if parts else "No strong directional signal"
                 else:
                     rec["signal_type"] = pred.signal_type
                     rec["confidence"] = round(pred.confidence, 2)
-
                     if pred.signal_type == "SELL":
-                        rec["action"] = "SELL"
+                        rec["action"] = "SELL" if held else "SHORT"
                         rec["target_price"] = round(pred.target_price, 2) if hasattr(pred, "target_price") else None
                         rec["stop_loss_price"] = round(pred.stop_loss_price, 2) if hasattr(pred, "stop_loss_price") else None
                         rec["reasoning"] = f"ML SELL signal at {pred.confidence:.0%} confidence"
                     elif pred.signal_type == "BUY":
-                        rec["action"] = "BUY_MORE"
-                        rec["reasoning"] = f"ML BUY signal at {pred.confidence:.0%} confidence — consider adding"
-                    else:
-                        rec["action"] = "HOLD"
-                        rec["reasoning"] = "No actionable signal"
+                        rec["action"] = "BUY_MORE" if held else "BUY"
+                        rec["target_price"] = round(pred.target_price, 2) if hasattr(pred, "target_price") else None
+                        rec["stop_loss_price"] = round(pred.stop_loss_price, 2) if hasattr(pred, "stop_loss_price") else None
+                        rec["reasoning"] = f"ML BUY signal at {pred.confidence:.0%} confidence"
 
             except Exception as e:
                 rec["reasoning"] = f"Analysis failed: {e}"
 
             recommendations.append(rec)
 
-        # Sort by confidence descending (actionable first)
         recommendations.sort(key=lambda r: (r["action"] != "HOLD", r["confidence"]), reverse=True)
         return {"recommendations": recommendations}
 

@@ -472,63 +472,101 @@ class TelegramBot:
         )
 
     async def _cmd_review(self, update: Any, context: Any) -> None:
-        """Handle /review [SYMBOL ...] — ML review of holdings."""
+        """Handle /review [SYMBOL ...] — ML review of any symbol or all holdings."""
         from yolovest.data.features import compute_features
 
         args = context.args
+
+        # Build symbol list: explicit args, or fall back to all holdings
         holdings = await self._ctx.broker.get_holdings()
-        if not holdings:
-            await update.message.reply_text("No holdings found.")
+        holding_map = {h["tradingsymbol"]: h for h in (holdings or []) if h.get("quantity", 0) > 0}
+
+        if args:
+            symbols = [a.upper() for a in args]
+        elif holding_map:
+            symbols = list(holding_map.keys())
+        else:
+            await update.message.reply_text("Usage: /review SYMBOL [SYMBOL ...]\nOr authenticate with Kite to review all holdings.")
             return
 
-        holding_map = {h["tradingsymbol"]: h for h in holdings if h.get("quantity", 0) > 0}
-        symbols = [a.upper() for a in args] if args else list(holding_map.keys())
-        symbols = [s for s in symbols if s in holding_map]
-
-        if not symbols:
-            await update.message.reply_text("No matching holdings.")
-            return
-
-        await update.message.reply_text(f"Reviewing {len(symbols)} holdings...")
+        await update.message.reply_text(f"Reviewing {len(symbols)} symbol{'s' if len(symbols) != 1 else ''}...")
 
         indicator_cfg = self._ctx.config.strategy.indicators
         lines = []
-        for symbol in symbols[:15]:  # cap at 15 to avoid timeout
-            h = holding_map[symbol]
-            entry = h.get("average_price", 0)
-            ltp = h.get("last_price", 0)
-            pnl_pct = ((ltp - entry) / entry * 100) if entry > 0 else 0
+        for symbol in symbols[:15]:
+            # Get price context — from holdings if held, else from market data
+            held = holding_map.get(symbol)
+            entry = held.get("average_price", 0) if held else 0
+            ltp = held.get("last_price", 0) if held else 0
+            qty = held.get("quantity", 0) if held else 0
+
+            if ltp <= 0:
+                try:
+                    ltp = await self._ctx.market_data.get_ltp(symbol)
+                except Exception:
+                    pass
+
+            pnl_pct = ((ltp - entry) / entry * 100) if entry > 0 and ltp > 0 else 0
+            held_label = f"x{qty}" if qty > 0 else "not held"
 
             action = "HOLD"
             conf = 0.0
             reason = ""
             try:
                 bars = await self._ctx.db.get_ohlcv(symbol, "daily", days=365)
-                if bars and len(bars) >= 50:
-                    features = compute_features(bars, indicator_cfg)
-                    if features and self._ctx.ml:
-                        pred = await self._ctx.ml.predict_swing(symbol, features, current_price=ltp)
-                        if pred and pred.signal_type != "HOLD":
-                            action = "SELL" if pred.signal_type == "SELL" else "BUY MORE"
-                            conf = pred.confidence
-                            reason = f"{pred.confidence:.0%} confidence"
+                if not bars or len(bars) < 50:
+                    reason = f"insufficient data ({len(bars) if bars else 0} bars)"
+                    lines.append(f"⚪ <b>{symbol}</b> ({held_label}) — {reason}")
+                    continue
+
+                features = compute_features(bars, indicator_cfg)
+                if features and self._ctx.ml:
+                    swing_pred = None
+                    intra_pred = None
+                    try:
+                        swing_pred = await self._ctx.ml.predict_swing(symbol, features, current_price=ltp or None)
+                    except Exception:
+                        pass
+                    try:
+                        intra_pred = await self._ctx.ml.predict_intraday(symbol, features, current_price=ltp or None)
+                    except Exception:
+                        pass
+
+                    # Pick best non-HOLD prediction
+                    pred = None
+                    if swing_pred and swing_pred.signal_type != "HOLD":
+                        pred = swing_pred
+                    if intra_pred and intra_pred.signal_type != "HOLD":
+                        if pred is None or intra_pred.confidence > pred.confidence:
+                            pred = intra_pred
+
+                    if pred:
+                        action = "SELL" if pred.signal_type == "SELL" else "BUY" if not held else "BUY MORE"
+                        conf = pred.confidence
+                        reason = f"{pred.confidence:.0%} confidence"
+                    else:
+                        conf = max(
+                            (swing_pred.confidence if swing_pred else 0),
+                            (intra_pred.confidence if intra_pred else 0),
+                        )
+                        if held and pnl_pct > 10:
+                            action = "TIGHTEN SL"
+                            reason = f"{pnl_pct:+.1f}% — consider partial booking"
                         else:
-                            conf = pred.confidence if pred else 0
-                            if pnl_pct > 10:
-                                action = "TIGHTEN SL"
-                                reason = f"{pnl_pct:+.1f}% — consider partial booking"
-                            else:
-                                reason = "no strong signal"
+                            reason = "no strong signal"
             except Exception:
                 reason = "analysis failed"
 
-            icon = {"SELL": "🔴", "BUY MORE": "🟢", "TIGHTEN SL": "🟡"}.get(action, "⚪")
+            icon = {"SELL": "🔴", "BUY": "🟢", "BUY MORE": "🟢", "TIGHTEN SL": "🟡"}.get(action, "⚪")
+            price_line = f"₹{ltp:.2f}" if ltp > 0 else "LTP unavailable"
+            if held and entry > 0:
+                price_line = f"₹{entry:.2f}→₹{ltp:.2f} ({pnl_pct:+.1f}%)"
             lines.append(
-                f"{icon} <b>{symbol}</b> — {action} ({conf:.0%})\n"
-                f"    {pnl_pct:+.1f}% | ₹{entry:.2f}→₹{ltp:.2f} | {reason}"
+                f"{icon} <b>{symbol}</b> ({held_label}) — {action} ({conf:.0%})\n"
+                f"    {price_line} | {reason}"
             )
 
-        msg = "<b>Holdings Review</b>\n\n" + "\n\n".join(lines)
+        msg = "<b>Symbol Review</b>\n\n" + "\n\n".join(lines)
         await update.message.reply_html(msg)
 
     async def _cmd_skills(self, update: Any, context: Any) -> None:

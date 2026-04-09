@@ -8,6 +8,7 @@ import {
   useAddUserWatchlistSymbol,
   useRemoveUserWatchlistSymbol,
   useUniverseSymbols,
+  useReviewHoldings,
 } from "../hooks/queries";
 import { parseUTC, getTimezone } from "../utils/datetime";
 
@@ -25,6 +26,8 @@ export function WatchlistPage() {
 
   const [newSymbol, setNewSymbol] = useState("");
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [reviewInput, setReviewInput] = useState("");
+  const review = useReviewHoldings();
   const [newSector, setNewSector] = useState("");
   const [newNotes, setNewNotes] = useState("");
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
@@ -66,6 +69,57 @@ export function WatchlistPage() {
           Your watchlist symbols are always included in signal generation. The algorithm independently
           maintains its own shortlist from the full NSE universe.
         </p>
+      </div>
+
+      {/* Quick ML Review */}
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+        <h3 className="text-sm font-medium text-gray-400 mb-3">Quick ML Review</h3>
+        <div className="flex gap-2 items-end">
+          <div className="flex-1">
+            <label className="block text-xs text-gray-500 mb-1">Symbols (comma or space separated)</label>
+            <input
+              type="text"
+              value={reviewInput}
+              onChange={(e) => setReviewInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const syms = reviewInput.split(/[,\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+                  if (syms.length > 0) review.mutate(syms);
+                }
+              }}
+              placeholder="e.g. GAIL, TCS, RELIANCE"
+              className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <button
+            onClick={() => {
+              const syms = reviewInput.split(/[,\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+              if (syms.length > 0) review.mutate(syms);
+            }}
+            disabled={review.isPending || !reviewInput.trim()}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors disabled:opacity-50"
+          >
+            {review.isPending ? "Reviewing..." : "Review"}
+          </button>
+        </div>
+        {review.data && review.data.recommendations.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {review.data.recommendations.map((r) => (
+              <div key={r.symbol} className="flex items-center gap-3 bg-gray-800/50 rounded px-3 py-2 text-sm">
+                <span className="font-medium text-gray-200 w-24">{r.symbol}</span>
+                <span className={clsx("px-1.5 py-0.5 rounded text-xs font-medium", {
+                  "bg-red-900/40 text-red-400": r.action === "SELL" || r.action === "SHORT",
+                  "bg-emerald-900/40 text-emerald-400": r.action === "BUY" || r.action === "BUY_MORE",
+                  "bg-amber-900/40 text-amber-400": r.action === "TIGHTEN_SL",
+                  "bg-gray-700 text-gray-400": r.action === "HOLD",
+                })}>{r.action.replace("_", " ")}</span>
+                <span className="text-gray-500 text-xs">{(r.confidence * 100).toFixed(0)}%</span>
+                {r.last_price > 0 && <span className="text-gray-400 text-xs">₹{r.last_price.toFixed(2)}</span>}
+                <span className="text-gray-500 text-xs flex-1">{r.reasoning}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Add symbol form */}
