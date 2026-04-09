@@ -2017,7 +2017,7 @@ class Database:
     # Weekly Data
     # ------------------------------------------------------------------
 
-    async def get_weekly_trades(self) -> list[dict[str, Any]]:
+    async def get_weekly_trades(self, mode: str | None = None) -> list[dict[str, Any]]:
         """Get trades for the current week (Monday-Friday)."""
         from datetime import timedelta
 
@@ -2026,10 +2026,13 @@ class Database:
         monday = (now - timedelta(days=days_since_monday)).replace(
             hour=9, minute=15, second=0, microsecond=0
         ).astimezone(UTC)
-        cursor = await self.conn.execute(
-            "SELECT * FROM trades WHERE created_at >= ? ORDER BY created_at",
-            (monday.isoformat(),),
-        )
+        query = "SELECT * FROM trades WHERE created_at >= ?"
+        params: list[Any] = [monday.isoformat()]
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        query += " ORDER BY created_at"
+        cursor = await self.conn.execute(query, params)
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
@@ -2121,6 +2124,7 @@ class Database:
         end_date: str | None = None,
         symbol: str | None = None,
         limit: int = 100,
+        mode: str | None = None,
     ) -> list[dict[str, Any]]:
         """Get trade history with optional filters.
 
@@ -2129,6 +2133,9 @@ class Database:
         query = "SELECT * FROM trades WHERE 1=1"
         params: list[Any] = []
 
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
         if start_date:
             query += " AND created_at >= ?"
             params.append(start_date)
@@ -2150,7 +2157,7 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
-    async def get_equity_curve(self, days: int = 30) -> list[dict[str, Any]]:
+    async def get_equity_curve(self, days: int = 30, mode: str | None = None) -> list[dict[str, Any]]:
         """Compute daily equity curve from closed trades.
 
         Returns a list of {date, cumulative_pnl, trade_count} entries.
@@ -2158,14 +2165,16 @@ class Database:
         from datetime import timedelta
 
         cutoff = (now_utc() - timedelta(days=days)).isoformat()
+        mode_clause = " AND mode = ?" if mode else ""
+        mode_params: list[Any] = [mode] if mode else []
         cursor = await self.conn.execute(
-            "SELECT DATE(closed_at) as trade_date, "
-            "SUM(pnl) as daily_pnl, COUNT(*) as trade_count "
-            "FROM trades "
-            "WHERE closed_at >= ? AND pnl IS NOT NULL "
-            "GROUP BY DATE(closed_at) "
-            "ORDER BY trade_date",
-            (cutoff,),
+            f"SELECT DATE(closed_at) as trade_date, "
+            f"SUM(pnl) as daily_pnl, COUNT(*) as trade_count "
+            f"FROM trades "
+            f"WHERE closed_at >= ? AND pnl IS NOT NULL{mode_clause} "
+            f"GROUP BY DATE(closed_at) "
+            f"ORDER BY trade_date",
+            [cutoff, *mode_params],
         )
         rows = await cursor.fetchall()
 
@@ -2182,7 +2191,7 @@ class Database:
             })
         return curve
 
-    async def get_daily_pnl_calendar(self, days: int = 90) -> list[dict[str, Any]]:
+    async def get_daily_pnl_calendar(self, days: int = 90, mode: str | None = None) -> list[dict[str, Any]]:
         """Daily PnL breakdown for calendar heatmap.
 
         Returns one entry per day that had trades, with PnL, trade count,
@@ -2190,17 +2199,19 @@ class Database:
         """
         from datetime import timedelta
         cutoff = (now_utc() - timedelta(days=days)).isoformat()
+        mode_clause = " AND mode = ?" if mode else ""
+        mode_params: list[Any] = [mode] if mode else []
         cursor = await self.read_conn.execute(
-            "SELECT DATE(closed_at) as trade_date, "
-            "SUM(pnl) as pnl, "
-            "COUNT(*) as trade_count, "
-            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, "
-            "SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses "
-            "FROM trades "
-            "WHERE closed_at >= ? AND pnl IS NOT NULL "
-            "GROUP BY DATE(closed_at) "
-            "ORDER BY trade_date",
-            (cutoff,),
+            f"SELECT DATE(closed_at) as trade_date, "
+            f"SUM(pnl) as pnl, "
+            f"COUNT(*) as trade_count, "
+            f"SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, "
+            f"SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses "
+            f"FROM trades "
+            f"WHERE closed_at >= ? AND pnl IS NOT NULL{mode_clause} "
+            f"GROUP BY DATE(closed_at) "
+            f"ORDER BY trade_date",
+            [cutoff, *mode_params],
         )
         rows = await cursor.fetchall()
         return [

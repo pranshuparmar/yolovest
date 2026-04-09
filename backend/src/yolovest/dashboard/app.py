@@ -582,11 +582,13 @@ def create_app(ctx: AppContext) -> FastAPI:
         end: str | None = Query(None, description="End date YYYY-MM-DD"),
         symbol: str | None = Query(None),
         limit: int = Query(100, ge=1, le=1000),
+        mode: str | None = Query(None, description="Filter by mode: paper, live, or omit for current"),
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Trade history with optional date range and symbol filter."""
         return await ctx.db.get_trades_history(
-            start_date=start, end_date=end, symbol=symbol, limit=limit
+            start_date=start, end_date=end, symbol=symbol, limit=limit,
+            mode=mode or ctx.config.mode,
         )
 
     @app.get("/api/equity-curve")
@@ -595,7 +597,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Daily equity curve data for charting."""
-        return await ctx.db.get_equity_curve(days=days)
+        return await ctx.db.get_equity_curve(days=days, mode=ctx.config.mode)
 
     @app.get("/api/pnl-calendar")
     async def get_pnl_calendar(
@@ -603,7 +605,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Daily PnL for calendar heatmap: {date, pnl, trade_count, wins, losses}."""
-        return await ctx.db.get_daily_pnl_calendar(days=days)
+        return await ctx.db.get_daily_pnl_calendar(days=days, mode=ctx.config.mode)
 
     # ------------------------------------------------------------------
     # Trade Detail View
@@ -1277,7 +1279,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """This week's trades."""
-        return await ctx.db.get_weekly_trades()
+        return await ctx.db.get_weekly_trades(mode=ctx.config.mode)
 
     @app.get("/api/weekly/predictions")
     async def get_weekly_predictions(
