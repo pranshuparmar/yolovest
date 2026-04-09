@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLockHoldings } from "../hooks/queries";
+import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLockHoldings, useReviewHoldings } from "../hooks/queries";
 import clsx from "clsx";
 import type { ManualOrder } from "../types/api";
 
@@ -196,7 +196,9 @@ export function HoldingsPage() {
   const lockHolding = useLockHolding();
   const unlockHolding = useUnlockHolding();
   const bulkLock = useBulkLockHoldings();
+  const review = useReviewHoldings();
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  type Rec = { symbol: string; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number };
 
   const toggleSelect = (sym: string) => {
     setSelected((prev) => {
@@ -244,6 +246,13 @@ export function HoldingsPage() {
             {isFetching ? "Refreshing..." : "Refresh"}
           </button>
           <button
+            onClick={() => review.mutate(selected.size > 0 ? [...selected] : undefined)}
+            disabled={review.isPending}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors disabled:opacity-50"
+          >
+            {review.isPending ? "Reviewing..." : selected.size > 0 ? `Review ${selected.size} Selected` : "Review All"}
+          </button>
+          <button
             onClick={() => setOrderForm({})}
             className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white transition-colors"
           >
@@ -260,6 +269,64 @@ export function HoldingsPage() {
           isLocked={orderForm.locked}
           onClose={() => setOrderForm(null)}
         />
+      )}
+
+      {/* Recommendations panel */}
+      {review.data && review.data.recommendations.length > 0 && (
+        <div className="bg-gray-900 border border-blue-800/50 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-blue-800/30 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-blue-400">ML Recommendations</h3>
+            <button onClick={() => review.reset()} className="text-xs text-gray-500 hover:text-gray-300">Dismiss</button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                  <th className="py-2 px-3 text-left">Symbol</th>
+                  <th className="py-2 px-3 text-center">Action</th>
+                  <th className="py-2 px-3 text-right">Confidence</th>
+                  <th className="py-2 px-3 text-right">P&L</th>
+                  <th className="py-2 px-3 text-left">Reasoning</th>
+                  <th className="py-2 px-3 text-center">Act</th>
+                </tr>
+              </thead>
+              <tbody>
+                {review.data.recommendations.map((r: Rec) => (
+                  <tr key={r.symbol} className="border-b border-gray-800/50 hover:bg-gray-800/20">
+                    <td className="py-2 px-3 font-medium text-gray-200">{r.symbol}</td>
+                    <td className="py-2 px-3 text-center">
+                      <span className={clsx("px-1.5 py-0.5 rounded text-xs font-medium", {
+                        "bg-red-900/40 text-red-400": r.action === "SELL",
+                        "bg-emerald-900/40 text-emerald-400": r.action === "BUY_MORE",
+                        "bg-amber-900/40 text-amber-400": r.action === "TIGHTEN_SL",
+                        "bg-gray-800 text-gray-400": r.action === "HOLD",
+                      })}>{r.action.replace("_", " ")}</span>
+                    </td>
+                    <td className="py-2 px-3 text-right font-mono text-gray-300">{(r.confidence * 100).toFixed(0)}%</td>
+                    <td className={clsx("py-2 px-3 text-right font-mono", r.pnl_pct >= 0 ? "text-emerald-400" : "text-red-400")}>
+                      {r.pnl_pct >= 0 ? "+" : ""}{r.pnl_pct.toFixed(1)}%
+                    </td>
+                    <td className="py-2 px-3 text-gray-400 text-xs max-w-xs">{r.reasoning}</td>
+                    <td className="py-2 px-3 text-center">
+                      {r.action === "SELL" && (
+                        <button
+                          onClick={() => setOrderForm({ symbol: r.symbol, side: "SELL" })}
+                          className="px-2 py-0.5 rounded text-xs bg-red-900/40 text-red-400 hover:bg-red-800/50"
+                        >Sell</button>
+                      )}
+                      {r.action === "BUY_MORE" && (
+                        <button
+                          onClick={() => setOrderForm({ symbol: r.symbol, side: "BUY" })}
+                          className="px-2 py-0.5 rounded text-xs bg-emerald-900/40 text-emerald-400 hover:bg-emerald-800/50"
+                        >Buy</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
       {/* Broker auth expired banner */}

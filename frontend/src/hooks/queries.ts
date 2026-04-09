@@ -114,6 +114,12 @@ export function useUnlockHolding() {
   });
 }
 
+export function useReviewHoldings() {
+  return useMutation({
+    mutationFn: (symbols?: string[]) => api.reviewHoldings(symbols),
+  });
+}
+
 export function useBulkLockHoldings() {
   const qc = useQueryClient();
   return useMutation({

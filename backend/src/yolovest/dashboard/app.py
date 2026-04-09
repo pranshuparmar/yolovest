@@ -461,6 +461,136 @@ def create_app(ctx: AppContext) -> FastAPI:
                 detail=f"Broker error: {e}. Token may be expired — re-authenticate via Settings.",
             )
 
+    @app.post("/api/holdings/review")
+    async def review_holdings(
+        body: dict[str, Any] | None = None,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Run ML review on holdings and return recommendations.
+
+        Body: {"symbols": ["SYM1", "SYM2"]} or omit for all holdings.
+        Returns per-symbol recommendation: SELL, BUY_MORE, HOLD, TIGHTEN_SL.
+        """
+        from yolovest.data.features import compute_features
+        from yolovest.timezone import IST
+        from datetime import datetime as dt
+
+        body = body or {}
+        requested = body.get("symbols")
+
+        # Get holdings from broker
+        holdings = await ctx.broker.get_holdings()
+        if not holdings:
+            return {"recommendations": [], "error": "No holdings found"}
+
+        holding_map = {h["tradingsymbol"]: h for h in holdings if h.get("quantity", 0) > 0}
+        symbols = [s.upper() for s in requested] if requested else list(holding_map.keys())
+        symbols = [s for s in symbols if s in holding_map]
+
+        if not symbols:
+            return {"recommendations": [], "error": "No matching holdings"}
+
+        indicator_cfg = ctx.config.strategy.indicators
+        recommendations = []
+
+        for symbol in symbols:
+            h = holding_map[symbol]
+            rec: dict[str, Any] = {
+                "symbol": symbol,
+                "quantity": h.get("quantity", 0),
+                "average_price": h.get("average_price", 0),
+                "last_price": h.get("last_price", 0),
+                "pnl_pct": 0,
+                "action": "HOLD",
+                "confidence": 0,
+                "signal_type": "HOLD",
+                "reasoning": "",
+            }
+
+            entry = h.get("average_price", 0)
+            ltp = h.get("last_price", 0)
+            if entry > 0 and ltp > 0:
+                rec["pnl_pct"] = round((ltp - entry) / entry * 100, 2)
+
+            try:
+                bars = await ctx.db.get_ohlcv(symbol, "daily", days=365)
+                if not bars or len(bars) < 50:
+                    rec["reasoning"] = f"Insufficient data ({len(bars) if bars else 0} bars)"
+                    recommendations.append(rec)
+                    continue
+
+                features = compute_features(bars, indicator_cfg)
+                if not features:
+                    rec["reasoning"] = "Feature computation failed"
+                    recommendations.append(rec)
+                    continue
+
+                # Run both models
+                intra_pred = None
+                swing_pred = None
+                if ctx.ml:
+                    try:
+                        swing_pred = await ctx.ml.predict_swing(symbol, features, current_price=ltp)
+                    except Exception:
+                        pass
+                    try:
+                        intra_pred = await ctx.ml.predict_intraday(symbol, features, current_price=ltp)
+                    except Exception:
+                        pass
+
+                # Pick best prediction
+                pred = None
+                if swing_pred and swing_pred.signal_type != "HOLD":
+                    pred = swing_pred
+                if intra_pred and intra_pred.signal_type != "HOLD":
+                    if pred is None or intra_pred.confidence > pred.confidence:
+                        pred = intra_pred
+
+                if pred is None:
+                    # Both models say HOLD — check technical indicators for reasoning
+                    rsi = features.get("rsi_14", 50)
+                    atr_pct = features.get("atr_pct", 0)
+                    rec["action"] = "HOLD"
+                    rec["confidence"] = max(
+                        (swing_pred.confidence if swing_pred else 0),
+                        (intra_pred.confidence if intra_pred else 0),
+                    )
+                    parts = []
+                    if rsi < 30:
+                        parts.append("oversold (RSI %.0f)" % rsi)
+                    elif rsi > 70:
+                        parts.append("overbought (RSI %.0f)" % rsi)
+                    if rec["pnl_pct"] > 10:
+                        parts.append("consider partial profit booking (%.1f%% up)" % rec["pnl_pct"])
+                        rec["action"] = "TIGHTEN_SL"
+                    elif rec["pnl_pct"] < -10:
+                        parts.append("significant drawdown (%.1f%%)" % rec["pnl_pct"])
+                    rec["reasoning"] = "; ".join(parts) if parts else "No strong directional signal"
+                else:
+                    rec["signal_type"] = pred.signal_type
+                    rec["confidence"] = round(pred.confidence, 2)
+
+                    if pred.signal_type == "SELL":
+                        rec["action"] = "SELL"
+                        rec["target_price"] = round(pred.target_price, 2) if hasattr(pred, "target_price") else None
+                        rec["stop_loss_price"] = round(pred.stop_loss_price, 2) if hasattr(pred, "stop_loss_price") else None
+                        rec["reasoning"] = f"ML SELL signal at {pred.confidence:.0%} confidence"
+                    elif pred.signal_type == "BUY":
+                        rec["action"] = "BUY_MORE"
+                        rec["reasoning"] = f"ML BUY signal at {pred.confidence:.0%} confidence — consider adding"
+                    else:
+                        rec["action"] = "HOLD"
+                        rec["reasoning"] = "No actionable signal"
+
+            except Exception as e:
+                rec["reasoning"] = f"Analysis failed: {e}"
+
+            recommendations.append(rec)
+
+        # Sort by confidence descending (actionable first)
+        recommendations.sort(key=lambda r: (r["action"] != "HOLD", r["confidence"]), reverse=True)
+        return {"recommendations": recommendations}
+
     @app.get("/api/locked-holdings")
     async def get_locked_holdings(
         _user: str = Depends(verify_credentials),

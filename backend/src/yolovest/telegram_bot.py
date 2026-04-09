@@ -97,6 +97,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("reject", self._cmd_reject))
         self._app.add_handler(CommandHandler("trade", self._cmd_trade))
         self._app.add_handler(CommandHandler("clear", self._cmd_clear_signals))
+        self._app.add_handler(CommandHandler("review", self._cmd_review))
         self._app.add_handler(CommandHandler("skills", self._cmd_skills))
         self._app.add_handler(CommandHandler("run", self._cmd_run_skill))
         self._app.add_handler(CommandHandler("holiday", self._cmd_holiday))
@@ -213,6 +214,10 @@ class TelegramBot:
             "/reject SYMBOL — Skip trade\n"
             "/trade BUY RELIANCE 2500 2550 2475 — Manual trade\n"
             "/trade SELL INFY 422 415 427 CNC 50 — With product + qty\n\n"
+
+            "<b>Analysis</b>\n"
+            "/review — ML review of all holdings\n"
+            "/review GAIL TCS — Review specific holdings\n\n"
 
             "<b>Monitoring</b>\n"
             "/status — System status + integrations\n"
@@ -465,6 +470,66 @@ class TelegramBot:
             f"Pending trades deleted: {pend}\n\n"
             f"Next heartbeat will regenerate fresh signals."
         )
+
+    async def _cmd_review(self, update: Any, context: Any) -> None:
+        """Handle /review [SYMBOL ...] — ML review of holdings."""
+        from yolovest.data.features import compute_features
+
+        args = context.args
+        holdings = await self._ctx.broker.get_holdings()
+        if not holdings:
+            await update.message.reply_text("No holdings found.")
+            return
+
+        holding_map = {h["tradingsymbol"]: h for h in holdings if h.get("quantity", 0) > 0}
+        symbols = [a.upper() for a in args] if args else list(holding_map.keys())
+        symbols = [s for s in symbols if s in holding_map]
+
+        if not symbols:
+            await update.message.reply_text("No matching holdings.")
+            return
+
+        await update.message.reply_text(f"Reviewing {len(symbols)} holdings...")
+
+        indicator_cfg = self._ctx.config.strategy.indicators
+        lines = []
+        for symbol in symbols[:15]:  # cap at 15 to avoid timeout
+            h = holding_map[symbol]
+            entry = h.get("average_price", 0)
+            ltp = h.get("last_price", 0)
+            pnl_pct = ((ltp - entry) / entry * 100) if entry > 0 else 0
+
+            action = "HOLD"
+            conf = 0.0
+            reason = ""
+            try:
+                bars = await self._ctx.db.get_ohlcv(symbol, "daily", days=365)
+                if bars and len(bars) >= 50:
+                    features = compute_features(bars, indicator_cfg)
+                    if features and self._ctx.ml:
+                        pred = await self._ctx.ml.predict_swing(symbol, features, current_price=ltp)
+                        if pred and pred.signal_type != "HOLD":
+                            action = "SELL" if pred.signal_type == "SELL" else "BUY MORE"
+                            conf = pred.confidence
+                            reason = f"{pred.confidence:.0%} confidence"
+                        else:
+                            conf = pred.confidence if pred else 0
+                            if pnl_pct > 10:
+                                action = "TIGHTEN SL"
+                                reason = f"{pnl_pct:+.1f}% — consider partial booking"
+                            else:
+                                reason = "no strong signal"
+            except Exception:
+                reason = "analysis failed"
+
+            icon = {"SELL": "🔴", "BUY MORE": "🟢", "TIGHTEN SL": "🟡"}.get(action, "⚪")
+            lines.append(
+                f"{icon} <b>{symbol}</b> — {action} ({conf:.0%})\n"
+                f"    {pnl_pct:+.1f}% | ₹{entry:.2f}→₹{ltp:.2f} | {reason}"
+            )
+
+        msg = "<b>Holdings Review</b>\n\n" + "\n\n".join(lines)
+        await update.message.reply_html(msg)
 
     async def _cmd_skills(self, update: Any, context: Any) -> None:
         """Handle /skills — list all registered skills."""
