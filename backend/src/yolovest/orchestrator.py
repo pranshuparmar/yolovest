@@ -211,6 +211,14 @@ class HeartbeatOrchestrator:
 
         return results
 
+    @staticmethod
+    def _today_start() -> str:
+        """Return today's start time in UTC ISO format for signal cleanup."""
+        from yolovest.timezone import UTC, now_ist
+        return now_ist().replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        ).astimezone(UTC).isoformat()
+
     async def _broadcast(self, event_type: str, data: dict[str, Any]) -> None:
         """Publish an event to the event bus (bridged to WebSocket)."""
         try:
@@ -303,9 +311,21 @@ class HeartbeatOrchestrator:
         trade_result = await self._run_skill("trade-execute", signal=signal)
         results[f"{prefix}/trade-execute"] = trade_result
         if not trade_result.success:
-            logger.warning("trade-execute failed for signal %d", index)
+            symbol = signal.get("symbol", "?") if isinstance(signal, dict) else "?"
+            logger.warning("trade-execute failed for signal %d (%s): %s", index, symbol, trade_result.error)
+            # Remove signal from DB so it's not blocked by already_signaled dedup
+            # and can be regenerated on the next heartbeat
+            try:
+                await self._ctx.db.conn.execute(
+                    "DELETE FROM signals WHERE symbol = ? AND created_at >= ?",
+                    (symbol, self._today_start()),
+                )
+                await self._ctx.db.conn.commit()
+                logger.info("Removed failed signal for %s so it can be retried next heartbeat", symbol)
+            except Exception:
+                logger.debug("Failed to remove signal for %s", symbol, exc_info=True)
             await self._ctx.notify.send(
-                f"Trade execution failed for signal {index}: {trade_result.error}",
+                f"Trade execution failed for {symbol}: {trade_result.error}",
                 alert_type="errors",
             )
             return results

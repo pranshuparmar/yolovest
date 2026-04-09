@@ -629,8 +629,23 @@ class TelegramBot:
                 "Trade execution failed for %s: %s",
                 signal.get("symbol"), result.error,
             )
+            # Remove signal so it can be retried next heartbeat
+            sym = signal.get("symbol", "")
+            try:
+                from yolovest.timezone import UTC, now_ist
+                today_start = now_ist().replace(
+                    hour=0, minute=0, second=0, microsecond=0,
+                ).astimezone(UTC).isoformat()
+                await self._ctx.db.conn.execute(
+                    "DELETE FROM signals WHERE symbol = ? AND created_at >= ?",
+                    (sym, today_start),
+                )
+                await self._ctx.db.conn.commit()
+            except Exception:
+                pass
             await update.message.reply_text(
-                f"FAILED: {signal.get('symbol')} execution error:\n{result.error}"
+                f"FAILED: {sym} execution error:\n{result.error}\n\n"
+                f"Signal removed — will retry on next heartbeat."
             )
 
     async def _cmd_reject(self, update: Any, context: Any) -> None:
