@@ -10,6 +10,10 @@ export interface PortfolioState {
   available_cash: number;
   exposure_pct: number;
   open_positions: number;
+  system_positions: number;
+  adopted_positions: number;
+  system_position_value: number;
+  adopted_position_value: number;
   stock_exposures: Record<string, number>;
   sector_counts: Record<string, number>;
   daily_pnl_pct: number;

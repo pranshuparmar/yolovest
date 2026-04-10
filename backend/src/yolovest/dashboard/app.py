@@ -2422,10 +2422,11 @@ def create_app(ctx: AppContext) -> FastAPI:
         _user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Get all trades awaiting manual approval."""
-        # Expire old pending trades first
-        expired = await ctx.db.expire_pending_trades(max_age_minutes=30)
+        # Expire stale pending trades — use generous timeout so trades
+        # survive server restarts and user away periods
+        expired = await ctx.db.expire_pending_trades(max_age_minutes=480)  # 8 hours (full trading day)
         if expired:
-            logger.info("Expired %d stale pending trades", expired)
+            logger.info("Expired %d stale pending trades (>8h old)", expired)
         return await ctx.db.get_pending_trades()
 
     @app.post("/api/clear-signals")
