@@ -65,16 +65,8 @@ class PositionMonitorSkill(SkillBase):
         except Exception:
             logger.debug("Holdings fetch failed for adoption check", exc_info=True)
 
-        discrepancies = self._reconcile(local_positions, broker_positions)
-
-        # Recover ghost positions: local DB says open, broker says closed.
-        # This happens when broker-side SL triggers or manual broker actions.
-        recovered = await self._recover_ghost_positions(
-            local_positions, broker_positions,
-        )
-
-        # Adopt untracked broker positions into local DB
-        # (e.g., bought directly on Kite, or from failed order retries)
+        # Adopt untracked broker positions BEFORE reconciliation
+        # so adopted symbols don't show up as discrepancies
         locked_symbols = await self.ctx.db.get_locked_symbols()
         adopted = await self._adopt_untracked_positions(
             local_positions, broker_positions, locked_symbols,
@@ -83,12 +75,18 @@ class PositionMonitorSkill(SkillBase):
             # Refresh local positions to include newly adopted ones
             local_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
 
+        discrepancies = self._reconcile(local_positions, broker_positions)
+
+        # Recover ghost positions: local DB says open, broker says closed.
+        # This happens when broker-side SL triggers or manual broker actions.
+        recovered = await self._recover_ghost_positions(
+            local_positions, broker_positions,
+        )
+
         if discrepancies:
             parts = [f"Position discrepancy detected:\n" + "\n".join(discrepancies)]
             if recovered:
                 parts.append(f"Auto-recovered: {', '.join(recovered)}")
-            if adopted:
-                parts.append(f"Auto-adopted: {', '.join(adopted)}")
             await self.ctx.notify.send("\n".join(parts), alert_type="errors")
 
         trails_modified = 0
@@ -348,8 +346,17 @@ class PositionMonitorSkill(SkillBase):
                 logger.warning("Cannot adopt %s: no valid average_price from broker", sym)
                 continue
 
-            # Compute SL/target from ATR
-            sl_price, target_price = await self._compute_atr_levels(sym, entry_price, signal_type)
+            # For adopted positions, compute SL/target from CURRENT price
+            # (what should I do NOW?) not the historical purchase price.
+            # The purchase price is recorded as entry_price for P&L tracking,
+            # but the risk levels should reflect the current market reality.
+            current_price = entry_price
+            try:
+                current_price = await self.ctx.market_data.get_ltp(sym)
+            except Exception:
+                logger.debug("LTP unavailable for adopted %s, using entry price", sym)
+
+            sl_price, target_price = await self._compute_atr_levels(sym, current_price, signal_type)
 
             trade = {
                 "symbol": sym,
@@ -380,8 +387,9 @@ class PositionMonitorSkill(SkillBase):
                     signal_type, sym, abs_qty, entry_price, sl_price, target_price, trade_id,
                 )
                 await self.ctx.notify.send(
-                    f"Adopted untracked position: {signal_type} {sym} x{abs_qty} "
-                    f"@ ₹{entry_price:.2f} (SL=₹{sl_price:.2f}, Target=₹{target_price:.2f})",
+                    f"Adopted untracked position: {signal_type} {sym} x{abs_qty}\n"
+                    f"  Entry: ₹{entry_price:.2f} | LTP: ₹{current_price:.2f}\n"
+                    f"  SL: ₹{sl_price:.2f} | Target: ₹{target_price:.2f}",
                     alert_type="trade_entry",
                 )
             except Exception:
