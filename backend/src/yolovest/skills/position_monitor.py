@@ -333,7 +333,7 @@ class PositionMonitorSkill(SkillBase):
             sym = bp.get("tradingsymbol") or bp.get("symbol", "")
             qty = bp.get("quantity", bp.get("net_quantity", 0))
 
-            if not sym or qty == 0 or sym in local_symbols or sym in locked_symbols:
+            if not sym or qty == 0 or sym in local_symbols:
                 continue
 
             # Determine direction from quantity sign (positive = long/BUY, negative = short/SELL)
