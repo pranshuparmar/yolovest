@@ -5,10 +5,12 @@ function Card({
   label,
   value,
   color,
+  subtitle,
 }: {
   label: string;
   value: string;
   color?: string;
+  subtitle?: string;
 }) {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -16,6 +18,7 @@ function Card({
       <p className={clsx("text-xl font-semibold", color || "text-gray-100")}>
         {value}
       </p>
+      {subtitle && <p className="text-[10px] text-gray-500 mt-0.5">{subtitle}</p>}
     </div>
   );
 }
@@ -49,13 +52,22 @@ export function PortfolioCards() {
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-      <Card label="Total Capital" value={`₹${fmt(data.total_capital, 0)}`} />
-      <Card label="Available Cash" value={`₹${fmt(data.available_cash, 0)}`} />
+      <Card label="Trading Capital" value={`₹${fmt(data.total_capital, 0)}`} />
+      <Card
+        label="Available Cash"
+        value={`₹${fmt(data.available_cash, 0)}`}
+        subtitle={data.system_position_value > 0 ? `₹${fmt(data.system_position_value, 0)} in trades` : undefined}
+      />
       <Card
         label="Exposure"
         value={`${fmt(data.exposure_pct * 100, 1)}%`}
+        subtitle={data.adopted_positions > 0 ? `+${data.adopted_positions} adopted` : undefined}
       />
-      <Card label="Open Positions" value={String(data.open_positions)} />
+      <Card
+        label="Open Positions"
+        value={data.system_positions > 0 ? `${data.system_positions}` : "0"}
+        subtitle={data.adopted_positions > 0 ? `+${data.adopted_positions} holdings` : undefined}
+      />
       <Card
         label="Daily PnL"
         value={`${data.daily_pnl_pct >= 0 ? "+" : ""}${fmt(data.daily_pnl_pct, 2)}%`}

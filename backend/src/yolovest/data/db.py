@@ -1272,18 +1272,29 @@ class Database:
         # Stock exposures and sector counts
         stock_exposures: dict[str, float] = {}
         sector_counts: dict[str, int] = {}
-        total_position_value = 0.0
+        system_position_value = 0.0  # positions created by the trading system
+        adopted_position_value = 0.0  # positions imported from broker holdings
+        system_position_count = 0
+        adopted_position_count = 0
 
         for pos in positions:
             symbol = pos.get("symbol", "")
             qty = pos.get("quantity", 0)
             entry = pos.get("entry_price", 0)
             value = qty * entry
-            total_position_value += value
+
+            if pos.get("origin") == "adopted":
+                adopted_position_value += value
+                adopted_position_count += 1
+            else:
+                system_position_value += value
+                system_position_count += 1
 
             sector = pos.get("sector") or await self.get_stock_sector(symbol)
             if sector:
                 sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
+        total_position_value = system_position_value + adopted_position_value
 
         # total_capital = initial + all realized PnL
         cursor = await self.conn.execute(
@@ -1301,8 +1312,10 @@ class Database:
                 entry = pos.get("entry_price", 0)
                 stock_exposures[symbol] = (qty * entry) / total_capital
 
-        exposure_pct = total_position_value / total_capital if total_capital > 0 else 0
-        available_cash = total_capital - total_position_value
+        # Available cash: only deduct system-traded positions, not adopted holdings
+        # (adopted holdings represent money already invested outside the system)
+        exposure_pct = system_position_value / total_capital if total_capital > 0 else 0
+        available_cash = total_capital - system_position_value
 
         # Today's trades count
         cursor = await self.conn.execute(
@@ -1362,6 +1375,10 @@ class Database:
             "available_cash": available_cash,
             "exposure_pct": exposure_pct,
             "open_positions": open_count,
+            "system_positions": system_position_count,
+            "adopted_positions": adopted_position_count,
+            "system_position_value": round(system_position_value, 2),
+            "adopted_position_value": round(adopted_position_value, 2),
             "stock_exposures": stock_exposures,
             "sector_counts": sector_counts,
             "daily_pnl_pct": daily_pnl_pct,
