@@ -362,7 +362,22 @@ class HeartbeatOrchestrator:
             )
 
         logger.info("Running skill: %s", name)
-        result = await skill.safe_execute(**kwargs)
+        # Timeout to prevent a hung skill from blocking the entire heartbeat
+        _SKILL_TIMEOUT_SEC = 300  # 5 minutes max per skill
+        try:
+            result = await asyncio.wait_for(
+                skill.safe_execute(**kwargs), timeout=_SKILL_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Skill '%s' TIMED OUT after %ds — force-skipping",
+                name, _SKILL_TIMEOUT_SEC,
+            )
+            result = SkillResult(
+                success=False,
+                skill_name=name,
+                error=f"Timed out after {_SKILL_TIMEOUT_SEC}s",
+            )
         logger.info(
             "Skill %s completed: success=%s, duration=%.1fms",
             name,
