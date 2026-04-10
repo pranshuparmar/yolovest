@@ -173,18 +173,25 @@ class TelegramBot:
         """Handle /start — quick status summary."""
         mode = self._ctx.config.mode.upper()
         kill_active = await self._ctx.db.is_kill_switch_active()
-        positions = await self._ctx.db.get_open_positions()
-        trades = await self._ctx.db.get_todays_trades()
+        positions = await self._ctx.db.get_open_positions(mode=self._ctx.config.mode)
+        trades = await self._ctx.db.get_todays_trades(mode=self._ctx.config.mode)
         pending = await self._ctx.db.get_pending_trades()
         total_pnl = sum(t.get("pnl", 0) for t in trades if t.get("pnl") is not None)
         sign = "+" if total_pnl >= 0 else ""
 
+        system_pos = [p for p in positions if p.get("origin") != "adopted"]
+        adopted_pos = [p for p in positions if p.get("origin") == "adopted"]
+
         msg = (
             f"<b>YoloVest</b> — {mode}"
             f"{' | PAUSED' if kill_active else ''}\n"
-            f"Positions: {len(positions)} | "
-            f"Trades today: {len(trades)} | "
-            f"PnL: {sign}₹{_fmt_inr(total_pnl)}\n"
+            f"Positions: {len(system_pos)}"
+        )
+        if adopted_pos:
+            msg += f" (+{len(adopted_pos)} holdings)"
+        msg += (
+            f" | Trades today: {len(trades)}"
+            f" | PnL: {sign}₹{_fmt_inr(total_pnl)}\n"
         )
         if pending:
             msg += f"<b>{len(pending)} pending</b> — /pending to review\n"
@@ -287,32 +294,50 @@ class TelegramBot:
 
     async def _cmd_pnl(self, update: Any, context: Any) -> None:
         """Handle /pnl command."""
-        trades = await self._ctx.db.get_todays_trades()
+        trades = await self._ctx.db.get_todays_trades(mode=self._ctx.config.mode)
         total_pnl = sum(t.get("pnl", 0) for t in trades if t.get("pnl") is not None)
         wins = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
         losses = sum(1 for t in trades if (t.get("pnl") or 0) < 0)
 
         sign = "+" if total_pnl >= 0 else ""
         await update.message.reply_html(
-            f"<b>Today's PnL</b>\n"
+            f"<b>Today's PnL ({self._ctx.config.mode.upper()})</b>\n"
             f"Total: {sign}₹{_fmt_inr(total_pnl)}\n"
             f"Trades: {len(trades)} (W:{wins} L:{losses})"
         )
 
     async def _cmd_positions(self, update: Any, context: Any) -> None:
         """Handle /positions command."""
-        positions = await self._ctx.db.get_open_positions()
+        positions = await self._ctx.db.get_open_positions(mode=self._ctx.config.mode)
         if not positions:
             await update.message.reply_text("No open positions.")
             return
 
-        lines = ["<b>Open Positions</b>"]
-        for pos in positions:
-            lines.append(
-                f"  {pos.get('signal_type', '?')} {pos.get('symbol', '?')} "
-                f"qty={pos.get('quantity', 0)} @ ₹{_fmt_inr(pos.get('entry_price', 0))}"
-            )
-        await update.message.reply_html("\n".join(lines))
+        system_pos = [p for p in positions if p.get("origin") != "adopted"]
+        adopted_pos = [p for p in positions if p.get("origin") == "adopted"]
+
+        lines = []
+        if system_pos:
+            lines.append(f"<b>Active Trades ({len(system_pos)})</b>")
+            for pos in system_pos:
+                lines.append(
+                    f"  {pos.get('signal_type', '?')} <b>{pos.get('symbol', '?')}</b> "
+                    f"x{pos.get('quantity', 0)} @ ₹{_fmt_inr(pos.get('entry_price', 0))}"
+                    f"  SL ₹{_fmt_inr(pos.get('stop_loss_price', 0))} → Target ₹{_fmt_inr(pos.get('target_price', 0))}"
+                )
+
+        if adopted_pos:
+            lines.append(f"\n<b>Adopted Holdings ({len(adopted_pos)})</b>")
+            for pos in adopted_pos:
+                lines.append(
+                    f"  {pos.get('signal_type', '?')} <b>{pos.get('symbol', '?')}</b> "
+                    f"x{pos.get('quantity', 0)} @ ₹{_fmt_inr(pos.get('entry_price', 0))}"
+                )
+
+        if not lines:
+            await update.message.reply_text("No open positions.")
+        else:
+            await update.message.reply_html("\n".join(lines))
 
     async def _cmd_stop(self, update: Any, context: Any) -> None:
         """Handle /stop — pause trading."""
