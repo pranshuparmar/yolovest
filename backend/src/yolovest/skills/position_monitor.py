@@ -127,29 +127,36 @@ class PositionMonitorSkill(SkillBase):
                 continue
 
             # Partial profit booking (before target/SL checks)
-            partial_booked = await self._check_partial_profit_booking(
-                pos, current_price,
-            )
-            if partial_booked:
-                # Update unrealized PnL for remaining position and move on;
-                # skip target/SL checks this cycle to let the partial order settle
-                await self.ctx.db.update_unrealized_pnl(
-                    pos["trade_id"], current_price,
+            # In manual mode, skip auto partial profit — user decides
+            is_manual = self.ctx.config.execution.transaction_mode == "manual"
+            if not is_manual:
+                partial_booked = await self._check_partial_profit_booking(
+                    pos, current_price,
                 )
-                continue
+                if partial_booked:
+                    await self.ctx.db.update_unrealized_pnl(
+                        pos["trade_id"], current_price,
+                    )
+                    continue
 
             # Target hit?
             if (pos["signal_type"] == "BUY" and current_price >= target) or (
                 pos["signal_type"] == "SELL" and current_price <= target
             ):
-                exit_price, pnl = await self._close_position_on_broker(
-                    pos, current_price, entry, "target",
-                )
-                targets_hit.append({"symbol": symbol, "pnl": pnl})
-                logger.info(
-                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f",
-                    symbol, exit_price, pnl,
-                )
+                if is_manual:
+                    # Queue exit for approval instead of auto-executing
+                    await self._queue_exit_for_approval(pos, current_price, "target_hit")
+                    targets_hit.append({"symbol": symbol, "pnl": 0})
+                    logger.info("position-monitor: TARGET HIT %s — queued for approval (manual mode)", symbol)
+                else:
+                    exit_price, pnl = await self._close_position_on_broker(
+                        pos, current_price, entry, "target",
+                    )
+                    targets_hit.append({"symbol": symbol, "pnl": pnl})
+                    logger.info(
+                        "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f",
+                        symbol, exit_price, pnl,
+                    )
                 continue
 
             # SL hit?
@@ -664,6 +671,38 @@ class PositionMonitorSkill(SkillBase):
             symbol, reason, pnl_pct, current_price, pnl,
         )
         return {**result_base, "action": "closed", "reason": reason, "pnl": pnl}
+
+    async def _queue_exit_for_approval(
+        self, pos: dict[str, Any], current_price: float, reason: str,
+    ) -> None:
+        """Queue a position exit as a pending trade for manual approval.
+
+        Used in manual mode for target hits and partial profits — user
+        decides whether to actually exit. SL hits always auto-execute.
+        """
+        exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
+        signal = {
+            "symbol": pos["symbol"],
+            "signal_type": exit_side,
+            "entry_price": current_price,
+            "target_price": pos.get("target_price", current_price),
+            "stop_loss_price": pos.get("stop_loss_price", current_price),
+            "position_size": pos.get("quantity", 0),
+            "confidence_score": 1.0,
+            "product": pos.get("product", "CNC"),
+        }
+        pending_id = await self.ctx.db.insert_pending_trade(signal)
+        await self.ctx.notify.send(
+            f"Pending exit ({reason}): {exit_side} {pos['symbol']} "
+            f"x{pos.get('quantity', 0)} @ ₹{current_price:.2f}\n"
+            f"Approve: /approve {pos['symbol']}\n"
+            f"Reject: /reject {pos['symbol']}",
+            alert_type="trade_exit",
+        )
+        logger.info(
+            "position-monitor: queued %s exit for %s (reason=%s, pending_id=%d)",
+            exit_side, pos["symbol"], reason, pending_id,
+        )
 
     async def _close_position_on_broker(
         self,

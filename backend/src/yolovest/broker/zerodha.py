@@ -329,11 +329,16 @@ class ZerodhaBroker(BrokerBase):
             raise RuntimeError("Not authenticated")
 
         _MARKET_PROTECTION_PCT = 0.01  # 1% buffer
+        _TICK_SIZE = 0.05  # NSE tick size for most instruments
+
+        def _round_to_tick(p: float) -> float:
+            """Round price to nearest NSE tick size."""
+            return round(round(p / _TICK_SIZE) * _TICK_SIZE, 2)
 
         # Convert MARKET to LIMIT with market protection buffer
         if order_type == "MARKET" and price is not None and price > 0:
             buffer = price * _MARKET_PROTECTION_PCT
-            price = round(price + buffer if side == "BUY" else price - buffer, 2)
+            price = _round_to_tick(price + buffer if side == "BUY" else price - buffer)
             order_type = "LIMIT"
             logger.debug("Converted MARKET to LIMIT with protection: %s %s @ %.2f", side, symbol, price)
         elif order_type == "MARKET" and (price is None or price <= 0):
@@ -344,7 +349,7 @@ class ZerodhaBroker(BrokerBase):
                 ltp = quotes.get(f"NSE:{symbol}", {}).get("last_price", 0)
                 if ltp > 0:
                     buffer = ltp * _MARKET_PROTECTION_PCT
-                    price = round(ltp + buffer if side == "BUY" else ltp - buffer, 2)
+                    price = _round_to_tick(ltp + buffer if side == "BUY" else ltp - buffer)
                     order_type = "LIMIT"
                     logger.debug("Converted MARKET to LIMIT via LTP: %s %s @ %.2f", side, symbol, price)
             except Exception:
@@ -353,7 +358,8 @@ class ZerodhaBroker(BrokerBase):
         # Convert SL-M to SL with limit price buffer
         if order_type == "SL-M" and trigger_price is not None:
             buffer = trigger_price * _MARKET_PROTECTION_PCT
-            price = round(trigger_price - buffer if side == "BUY" else trigger_price + buffer, 2)
+            price = _round_to_tick(trigger_price - buffer if side == "BUY" else trigger_price + buffer)
+            trigger_price = _round_to_tick(trigger_price)
             order_type = "SL"
             logger.debug("Converted SL-M to SL with limit: %s %s trigger=%.2f limit=%.2f", side, symbol, trigger_price, price)
 
@@ -477,11 +483,9 @@ class ZerodhaBroker(BrokerBase):
 
         # SL orders have a limit price — update it with a buffer from trigger
         _MARKET_PROTECTION_PCT = 0.01
-        # Determine SL side from the order to set correct limit direction
-        order_info = self._paper_orders.get(order_id) if self._mode == "paper" else None
-        # For live: SL sell limit is below trigger, SL buy limit is above trigger
-        # We don't know the side here, so use a wider buffer in both directions
-        limit_price = round(new_trigger_price * (1 - _MARKET_PROTECTION_PCT), 2)
+        _TICK_SIZE = 0.05
+        new_trigger_price = round(round(new_trigger_price / _TICK_SIZE) * _TICK_SIZE, 2)
+        limit_price = round(round((new_trigger_price * (1 - _MARKET_PROTECTION_PCT)) / _TICK_SIZE) * _TICK_SIZE, 2)
 
         def _modify() -> None:
             self._kite.modify_order(
@@ -516,6 +520,7 @@ class ZerodhaBroker(BrokerBase):
             "order not found",
             "margin",
             "quantity",
+            "tick size",
         )
 
         last_error: Exception | None = None
