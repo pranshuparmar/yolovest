@@ -75,7 +75,7 @@ class PositionMonitorSkill(SkillBase):
             # Refresh local positions to include newly adopted ones
             local_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
 
-        discrepancies = self._reconcile(local_positions, broker_positions)
+        discrepancies = await self._reconcile(local_positions, broker_positions)
 
         # Recover ghost positions: local DB says open, broker says closed.
         # This happens when broker-side SL triggers or manual broker actions.
@@ -441,8 +441,8 @@ class PositionMonitorSkill(SkillBase):
             return (round(entry_price * 0.97, 2), round(entry_price * 1.05, 2))
         return (round(entry_price * 1.03, 2), round(entry_price * 0.95, 2))
 
-    def _reconcile(self, local: list[dict[str, Any]], broker: list[dict[str, Any]]) -> list[str]:
-        """Compare local DB positions with broker positions."""
+    async def _reconcile(self, local: list[dict[str, Any]], broker: list[dict[str, Any]]) -> list[str]:
+        """Compare local DB positions with broker positions. Auto-fixes qty mismatches."""
         discrepancies = []
 
         # Build lookup by symbol for broker positions
@@ -469,9 +469,25 @@ class PositionMonitorSkill(SkillBase):
             broker_qty = bp.get("quantity", bp.get("net_quantity", 0))
             local_qty = pos.get("quantity", 0)
             if broker_qty != local_qty:
-                discrepancies.append(
-                    f"{symbol}: qty mismatch (local={local_qty}, broker={broker_qty})"
-                )
+                # Auto-fix: broker is source of truth
+                try:
+                    await self.ctx.db.conn.execute(
+                        "UPDATE trades SET quantity = ? WHERE trade_id = ?",
+                        (broker_qty, pos["trade_id"]),
+                    )
+                    await self.ctx.db.conn.commit()
+                    logger.info(
+                        "Auto-fixed qty for %s: %d → %d (broker is source of truth)",
+                        symbol, local_qty, broker_qty,
+                    )
+                    discrepancies.append(
+                        f"{symbol}: qty auto-fixed {local_qty}→{broker_qty}"
+                    )
+                except Exception:
+                    logger.warning("Failed to auto-fix qty for %s", symbol, exc_info=True)
+                    discrepancies.append(
+                        f"{symbol}: qty mismatch (local={local_qty}, broker={broker_qty})"
+                    )
 
         # Check for broker positions not in local DB
         for sym, bp in broker_by_symbol.items():
