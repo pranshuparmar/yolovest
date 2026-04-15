@@ -698,6 +698,7 @@ class PositionMonitorSkill(SkillBase):
         Skips if a pending exit already exists for this symbol.
         """
         symbol = pos["symbol"]
+        exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
 
         # Dedup: skip if a pending exit already exists for this symbol
         existing = await self.ctx.db.get_pending_trade_by_symbol(symbol)
@@ -708,7 +709,13 @@ class PositionMonitorSkill(SkillBase):
             )
             return
 
-        exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
+        # Respect user rejection: don't re-queue for 4 hours after rejection
+        if await self.ctx.db.was_recently_rejected(symbol, exit_side, hours=4):
+            logger.info(
+                "position-monitor: skipping %s %s exit — user rejected recently",
+                exit_side, symbol,
+            )
+            return
         qty = pos.get("quantity", 0)
         entry = pos.get("entry_price", 0)
         invested = round(qty * entry, 2)

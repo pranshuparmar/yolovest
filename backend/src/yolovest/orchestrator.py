@@ -287,6 +287,7 @@ class HeartbeatOrchestrator:
         if self._ctx.config.execution.transaction_mode == "manual":
             # Dedup: skip if a pending entry already exists for this symbol
             sym_for_dedup = signal.get("symbol", "") if isinstance(signal, dict) else ""
+            sig_type_for_dedup = signal.get("signal_type", "") if isinstance(signal, dict) else ""
             if sym_for_dedup:
                 existing = await self._ctx.db.get_pending_trade_by_symbol(sym_for_dedup)
                 if existing:
@@ -297,6 +298,18 @@ class HeartbeatOrchestrator:
                     results[f"{prefix}/pending"] = SkillResult(
                         success=True, skill_name="pending-approval",
                         data={"skipped": True, "reason": "pending_exists", "symbol": sym_for_dedup},
+                    )
+                    return results
+
+                # Respect user rejection: don't re-queue for 4 hours
+                if await self._ctx.db.was_recently_rejected(sym_for_dedup, sig_type_for_dedup, hours=4):
+                    logger.info(
+                        "Manual mode: skipping %s %s — user rejected recently",
+                        sig_type_for_dedup, sym_for_dedup,
+                    )
+                    results[f"{prefix}/pending"] = SkillResult(
+                        success=True, skill_name="pending-approval",
+                        data={"skipped": True, "reason": "recently_rejected", "symbol": sym_for_dedup},
                     )
                     return results
 

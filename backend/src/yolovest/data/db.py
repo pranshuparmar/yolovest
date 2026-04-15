@@ -2518,6 +2518,22 @@ class Database:
         row = await cursor.fetchone()
         return dict[str, Any](row) if row else None
 
+    async def was_recently_rejected(self, symbol: str, signal_type: str, hours: int = 4) -> bool:
+        """Check if a symbol+signal_type was rejected within the last N hours.
+
+        Used to prevent re-queuing the same trade right after user rejects it.
+        """
+        from datetime import timedelta
+        cutoff = (now_utc() - timedelta(hours=hours)).isoformat()
+        cursor = await self.read_conn.execute(
+            "SELECT 1 FROM pending_trades "
+            "WHERE status = 'rejected' AND UPPER(symbol) = UPPER(?) "
+            "AND signal_type = ? AND decided_at >= ? "
+            "LIMIT 1",
+            (symbol, signal_type, cutoff),
+        )
+        return await cursor.fetchone() is not None
+
     async def decide_pending_trade(
         self, trade_id: int, decision: str, decided_by: str,
         overrides: dict[str, Any] | None = None,
