@@ -285,18 +285,49 @@ class HeartbeatOrchestrator:
 
         # Manual approval mode — queue instead of executing
         if self._ctx.config.execution.transaction_mode == "manual":
+            # Dedup: skip if a pending entry already exists for this symbol
+            sym_for_dedup = signal.get("symbol", "") if isinstance(signal, dict) else ""
+            if sym_for_dedup:
+                existing = await self._ctx.db.get_pending_trade_by_symbol(sym_for_dedup)
+                if existing:
+                    logger.info(
+                        "Manual mode: skipping %s — pending trade already exists (id=%s)",
+                        sym_for_dedup, existing.get("id"),
+                    )
+                    results[f"{prefix}/pending"] = SkillResult(
+                        success=True, skill_name="pending-approval",
+                        data={"skipped": True, "reason": "pending_exists", "symbol": sym_for_dedup},
+                    )
+                    return results
+
             pending_id = await self._ctx.db.insert_pending_trade(signal)
-            symbol = signal.get("symbol", "?") if isinstance(signal, dict) else "?"
+            symbol = sym_for_dedup or "?"
             sig_type = signal.get("signal_type", "?") if isinstance(signal, dict) else "?"
             conf = signal.get("confidence_score", 0) if isinstance(signal, dict) else 0
             entry = signal.get("entry_price", 0) if isinstance(signal, dict) else 0
+            target = signal.get("target_price", 0) if isinstance(signal, dict) else 0
+            sl = signal.get("stop_loss_price", 0) if isinstance(signal, dict) else 0
+            qty = signal.get("position_size", 0) if isinstance(signal, dict) else 0
+            product = signal.get("product", "MIS") if isinstance(signal, dict) else "MIS"
+            holding = signal.get("expected_holding_period", "") if isinstance(signal, dict) else ""
+            days = signal.get("expected_holding_days", 0) if isinstance(signal, dict) else 0
+            investment = round(qty * entry, 2)
+            risk = round(qty * abs(entry - sl), 2)
+            reward = round(qty * abs(target - entry), 2)
+            rr_ratio = round(reward / risk, 2) if risk > 0 else 0
+
             logger.info(
                 "Manual mode: queued %s %s @ %.2f conf=%.0f%% (pending_id=%d)",
                 sig_type, symbol, entry, conf * 100, pending_id,
             )
+            hold_label = f"{holding} ({days}d)" if days > 0 else holding or "intraday"
             await self._ctx.notify.send(
-                f"Pending approval: {sig_type} {symbol} @ ₹{entry:.2f} "
-                f"(conf {conf:.0%})\n"
+                f"Pending Entry\n"
+                f"{sig_type} <b>{symbol}</b> x{qty} ({product}) — {hold_label}\n"
+                f"  Entry: ₹{entry:.2f} | Target: ₹{target:.2f} | SL: ₹{sl:.2f}\n"
+                f"  Investment: ₹{investment:,.2f}\n"
+                f"  Risk: ₹{risk:,.2f} | Reward: ₹{reward:,.2f} (R:R {rr_ratio}:1)\n"
+                f"  Confidence: {conf:.0%}\n"
                 f"Approve: /approve {symbol}\n"
                 f"Reject: /reject {symbol}",
                 alert_type="trade_entry",

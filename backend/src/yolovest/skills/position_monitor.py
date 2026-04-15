@@ -695,29 +695,53 @@ class PositionMonitorSkill(SkillBase):
 
         Used in manual mode for target hits and partial profits — user
         decides whether to actually exit. SL hits always auto-execute.
+        Skips if a pending exit already exists for this symbol.
         """
+        symbol = pos["symbol"]
+
+        # Dedup: skip if a pending exit already exists for this symbol
+        existing = await self.ctx.db.get_pending_trade_by_symbol(symbol)
+        if existing:
+            logger.debug(
+                "position-monitor: pending exit already exists for %s (id=%s), skipping",
+                symbol, existing.get("id"),
+            )
+            return
+
         exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
+        qty = pos.get("quantity", 0)
+        entry = pos.get("entry_price", 0)
+        invested = round(qty * entry, 2)
+        current_value = round(qty * current_price, 2)
+        pnl = round(current_value - invested, 2)
+        pnl_pct = round((pnl / invested * 100) if invested > 0 else 0, 2)
+        pnl_sign = "+" if pnl >= 0 else ""
+
         signal = {
-            "symbol": pos["symbol"],
+            "symbol": symbol,
             "signal_type": exit_side,
             "entry_price": current_price,
             "target_price": pos.get("target_price", current_price),
             "stop_loss_price": pos.get("stop_loss_price", current_price),
-            "position_size": pos.get("quantity", 0),
+            "position_size": qty,
             "confidence_score": 1.0,
             "product": pos.get("product", "CNC"),
         }
         pending_id = await self.ctx.db.insert_pending_trade(signal)
         await self.ctx.notify.send(
-            f"Pending exit ({reason}): {exit_side} {pos['symbol']} "
-            f"x{pos.get('quantity', 0)} @ ₹{current_price:.2f}\n"
-            f"Approve: /approve {pos['symbol']}\n"
-            f"Reject: /reject {pos['symbol']}",
+            f"Pending Exit — {reason.replace('_', ' ').upper()}\n"
+            f"{exit_side} <b>{symbol}</b> x{qty} ({pos.get('product', 'CNC')})\n"
+            f"  Entry: ₹{entry:.2f} → LTP: ₹{current_price:.2f}\n"
+            f"  Invested: ₹{invested:,.2f} | Current: ₹{current_value:,.2f}\n"
+            f"  PnL: {pnl_sign}₹{pnl:,.2f} ({pnl_sign}{pnl_pct}%)\n"
+            f"  SL: ₹{pos.get('stop_loss_price', 0):.2f} | Target: ₹{pos.get('target_price', 0):.2f}\n"
+            f"Approve: /approve {symbol}\n"
+            f"Reject: /reject {symbol}",
             alert_type="trade_exit",
         )
         logger.info(
-            "position-monitor: queued %s exit for %s (reason=%s, pending_id=%d)",
-            exit_side, pos["symbol"], reason, pending_id,
+            "position-monitor: queued %s exit for %s (reason=%s, pending_id=%d, pnl=₹%.2f)",
+            exit_side, symbol, reason, pending_id, pnl,
         )
 
     async def _close_position_on_broker(
