@@ -709,8 +709,9 @@ class PositionMonitorSkill(SkillBase):
             )
             return
 
-        # Respect user rejection: don't re-queue for 4 hours after rejection
-        if await self.ctx.db.was_recently_rejected(symbol, exit_side, hours=4):
+        # Respect user rejection: don't re-queue within the cooldown window
+        cooldown_hours = self.ctx.config.execution.rejection_cooldown_hours
+        if await self.ctx.db.was_recently_rejected(symbol, exit_side, hours=cooldown_hours):
             logger.info(
                 "position-monitor: skipping %s %s exit — user rejected recently",
                 exit_side, symbol,

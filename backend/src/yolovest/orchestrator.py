@@ -301,8 +301,9 @@ class HeartbeatOrchestrator:
                     )
                     return results
 
-                # Respect user rejection: don't re-queue for 4 hours
-                if await self._ctx.db.was_recently_rejected(sym_for_dedup, sig_type_for_dedup, hours=4):
+                # Respect user rejection: don't re-queue within the cooldown window
+                cooldown_hours = self._ctx.config.execution.rejection_cooldown_hours
+                if await self._ctx.db.was_recently_rejected(sym_for_dedup, sig_type_for_dedup, hours=cooldown_hours):
                     logger.info(
                         "Manual mode: skipping %s %s — user rejected recently",
                         sig_type_for_dedup, sym_for_dedup,

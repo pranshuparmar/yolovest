@@ -270,6 +270,7 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "execution.order_timeout_sec": "Order Timeout (sec)",
   "execution.price_drift_max_pct": "Max Price Drift",
   "execution.transaction_mode": "Transaction Mode",
+  "execution.rejection_cooldown_hours": "Rejection Cooldown (hours)",
   // Scaled Entry
   "execution.scaled_entry.enabled": "Scaled Entry",
   "execution.scaled_entry.legs": "Entry Legs",
@@ -434,6 +435,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "execution.order_timeout_sec": "Cancel unfilled order remainder after this many seconds.",
   "execution.price_drift_max_pct": "Reject signal if current price drifted more than this from entry price.",
   "execution.transaction_mode": "Auto executes immediately. Manual requires approval via Telegram/UI.",
+  "execution.rejection_cooldown_hours": "After rejecting a trade, don't re-queue the same symbol+side for this many hours. 0 = no cooldown, 168 = 7 days.",
   "execution.scaled_entry.enabled": "Split orders into multiple legs for better average entry price.",
   "execution.scaled_entry.legs": "Number of entry legs (2 = split into two orders).",
   "execution.scaled_entry.second_leg_offset_pct": "Second leg limit price offset from entry (0.005 = 0.5% lower for BUY).",

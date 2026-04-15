@@ -386,6 +386,7 @@ class ExecutionConfig(BaseModel):
     order_timeout_sec: int = 30
     price_drift_max_pct: float = Field(default=0.02, gt=0, lt=1)
     transaction_mode: Literal["auto", "manual"] = "auto"  # manual = require approval before execution
+    rejection_cooldown_hours: int = Field(default=48, ge=0, le=168)  # skip re-queuing a rejected trade
 
 
 class TransactionCostConfig(BaseModel):
