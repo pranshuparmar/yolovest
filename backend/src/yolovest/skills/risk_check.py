@@ -87,7 +87,9 @@ class RiskCheckSkill(SkillBase):
             remaining = cfg.loss_cooldown_minutes - portfolio["minutes_since_last_loss"]
             return self._reject(signal, f"Loss cooldown active ({remaining:.0f}min remaining)")
 
-        # Max open positions (include pending approvals to prevent over-generation)
+        # Max open positions (system-generated trades only; adopted holdings
+        # are pre-existing investments and don't count toward the trading limit).
+        # Include pending approvals to prevent over-generation in manual mode.
         pending_count = 0
         if self.ctx.config.execution.transaction_mode == "manual":
             try:
@@ -95,13 +97,15 @@ class RiskCheckSkill(SkillBase):
                 pending_count = len(pending)
             except Exception:
                 logger.debug("Failed to count pending trades", exc_info=True)
-        effective_positions = portfolio["open_positions"] + pending_count
+        system_positions = portfolio.get("system_positions", portfolio["open_positions"])
+        adopted_positions = portfolio.get("adopted_positions", 0)
+        effective_positions = system_positions + pending_count
         if effective_positions >= cfg.max_open_positions:
             return self._reject(
                 signal,
                 f"Max open positions reached ({effective_positions} = "
-                f"{portfolio['open_positions']} open + {pending_count} pending, "
-                f"limit={cfg.max_open_positions})",
+                f"{system_positions} system + {pending_count} pending, "
+                f"limit={cfg.max_open_positions}; {adopted_positions} adopted not counted)",
             )
 
         # Max portfolio exposure
