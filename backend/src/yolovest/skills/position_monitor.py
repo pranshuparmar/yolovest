@@ -144,10 +144,13 @@ class PositionMonitorSkill(SkillBase):
                 pos["signal_type"] == "SELL" and current_price <= target
             ):
                 if is_manual:
-                    # Queue exit for approval instead of auto-executing
-                    await self._queue_exit_for_approval(pos, current_price, "target_hit")
-                    targets_hit.append({"symbol": symbol, "pnl": 0})
-                    logger.info("position-monitor: TARGET HIT %s — queued for approval (manual mode)", symbol)
+                    # Queue exit for approval instead of auto-executing.
+                    # Returns True if newly queued, False if skipped (dedup/rejection).
+                    queued = await self._queue_exit_for_approval(pos, current_price, "target_hit")
+                    if queued:
+                        logger.info("position-monitor: TARGET HIT %s — queued for approval (manual mode)", symbol)
+                    # Don't add to targets_hit — no actual exit happened.
+                    # The queue itself sends a notification; no need for a separate "Exit" alert.
                 else:
                     exit_price, pnl = await self._close_position_on_broker(
                         pos, current_price, entry, "target",
@@ -696,7 +699,7 @@ class PositionMonitorSkill(SkillBase):
 
     async def _queue_exit_for_approval(
         self, pos: dict[str, Any], current_price: float, reason: str,
-    ) -> None:
+    ) -> bool:
         """Queue a position exit as a pending trade for manual approval.
 
         Used in manual mode for target hits and partial profits — user
@@ -713,7 +716,7 @@ class PositionMonitorSkill(SkillBase):
                 "position-monitor: pending exit already exists for %s (id=%s), skipping",
                 symbol, existing.get("id"),
             )
-            return
+            return False
 
         # Respect user rejection: don't re-queue within the cooldown window
         cooldown_hours = self.ctx.config.execution.rejection_cooldown_hours
@@ -722,7 +725,7 @@ class PositionMonitorSkill(SkillBase):
                 "position-monitor: skipping %s %s exit — user rejected recently",
                 exit_side, symbol,
             )
-            return
+            return False
         qty = pos.get("quantity", 0)
         entry = pos.get("entry_price", 0)
         invested = round(qty * entry, 2)
@@ -757,6 +760,7 @@ class PositionMonitorSkill(SkillBase):
             "position-monitor: queued %s exit for %s (reason=%s, pending_id=%d, pnl=₹%.2f)",
             exit_side, symbol, reason, pending_id, pnl,
         )
+        return True
 
     async def _close_position_on_broker(
         self,
