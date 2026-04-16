@@ -492,7 +492,14 @@ def create_app(ctx: AppContext) -> FastAPI:
         else:
             return {"recommendations": [], "error": "Provide symbols or authenticate with Kite for holdings review"}
 
-        indicator_cfg = ctx.config.strategy.indicators
+        from yolovest.data.features import IndicatorConfig
+        ind = ctx.config.strategy.indicators
+        indicator_cfg = IndicatorConfig(
+            ema_periods=ctx.config.strategy.ema_periods,
+            rsi=ind.rsi, macd=ind.macd, bollinger_bands=ind.bollinger_bands,
+            vwap=ind.vwap, atr=ind.atr, volume_profile=ind.volume_profile,
+            obv=ind.obv, supertrend=ind.supertrend,
+        )
         recommendations = []
 
         for symbol in symbols:

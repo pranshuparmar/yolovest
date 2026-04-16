@@ -498,7 +498,7 @@ class TelegramBot:
 
     async def _cmd_review(self, update: Any, context: Any) -> None:
         """Handle /review [SYMBOL ...] — ML review of any symbol or all holdings."""
-        from yolovest.data.features import compute_features
+        from yolovest.data.features import IndicatorConfig, compute_features
 
         args = context.args
 
@@ -516,7 +516,13 @@ class TelegramBot:
 
         await update.message.reply_text(f"Reviewing {len(symbols)} symbol{'s' if len(symbols) != 1 else ''}...")
 
-        indicator_cfg = self._ctx.config.strategy.indicators
+        ind = self._ctx.config.strategy.indicators
+        indicator_cfg = IndicatorConfig(
+            ema_periods=self._ctx.config.strategy.ema_periods,
+            rsi=ind.rsi, macd=ind.macd, bollinger_bands=ind.bollinger_bands,
+            vwap=ind.vwap, atr=ind.atr, volume_profile=ind.volume_profile,
+            obv=ind.obv, supertrend=ind.supertrend,
+        )
         lines = []
         for symbol in symbols[:15]:
             # Get price context — from holdings if held, else from market data

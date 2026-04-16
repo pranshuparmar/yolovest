@@ -411,7 +411,7 @@ class PositionMonitorSkill(SkillBase):
 
         Returns (stop_loss, target).
         """
-        from yolovest.data.features import compute_features
+        from yolovest.data.features import IndicatorConfig, compute_features
 
         sl_mult = 1.5  # default ATR multipliers
         target_mult = 2.5
@@ -419,7 +419,13 @@ class PositionMonitorSkill(SkillBase):
         try:
             bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=60)
             if bars and len(bars) >= 14:
-                indicator_cfg = self.ctx.config.strategy.indicators
+                ind = self.ctx.config.strategy.indicators
+                indicator_cfg = IndicatorConfig(
+                    ema_periods=self.ctx.config.strategy.ema_periods,
+                    rsi=ind.rsi, macd=ind.macd, bollinger_bands=ind.bollinger_bands,
+                    vwap=ind.vwap, atr=ind.atr, volume_profile=ind.volume_profile,
+                    obv=ind.obv, supertrend=ind.supertrend,
+                )
                 features = compute_features(bars, indicator_cfg)
                 atr = features.get("atr_14", 0) if features else 0
                 if atr > 0:
