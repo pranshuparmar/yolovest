@@ -846,7 +846,15 @@ class Database:
         await self.conn.commit()
 
     async def get_todays_signaled_symbols(self) -> set[str]:
-        """Get symbols that already have a signal or open position today."""
+        """Get symbols that should be skipped from new signal generation today.
+
+        Includes:
+        - Symbols with signals already generated today (avoid duplicates)
+        - Symbols with open SYSTEM-generated positions (avoid double-trading)
+
+        Excludes adopted holdings — we still want ML signals for them so
+        the user can get exit/buy-more recommendations on existing holdings.
+        """
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).astimezone(UTC).isoformat()
@@ -856,10 +864,11 @@ class Database:
             (today_start,),
         )
         signaled = {row[0] for row in await cursor.fetchall()}
-        # Symbols with open positions (regardless of when opened)
+        # Symbols with open SYSTEM-generated positions only (skip adopted holdings)
         cursor = await self.read_conn.execute(
             "SELECT DISTINCT symbol FROM trades "
-            "WHERE status IN ('open', 'partially_filled')"
+            "WHERE status IN ('open', 'partially_filled') "
+            "AND COALESCE(origin, 'system') = 'system'"
         )
         positioned = {row[0] for row in await cursor.fetchall()}
         return signaled | positioned
