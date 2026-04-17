@@ -91,9 +91,15 @@ class GenerateSignalsSkill(SkillBase):
         locked_symbols = await self.ctx.db.get_locked_symbols()
 
         # Skip symbols that already have a signal or open position today
-        already_signaled = await self.ctx.db.get_todays_signaled_symbols()
+        already_signaled = await self.ctx.db.get_todays_signaled_symbols(
+            mode=self.ctx.config.mode,
+        )
         if already_signaled:
             filter_counts["already_signaled"] = 0
+            logger.info(
+                "generate-signals: %d symbols blocked by already_signaled dedup: %s",
+                len(already_signaled), sorted(already_signaled),
+            )
 
         # Load symbol cooldown/repeat data
         cooldown_days = self.ctx.config.risk.symbol_cooldown_days
@@ -101,7 +107,9 @@ class GenerateSignalsSkill(SkillBase):
         repeat_min_conf = self.ctx.config.risk.symbol_repeat_min_confidence
         recently_traded: dict[str, str] = {}
         if repeat_lookback > 0:
-            recently_traded = await self.ctx.db.get_recently_traded_symbols(repeat_lookback)
+            recently_traded = await self.ctx.db.get_recently_traded_symbols(
+                repeat_lookback, mode=self.ctx.config.mode,
+            )
 
         now = now_ist()
 

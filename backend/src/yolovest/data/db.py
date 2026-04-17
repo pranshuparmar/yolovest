@@ -845,31 +845,42 @@ class Database:
         )
         await self.conn.commit()
 
-    async def get_todays_signaled_symbols(self) -> set[str]:
+    async def get_todays_signaled_symbols(self, mode: str | None = None) -> set[str]:
         """Get symbols that should be skipped from new signal generation today.
 
         Includes:
         - Symbols with signals already generated today (avoid duplicates)
-        - Symbols with open SYSTEM-generated positions (avoid double-trading)
+        - Symbols with open SYSTEM-generated positions in the current mode
+          (avoid double-trading)
 
-        Excludes adopted holdings — we still want ML signals for them so
-        the user can get exit/buy-more recommendations on existing holdings.
+        Excludes:
+        - Adopted holdings — we still want ML signals for them so the user
+          can get exit/buy-more recommendations.
+        - Positions from the other mode (paper vs live should not interfere).
         """
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).astimezone(UTC).isoformat()
+
         # Symbols with signals generated today
         cursor = await self.read_conn.execute(
             "SELECT DISTINCT symbol FROM signals WHERE created_at >= ?",
             (today_start,),
         )
         signaled = {row[0] for row in await cursor.fetchall()}
-        # Symbols with open SYSTEM-generated positions only (skip adopted holdings)
-        cursor = await self.read_conn.execute(
+
+        # Symbols with open SYSTEM-generated positions only (skip adopted).
+        # Filter by mode so old paper positions don't block live signal generation.
+        query = (
             "SELECT DISTINCT symbol FROM trades "
             "WHERE status IN ('open', 'partially_filled') "
             "AND COALESCE(origin, 'system') = 'system'"
         )
+        params: list[Any] = []
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        cursor = await self.read_conn.execute(query, params)
         positioned = {row[0] for row in await cursor.fetchall()}
         return signaled | positioned
 
@@ -899,20 +910,27 @@ class Database:
         )
         return {"signals_deleted": signals_deleted, "pending_deleted": pending_deleted}
 
-    async def get_recently_traded_symbols(self, lookback_days: int) -> dict[str, str]:
+    async def get_recently_traded_symbols(
+        self, lookback_days: int, mode: str | None = None,
+    ) -> dict[str, str]:
         """Get symbols traded in the last N days with their most recent trade date.
 
-        Returns {symbol: last_trade_date_iso} for symbols with closed trades
-        in the lookback window.
+        Returns {symbol: last_trade_date_iso} for symbols with trades
+        in the lookback window. Filters by mode and excludes adopted holdings.
         """
         from datetime import timedelta
         cutoff = (now_utc() - timedelta(days=lookback_days)).isoformat()
-        cursor = await self.conn.execute(
+        query = (
             "SELECT symbol, MAX(created_at) as last_trade "
             "FROM trades WHERE created_at >= ? "
-            "GROUP BY symbol",
-            (cutoff,),
+            "AND COALESCE(origin, 'system') = 'system'"
         )
+        params: list[Any] = [cutoff]
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        query += " GROUP BY symbol"
+        cursor = await self.conn.execute(query, params)
         rows = await cursor.fetchall()
         return {row[0]: row[1] for row in rows}
 
