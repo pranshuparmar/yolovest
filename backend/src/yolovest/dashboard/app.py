@@ -2010,7 +2010,9 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "shortlist_size": 0,
                 "signals": [],
                 "diagnostics": {
-                    "min_confidence_threshold": cfg.risk.min_confidence_score,
+                    "min_confidence_threshold": min(cfg.risk.min_confidence_buy, cfg.risk.min_confidence_sell),
+                    "min_confidence_buy": cfg.risk.min_confidence_buy,
+                    "min_confidence_sell": cfg.risk.min_confidence_sell,
                     "ml_available": ctx.ml is not None,
                     "filter_counts": {
                         "insufficient_bars": 0, "feature_computation_failed": 0,
@@ -2028,7 +2030,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         # Build held symbols set for SELL signal adjustment
         open_positions = await ctx.db.get_open_positions()
         held_symbols = {p["symbol"] for p in open_positions}
-        min_confidence = cfg.risk.min_confidence_score
+        min_confidence_buy = cfg.risk.min_confidence_buy
+        min_confidence_sell = cfg.risk.min_confidence_sell
 
         if ml_unavailable:
             logger.warning("Dry-run: ML model not loaded — cannot generate signals. "
@@ -2164,16 +2167,20 @@ def create_app(ctx: AppContext) -> FastAPI:
                     logger.info("Dry-run: HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
                     continue
 
-                if prediction.confidence < min_confidence:
+                threshold = (
+                    min_confidence_buy if prediction.signal_type == "BUY"
+                    else min_confidence_sell
+                )
+                if prediction.confidence < threshold:
                     filter_counts["low_confidence"] += 1
                     rejection_details.append({
                         "symbol": symbol,
                         "reason": "low_confidence",
-                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {min_confidence}",
+                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {threshold}",
                     })
                     logger.info(
                         "Dry-run: Low confidence for %s: %s @ %.2f < %.2f",
-                        symbol, prediction.signal_type, prediction.confidence, min_confidence,
+                        symbol, prediction.signal_type, prediction.confidence, threshold,
                     )
                     continue
 
@@ -2257,7 +2264,9 @@ def create_app(ctx: AppContext) -> FastAPI:
             "shortlist_size": len(shortlist),
             "signals": signals_out,
             "diagnostics": {
-                "min_confidence_threshold": min_confidence,
+                "min_confidence_threshold": min(cfg.risk.min_confidence_buy, cfg.risk.min_confidence_sell),
+                "min_confidence_buy": cfg.risk.min_confidence_buy,
+                "min_confidence_sell": cfg.risk.min_confidence_sell,
                 "ml_available": ctx.ml is not None,
                 "filter_counts": filter_counts,
                 "rejection_details": rejection_details,

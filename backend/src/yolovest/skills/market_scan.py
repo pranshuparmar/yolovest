@@ -61,6 +61,18 @@ class MarketScanSkill(SkillBase):
         # Step 3: Filter out banned / corporate action stocks
         filtered = self._apply_exclusion_filters(liquid)
 
+        # Exclude symbols in rotation cooldown — they failed to produce signals
+        # for consecutive heartbeats, so give them a break and free slots.
+        if cfg.rotation_enabled:
+            cooldown = await self.ctx.db.get_rotation_cooldown_symbols()
+            if cooldown:
+                before = len(filtered)
+                filtered = [s for s in filtered if s.get("symbol", "").upper() not in cooldown]
+                logger.info(
+                    "market-scan: rotation cooldown excluded %d/%d symbols: %s",
+                    before - len(filtered), before, sorted(cooldown),
+                )
+
         # Step 4: Enrich with technical indicators from OHLCV bars
         filtered = await self._enrich_with_features(filtered)
 

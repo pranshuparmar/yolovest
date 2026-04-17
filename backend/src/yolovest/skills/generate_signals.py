@@ -35,7 +35,15 @@ class GenerateSignalsSkill(SkillBase):
     async def execute(self, **kwargs: Any) -> SkillResult:
         watchlist = await self.ctx.db.get_combined_watchlist()
         signals_generated = []
-        min_confidence = self.ctx.config.risk.min_confidence_score
+        risk_cfg = self.ctx.config.risk
+        min_confidence_buy = risk_cfg.min_confidence_buy
+        min_confidence_sell = risk_cfg.min_confidence_sell
+        # Legacy threshold kept for diagnostics
+        min_confidence = min(min_confidence_buy, min_confidence_sell)
+        skip_sell_on_holdings = risk_cfg.skip_sell_on_holdings
+        rotation_cfg = self.ctx.config.scanning
+        # Tracks per-symbol signal productivity for watchlist rotation
+        outcome_tracker: dict[str, bool] = {}
 
         # Diagnostics: track why stocks get filtered out
         filter_counts = {
@@ -261,6 +269,7 @@ class GenerateSignalsSkill(SkillBase):
                 # Step 4: Skip HOLD signals
                 if prediction.signal_type == "HOLD":
                     filter_counts["hold_signal"] += 1
+                    outcome_tracker[symbol] = False
                     rejection_details.append({
                         "symbol": symbol, "reason": "hold_signal",
                         "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
@@ -277,6 +286,23 @@ class GenerateSignalsSkill(SkillBase):
                         "detail": f"SELL blocked — {symbol} is locked",
                     })
                     logger.info("Locked holding: skipping SELL for %s", symbol)
+                    continue
+
+                # Skip SELL signals for any held symbol — position-monitor owns exits.
+                # Prevents SELL spam on holdings and lets SL/target/trailing do their job.
+                if (
+                    skip_sell_on_holdings
+                    and prediction.signal_type == "SELL"
+                    and symbol in held_symbols
+                ):
+                    filter_counts.setdefault("sell_on_holding", 0)
+                    filter_counts["sell_on_holding"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "sell_on_holding",
+                        "detail": f"SELL skipped — position-monitor handles exit for {symbol}",
+                    })
+                    logger.info("Held symbol: skipping SELL for %s (monitor owns exits)", symbol)
+                    outcome_tracker[symbol] = False
                     continue
 
                 # Adjust SELL signals: force to MIS/intraday if user doesn't hold the stock
@@ -345,12 +371,15 @@ class GenerateSignalsSkill(SkillBase):
                 if is_reentry:
                     signal["reentry"] = True
 
-                # Step 5: Confidence filter
-                # Use elevated threshold for recently traded symbols
-                effective_min = min_confidence
+                # Step 5: Confidence filter (asymmetric per signal type)
+                base_threshold = (
+                    min_confidence_buy if prediction.signal_type == "BUY"
+                    else min_confidence_sell
+                )
+                effective_min = base_threshold
                 is_repeat = symbol in recently_traded
                 if is_repeat and repeat_lookback > 0:
-                    effective_min = max(min_confidence, repeat_min_conf)
+                    effective_min = max(base_threshold, repeat_min_conf)
 
                 if signal["confidence_score"] >= effective_min:
                     # Re-entry: require higher confidence than original trade
@@ -373,6 +402,7 @@ class GenerateSignalsSkill(SkillBase):
                             continue
 
                     filter_counts["passed"] += 1
+                    outcome_tracker[symbol] = True
                     await self.ctx.db.insert_signal(signal)
                     signals_generated.append(signal)
                     await self.broadcast("signal_generated", {
@@ -381,31 +411,33 @@ class GenerateSignalsSkill(SkillBase):
                         "confidence": prediction.confidence,
                         "entry_price": prediction.entry_price,
                     })
-                elif is_repeat and signal["confidence_score"] >= min_confidence:
+                elif is_repeat and signal["confidence_score"] >= base_threshold:
                     # Would have passed normal threshold but blocked by repeat rule
                     filter_counts.setdefault("repeat_low_confidence", 0)
                     filter_counts["repeat_low_confidence"] += 1
+                    outcome_tracker[symbol] = False
                     rejection_details.append({
                         "symbol": symbol, "reason": "repeat_low_confidence",
                         "detail": (
                             f"{prediction.signal_type} @ {prediction.confidence:.2f} "
-                            f"< {effective_min} (repeat threshold, normal={min_confidence})"
+                            f"< {effective_min} (repeat threshold, base={base_threshold})"
                         ),
                     })
                     logger.info(
-                        "Repeat confidence filter for %s: %s @ %.2f < %.2f (repeat, normal=%.2f)",
+                        "Repeat confidence filter for %s: %s @ %.2f < %.2f (repeat, base=%.2f)",
                         symbol, prediction.signal_type, prediction.confidence,
-                        effective_min, min_confidence,
+                        effective_min, base_threshold,
                     )
                 else:
                     filter_counts["low_confidence"] += 1
+                    outcome_tracker[symbol] = False
                     rejection_details.append({
                         "symbol": symbol, "reason": "low_confidence",
-                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {min_confidence}",
+                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {base_threshold}",
                     })
                     logger.info(
                         "Low confidence for %s: %s @ %.2f < %.2f",
-                        symbol, prediction.signal_type, prediction.confidence, min_confidence,
+                        symbol, prediction.signal_type, prediction.confidence, base_threshold,
                     )
 
             except Exception as e:
@@ -420,6 +452,19 @@ class GenerateSignalsSkill(SkillBase):
             len(signals_generated), len(watchlist), filter_counts,
         )
 
+        # Persist rotation outcomes so market-scan can cooldown stale symbols.
+        if rotation_cfg.rotation_enabled and outcome_tracker:
+            threshold = rotation_cfg.rotation_no_signal_threshold
+            cooldown_hours = rotation_cfg.rotation_cooldown_hours
+            for sym, produced in outcome_tracker.items():
+                try:
+                    await self.ctx.db.record_signal_outcome(
+                        sym, produced,
+                        threshold=threshold, cooldown_hours=cooldown_hours,
+                    )
+                except Exception:
+                    logger.exception("Failed to record signal outcome for %s", sym)
+
         return SkillResult(
             success=True,
             skill_name=self.name,
@@ -428,7 +473,9 @@ class GenerateSignalsSkill(SkillBase):
                 "signals_generated": len(signals_generated),
                 "signals": signals_generated,  # full signal dicts for downstream skills
                 "diagnostics": {
-                    "min_confidence_threshold": min_confidence,
+                    "min_confidence_threshold": min_confidence,  # legacy (min of buy/sell)
+                    "min_confidence_buy": min_confidence_buy,
+                    "min_confidence_sell": min_confidence_sell,
                     "filter_counts": filter_counts,
                     "rejection_details": rejection_details,
                 },

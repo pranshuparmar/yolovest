@@ -127,9 +127,14 @@ class ScanningConfig(BaseModel):
     seed_symbols: list[str] = Field(
         default_factory=lambda: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
     )
-    shortlist_size: int = 25
+    shortlist_size: int = 500
     min_avg_daily_volume: int = 500_000
     weights: ScanningWeights = Field(default_factory=ScanningWeights)
+    # Watchlist rotation: evict symbols that produce no actionable signal for N
+    # consecutive heartbeats, apply a cooldown so market-scan doesn't re-add them.
+    rotation_enabled: bool = True
+    rotation_no_signal_threshold: int = Field(default=8, ge=1, le=100)
+    rotation_cooldown_hours: int = Field(default=4, ge=1, le=72)
 
 
 class IndicatorsConfig(BaseModel):
@@ -323,7 +328,10 @@ class RiskConfig(BaseModel):
     llm_fallback_to_rules: bool = True
     max_same_sector_positions: int = Field(default=1, ge=1)
     kill_switch_enabled: bool = True
-    min_confidence_score: float = Field(default=0.65, ge=0, le=1)
+    min_confidence_score: float = Field(default=0.65, ge=0, le=1)  # legacy fallback
+    min_confidence_buy: float = Field(default=0.65, ge=0, le=1)
+    min_confidence_sell: float = Field(default=0.75, ge=0, le=1)
+    skip_sell_on_holdings: bool = True  # position-monitor handles exits; no SELL on held symbols
     max_trades_per_day: int = Field(default=5, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
     symbol_cooldown_days: int = Field(default=1, ge=0)

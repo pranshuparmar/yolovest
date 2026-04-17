@@ -6,7 +6,9 @@ Schema versioned via numbered SQL migration files in migrations/ directory.
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 from pathlib import Path
 
 import aiosqlite
@@ -513,6 +515,69 @@ class Database:
             combined = [s for s in combined if s["symbol"] not in quarantined]
 
         return combined
+
+    # ------------------------------------------------------------------
+    # Watchlist rotation stats
+    # ------------------------------------------------------------------
+
+    async def record_signal_outcome(
+        self, symbol: str, produced_signal: bool,
+        threshold: int = 8, cooldown_hours: int = 4,
+    ) -> None:
+        """Track per-symbol signal productivity. Symbols that fail to produce an
+        actionable signal for `threshold` consecutive heartbeats are placed on a
+        rotation cooldown so market-scan can free the slot for a fresh candidate.
+        """
+        symbol = symbol.upper()
+        if produced_signal:
+            await self.conn.execute(
+                "INSERT INTO watchlist_signal_stats (symbol, no_signal_streak, cooldown_until, updated_at) "
+                "VALUES (?, 0, NULL, datetime('now')) "
+                "ON CONFLICT(symbol) DO UPDATE SET "
+                "no_signal_streak = 0, cooldown_until = NULL, updated_at = datetime('now')",
+                (symbol,),
+            )
+            await self.conn.commit()
+            return
+
+        cursor = await self.conn.execute(
+            "SELECT no_signal_streak FROM watchlist_signal_stats WHERE symbol = ?",
+            (symbol,),
+        )
+        row = await cursor.fetchone()
+        streak = (row[0] if row else 0) + 1
+        if streak >= threshold:
+            cooldown_until = (datetime.now(UTC) + timedelta(hours=cooldown_hours)).isoformat()
+            await self.conn.execute(
+                "INSERT INTO watchlist_signal_stats (symbol, no_signal_streak, cooldown_until, updated_at) "
+                "VALUES (?, ?, ?, datetime('now')) "
+                "ON CONFLICT(symbol) DO UPDATE SET "
+                "no_signal_streak = excluded.no_signal_streak, "
+                "cooldown_until = excluded.cooldown_until, "
+                "updated_at = datetime('now')",
+                (symbol, streak, cooldown_until),
+            )
+        else:
+            await self.conn.execute(
+                "INSERT INTO watchlist_signal_stats (symbol, no_signal_streak, updated_at) "
+                "VALUES (?, ?, datetime('now')) "
+                "ON CONFLICT(symbol) DO UPDATE SET "
+                "no_signal_streak = excluded.no_signal_streak, "
+                "updated_at = datetime('now')",
+                (symbol, streak),
+            )
+        await self.conn.commit()
+
+    async def get_rotation_cooldown_symbols(self) -> set[str]:
+        """Return symbols currently in rotation cooldown (cooldown_until > now)."""
+        now_iso = datetime.now(UTC).isoformat()
+        cursor = await self.read_conn.execute(
+            "SELECT symbol FROM watchlist_signal_stats "
+            "WHERE cooldown_until IS NOT NULL AND cooldown_until > ?",
+            (now_iso,),
+        )
+        rows = await cursor.fetchall()
+        return {row[0] for row in rows}
 
     # ------------------------------------------------------------------
     # Positions (read from trades table)
