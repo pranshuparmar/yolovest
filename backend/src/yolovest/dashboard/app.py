@@ -86,7 +86,10 @@ def _verify_token(token: str) -> str:
 
 
 def _extract_broker_capital(margins: dict[str, Any]) -> float:
-    """Extract total capital from Kite margins response.
+    """Extract free cash + utilised margin from Kite margins response.
+
+    This represents the trading account's cash side (excluding holdings value).
+    For total net worth use _compute_total_capital() which adds holdings value.
 
     Kite margins() returns different structures depending on the SDK version:
     - {"equity": {"net": X, "available": {"cash": Y, ...}, "utilised": {...}}}
@@ -125,6 +128,55 @@ def _extract_broker_capital(margins: dict[str, Any]) -> float:
 
     logger.warning("Could not extract capital from margins: %s", list(margins.keys()))
     return 0.0
+
+
+def _holdings_value(holdings: list[dict[str, Any]]) -> float:
+    """Sum the current market value of all delivery holdings.
+
+    Each holding from kite.holdings() has fields like:
+    - quantity / opening_quantity
+    - last_price (current LTP) or close_price (yesterday's close)
+    - average_price (cost basis)
+    """
+    total = 0.0
+    for h in holdings or []:
+        qty = h.get("quantity") or h.get("opening_quantity") or 0
+        if qty <= 0:
+            continue
+        # Prefer LTP, fall back to close, then to average price
+        price = (
+            h.get("last_price")
+            or h.get("close_price")
+            or h.get("average_price")
+            or 0
+        )
+        try:
+            total += float(qty) * float(price)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+async def _compute_total_capital(broker: Any) -> float:
+    """Compute total broker capital = free cash + utilised margin + holdings value.
+
+    Returns 0.0 if the broker can't be queried. Caller should skip the DB
+    update on 0 to avoid clobbering a previously-synced value.
+    """
+    cash_side = 0.0
+    holdings_side = 0.0
+    try:
+        margins = await broker.get_margins()
+        if margins:
+            cash_side = _extract_broker_capital(margins)
+    except Exception:
+        logger.debug("Margins fetch failed in capital sync", exc_info=True)
+    try:
+        holdings = await broker.get_holdings()
+        holdings_side = _holdings_value(holdings)
+    except Exception:
+        logger.debug("Holdings fetch failed in capital sync", exc_info=True)
+    return cash_side + holdings_side
 
 
 # WebSocket connection manager
@@ -337,17 +389,15 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         If broker is authenticated, syncs available funds from Zerodha.
         """
-        # Sync capital from broker if authenticated
+        # Sync capital from broker (cash + holdings value) if authenticated
         try:
             if await ctx.broker.is_authenticated():
-                margins = await ctx.broker.get_margins()
-                if margins:
-                    broker_capital = _extract_broker_capital(margins)
-                    if broker_capital > 0:
-                        await ctx.db.set_system_state("initial_capital", str(broker_capital))
-                        logger.info("Portfolio: synced broker capital ₹%.2f", broker_capital)
-                    else:
-                        logger.warning("Portfolio: _extract_broker_capital returned 0, margins keys=%s", list(margins.keys()))
+                broker_capital = await _compute_total_capital(ctx.broker)
+                if broker_capital > 0:
+                    await ctx.db.set_system_state("initial_capital", str(broker_capital))
+                    logger.info("Portfolio: synced broker capital ₹%.2f", broker_capital)
+                else:
+                    logger.warning("Portfolio: total broker capital is 0, keeping previous value")
         except Exception:
             logger.debug("Broker capital sync failed, using DB value", exc_info=True)
 
@@ -370,18 +420,13 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def sync_capital_from_broker(
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Sync capital from Zerodha broker account."""
+        """Sync capital (cash + holdings value) from Zerodha broker account."""
         try:
             if not await ctx.broker.is_authenticated():
                 return {"success": False, "error": "Broker not authenticated"}
-            margins = await ctx.broker.get_margins()
-            if not margins:
-                return {"success": False, "error": "No margin data from broker"}
-            logger.info("Kite margins response: equity keys=%s",
-                        list(margins.get("equity", {}).keys()) if isinstance(margins.get("equity"), dict) else margins.get("equity"))
-            broker_capital = _extract_broker_capital(margins)
-            if broker_capital is None:
-                return {"success": False, "error": "Could not extract capital from margins data"}
+            broker_capital = await _compute_total_capital(ctx.broker)
+            if broker_capital <= 0:
+                return {"success": False, "error": "Broker reported zero total capital"}
             await ctx.db.set_system_state("initial_capital", str(broker_capital))
             return {"success": True, "initial_capital": broker_capital}
         except Exception as e:

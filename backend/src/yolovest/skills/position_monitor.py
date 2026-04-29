@@ -326,14 +326,11 @@ class PositionMonitorSkill(SkillBase):
         return None
 
     async def _sync_broker_capital(self) -> None:
-        """Sync broker balance to DB so capital figures stay accurate between
-        dashboard visits. Reuses the same extraction logic as the API endpoint."""
+        """Sync broker balance (cash + holdings value) to DB so capital figures
+        stay accurate between dashboard visits."""
         try:
-            margins = await self.ctx.broker.get_margins()
-            if not margins:
-                return
-            from yolovest.dashboard.app import _extract_broker_capital
-            broker_capital = _extract_broker_capital(margins)
+            from yolovest.dashboard.app import _compute_total_capital
+            broker_capital = await _compute_total_capital(self.ctx.broker)
             if broker_capital > 0:
                 await self.ctx.db.set_system_state("initial_capital", str(broker_capital))
                 logger.debug("Synced broker capital: %.2f", broker_capital)
