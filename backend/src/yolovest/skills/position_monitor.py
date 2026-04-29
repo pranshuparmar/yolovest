@@ -326,14 +326,16 @@ class PositionMonitorSkill(SkillBase):
         return None
 
     async def _sync_broker_capital(self) -> None:
-        """Sync broker balance (cash + holdings value) to DB so capital figures
-        stay accurate between dashboard visits."""
+        """Sync broker balance breakdown (cash + utilised + holdings) to DB so
+        capital figures stay accurate between dashboard visits."""
         try:
-            from yolovest.dashboard.app import _compute_total_capital
-            broker_capital = await _compute_total_capital(self.ctx.broker)
-            if broker_capital > 0:
-                await self.ctx.db.set_system_state("initial_capital", str(broker_capital))
-                logger.debug("Synced broker capital: %.2f", broker_capital)
+            import json as _json
+            from yolovest.dashboard.app import _compute_capital_breakdown
+            bd = await _compute_capital_breakdown(self.ctx.broker)
+            if bd["total"] > 0:
+                await self.ctx.db.set_system_state("initial_capital", str(bd["total"]))
+                await self.ctx.db.set_system_state("capital_breakdown", _json.dumps(bd))
+                logger.debug("Synced broker capital: %.2f", bd["total"])
         except Exception:
             logger.debug("Broker capital sync skipped", exc_info=True)
 

@@ -157,26 +157,97 @@ def _holdings_value(holdings: list[dict[str, Any]]) -> float:
     return total
 
 
-async def _compute_total_capital(broker: Any) -> float:
-    """Compute total broker capital = free cash + utilised margin + holdings value.
+def _extract_available_cash(margins: dict[str, Any]) -> float:
+    """Extract free trading cash (not deployed) from Kite margins."""
+    equity = margins.get("equity", {})
+    if isinstance(equity, dict):
+        avail = equity.get("available", {})
+        if isinstance(avail, dict):
+            for k in ("cash", "live_balance", "adhoc_margin", "opening_balance"):
+                v = avail.get(k)
+                if v is not None:
+                    return float(v)
+    avail = margins.get("available", {})
+    if isinstance(avail, dict):
+        v = avail.get("cash") or avail.get("live_balance")
+        if v is not None:
+            return float(v)
+    return 0.0
 
-    Returns 0.0 if the broker can't be queried. Caller should skip the DB
-    update on 0 to avoid clobbering a previously-synced value.
+
+def _extract_utilised_margin(margins: dict[str, Any]) -> float:
+    """Extract margin currently locked in open intraday positions."""
+    equity = margins.get("equity", {})
+    if isinstance(equity, dict):
+        used = equity.get("utilised", {})
+        if isinstance(used, dict):
+            v = used.get("debits") or used.get("net")
+            if v is not None:
+                return float(v)
+    return 0.0
+
+
+def _compute_holdings_breakdown(holdings: list[dict[str, Any]]) -> dict[str, float]:
+    """Sum invested cost basis and current market value across delivery holdings."""
+    invested = 0.0
+    current = 0.0
+    for h in holdings or []:
+        qty = h.get("quantity") or h.get("opening_quantity") or 0
+        if qty <= 0:
+            continue
+        avg = h.get("average_price") or 0
+        ltp = h.get("last_price") or h.get("close_price") or avg or 0
+        try:
+            invested += float(qty) * float(avg)
+            current += float(qty) * float(ltp)
+        except (TypeError, ValueError):
+            continue
+    return {"invested": invested, "current": current}
+
+
+async def _compute_capital_breakdown(broker: Any) -> dict[str, float]:
+    """Return a structured breakdown of broker capital.
+
+    Keys:
+        available_cash: free funds ready to deploy
+        utilised_margin: margin locked in open intraday positions
+        holdings_invested: total buy price of CNC delivery holdings
+        holdings_current: current market value of CNC delivery holdings
+        total: available_cash + utilised_margin + holdings_current
     """
-    cash_side = 0.0
-    holdings_side = 0.0
+    breakdown = {
+        "available_cash": 0.0,
+        "utilised_margin": 0.0,
+        "holdings_invested": 0.0,
+        "holdings_current": 0.0,
+        "total": 0.0,
+    }
     try:
         margins = await broker.get_margins()
         if margins:
-            cash_side = _extract_broker_capital(margins)
+            breakdown["available_cash"] = _extract_available_cash(margins)
+            breakdown["utilised_margin"] = _extract_utilised_margin(margins)
     except Exception:
-        logger.debug("Margins fetch failed in capital sync", exc_info=True)
+        logger.debug("Margins fetch failed", exc_info=True)
     try:
         holdings = await broker.get_holdings()
-        holdings_side = _holdings_value(holdings)
+        h = _compute_holdings_breakdown(holdings)
+        breakdown["holdings_invested"] = h["invested"]
+        breakdown["holdings_current"] = h["current"]
     except Exception:
-        logger.debug("Holdings fetch failed in capital sync", exc_info=True)
-    return cash_side + holdings_side
+        logger.debug("Holdings fetch failed", exc_info=True)
+    breakdown["total"] = (
+        breakdown["available_cash"]
+        + breakdown["utilised_margin"]
+        + breakdown["holdings_current"]
+    )
+    return breakdown
+
+
+async def _compute_total_capital(broker: Any) -> float:
+    """Backward-compat wrapper. Returns the total of the breakdown."""
+    bd = await _compute_capital_breakdown(broker)
+    return bd["total"]
 
 
 # WebSocket connection manager
@@ -389,13 +460,16 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         If broker is authenticated, syncs available funds from Zerodha.
         """
-        # Sync capital from broker (cash + holdings value) if authenticated
+        # Sync capital breakdown (cash + utilised + holdings) if authenticated
         try:
             if await ctx.broker.is_authenticated():
-                broker_capital = await _compute_total_capital(ctx.broker)
-                if broker_capital > 0:
-                    await ctx.db.set_system_state("initial_capital", str(broker_capital))
-                    logger.info("Portfolio: synced broker capital ₹%.2f", broker_capital)
+                bd = await _compute_capital_breakdown(ctx.broker)
+                if bd["total"] > 0:
+                    import json as _json
+                    await ctx.db.set_system_state("initial_capital", str(bd["total"]))
+                    await ctx.db.set_system_state("capital_breakdown", _json.dumps(bd))
+                    logger.info("Portfolio: synced broker capital ₹%.2f (cash=%.2f, used=%.2f, hold=%.2f)",
+                                bd["total"], bd["available_cash"], bd["utilised_margin"], bd["holdings_current"])
                 else:
                     logger.warning("Portfolio: total broker capital is 0, keeping previous value")
         except Exception:

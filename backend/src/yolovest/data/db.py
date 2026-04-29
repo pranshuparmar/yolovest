@@ -1357,6 +1357,25 @@ class Database:
             except (ValueError, TypeError):
                 pass
 
+        # Capital breakdown (broker-synced cash/utilised/holdings).
+        # Falls back to zeros if no broker sync has happened yet.
+        breakdown = {
+            "available_cash": 0.0,
+            "utilised_margin": 0.0,
+            "holdings_invested": 0.0,
+            "holdings_current": 0.0,
+            "total": 0.0,
+        }
+        bd_raw = await self.get_system_state("capital_breakdown")
+        if bd_raw:
+            try:
+                import json as _json
+                parsed = _json.loads(bd_raw)
+                if isinstance(parsed, dict):
+                    breakdown.update({k: float(parsed.get(k, 0.0)) for k in breakdown})
+            except (ValueError, TypeError):
+                pass
+
         # Open positions
         positions = await self.get_open_positions(mode=mode)
         open_count = len(positions)
@@ -1446,6 +1465,31 @@ class Database:
         weekly_pnl = row[0] if row else 0
         weekly_pnl_pct = weekly_pnl / total_capital if total_capital > 0 else 0
 
+        # Pending trade value (app-side block: trades waiting for user approval)
+        pending_trade_value = 0.0
+        try:
+            cursor = await self.read_conn.execute(
+                "SELECT entry_price, quantity FROM pending_trades WHERE status = 'pending'"
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                try:
+                    pending_trade_value += float(row[0] or 0) * float(row[1] or 0)
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            pass
+
+        # Holdings unrealized PnL (only meaningful when broker breakdown is fresh)
+        holdings_unrealized = breakdown["holdings_current"] - breakdown["holdings_invested"]
+        holdings_unrealized_pct = (
+            holdings_unrealized / breakdown["holdings_invested"]
+            if breakdown["holdings_invested"] > 0 else 0.0
+        )
+
+        # Total PnL (all-time realized + holdings unrealized)
+        total_pnl_amount = float(all_time_pnl) + holdings_unrealized
+
         # Minutes since last loss
         cursor = await self.conn.execute(
             f"SELECT closed_at FROM trades "
@@ -1462,6 +1506,10 @@ class Database:
         else:
             minutes_since_last_loss = 999.0  # no losses yet
 
+        # If broker breakdown is available, prefer it as the authoritative
+        # total_portfolio_value (cash + utilised + holdings_current).
+        total_portfolio_value = breakdown["total"] if breakdown["total"] > 0 else total_capital
+
         return {
             "total_capital": total_capital,
             "available_cash": available_cash,
@@ -1475,8 +1523,22 @@ class Database:
             "sector_counts": sector_counts,
             "daily_pnl_pct": daily_pnl_pct,
             "weekly_pnl_pct": weekly_pnl_pct,
+            "daily_pnl": round(float(daily_pnl), 2),
+            "weekly_pnl": round(float(weekly_pnl), 2),
             "trades_today": trades_today,
             "minutes_since_last_loss": minutes_since_last_loss,
+            # Broker-synced breakdown
+            "available_funds": round(breakdown["available_cash"], 2),
+            "utilised_margin": round(breakdown["utilised_margin"], 2),
+            "pending_trade_value": round(pending_trade_value, 2),
+            "locked_total": round(breakdown["utilised_margin"] + pending_trade_value, 2),
+            "holdings_invested": round(breakdown["holdings_invested"], 2),
+            "holdings_current": round(breakdown["holdings_current"], 2),
+            "holdings_unrealized_pnl": round(holdings_unrealized, 2),
+            "holdings_unrealized_pnl_pct": round(holdings_unrealized_pct, 4),
+            "total_portfolio_value": round(total_portfolio_value, 2),
+            "total_pnl": round(total_pnl_amount, 2),
+            "all_time_realized_pnl": round(float(all_time_pnl), 2),
         }
 
     # ------------------------------------------------------------------

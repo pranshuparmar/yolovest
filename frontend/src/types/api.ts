@@ -18,8 +18,22 @@ export interface PortfolioState {
   sector_counts: Record<string, number>;
   daily_pnl_pct: number;
   weekly_pnl_pct: number;
+  daily_pnl: number;
+  weekly_pnl: number;
   trades_today: number;
   minutes_since_last_loss: number;
+  // Broker-synced capital breakdown
+  available_funds: number;
+  utilised_margin: number;
+  pending_trade_value: number;
+  locked_total: number;
+  holdings_invested: number;
+  holdings_current: number;
+  holdings_unrealized_pnl: number;
+  holdings_unrealized_pnl_pct: number;
+  total_portfolio_value: number;
+  total_pnl: number;
+  all_time_realized_pnl: number;
 }
 
 export interface Trade {
