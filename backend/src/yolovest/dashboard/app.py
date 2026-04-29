@@ -345,6 +345,9 @@ def create_app(ctx: AppContext) -> FastAPI:
                     broker_capital = _extract_broker_capital(margins)
                     if broker_capital > 0:
                         await ctx.db.set_system_state("initial_capital", str(broker_capital))
+                        logger.info("Portfolio: synced broker capital ₹%.2f", broker_capital)
+                    else:
+                        logger.warning("Portfolio: _extract_broker_capital returned 0, margins keys=%s", list(margins.keys()))
         except Exception:
             logger.debug("Broker capital sync failed, using DB value", exc_info=True)
 

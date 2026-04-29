@@ -65,6 +65,9 @@ class PositionMonitorSkill(SkillBase):
         except Exception:
             logger.debug("Holdings fetch failed for adoption check", exc_info=True)
 
+        # Sync broker balance to keep capital figures accurate
+        await self._sync_broker_capital()
+
         # Adopt untracked broker positions BEFORE reconciliation
         # so adopted symbols don't show up as discrepancies
         locked_symbols = await self.ctx.db.get_locked_symbols()
@@ -321,6 +324,21 @@ class PositionMonitorSkill(SkillBase):
             if attempt < max_retries - 1:
                 await asyncio.sleep(base_delay * (2 ** attempt))
         return None
+
+    async def _sync_broker_capital(self) -> None:
+        """Sync broker balance to DB so capital figures stay accurate between
+        dashboard visits. Reuses the same extraction logic as the API endpoint."""
+        try:
+            margins = await self.ctx.broker.get_margins()
+            if not margins:
+                return
+            from yolovest.dashboard.app import _extract_broker_capital
+            broker_capital = _extract_broker_capital(margins)
+            if broker_capital > 0:
+                await self.ctx.db.set_system_state("initial_capital", str(broker_capital))
+                logger.debug("Synced broker capital: %.2f", broker_capital)
+        except Exception:
+            logger.debug("Broker capital sync skipped", exc_info=True)
 
     async def _adopt_untracked_positions(
         self,
