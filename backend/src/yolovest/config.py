@@ -134,7 +134,7 @@ class ScanningConfig(BaseModel):
     # consecutive heartbeats, apply a cooldown so market-scan doesn't re-add them.
     rotation_enabled: bool = True
     rotation_no_signal_threshold: int = Field(default=8, ge=1, le=100)
-    rotation_cooldown_hours: int = Field(default=4, ge=1, le=72)
+    rotation_cooldown_hours: int = Field(default=48, ge=1, le=72)
 
 
 class IndicatorsConfig(BaseModel):
@@ -315,7 +315,7 @@ class StrategyConfig(BaseModel):
 class RiskConfig(BaseModel):
     max_risk_per_trade_pct: float = Field(default=0.02, gt=0, lt=1)
     max_portfolio_exposure_pct: float = Field(default=0.60, gt=0, le=1)
-    max_open_positions: int = Field(default=3, ge=1)
+    max_open_positions: int = Field(default=10, ge=1)
     max_single_stock_pct: float = Field(default=0.25, gt=0, le=1)
     daily_loss_limit_pct: float = Field(default=0.03, gt=0, lt=1)
     weekly_loss_limit_pct: float = Field(default=0.05, gt=0, lt=1)
@@ -329,7 +329,7 @@ class RiskConfig(BaseModel):
     max_same_sector_positions: int = Field(default=1, ge=1)
     kill_switch_enabled: bool = True
     min_confidence_score: float = Field(default=0.65, ge=0, le=1)  # legacy fallback
-    min_confidence_buy: float = Field(default=0.65, ge=0, le=1)
+    min_confidence_buy: float = Field(default=0.60, ge=0, le=1)
     min_confidence_sell: float = Field(default=0.75, ge=0, le=1)
     skip_sell_on_holdings: bool = True  # position-monitor handles exits; no SELL on held symbols
     max_trades_per_day: int = Field(default=5, ge=1)
