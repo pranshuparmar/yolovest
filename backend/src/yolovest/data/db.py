@@ -1624,6 +1624,33 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
+    async def get_todays_closed_trades(self, mode: str | None = None) -> list[dict[str, Any]]:
+        """Get trades that were closed today, regardless of when they were created."""
+        today_start = now_ist().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).astimezone(UTC).isoformat()
+        query = "SELECT * FROM trades WHERE closed_at >= ? AND status = 'closed'"
+        params: list[Any] = [today_start]
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        query += " ORDER BY closed_at"
+        cursor = await self.conn.execute(query, params)
+        rows = await cursor.fetchall()
+        return [dict[str, Any](row) for row in rows]
+
+    async def get_todays_signals_count(self) -> int:
+        """Count signals generated today."""
+        today_start = now_ist().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).astimezone(UTC).isoformat()
+        cursor = await self.read_conn.execute(
+            "SELECT COUNT(*) FROM signals WHERE created_at >= ?",
+            (today_start,),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
     async def get_latest_sentiment(self, symbol: str) -> dict[str, Any] | None:
         """Get latest sentiment for a symbol as dict[str, Any] (for LLM review context)."""
         result = await self.get_sentiment(symbol)

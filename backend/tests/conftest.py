@@ -208,6 +208,8 @@ def mock_db() -> AsyncMock:
     db.get_weekly_predictions = AsyncMock(return_value=[])
     db.get_weekly_llm_reviews = AsyncMock(return_value=[])
     db.store_report = AsyncMock()
+    db.get_todays_closed_trades = AsyncMock(return_value=[])
+    db.get_todays_signals_count = AsyncMock(return_value=0)
     db.get_shadow_models_ready = AsyncMock(return_value=[])
     db.retire_model = AsyncMock()
     db.get_trades_history = AsyncMock(return_value=[])

@@ -67,17 +67,18 @@ class ReportGenerateSkill(SkillBase):
     async def _generate_daily(self) -> SkillResult:
         """Daily report at market close."""
         mode = self.ctx.config.mode
-        trades = await self.ctx.db.get_todays_trades(mode=mode)
+        new_trades = await self.ctx.db.get_todays_trades(mode=mode)
+        closed_trades = await self.ctx.db.get_todays_closed_trades(mode=mode)
         predictions_result = await self.ctx.db.get_todays_predictions(mode=mode)
-        # get_todays_predictions returns paginated dict {"items": [...], "total": N}
         predictions = predictions_result.get("items", []) if isinstance(predictions_result, dict) else predictions_result
 
-        total_pnl = sum(t.get("pnl", 0) for t in trades if t.get("pnl") is not None)
-        wins = [t for t in trades if (t.get("pnl") or 0) > 0]
-        losses = [t for t in trades if (t.get("pnl") or 0) < 0]
-        win_rate = len(wins) / len(trades) if trades else 0
+        realized_pnl = sum(t.get("pnl", 0) for t in closed_trades if t.get("pnl") is not None)
+        wins = [t for t in closed_trades if (t.get("pnl") or 0) > 0]
+        losses = [t for t in closed_trades if (t.get("pnl") or 0) < 0]
+        win_rate = len(wins) / len(closed_trades) if closed_trades else 0
         avg_slippage = (
-            sum(t.get("slippage", 0) for t in trades) / len(trades) if trades else 0
+            sum(t.get("slippage", 0) for t in closed_trades) / len(closed_trades)
+            if closed_trades else 0
         )
 
         # Prediction accuracy
@@ -87,6 +88,10 @@ class ReportGenerateSkill(SkillBase):
             if scored
             else None
         )
+
+        # Portfolio snapshot
+        portfolio = await self.ctx.db.get_portfolio_state(mode=mode)
+        signals_today = await self.ctx.db.get_todays_signals_count()
 
         # Gemini market summary (best effort, skip if LLM disabled)
         market_summary = None
@@ -98,20 +103,29 @@ class ReportGenerateSkill(SkillBase):
 
         report = {
             "type": "daily",
-            "total_trades": len(trades),
-            "total_pnl": total_pnl,
+            "new_entries": len(new_trades),
+            "exits": len(closed_trades),
+            "total_trades": len(new_trades) + len(closed_trades),
+            "realized_pnl": realized_pnl,
+            "total_pnl": realized_pnl,
             "win_rate": win_rate,
             "wins": len(wins),
             "losses": len(losses),
             "avg_slippage": avg_slippage,
             "prediction_accuracy": pred_accuracy,
             "predictions_scored": len(scored),
+            "signals_generated": signals_today,
+            "open_positions": portfolio.get("system_positions", 0),
+            "adopted_positions": portfolio.get("adopted_positions", 0),
+            "portfolio_value": portfolio.get("total_portfolio_value", 0),
+            "holdings_current": portfolio.get("holdings_current", 0),
+            "holdings_unrealized_pnl": portfolio.get("holdings_unrealized_pnl", 0),
+            "available_funds": portfolio.get("available_funds", 0),
             "market_summary": str(market_summary) if market_summary else None,
         }
 
         await self.ctx.db.store_report(report)
 
-        # Notify (respects daily_summary alert toggle)
         msg = self._format_daily_report(report)
         await self.ctx.notify.send(msg, alert_type="daily_summary")
 
@@ -198,16 +212,50 @@ class ReportGenerateSkill(SkillBase):
     @staticmethod
     def _format_daily_report(report: dict[str, Any]) -> str:
         """Format daily report for Telegram/console."""
-        pnl = report.get("total_pnl", 0)
-        pnl_emoji = "+" if pnl >= 0 else ""
-        lines = [
-            "Daily Report",
-            f"Trades: {report.get('total_trades', 0)} "
-            f"(W:{report.get('wins', 0)} L:{report.get('losses', 0)})",
-            f"PnL: {pnl_emoji}{pnl:,.2f}",
-            f"Win Rate: {report.get('win_rate', 0):.0%}",
-            f"Avg Slippage: {report.get('avg_slippage', 0):.4f}",
-        ]
+        pnl = report.get("realized_pnl", report.get("total_pnl", 0))
+        pnl_sign = "+" if pnl >= 0 else ""
+        lines = ["Daily Report", ""]
+
+        # Portfolio snapshot
+        portfolio_val = report.get("portfolio_value", 0)
+        if portfolio_val > 0:
+            lines.append(f"Portfolio: {portfolio_val:,.0f}")
+        avail = report.get("available_funds", 0)
+        if avail > 0:
+            lines.append(f"Available: {avail:,.0f}")
+        holdings = report.get("holdings_current", 0)
+        h_pnl = report.get("holdings_unrealized_pnl", 0)
+        if holdings > 0:
+            h_sign = "+" if h_pnl >= 0 else ""
+            lines.append(f"Holdings: {holdings:,.0f} ({h_sign}{h_pnl:,.0f})")
+        lines.append("")
+
+        # Trading activity
+        new_entries = report.get("new_entries", 0)
+        exits = report.get("exits", 0)
+        open_pos = report.get("open_positions", 0)
+        adopted = report.get("adopted_positions", 0)
+        signals = report.get("signals_generated", 0)
+        lines.append(f"Entries: {new_entries} | Exits: {exits}")
+        pos_parts = [f"{open_pos} system"]
+        if adopted > 0:
+            pos_parts.append(f"{adopted} adopted")
+        lines.append(f"Open: {' + '.join(pos_parts)}")
+        if signals > 0:
+            lines.append(f"Signals: {signals}")
+        lines.append("")
+
+        # PnL
+        if exits > 0:
+            lines.append(
+                f"Realized PnL: {pnl_sign}{pnl:,.2f} "
+                f"(W:{report.get('wins', 0)} L:{report.get('losses', 0)}, "
+                f"{report.get('win_rate', 0):.0%})"
+            )
+            lines.append(f"Avg Slippage: {report.get('avg_slippage', 0):.4f}")
+        else:
+            lines.append("No exits today")
+
         if report.get("prediction_accuracy") is not None:
             lines.append(
                 f"Prediction Accuracy: {report['prediction_accuracy']:.0%} "
