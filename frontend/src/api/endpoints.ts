@@ -11,6 +11,7 @@ import type {
   ScoreboardEntry,
   SlippageStats,
   LLMAccuracy,
+  Recommendation,
   Report,
   AuditEntry,
   IntegrationsStatus,
@@ -128,6 +129,8 @@ export const api = {
     const qs = q.toString();
     return apiFetch<Report[]>(`/api/reports${qs ? "?" + qs : ""}`);
   },
+
+  recommendations: () => apiFetch<Recommendation[]>("/api/recommendations"),
 
   slippage: (params?: { symbol?: string; days?: number }) => {
     const q = new URLSearchParams();

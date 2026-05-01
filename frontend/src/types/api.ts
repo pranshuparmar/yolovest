@@ -208,6 +208,29 @@ export interface Report {
   created_at: string;
 }
 
+export type SignalDisposition =
+  | "pending"
+  | "risk_rejected"
+  | "llm_rejected"
+  | "awaiting_approval"
+  | "executed"
+  | "recently_rejected_dedup";
+
+export interface Recommendation {
+  id: number;
+  symbol: string;
+  signal_type: "BUY" | "SELL";
+  entry_price: number;
+  target_price: number;
+  stop_loss_price: number;
+  position_size: number;
+  confidence_score: number;
+  model_version: string;
+  disposition: SignalDisposition;
+  disposition_reason: string | null;
+  created_at: string;
+}
+
 export interface GeminiStatus {
   configured: boolean;
   connected: boolean;

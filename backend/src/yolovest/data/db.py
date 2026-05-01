@@ -910,6 +910,39 @@ class Database:
         )
         await self.conn.commit()
 
+    async def update_signal_disposition(
+        self,
+        symbol: str,
+        disposition: str,
+        reason: str | None = None,
+    ) -> None:
+        """Update disposition for the most recent signal for a symbol today."""
+        today_start = now_ist().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).astimezone(UTC).isoformat()
+        await self.conn.execute(
+            "UPDATE signals SET disposition = ?, disposition_reason = ? "
+            "WHERE id = (SELECT id FROM signals WHERE symbol = ? AND created_at >= ? "
+            "ORDER BY created_at DESC LIMIT 1)",
+            (disposition, reason, symbol, today_start),
+        )
+        await self.conn.commit()
+
+    async def get_todays_recommendations(self) -> list[dict[str, Any]]:
+        """Today's signals with disposition — what the system suggested + outcome."""
+        today_start = now_ist().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).astimezone(UTC).isoformat()
+        cursor = await self.read_conn.execute(
+            "SELECT id, symbol, signal_type, entry_price, target_price, "
+            "stop_loss_price, position_size, confidence_score, model_version, "
+            "disposition, disposition_reason, created_at "
+            "FROM signals WHERE created_at >= ? ORDER BY created_at DESC",
+            (today_start,),
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](row) for row in rows]
+
     async def get_todays_signaled_symbols(self, mode: str | None = None) -> set[str]:
         """Get symbols that should be skipped from new signal generation today.
 

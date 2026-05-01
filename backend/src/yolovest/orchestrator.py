@@ -227,6 +227,22 @@ class HeartbeatOrchestrator:
         except Exception:
             logger.debug("Failed to broadcast event %s", event_type, exc_info=True)
 
+    def _signal_symbol(self, signal: object) -> str:
+        if isinstance(signal, dict):
+            return signal.get("symbol", "")
+        return getattr(signal, "symbol", "") or ""
+
+    async def _set_disposition(
+        self, signal: object, disposition: str, reason: str | None = None
+    ) -> None:
+        symbol = self._signal_symbol(signal)
+        if not symbol:
+            return
+        try:
+            await self._ctx.db.update_signal_disposition(symbol, disposition, reason)
+        except Exception:
+            logger.debug("Failed to update signal disposition", exc_info=True)
+
     async def _execute_signal_chain(
         self, signal: object, index: int
     ) -> dict[str, Any]:
@@ -248,14 +264,14 @@ class HeartbeatOrchestrator:
         results[f"{prefix}/risk-check"] = risk_result
         if not risk_result.success:
             logger.info("risk-check failed for signal %d — skipping", index)
+            await self._set_disposition(signal, "risk_rejected", "risk-check skill failed")
             return results
 
         # Check risk approval and use adjusted signal
         if risk_result.data and not risk_result.data.get("approved", True):
-            logger.info(
-                "risk-check rejected signal %d: %s",
-                index, risk_result.data.get("rejection_reason"),
-            )
+            reason = risk_result.data.get("rejection_reason", "")
+            logger.info("risk-check rejected signal %d: %s", index, reason)
+            await self._set_disposition(signal, "risk_rejected", reason)
             return results
         if risk_result.data and risk_result.data.get("signal"):
             signal = risk_result.data["signal"]  # use risk-adjusted signal (position size)
@@ -271,13 +287,16 @@ class HeartbeatOrchestrator:
                 )
             else:
                 logger.info("llm-review failed for signal %d — skipping", index)
+                await self._set_disposition(signal, "llm_rejected", "llm-review skill failed")
                 return results
 
         # Check LLM decision (if it succeeded)
         if llm_result.success:
             approved = llm_result.data.get("approved", True)
             if not approved:
+                reason = llm_result.data.get("reasoning", "LLM rejected signal")
                 logger.info("LLM rejected signal %d", index)
+                await self._set_disposition(signal, "llm_rejected", reason)
                 return results
             # Use updated signal from LLM (may have been resized)
             if llm_result.data.get("signal"):
@@ -295,6 +314,9 @@ class HeartbeatOrchestrator:
                         "Manual mode: skipping %s — pending trade already exists (id=%s)",
                         sym_for_dedup, existing.get("id"),
                     )
+                    await self._set_disposition(
+                        signal, "awaiting_approval", "pending trade already exists"
+                    )
                     results[f"{prefix}/pending"] = SkillResult(
                         success=True, skill_name="pending-approval",
                         data={"skipped": True, "reason": "pending_exists", "symbol": sym_for_dedup},
@@ -308,6 +330,10 @@ class HeartbeatOrchestrator:
                         "Manual mode: skipping %s %s — user rejected recently",
                         sig_type_for_dedup, sym_for_dedup,
                     )
+                    await self._set_disposition(
+                        signal, "recently_rejected_dedup",
+                        f"user rejected within last {cooldown_hours}h",
+                    )
                     results[f"{prefix}/pending"] = SkillResult(
                         success=True, skill_name="pending-approval",
                         data={"skipped": True, "reason": "recently_rejected", "symbol": sym_for_dedup},
@@ -315,6 +341,9 @@ class HeartbeatOrchestrator:
                     return results
 
             pending_id = await self._ctx.db.insert_pending_trade(signal)
+            await self._set_disposition(
+                signal, "awaiting_approval", f"pending_id={pending_id}"
+            )
             symbol = sym_for_dedup or "?"
             sig_type = signal.get("signal_type", "?") if isinstance(signal, dict) else "?"
             conf = signal.get("confidence_score", 0) if isinstance(signal, dict) else 0
@@ -380,6 +409,7 @@ class HeartbeatOrchestrator:
         if trade_result.success and trade_result.data:
             trade = trade_result.data.get("trade", {})
             trade_id = trade.get("trade_id") or trade.get("order_id")
+            await self._set_disposition(signal, "executed", f"trade_id={trade_id}")
         predict_result = await self._run_skill(
             "predict-track", signal=signal, mode="log", trade_id=trade_id
         )

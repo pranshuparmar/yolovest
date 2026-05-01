@@ -206,6 +206,15 @@ export function useReports(params?: {
   });
 }
 
+export function useRecommendations() {
+  return useQuery({
+    queryKey: ["recommendations"],
+    queryFn: () => api.recommendations(),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+}
+
 export function useSlippage(params?: { symbol?: string; days?: number }) {
   return useQuery({
     queryKey: ["slippage", params],

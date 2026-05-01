@@ -953,6 +953,13 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Prediction accuracy scoreboard."""
         return await ctx.db.get_prediction_scoreboard(group_type)
 
+    @app.get("/api/recommendations")
+    async def get_recommendations(
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Today's signals with disposition (executed/pending/rejected)."""
+        return await ctx.db.get_todays_recommendations()
+
     # ------------------------------------------------------------------
     # Historical Reports
     # ------------------------------------------------------------------
