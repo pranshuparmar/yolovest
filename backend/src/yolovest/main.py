@@ -284,18 +284,21 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
         return _StubMarketData()
 
     intraday = None
-    # Kite handles intraday too, so skip tvDatafeed if Kite is primary
+    intraday_fallback = None
+    # Kite handles intraday too — use it as primary with tvDatafeed as fallback
     if config.market_data.kite_data_enabled and daily_providers:
         from yolovest.data.kite_data import KiteDataProvider
 
         if isinstance(daily_providers[0], KiteDataProvider):
-            intraday = daily_providers[0]  # Kite handles all intervals
+            intraday = daily_providers[0]
+            intraday_fallback = TVDatafeedProvider()
     if intraday is None and config.market_data.intraday_provider == "tvdatafeed":
         intraday = TVDatafeedProvider()
 
     return MarketDataIngester(
         daily_providers=daily_providers,
         intraday_provider=intraday,
+        intraday_fallback=intraday_fallback,
         stale_threshold_minutes=config.market_data.stale_threshold_minutes,
     )
 

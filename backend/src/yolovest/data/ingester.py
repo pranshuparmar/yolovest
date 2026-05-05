@@ -26,6 +26,7 @@ class MarketDataIngester(MarketDataBase):
         self,
         daily_providers: list[MarketDataBase],
         intraday_provider: MarketDataBase | None = None,
+        intraday_fallback: MarketDataBase | None = None,
         stale_threshold_minutes: int = 30,
     ) -> None:
         """Initialize with ordered list of daily providers and optional intraday provider.
@@ -33,12 +34,14 @@ class MarketDataIngester(MarketDataBase):
         Args:
             daily_providers: Ordered list — first is primary, rest are fallbacks.
             intraday_provider: Separate provider for intraday intervals (e.g., tvDatafeed).
+            intraday_fallback: Fallback intraday provider if primary fails.
             stale_threshold_minutes: Reject data older than this.
         """
         if not daily_providers:
             raise ValueError("At least one daily provider is required")
         self._daily_providers = daily_providers
         self._intraday_provider = intraday_provider
+        self._intraday_fallback = intraday_fallback
         self._stale_minutes = stale_threshold_minutes
         # Per-symbol metadata from the last fetch (provider errors, empties)
         self._last_fetch_meta: dict[str, dict[str, Any]] = {}
@@ -174,9 +177,14 @@ class MarketDataIngester(MarketDataBase):
     def _select_providers(self, interval: str) -> list[MarketDataBase]:
         """Select providers based on interval type."""
         if interval in ("5minute", "15minute", "1m"):
+            providers = []
             if self._intraday_provider:
-                return [self._intraday_provider]
-            raise ValueError(f"No intraday provider configured for interval {interval}")
+                providers.append(self._intraday_provider)
+            if self._intraday_fallback and self._intraday_fallback not in providers:
+                providers.append(self._intraday_fallback)
+            if not providers:
+                raise ValueError(f"No intraday provider configured for interval {interval}")
+            return providers
         return self._daily_providers
 
     def _all_providers(self) -> list[MarketDataBase]:

@@ -87,15 +87,33 @@ class KiteDataProvider(MarketDataBase):
         self._kite = kite
         return self._kite
 
+    _INDEX_SYMBOLS = {"NIFTY 50", "NIFTY BANK", "NIFTY IT", "NIFTY NEXT 50"}
+
     async def _get_instrument_token(self, symbol: str) -> int:
         """Resolve NSE symbol to Kite instrument token.
 
+        Handles both regular NSE stocks and NSE indices (NIFTY 50, etc.).
         Caches results to avoid repeated API calls.
         """
         if symbol in self._token_cache:
             return self._token_cache[symbol]
 
         kite = self._get_kite()
+
+        # Index symbols live on a separate "indices" exchange in Kite
+        if symbol in self._INDEX_SYMBOLS:
+            instruments = await asyncio.to_thread(kite.instruments, "NSE")
+            for inst in instruments:
+                if inst["tradingsymbol"] == symbol and inst["instrument_type"] == "EQ":
+                    self._token_cache[symbol] = inst["instrument_token"]
+                    return inst["instrument_token"]
+            # Fallback: try with "INDICES" segment (Kite uses instrument_type)
+            for inst in instruments:
+                if inst["tradingsymbol"] == symbol:
+                    self._token_cache[symbol] = inst["instrument_token"]
+                    return inst["instrument_token"]
+            raise ValueError(f"Index instrument token not found for {symbol}")
+
         instruments = await asyncio.to_thread(kite.instruments, "NSE")
         for inst in instruments:
             if inst["tradingsymbol"] == symbol:

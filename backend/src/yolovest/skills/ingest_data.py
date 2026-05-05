@@ -93,6 +93,10 @@ class IngestDataSkill(SkillBase):
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         symbols = kwargs.get("symbols") or await self._get_active_symbols()
+        # Include index symbol for market regime detection
+        regime_cfg = self.ctx.config.strategy.market_regime
+        if regime_cfg.enabled and regime_cfg.index_symbol not in symbols:
+            symbols.append(regime_cfg.index_symbol)
         results: dict[str, Any] = {
             "symbols_ingested": 0, "news_articles": 0, "errors": [],
             "cache_hits": 0, "quarantined": 0,
