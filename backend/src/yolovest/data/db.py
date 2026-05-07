@@ -1458,8 +1458,10 @@ class Database:
 
         # Available cash: only deduct system-traded positions, not adopted holdings
         # (adopted holdings represent money already invested outside the system)
-        exposure_pct = system_position_value / total_capital if total_capital > 0 else 0
-        available_cash = total_capital - system_position_value
+        # Exposure = system trades / (available capital for system trading)
+        system_capital = total_capital - adopted_position_value
+        exposure_pct = system_position_value / system_capital if system_capital > 0 else 0
+        available_cash = system_capital - system_position_value
 
         # Today's trades count
         cursor = await self.conn.execute(
