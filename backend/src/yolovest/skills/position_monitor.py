@@ -611,7 +611,11 @@ class PositionMonitorSkill(SkillBase):
             cost_config=self.ctx.config.transaction_costs,
         )
         pnl = round(gross_pnl - costs, 2)
-        await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+
+        if self.ctx.config.execution.transaction_mode == "manual":
+            await self._queue_exit_for_approval(pos, current_price, pnl, "holding_expiry")
+        else:
+            await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
         return pnl
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:

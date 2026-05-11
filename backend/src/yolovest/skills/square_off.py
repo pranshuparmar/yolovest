@@ -92,6 +92,26 @@ class SquareOffSkill(SkillBase):
                 data={"squared_off": [], "total_pnl": 0, "failures": [], "force": force},
             )
 
+        # In manual mode (non-force), notify user instead of auto-closing.
+        # MIS positions MUST close by EOD — warn urgently via Telegram.
+        if self.ctx.config.execution.transaction_mode == "manual" and not force:
+            symbols = [p["symbol"] for p in positions]
+            logger.warning(
+                "square-off: %d MIS positions need closing but manual mode is active: %s",
+                len(positions), symbols,
+            )
+            await self.ctx.notify.send(
+                f"URGENT: {len(positions)} MIS positions must close before 3:30 PM!\n"
+                f"Symbols: {', '.join(symbols)}\n"
+                f"Approve exits on dashboard or Zerodha will auto-square with penalty.",
+                alert_type="errors",
+            )
+            return SkillResult(
+                success=True, skill_name=self.name,
+                data={"squared_off": [], "total_pnl": 0, "failures": [],
+                      "manual_mode_warning": symbols, "force": force},
+            )
+
         deadline = self._get_hard_deadline()
         squared_off: list[dict[str, Any]] = []
         remaining = list(positions)
