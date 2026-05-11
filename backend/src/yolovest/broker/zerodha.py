@@ -86,6 +86,7 @@ class ZerodhaBroker(BrokerBase):
         max_retries: int = 3,
         retry_base_delay: float = 2.0,
         db: Any = None,
+        kite_data_enabled: bool = False,
     ) -> None:
         self._api_key = api_key
         self._api_secret = api_secret
@@ -93,6 +94,7 @@ class ZerodhaBroker(BrokerBase):
         self._paper_slippage_pct = paper_slippage_pct
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
+        self._kite_data_enabled = kite_data_enabled
         self._access_token: str | None = None
         self._kite: Any = None
         self._db = db  # For persisting access token across restarts
@@ -320,14 +322,21 @@ class ZerodhaBroker(BrokerBase):
         # Convert MARKET → LIMIT at LTP ± buffer (Zerodha API restriction)
         if order_type == "MARKET":
             try:
-                async with self._rate_limiter:
-                    ohlc_data = await asyncio.to_thread(
-                        self._kite.ohlc, f"NSE:{symbol}"
-                    )
-                quote = ohlc_data.get(f"NSE:{symbol}", {})
-                ltp = quote.get("last_price") or quote.get("ohlc", {}).get("close", 0)
+                nse_key = f"NSE:{symbol}"
+                ltp = 0.0
+                # kite.ltp() gives real-time price but needs paid data plan;
+                # kite.ohlc() is free-tier and returns last_price + day OHLC.
+                if self._kite_data_enabled:
+                    async with self._rate_limiter:
+                        data = await asyncio.to_thread(self._kite.ltp, nse_key)
+                    ltp = data.get(nse_key, {}).get("last_price", 0)
+                if not ltp or ltp <= 0:
+                    async with self._rate_limiter:
+                        data = await asyncio.to_thread(self._kite.ohlc, nse_key)
+                    quote = data.get(nse_key, {})
+                    ltp = quote.get("last_price") or quote.get("ohlc", {}).get("close", 0)
                 if ltp and ltp > 0:
-                    buffer = 0.01  # 1% buffer for slippage
+                    buffer = 0.005 if self._kite_data_enabled else 0.01
                     if side == "BUY":
                         price = round(ltp * (1 + buffer), 2)
                     else:

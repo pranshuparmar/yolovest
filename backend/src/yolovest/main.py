@@ -229,6 +229,7 @@ def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
             paper_slippage_pct=config.execution.paper_slippage_pct,
             max_retries=config.execution.max_order_retries,
             retry_base_delay=float(config.execution.retry_base_delay_sec),
+            kite_data_enabled=config.market_data.kite_data_enabled,
         )
     return _StubBroker()
 
