@@ -97,8 +97,16 @@ class IngestDataSkill(SkillBase):
             "cache_hits": 0, "quarantined": 0,
         }
 
-        # Load quarantined symbols for fast skip
+        # Include index symbol for market regime detection (if enabled)
+        regime_cfg = self.ctx.config.strategy.market_regime
+        index_symbol = regime_cfg.index_symbol if regime_cfg.enabled else None
+        if index_symbol and index_symbol not in symbols:
+            symbols.append(index_symbol)
+
+        # Load quarantined symbols for fast skip (but never quarantine index symbols)
         quarantined = await self.ctx.db.get_all_quarantined_symbol_set()
+        if index_symbol:
+            quarantined.discard(index_symbol)
         active_symbols = [s for s in symbols if s not in quarantined]
         results["quarantined"] = len(symbols) - len(active_symbols)
         if results["quarantined"] > 0:
