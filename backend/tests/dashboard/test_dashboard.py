@@ -237,6 +237,8 @@ class TestDryRunDiagnostics:
 
     def _setup_universe(self, dashboard_ctx, symbols: list[str]):
         """Configure mock DB to return stocks in the universe."""
+        dashboard_ctx.config.strategy.mode = "short_term"
+        dashboard_ctx.config.strategy.allowed_holding_periods = ["short_term", "long_term"]
         dashboard_ctx.db.get_nse_universe = AsyncMock(return_value=[
             {"symbol": s, "avg_daily_volume": 500_000} for s in symbols
         ])
@@ -274,7 +276,7 @@ class TestDryRunDiagnostics:
         diag = data["diagnostics"]
         assert diag["filter_counts"]["low_confidence"] == 2
         assert diag["filter_counts"]["passed"] == 0
-        assert diag["min_confidence_threshold"] == 0.65
+        assert diag["min_confidence_threshold"] == 0.60
         assert all(r["reason"] == "low_confidence" for r in diag["rejection_details"])
 
     def test_dry_run_insufficient_bars_shows_diagnostics(self, client, auth_headers, dashboard_ctx):

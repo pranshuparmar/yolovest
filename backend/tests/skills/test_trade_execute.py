@@ -62,7 +62,7 @@ class TestLiveTrading:
     async def test_live_trade_basic(self, trade_skill, base_signal):
         trade_skill.ctx.config.mode = "live"
         trade_skill.ctx.broker.get_order_status = AsyncMock(
-            return_value={"status": "filled", "average_price": 2501.0}
+            return_value={"status": "filled", "average_price": 2501.0, "filled_quantity": 10}
         )
 
         result = await trade_skill.execute(signal=base_signal)
@@ -75,7 +75,7 @@ class TestLiveTrading:
     async def test_live_slippage_tracked(self, trade_skill, base_signal):
         trade_skill.ctx.config.mode = "live"
         trade_skill.ctx.broker.get_order_status = AsyncMock(
-            return_value={"status": "filled", "average_price": 2503.0}
+            return_value={"status": "filled", "average_price": 2503.0, "filled_quantity": 10}
         )
 
         result = await trade_skill.execute(signal=base_signal)
@@ -90,7 +90,7 @@ class TestLiveTrading:
             side_effect=[Exception("timeout"), "ORD-1", "SL-1"]
         )
         trade_skill.ctx.broker.get_order_status = AsyncMock(
-            return_value={"status": "filled", "average_price": 2500.0}
+            return_value={"status": "filled", "average_price": 2500.0, "filled_quantity": 10}
         )
 
         result = await trade_skill.execute(signal=base_signal)

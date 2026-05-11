@@ -112,8 +112,8 @@ class TestSquareOff:
         square_off_skill.ctx.db.get_open_positions = AsyncMock(
             return_value=[mis_position]
         )
-        square_off_skill.ctx.broker.cancel_order = AsyncMock(
-            side_effect=Exception("cancel failed")
+        square_off_skill.ctx.broker.place_order = AsyncMock(
+            side_effect=Exception("broker unavailable")
         )
 
         result = await square_off_skill.execute()
