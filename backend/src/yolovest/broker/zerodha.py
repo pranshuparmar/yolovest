@@ -308,9 +308,39 @@ class ZerodhaBroker(BrokerBase):
         price: float | None,
         trigger_price: float | None,
     ) -> str:
-        """Place order via Kite API with retry."""
+        """Place order via Kite API with retry.
+
+        Zerodha no longer allows MARKET orders without market protection
+        via API. All MARKET orders are auto-converted to LIMIT at LTP
+        with a small buffer to ensure fill.
+        """
         if self._kite is None:
             raise RuntimeError("Not authenticated")
+
+        # Convert MARKET → LIMIT at LTP ± buffer (Zerodha API restriction)
+        if order_type == "MARKET" and price is None:
+            try:
+                async with self._rate_limiter:
+                    ltp_data = await asyncio.to_thread(
+                        self._kite.ltp, f"NSE:{symbol}"
+                    )
+                ltp = ltp_data.get(f"NSE:{symbol}", {}).get("last_price", 0)
+                if ltp and ltp > 0:
+                    buffer = 0.005  # 0.5% buffer for slippage
+                    if side == "BUY":
+                        price = round(ltp * (1 + buffer), 2)
+                    else:
+                        price = round(ltp * (1 - buffer), 2)
+                    order_type = "LIMIT"
+                    logger.info(
+                        "MARKET→LIMIT conversion: %s %s LTP=%.2f → price=%.2f",
+                        side, symbol, ltp, price,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "LTP fetch failed for MARKET→LIMIT conversion on %s, "
+                    "will try MARKET: %s", symbol, e,
+                )
 
         kite_side = "BUY" if side == "BUY" else "SELL"
         params: dict[str, Any] = {
