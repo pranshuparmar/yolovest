@@ -321,12 +321,13 @@ class ZerodhaBroker(BrokerBase):
         if order_type == "MARKET":
             try:
                 async with self._rate_limiter:
-                    ltp_data = await asyncio.to_thread(
-                        self._kite.ltp, f"NSE:{symbol}"
+                    ohlc_data = await asyncio.to_thread(
+                        self._kite.ohlc, f"NSE:{symbol}"
                     )
-                ltp = ltp_data.get(f"NSE:{symbol}", {}).get("last_price", 0)
+                quote = ohlc_data.get(f"NSE:{symbol}", {})
+                ltp = quote.get("last_price") or quote.get("ohlc", {}).get("close", 0)
                 if ltp and ltp > 0:
-                    buffer = 0.005  # 0.5% buffer for slippage
+                    buffer = 0.01  # 1% buffer for slippage
                     if side == "BUY":
                         price = round(ltp * (1 + buffer), 2)
                     else:
@@ -338,8 +339,8 @@ class ZerodhaBroker(BrokerBase):
                     )
             except Exception as e:
                 logger.warning(
-                    "LTP fetch failed for MARKET→LIMIT conversion on %s, "
-                    "will try MARKET: %s", symbol, e,
+                    "Price fetch failed for MARKET→LIMIT conversion on %s: %s",
+                    symbol, e,
                 )
 
         kite_side = "BUY" if side == "BUY" else "SELL"
