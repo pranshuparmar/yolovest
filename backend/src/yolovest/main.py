@@ -363,14 +363,16 @@ def build_context(config: AppConfig) -> AppContext:
     db = _build_db(config)
     broker = _build_broker(config)
     # Pass DB to broker for token persistence (if real broker)
+    market_data = _build_market_data(config)
     if isinstance(broker, ZerodhaBroker):
         broker._db = db
+        broker._market_data = market_data
     return AppContext(
         config=config,
         db=cast(DatabaseProtocol, db),
         broker=cast(BrokerProtocol, broker),
         llm=cast(LLMProtocol, _build_llm(config)),
-        market_data=cast(MarketDataProtocol, _build_market_data(config)),
+        market_data=cast(MarketDataProtocol, market_data),
         notify=cast(NotifierProtocol, Notifier(config)),
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
