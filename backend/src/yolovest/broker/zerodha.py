@@ -371,10 +371,13 @@ class ZerodhaBroker(BrokerBase):
             ltp = await self._fetch_ltp_for_limit(symbol)
             if ltp and ltp > 0:
                 buffer = 0.005 if self._kite_data_enabled else 0.01
+                tick = 0.05
                 if side == "BUY":
-                    price = round(ltp * (1 + buffer), 2)
+                    raw = ltp * (1 + buffer)
+                    price = round(round(raw / tick) * tick, 2)
                 else:
-                    price = round(ltp * (1 - buffer), 2)
+                    raw = ltp * (1 - buffer)
+                    price = round(round(raw / tick) * tick, 2)
                 order_type = "LIMIT"
                 logger.info(
                     "MARKET→LIMIT conversion: %s %s LTP=%.2f → price=%.2f",

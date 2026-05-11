@@ -663,6 +663,14 @@ class PositionMonitorSkill(SkillBase):
         if close_qty <= 0:
             return False
 
+        # In manual mode, skip auto partial profit — user controls all exits
+        if self.ctx.config.execution.transaction_mode == "manual":
+            logger.info(
+                "position-monitor: partial profit target crossed for %s but skipping (manual mode)",
+                pos["symbol"],
+            )
+            return False
+
         # Place the partial exit order
         try:
             if signal_type == "BUY":
