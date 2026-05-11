@@ -41,44 +41,10 @@ class PositionMonitorSkill(SkillBase):
         from yolovest.timezone import now_ist
 
         cfg = self.ctx.config.risk
-        local_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
+        local_positions = await self.ctx.db.get_open_positions()
         broker_positions = await self.ctx.broker.get_positions()
 
-        # Also include CNC holdings (delivery stocks held overnight)
-        try:
-            holdings = await self.ctx.broker.get_holdings()
-            for h in holdings:
-                qty = h.get("quantity", 0) or h.get("opening_quantity", 0)
-                if qty > 0 and h.get("tradingsymbol"):
-                    # Only add if not already in positions (avoid duplicates)
-                    pos_symbols = {
-                        (bp.get("tradingsymbol") or bp.get("symbol", ""))
-                        for bp in broker_positions
-                    }
-                    if h["tradingsymbol"] not in pos_symbols:
-                        broker_positions.append({
-                            "tradingsymbol": h["tradingsymbol"],
-                            "quantity": qty,
-                            "average_price": h.get("average_price", 0),
-                            "product": "CNC",
-                        })
-        except Exception:
-            logger.debug("Holdings fetch failed for adoption check", exc_info=True)
-
-        # Sync broker balance to keep capital figures accurate
-        await self._sync_broker_capital()
-
-        # Adopt untracked broker positions BEFORE reconciliation
-        # so adopted symbols don't show up as discrepancies
-        locked_symbols = await self.ctx.db.get_locked_symbols()
-        adopted = await self._adopt_untracked_positions(
-            local_positions, broker_positions, locked_symbols,
-        )
-        if adopted:
-            # Refresh local positions to include newly adopted ones
-            local_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
-
-        discrepancies = await self._reconcile(local_positions, broker_positions)
+        discrepancies = self._reconcile(local_positions, broker_positions)
 
         # Recover ghost positions: local DB says open, broker says closed.
         # This happens when broker-side SL triggers or manual broker actions.
@@ -87,10 +53,12 @@ class PositionMonitorSkill(SkillBase):
         )
 
         if discrepancies:
-            parts = [f"Position discrepancy detected:\n" + "\n".join(discrepancies)]
-            if recovered:
-                parts.append(f"Auto-recovered: {', '.join(recovered)}")
-            await self.ctx.notify.send("\n".join(parts), alert_type="errors")
+            await self.ctx.notify.send(
+                f"Position discrepancy detected:\n"
+                + "\n".join(discrepancies)
+                + (f"\nAuto-recovered: {', '.join(recovered)}" if recovered else ""),
+                alert_type="errors",
+            )
 
         trails_modified = 0
         targets_hit: list[dict[str, Any]] = []
@@ -100,6 +68,9 @@ class PositionMonitorSkill(SkillBase):
 
         # Skip positions that were just recovered (already closed in DB)
         recovered_set = set(recovered)
+
+        # Load locked symbols — these should not be auto-sold (target/SL/trail)
+        locked_symbols = await self.ctx.db.get_locked_symbols()
 
         for pos in local_positions:
             symbol = pos["symbol"]
@@ -130,52 +101,72 @@ class PositionMonitorSkill(SkillBase):
                 continue
 
             # Partial profit booking (before target/SL checks)
-            # In manual mode, skip auto partial profit — user decides
-            is_manual = self.ctx.config.execution.transaction_mode == "manual"
-            if not is_manual:
-                partial_booked = await self._check_partial_profit_booking(
-                    pos, current_price,
+            partial_booked = await self._check_partial_profit_booking(
+                pos, current_price,
+            )
+            if partial_booked:
+                # Update unrealized PnL for remaining position and move on;
+                # skip target/SL checks this cycle to let the partial order settle
+                await self.ctx.db.update_unrealized_pnl(
+                    pos["trade_id"], current_price,
                 )
-                if partial_booked:
-                    await self.ctx.db.update_unrealized_pnl(
-                        pos["trade_id"], current_price,
-                    )
-                    continue
+                continue
 
             # Target hit?
             if (pos["signal_type"] == "BUY" and current_price >= target) or (
                 pos["signal_type"] == "SELL" and current_price <= target
             ):
-                if is_manual:
-                    # Queue exit for approval instead of auto-executing.
-                    # Returns True if newly queued, False if skipped (dedup/rejection).
-                    queued = await self._queue_exit_for_approval(pos, current_price, "target_hit")
-                    if queued:
-                        logger.info("position-monitor: TARGET HIT %s — queued for approval (manual mode)", symbol)
-                    # Don't add to targets_hit — no actual exit happened.
-                    # The queue itself sends a notification; no need for a separate "Exit" alert.
+                qty = pos.get("quantity", 0)
+                if pos["signal_type"] == "BUY":
+                    gross_pnl = (current_price - entry) * qty
                 else:
-                    exit_price, pnl = await self._close_position_on_broker(
-                        pos, current_price, entry, "target",
+                    gross_pnl = (entry - current_price) * qty
+                product = pos.get("product", "MIS")
+                costs = compute_transaction_costs(
+                    entry, current_price, qty, product=product,
+                    cost_config=self.ctx.config.transaction_costs,
+                )
+                pnl = round(gross_pnl - costs, 2)
+
+                if self.ctx.config.execution.transaction_mode == "manual":
+                    await self._queue_exit_for_approval(
+                        pos, current_price, pnl, "target_hit",
                     )
-                    targets_hit.append({"symbol": symbol, "pnl": pnl})
-                    logger.info(
-                        "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f",
-                        symbol, exit_price, pnl,
-                    )
+                else:
+                    await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+                targets_hit.append({"symbol": symbol, "pnl": pnl})
+                logger.info(
+                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
+                    symbol, current_price, pnl, costs,
+                )
                 continue
 
             # SL hit?
             if (pos["signal_type"] == "BUY" and current_price <= sl) or (
                 pos["signal_type"] == "SELL" and current_price >= sl
             ):
-                exit_price, pnl = await self._close_position_on_broker(
-                    pos, current_price, entry, "stop_loss",
+                qty = pos.get("quantity", 0)
+                if pos["signal_type"] == "BUY":
+                    gross_pnl = (current_price - entry) * qty
+                else:
+                    gross_pnl = (entry - current_price) * qty
+                product = pos.get("product", "MIS")
+                costs = compute_transaction_costs(
+                    entry, current_price, qty, product=product,
+                    cost_config=self.ctx.config.transaction_costs,
                 )
+                pnl = round(gross_pnl - costs, 2)
+
+                if self.ctx.config.execution.transaction_mode == "manual":
+                    await self._queue_exit_for_approval(
+                        pos, current_price, pnl, "stop_loss_hit",
+                    )
+                else:
+                    await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
                 stops_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
-                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f",
-                    symbol, exit_price, pnl,
+                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
+                    symbol, current_price, pnl, costs,
                 )
                 continue
 
@@ -195,16 +186,10 @@ class PositionMonitorSkill(SkillBase):
                     else:
                         new_sl = min(entry, current_price + step)
 
-                    if self._is_better_sl(pos["signal_type"], new_sl, sl) and pos.get("sl_order_id"):
-                        try:
-                            await self.ctx.broker.modify_sl_order(pos["sl_order_id"], new_sl)
-                            await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
-                            trails_modified += 1
-                        except Exception:
-                            logger.warning(
-                                "Failed to trail SL for %s (will retry next cycle)",
-                                symbol, exc_info=True,
-                            )
+                    if self._is_better_sl(pos["signal_type"], new_sl, sl):
+                        await self.ctx.broker.modify_sl_order(pos["sl_order_id"], new_sl)
+                        await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+                        trails_modified += 1
 
             # Holding period expiry check
             expiry_result = await self._check_holding_expiry(
@@ -325,150 +310,8 @@ class PositionMonitorSkill(SkillBase):
                 await asyncio.sleep(base_delay * (2 ** attempt))
         return None
 
-    async def _sync_broker_capital(self) -> None:
-        """Sync broker balance breakdown (cash + utilised + holdings) to DB so
-        capital figures stay accurate between dashboard visits."""
-        try:
-            import json as _json
-            from yolovest.dashboard.app import _compute_capital_breakdown
-            bd = await _compute_capital_breakdown(self.ctx.broker)
-            if bd["total"] > 0:
-                await self.ctx.db.set_system_state("initial_capital", str(bd["total"]))
-                await self.ctx.db.set_system_state("capital_breakdown", _json.dumps(bd))
-                logger.debug("Synced broker capital: %.2f", bd["total"])
-        except Exception:
-            logger.debug("Broker capital sync skipped", exc_info=True)
-
-    async def _adopt_untracked_positions(
-        self,
-        local_positions: list[dict[str, Any]],
-        broker_positions: list[dict[str, Any]],
-        locked_symbols: set[str],
-    ) -> list[str]:
-        """Adopt broker positions that aren't tracked locally.
-
-        Creates trade records for positions found on the broker but missing
-        from the local DB (e.g., bought directly on Kite, or from failed
-        order retries). Locked holdings are skipped.
-
-        Returns list of adopted symbol names.
-        """
-        local_symbols = {pos.get("symbol", "") for pos in local_positions}
-        adopted: list[str] = []
-
-        for bp in broker_positions:
-            sym = bp.get("tradingsymbol") or bp.get("symbol", "")
-            qty = bp.get("quantity", bp.get("net_quantity", 0))
-
-            if not sym or qty == 0 or sym in local_symbols:
-                continue
-
-            # Determine direction from quantity sign (positive = long/BUY, negative = short/SELL)
-            signal_type = "BUY" if qty > 0 else "SELL"
-            abs_qty = abs(qty)
-            entry_price = bp.get("average_price", 0) or bp.get("buy_price", 0)
-            product = bp.get("product", "CNC")
-
-            if entry_price <= 0:
-                logger.warning("Cannot adopt %s: no valid average_price from broker", sym)
-                continue
-
-            # For adopted positions, compute SL/target from CURRENT price
-            # (what should I do NOW?) not the historical purchase price.
-            # The purchase price is recorded as entry_price for P&L tracking,
-            # but the risk levels should reflect the current market reality.
-            current_price = entry_price
-            try:
-                current_price = await self.ctx.market_data.get_ltp(sym)
-            except Exception:
-                logger.debug("LTP unavailable for adopted %s, using entry price", sym)
-
-            sl_price, target_price = await self._compute_atr_levels(sym, current_price, signal_type)
-
-            trade = {
-                "symbol": sym,
-                "signal_type": signal_type,
-                "entry_price": entry_price,
-                "fill_price": entry_price,
-                "quantity": abs_qty,
-                "stop_loss_price": sl_price,
-                "target_price": target_price,
-                "order_id": f"ADOPTED-{sym}",
-                "sl_order_id": None,
-                "product": product,
-                "status": "open",
-                "mode": self.ctx.config.mode,
-                "slippage": 0,
-                "origin": "adopted",
-            }
-
-            try:
-                trade_id = await self.ctx.db.insert_trade(trade)
-                adopted.append(sym)
-
-                # Ensure symbol is on the watchlist so it gets ML signals
-                await self.ctx.db.add_watchlist_symbol(sym)
-
-                logger.info(
-                    "position-monitor: ADOPTED %s %s qty=%d entry=%.2f SL=%.2f target=%.2f (id=%s)",
-                    signal_type, sym, abs_qty, entry_price, sl_price, target_price, trade_id,
-                )
-                await self.ctx.notify.send(
-                    f"Adopted untracked position: {signal_type} {sym} x{abs_qty}\n"
-                    f"  Entry: ₹{entry_price:.2f} | LTP: ₹{current_price:.2f}\n"
-                    f"  SL: ₹{sl_price:.2f} | Target: ₹{target_price:.2f}",
-                    alert_type="trade_entry",
-                )
-            except Exception:
-                logger.exception("Failed to adopt position %s", sym)
-
-        return adopted
-
-    async def _compute_atr_levels(
-        self, symbol: str, entry_price: float, signal_type: str,
-    ) -> tuple[float, float]:
-        """Compute SL and target prices using ATR for an adopted position.
-
-        Returns (stop_loss, target).
-        """
-        from yolovest.data.features import IndicatorConfig, compute_features
-
-        sl_mult = 1.5  # default ATR multipliers
-        target_mult = 2.5
-
-        try:
-            bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=60)
-            if bars and len(bars) >= 14:
-                ind = self.ctx.config.strategy.indicators
-                indicator_cfg = IndicatorConfig(
-                    ema_periods=self.ctx.config.strategy.ema_periods,
-                    rsi=ind.rsi, macd=ind.macd, bollinger_bands=ind.bollinger_bands,
-                    vwap=ind.vwap, atr=ind.atr, volume_profile=ind.volume_profile,
-                    obv=ind.obv, supertrend=ind.supertrend,
-                )
-                features = compute_features(bars, indicator_cfg)
-                atr = features.get("atr_14", 0) if features else 0
-                if atr > 0:
-                    if signal_type == "BUY":
-                        return (
-                            round(max(entry_price - sl_mult * atr, 0.01), 2),
-                            round(entry_price + target_mult * atr, 2),
-                        )
-                    else:
-                        return (
-                            round(entry_price + sl_mult * atr, 2),
-                            round(max(entry_price - target_mult * atr, 0.01), 2),
-                        )
-        except Exception:
-            logger.debug("ATR computation failed for %s, using percentage fallback", symbol)
-
-        # Fallback: 3% SL, 5% target
-        if signal_type == "BUY":
-            return (round(entry_price * 0.97, 2), round(entry_price * 1.05, 2))
-        return (round(entry_price * 1.03, 2), round(entry_price * 0.95, 2))
-
-    async def _reconcile(self, local: list[dict[str, Any]], broker: list[dict[str, Any]]) -> list[str]:
-        """Compare local DB positions with broker positions. Auto-fixes qty mismatches."""
+    def _reconcile(self, local: list[dict[str, Any]], broker: list[dict[str, Any]]) -> list[str]:
+        """Compare local DB positions with broker positions."""
         discrepancies = []
 
         # Build lookup by symbol for broker positions
@@ -495,25 +338,9 @@ class PositionMonitorSkill(SkillBase):
             broker_qty = bp.get("quantity", bp.get("net_quantity", 0))
             local_qty = pos.get("quantity", 0)
             if broker_qty != local_qty:
-                # Auto-fix: broker is source of truth
-                try:
-                    await self.ctx.db.conn.execute(
-                        "UPDATE trades SET quantity = ? WHERE trade_id = ?",
-                        (broker_qty, pos["trade_id"]),
-                    )
-                    await self.ctx.db.conn.commit()
-                    logger.info(
-                        "Auto-fixed qty for %s: %d → %d (broker is source of truth)",
-                        symbol, local_qty, broker_qty,
-                    )
-                    discrepancies.append(
-                        f"{symbol}: qty auto-fixed {local_qty}→{broker_qty}"
-                    )
-                except Exception:
-                    logger.warning("Failed to auto-fix qty for %s", symbol, exc_info=True)
-                    discrepancies.append(
-                        f"{symbol}: qty mismatch (local={local_qty}, broker={broker_qty})"
-                    )
+                discrepancies.append(
+                    f"{symbol}: qty mismatch (local={local_qty}, broker={broker_qty})"
+                )
 
         # Check for broker positions not in local DB
         for sym, bp in broker_by_symbol.items():
@@ -614,7 +441,7 @@ class PositionMonitorSkill(SkillBase):
                     output_summary={"pnl": pnl, "costs": costs},
                 )
             except Exception:
-                logger.debug("Failed to log audit for ghost position recovery", exc_info=True)
+                pass
 
         return recovered
 
@@ -688,21 +515,15 @@ class PositionMonitorSkill(SkillBase):
             else:
                 new_sl = entry - buffer
 
-            if self._is_better_sl(pos["signal_type"], new_sl, pos["stop_loss_price"]) and pos.get("sl_order_id"):
-                try:
-                    await self.ctx.broker.modify_sl_order(pos["sl_order_id"], new_sl)
-                    await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
-                    logger.info(
-                        "position-monitor: HOLDING EXPIRY %s — in profit (%.1f%%), "
-                        "SL tightened to %.2f",
-                        symbol, pnl_pct, new_sl,
-                    )
-                    return {**result_base, "action": "tightened", "new_sl": new_sl}
-                except Exception:
-                    logger.warning(
-                        "Failed to tighten SL for holding expiry %s (will retry)",
-                        symbol, exc_info=True,
-                    )
+            if self._is_better_sl(pos["signal_type"], new_sl, pos["stop_loss_price"]):
+                await self.ctx.broker.modify_sl_order(pos.get("sl_order_id"), new_sl)
+                await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+                logger.info(
+                    "position-monitor: HOLDING EXPIRY %s — in profit (%.1f%%), "
+                    "SL tightened to %.2f",
+                    symbol, pnl_pct, new_sl,
+                )
+                return {**result_base, "action": "tightened", "new_sl": new_sl}
             return None  # SL already tighter than breakeven
 
         # At a loss or near breakeven — close the position
@@ -715,133 +536,62 @@ class PositionMonitorSkill(SkillBase):
         return {**result_base, "action": "closed", "reason": reason, "pnl": pnl}
 
     async def _queue_exit_for_approval(
-        self, pos: dict[str, Any], current_price: float, reason: str,
-    ) -> bool:
-        """Queue a position exit as a pending trade for manual approval.
-
-        Used in manual mode for target hits and partial profits — user
-        decides whether to actually exit. SL hits always auto-execute.
-        Skips if a pending exit already exists for this symbol.
-        """
-        symbol = pos["symbol"]
+        self,
+        pos: dict[str, Any],
+        exit_price: float,
+        pnl: float,
+        reason: str,
+    ) -> None:
+        """Queue an exit as a pending trade instead of auto-closing (manual mode)."""
+        symbol = pos.get("symbol", "?")
+        qty = pos.get("quantity", 0)
+        product = pos.get("product", "CNC")
+        entry = pos.get("entry_price", 0)
         exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
 
-        # Dedup: skip if a pending exit already exists for this symbol
         existing = await self.ctx.db.get_pending_trade_by_symbol(symbol)
         if existing:
-            logger.debug(
-                "position-monitor: pending exit already exists for %s (id=%s), skipping",
-                symbol, existing.get("id"),
-            )
-            return False
-
-        # Respect user rejection: don't re-queue within the cooldown window
-        cooldown_hours = self.ctx.config.execution.rejection_cooldown_hours
-        if await self.ctx.db.was_recently_rejected(symbol, exit_side, hours=cooldown_hours):
             logger.info(
-                "position-monitor: skipping %s %s exit — user rejected recently",
-                exit_side, symbol,
+                "position-monitor: %s %s — pending exit already queued (id=%s)",
+                reason.upper(), symbol, existing.get("id"),
             )
-            return False
-        qty = pos.get("quantity", 0)
-        entry = pos.get("entry_price", 0)
-        invested = round(qty * entry, 2)
-        current_value = round(qty * current_price, 2)
-        pnl = round(current_value - invested, 2)
-        pnl_pct = round((pnl / invested * 100) if invested > 0 else 0, 2)
-        pnl_sign = "+" if pnl >= 0 else ""
+            return
 
         signal = {
             "symbol": symbol,
             "signal_type": exit_side,
-            "entry_price": current_price,
-            "target_price": pos.get("target_price", current_price),
-            "stop_loss_price": pos.get("stop_loss_price", current_price),
+            "entry_price": exit_price,
+            "target_price": exit_price,
+            "stop_loss_price": exit_price,
             "position_size": qty,
             "confidence_score": 1.0,
-            "product": pos.get("product", "CNC"),
+            "product": product,
+            "model_version": f"exit_{reason}",
         }
         pending_id = await self.ctx.db.insert_pending_trade(signal)
-        await self.ctx.notify.send(
-            f"Pending Exit — {reason.replace('_', ' ').upper()}\n"
-            f"{exit_side} <b>{symbol}</b> x{qty} ({pos.get('product', 'CNC')})\n"
-            f"  Entry: ₹{entry:.2f} → LTP: ₹{current_price:.2f}\n"
-            f"  Invested: ₹{invested:,.2f} | Current: ₹{current_value:,.2f}\n"
-            f"  PnL: {pnl_sign}₹{pnl:,.2f} ({pnl_sign}{pnl_pct}%)\n"
-            f"  SL: ₹{pos.get('stop_loss_price', 0):.2f} | Target: ₹{pos.get('target_price', 0):.2f}\n"
-            f"Approve: /approve {symbol}\n"
-            f"Reject: /reject {symbol}",
-            alert_type="trade_exit",
-        )
+        invested = round(qty * entry, 2)
+        current_val = round(qty * exit_price, 2)
+        pnl_pct = round((pnl / invested) * 100, 2) if invested > 0 else 0
+
         logger.info(
             "position-monitor: queued %s exit for %s (reason=%s, pending_id=%d, pnl=₹%.2f)",
             exit_side, symbol, reason, pending_id, pnl,
         )
-        return True
-
-    async def _close_position_on_broker(
-        self,
-        pos: dict[str, Any],
-        current_price: float,
-        entry: float,
-        reason: str,
-    ) -> tuple[float, float]:
-        """Cancel SL order, place market exit, close in DB with actual fill price.
-
-        Returns (exit_price, pnl).
-        """
-        import asyncio
-
-        symbol = pos["symbol"]
-        qty = pos.get("quantity", 0)
-        product = pos.get("product", "MIS")
-
-        # 1. Cancel the SL-M order (best-effort — may already be triggered)
-        sl_order_id = pos.get("sl_order_id")
-        if sl_order_id:
-            try:
-                await self.ctx.broker.cancel_order(sl_order_id)
-            except Exception:
-                logger.debug("SL cancel for %s %s (may already be triggered)",
-                             symbol, reason, exc_info=True)
-
-        # 2. Place market exit order
-        exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
-        exit_price = current_price  # fallback
-        try:
-            exit_order_id = await self.ctx.broker.place_order(
-                symbol=symbol,
-                side=exit_side,
-                quantity=qty,
-                order_type="MARKET",
-                product=product,
-            )
-            # Wait for fill
-            for _ in range(10):
-                await asyncio.sleep(0.5)
-                status = await self.ctx.broker.get_order_status(exit_order_id)
-                fill = status.get("average_price")
-                if fill and fill > 0:
-                    exit_price = fill
-                    break
-        except Exception:
-            logger.warning(
-                "position-monitor: exit order failed for %s %s, using LTP",
-                symbol, reason, exc_info=True,
-            )
-
-        # 3. Calculate PnL and close in DB
-        if pos["signal_type"] == "BUY":
-            gross_pnl = (exit_price - entry) * qty
-        else:
-            gross_pnl = (entry - exit_price) * qty
-        costs = compute_transaction_costs(
-            entry, exit_price, qty, product=product,
-            cost_config=self.ctx.config.transaction_costs,
+        logger.info(
+            "position-monitor: %s %s — queued for approval (manual mode)",
+            reason.upper(), symbol,
         )
-        pnl = round(gross_pnl - costs, 2)
-        await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)
-        return exit_price, pnl
+        await self.ctx.notify.send(
+            f"Pending Exit — {reason.upper().replace('_', ' ')}\n"
+            f"{exit_side} <b>{symbol}</b> x{qty} ({product})\n"
+            f"  Entry: ₹{entry:.2f} → LTP: ₹{exit_price:.2f}\n"
+            f"  Invested: ₹{invested:,.2f} | Current: ₹{current_val:,.2f}\n"
+            f"  PnL: ₹{pnl:,.2f} ({pnl_pct:+.2f}%)\n"
+            f"  SL: ₹{pos.get('stop_loss_price', 0):.2f} | Target: ₹{pos.get('target_price', 0):.2f}\n"
+            f"Approve: /approve {symbol}\n"
+            f"Reject: /reject {symbol}",
+            alert_type="trade_entry",
+        )
 
     async def _close_expired_position(
         self,
@@ -851,9 +601,17 @@ class PositionMonitorSkill(SkillBase):
         qty: int,
     ) -> float:
         """Close a position due to holding period expiry."""
-        _, pnl = await self._close_position_on_broker(
-            pos, current_price, entry, "holding_expiry",
+        if pos["signal_type"] == "BUY":
+            gross_pnl = (current_price - entry) * qty
+        else:
+            gross_pnl = (entry - current_price) * qty
+        product = pos.get("product", "MIS")
+        costs = compute_transaction_costs(
+            entry, current_price, qty, product=product,
+            cost_config=self.ctx.config.transaction_costs,
         )
+        pnl = round(gross_pnl - costs, 2)
+        await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
         return pnl
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:
@@ -933,7 +691,6 @@ class PositionMonitorSkill(SkillBase):
             return False
 
         # Move SL to breakeven if configured
-        sl_moved = True
         if cfg.move_sl_to_breakeven:
             try:
                 sl_order_id = pos.get("sl_order_id")
@@ -941,15 +698,10 @@ class PositionMonitorSkill(SkillBase):
                     await self.ctx.broker.modify_sl_order(sl_order_id, entry)
                     await self.ctx.db.update_position_sl(position_id, entry)
             except Exception:
-                sl_moved = False
                 logger.exception(
-                    "position-monitor: Failed to move SL to breakeven for %s — "
-                    "will NOT mark as booked so it retries next cycle",
+                    "position-monitor: Failed to move SL to breakeven for %s",
                     pos["symbol"],
                 )
-
-        if not sl_moved:
-            return False  # Don't mark as booked — retry next cycle
 
         # Mark as partially booked
         await self.ctx.db.set_system_state(

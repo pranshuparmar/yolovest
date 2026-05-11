@@ -72,7 +72,6 @@ class IngestDataSkill(SkillBase):
                 # Intraday: fresh if within cache_ttl_minutes
                 return (now - latest) < timedelta(minutes=ttl)
         except Exception:
-            logger.debug("Freshness check failed for %s/%s", symbol, interval, exc_info=True)
             return False
 
     async def _get_active_symbols(self) -> list[str]:
@@ -88,45 +87,33 @@ class IngestDataSkill(SkillBase):
             if watchlist:
                 return [s["symbol"] for s in watchlist]
         except Exception:
-            logger.warning("Failed to get watchlist, using seed_symbols", exc_info=True)
+            pass
         return self.ctx.config.scanning.seed_symbols
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         symbols = kwargs.get("symbols") or await self._get_active_symbols()
-        # Include index symbol for market regime detection
-        regime_cfg = self.ctx.config.strategy.market_regime
-        if regime_cfg.enabled and regime_cfg.index_symbol not in symbols:
-            symbols.append(regime_cfg.index_symbol)
         results: dict[str, Any] = {
             "symbols_ingested": 0, "news_articles": 0, "errors": [],
             "cache_hits": 0, "quarantined": 0,
         }
 
-        # Load quarantined symbols and their replacements
+        # Include index symbol for market regime detection (if enabled)
+        regime_cfg = self.ctx.config.strategy.market_regime
+        index_symbol = regime_cfg.index_symbol if regime_cfg.enabled else None
+        if index_symbol and index_symbol not in symbols:
+            symbols.append(index_symbol)
+
+        # Load quarantined symbols for fast skip (but never quarantine index symbols)
         quarantined = await self.ctx.db.get_all_quarantined_symbol_set()
-        replacements = await self.ctx.db.get_quarantine_replacements()
-
-        # Swap quarantined symbols with replacements; skip those without one
-        active_symbols: list[str] = []
-        replaced_count = 0
-        skipped_quarantined: list[str] = []
-        for s in symbols:
-            if s not in quarantined:
-                active_symbols.append(s)
-            elif s in replacements:
-                active_symbols.append(replacements[s])
-                replaced_count += 1
-                logger.info("ingest-data: using replacement %s -> %s", s, replacements[s])
-            else:
-                skipped_quarantined.append(s)
-
-        results["quarantined"] = len(skipped_quarantined)
-        results["replaced"] = replaced_count
-        if skipped_quarantined:
+        if index_symbol:
+            quarantined.discard(index_symbol)
+        active_symbols = [s for s in symbols if s not in quarantined]
+        results["quarantined"] = len(symbols) - len(active_symbols)
+        if results["quarantined"] > 0:
             logger.info(
-                "ingest-data: skipping %d quarantined symbols (no replacement): %s",
-                len(skipped_quarantined),
-                sorted(skipped_quarantined),
+                "ingest-data: skipping %d quarantined symbols: %s",
+                results["quarantined"],
+                sorted(quarantined & set(symbols)),
             )
 
         # --- OHLCV Data (primary + fallback) — fetched concurrently ---
@@ -257,7 +244,7 @@ class IngestDataSkill(SkillBase):
                     logger.debug("Skipping expensive fetches (last full ingest %.0fs ago)",
                                  (now_ist() - last_ts).total_seconds())
         except Exception:
-            logger.debug("Failed to check last full ingest time", exc_info=True)
+            pass
 
         # --- Expensive fetches: news, scrapers, sentiment ---
         # Run concurrently with per-source timeouts and an overall budget
@@ -568,7 +555,7 @@ class IngestDataSkill(SkillBase):
                 from yolovest.timezone import now_utc
                 await self.ctx.db.set_system_state("last_full_ingest", now_utc().isoformat())
             except Exception:
-                logger.warning("Failed to persist last_full_ingest timestamp", exc_info=True)
+                pass
 
         # --- Phase 2: Sentiment (depends on news, runs after) ---
         if self.ctx.config.llm.enabled and deduped:

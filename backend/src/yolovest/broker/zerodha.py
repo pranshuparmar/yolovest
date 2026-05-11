@@ -77,10 +77,6 @@ class ZerodhaBroker(BrokerBase):
     In live mode, orders are placed via Kite Connect SDK.
     """
 
-    # Shared rate limiter so KiteDataProvider uses the same concurrency
-    # pool (Kite aggregate limit is 10 req/s across all endpoints)
-    _shared_rate_limiter = asyncio.Semaphore(8)
-
     def __init__(
         self,
         api_key: str,
@@ -106,8 +102,7 @@ class ZerodhaBroker(BrokerBase):
         # This avoids a kite.profile() call on every heartbeat/page load.
         self._auth_cache_valid_until: float = 0.0
         # Rate limiter: 8 concurrent to stay under Kite's 10 req/s
-        # Shared as class-level so KiteDataProvider can use the same limiter
-        self._rate_limiter = ZerodhaBroker._shared_rate_limiter
+        self._rate_limiter = asyncio.Semaphore(8)
         # Circuit breaker: trip after 5 consecutive API failures, 30s cooldown
         self._circuit_breaker = BrokerCircuitBreaker(
             failure_threshold=5, cooldown_sec=30.0,
@@ -141,7 +136,7 @@ class ZerodhaBroker(BrokerBase):
                 try:
                     await self._db.set_system_state("kite_access_token", self._access_token)
                 except Exception:
-                    logger.debug("Failed to persist kite access token", exc_info=True)
+                    pass
             logger.info("Kite Connect authenticated successfully (valid until ~6:00 AM IST)")
             return True
         except Exception:
@@ -179,7 +174,7 @@ class ZerodhaBroker(BrokerBase):
                 try:
                     await self._db.set_system_state("kite_access_token", "")
                 except Exception:
-                    logger.debug("Failed to clear stale kite token", exc_info=True)
+                    pass
             return False
 
     def _create_kite_session(self, request_token: str) -> Any:
@@ -238,7 +233,6 @@ class ZerodhaBroker(BrokerBase):
             self._update_auth_cache()
             return True
         except Exception:
-            logger.debug("Kite auth verification failed, invalidating cache", exc_info=True)
             self._auth_cache_valid_until = 0.0  # Invalidate cache
             return False
 
@@ -285,11 +279,9 @@ class ZerodhaBroker(BrokerBase):
             direction = 1 if side == "BUY" else -1
             fill_price *= 1 + direction * self._paper_slippage_pct
 
-        is_immediate = order_type == "MARKET"
         self._paper_orders[order_id] = {
             "order_id": order_id,
             "symbol": symbol,
-            "tradingsymbol": symbol,
             "side": side,
             "quantity": quantity,
             "order_type": order_type,
@@ -297,9 +289,7 @@ class ZerodhaBroker(BrokerBase):
             "price": price,
             "trigger_price": trigger_price,
             "fill_price": fill_price,
-            "filled_quantity": quantity if is_immediate else 0,
-            "average_price": fill_price if is_immediate else 0,
-            "status": "COMPLETE" if is_immediate else "OPEN",
+            "status": "filled" if order_type == "MARKET" else "open",
         }
 
         logger.info(
@@ -320,48 +310,37 @@ class ZerodhaBroker(BrokerBase):
     ) -> str:
         """Place order via Kite API with retry.
 
-        Zerodha requires market protection for MARKET/SL-M orders via API.
-        We convert these to LIMIT/SL with a buffer to ensure execution:
-        - MARKET → LIMIT at LTP ± 1% (acts as market with protection)
-        - SL-M → SL with limit price = trigger ± 1% (ensures SL fills)
+        Zerodha no longer allows MARKET orders without market protection
+        via API. All MARKET orders are auto-converted to LIMIT at LTP
+        with a small buffer to ensure fill.
         """
         if self._kite is None:
             raise RuntimeError("Not authenticated")
 
-        _MARKET_PROTECTION_PCT = 0.01  # 1% buffer
-        _TICK_SIZE = 0.05  # NSE tick size for most instruments
-
-        def _round_to_tick(p: float) -> float:
-            """Round price to nearest NSE tick size."""
-            return round(round(p / _TICK_SIZE) * _TICK_SIZE, 2)
-
-        # Convert MARKET to LIMIT with market protection buffer
-        if order_type == "MARKET" and price is not None and price > 0:
-            buffer = price * _MARKET_PROTECTION_PCT
-            price = _round_to_tick(price + buffer if side == "BUY" else price - buffer)
-            order_type = "LIMIT"
-            logger.debug("Converted MARKET to LIMIT with protection: %s %s @ %.2f", side, symbol, price)
-        elif order_type == "MARKET" and (price is None or price <= 0):
-            # No price at all — fetch LTP and use as limit
+        # Convert MARKET → LIMIT at LTP ± buffer (Zerodha API restriction)
+        if order_type == "MARKET" and price is None:
             try:
                 async with self._rate_limiter:
-                    quotes = await asyncio.to_thread(self._kite.ltp, f"NSE:{symbol}")
-                ltp = quotes.get(f"NSE:{symbol}", {}).get("last_price", 0)
-                if ltp > 0:
-                    buffer = ltp * _MARKET_PROTECTION_PCT
-                    price = _round_to_tick(ltp + buffer if side == "BUY" else ltp - buffer)
+                    ltp_data = await asyncio.to_thread(
+                        self._kite.ltp, f"NSE:{symbol}"
+                    )
+                ltp = ltp_data.get(f"NSE:{symbol}", {}).get("last_price", 0)
+                if ltp and ltp > 0:
+                    buffer = 0.005  # 0.5% buffer for slippage
+                    if side == "BUY":
+                        price = round(ltp * (1 + buffer), 2)
+                    else:
+                        price = round(ltp * (1 - buffer), 2)
                     order_type = "LIMIT"
-                    logger.debug("Converted MARKET to LIMIT via LTP: %s %s @ %.2f", side, symbol, price)
-            except Exception:
-                logger.warning("LTP fetch failed for MARKET→LIMIT conversion on %s, will try MARKET", symbol)
-
-        # Convert SL-M to SL with limit price buffer
-        if order_type == "SL-M" and trigger_price is not None:
-            buffer = trigger_price * _MARKET_PROTECTION_PCT
-            price = _round_to_tick(trigger_price - buffer if side == "BUY" else trigger_price + buffer)
-            trigger_price = _round_to_tick(trigger_price)
-            order_type = "SL"
-            logger.debug("Converted SL-M to SL with limit: %s %s trigger=%.2f limit=%.2f", side, symbol, trigger_price, price)
+                    logger.info(
+                        "MARKET→LIMIT conversion: %s %s LTP=%.2f → price=%.2f",
+                        side, symbol, ltp, price,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "LTP fetch failed for MARKET→LIMIT conversion on %s, "
+                    "will try MARKET: %s", symbol, e,
+                )
 
         kite_side = "BUY" if side == "BUY" else "SELL"
         params: dict[str, Any] = {
@@ -388,7 +367,7 @@ class ZerodhaBroker(BrokerBase):
     async def cancel_order(self, order_id: str) -> bool:
         if self._mode == "paper":
             if order_id in self._paper_orders:
-                self._paper_orders[order_id]["status"] = "CANCELLED"
+                self._paper_orders[order_id]["status"] = "cancelled"
                 return True
             return False
 
@@ -417,7 +396,7 @@ class ZerodhaBroker(BrokerBase):
         if self._mode == "paper":
             return [
                 o for o in self._paper_orders.values()
-                if o["status"] in ("filled", "open", "COMPLETE", "OPEN")
+                if o["status"] in ("filled", "open")
             ]
 
         async with self._rate_limiter:
@@ -457,7 +436,7 @@ class ZerodhaBroker(BrokerBase):
                     margins = await asyncio.to_thread(self._kite.margins)
                 return margins
             except Exception:
-                logger.debug("Failed to fetch Kite margins, using fallback", exc_info=True)
+                pass
         # Fallback for unauthenticated or paper-only
         return {"available": {"cash": 0}, "equity": {"available": {"cash": 0}}}
 
@@ -481,18 +460,11 @@ class ZerodhaBroker(BrokerBase):
         if not self._kite:
             raise RuntimeError("Not authenticated")
 
-        # SL orders have a limit price — update it with a buffer from trigger
-        _MARKET_PROTECTION_PCT = 0.01
-        _TICK_SIZE = 0.05
-        new_trigger_price = round(round(new_trigger_price / _TICK_SIZE) * _TICK_SIZE, 2)
-        limit_price = round(round((new_trigger_price * (1 - _MARKET_PROTECTION_PCT)) / _TICK_SIZE) * _TICK_SIZE, 2)
-
         def _modify() -> None:
             self._kite.modify_order(
                 variety="regular",
                 order_id=order_id,
                 trigger_price=new_trigger_price,
-                price=limit_price,
             )
 
         await self._retry_api_call(_modify)
@@ -503,25 +475,9 @@ class ZerodhaBroker(BrokerBase):
     # ------------------------------------------------------------------
 
     async def _retry_api_call(self, fn: Any) -> Any:
-        """Retry with exponential backoff and circuit breaker protection.
-
-        Only retries transient errors (network, rate limits). Permanent errors
-        (validation, auth, input errors) are raised immediately.
-        """
+        """Retry with exponential backoff and circuit breaker protection."""
         # Fail fast if circuit breaker is open
         self._circuit_breaker.check()
-
-        # Error messages that indicate permanent failures — never retry these
-        _PERMANENT_ERRORS = (
-            "market protection",
-            "not allowed",
-            "invalid",
-            "insufficient",
-            "order not found",
-            "margin",
-            "quantity",
-            "tick size",
-        )
 
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
@@ -532,13 +488,6 @@ class ZerodhaBroker(BrokerBase):
                 return result
             except Exception as e:
                 last_error = e
-                err_msg = str(e).lower()
-
-                # Don't retry permanent errors
-                if any(keyword in err_msg for keyword in _PERMANENT_ERRORS):
-                    logger.error("API call failed with permanent error (no retry): %s", e)
-                    raise
-
                 self._circuit_breaker.record_failure()
                 # If circuit just opened, don't retry — fail fast
                 if self._circuit_breaker.state == "OPEN":
