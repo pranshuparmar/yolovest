@@ -318,7 +318,7 @@ class ZerodhaBroker(BrokerBase):
             raise RuntimeError("Not authenticated")
 
         # Convert MARKET → LIMIT at LTP ± buffer (Zerodha API restriction)
-        if order_type == "MARKET" and price is None:
+        if order_type == "MARKET":
             try:
                 async with self._rate_limiter:
                     ltp_data = await asyncio.to_thread(
