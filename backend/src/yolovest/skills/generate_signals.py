@@ -12,6 +12,7 @@ Flow:
 6. Emit signals as events for risk-check skill to consume
 """
 
+import asyncio
 import logging
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -34,7 +35,15 @@ class GenerateSignalsSkill(SkillBase):
     async def execute(self, **kwargs: Any) -> SkillResult:
         watchlist = await self.ctx.db.get_combined_watchlist()
         signals_generated = []
-        min_confidence = self.ctx.config.risk.min_confidence_score
+        risk_cfg = self.ctx.config.risk
+        min_confidence_buy = risk_cfg.min_confidence_buy
+        min_confidence_sell = risk_cfg.min_confidence_sell
+        # Legacy threshold kept for diagnostics
+        min_confidence = min(min_confidence_buy, min_confidence_sell)
+        skip_sell_on_holdings = risk_cfg.skip_sell_on_holdings
+        rotation_cfg = self.ctx.config.scanning
+        # Tracks per-symbol signal productivity for watchlist rotation
+        outcome_tracker: dict[str, bool] = {}
 
         # Diagnostics: track why stocks get filtered out
         filter_counts = {
@@ -83,16 +92,22 @@ class GenerateSignalsSkill(SkillBase):
 
         # Build set of currently held symbols (open positions)
         # Used to decide if SELL = exit-owned-stock (CNC ok) vs short-sell (force MIS)
-        open_positions = await self.ctx.db.get_open_positions()
+        open_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
         held_symbols = {p["symbol"] for p in open_positions}
 
         # Load locked symbols — SELL signals for these will be skipped entirely
         locked_symbols = await self.ctx.db.get_locked_symbols()
 
         # Skip symbols that already have a signal or open position today
-        already_signaled = await self.ctx.db.get_todays_signaled_symbols()
+        already_signaled = await self.ctx.db.get_todays_signaled_symbols(
+            mode=self.ctx.config.mode,
+        )
         if already_signaled:
             filter_counts["already_signaled"] = 0
+            logger.info(
+                "generate-signals: %d symbols blocked by already_signaled dedup: %s",
+                len(already_signaled), sorted(already_signaled),
+            )
 
         # Load symbol cooldown/repeat data
         cooldown_days = self.ctx.config.risk.symbol_cooldown_days
@@ -100,7 +115,9 @@ class GenerateSignalsSkill(SkillBase):
         repeat_min_conf = self.ctx.config.risk.symbol_repeat_min_confidence
         recently_traded: dict[str, str] = {}
         if repeat_lookback > 0:
-            recently_traded = await self.ctx.db.get_recently_traded_symbols(repeat_lookback)
+            recently_traded = await self.ctx.db.get_recently_traded_symbols(
+                repeat_lookback, mode=self.ctx.config.mode,
+            )
 
         now = now_ist()
 
@@ -153,7 +170,7 @@ class GenerateSignalsSkill(SkillBase):
                             )
                             continue
                 except (ValueError, TypeError):
-                    pass
+                    logger.debug("Cooldown check parse error for %s", symbol, exc_info=True)
 
             try:
                 # Step 2: Fetch OHLCV and compute features
@@ -186,22 +203,35 @@ class GenerateSignalsSkill(SkillBase):
                 try:
                     current_price = await self.ctx.market_data.get_ltp(symbol)
                 except Exception:
-                    pass  # fall back to features["close"] in _predict()
+                    logger.debug("LTP unavailable for %s, falling back to bar close", symbol)
 
                 # Decide holding period based on stock characteristics and strategy mode
                 holding_period, product, expected_days = await self._decide_holding_period(
                     features, existing_positions=open_positions,
                 )
                 use_intraday = holding_period == "intraday"
+                is_balanced = self.ctx.config.strategy.mode == "balanced"
 
                 # Use latest intraday price for feature close during market hours
-                if use_intraday:
+                intraday_features = None
+                if use_intraday or is_balanced:
                     intraday_bars = await self.ctx.db.get_ohlcv(symbol, "5minute", days=1)
                     if intraday_bars:
-                        features["close"] = intraday_bars[-1].close
+                        intraday_features = {**features, "close": intraday_bars[-1].close}
 
-                # Step 3: Run ML model (features for classification, current_price for entry/target/SL)
-                if use_intraday:
+                # Step 3: Run ML model(s)
+                if is_balanced:
+                    # Balanced mode: run BOTH models, pick higher confidence
+                    prediction, holding_period, product, expected_days = (
+                        await self._predict_balanced(
+                            symbol, features, intraday_features,
+                            current_price, holding_period, product, expected_days,
+                        )
+                    )
+                    use_intraday = holding_period == "intraday"
+                elif use_intraday:
+                    if intraday_features:
+                        features = intraday_features
                     prediction = await self.ctx.ml.predict_intraday(
                         symbol, features, current_price=current_price,
                     )
@@ -239,6 +269,7 @@ class GenerateSignalsSkill(SkillBase):
                 # Step 4: Skip HOLD signals
                 if prediction.signal_type == "HOLD":
                     filter_counts["hold_signal"] += 1
+                    outcome_tracker[symbol] = False
                     rejection_details.append({
                         "symbol": symbol, "reason": "hold_signal",
                         "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
@@ -257,6 +288,23 @@ class GenerateSignalsSkill(SkillBase):
                     logger.info("Locked holding: skipping SELL for %s", symbol)
                     continue
 
+                # Skip SELL signals for any held symbol — position-monitor owns exits.
+                # Prevents SELL spam on holdings and lets SL/target/trailing do their job.
+                if (
+                    skip_sell_on_holdings
+                    and prediction.signal_type == "SELL"
+                    and symbol in held_symbols
+                ):
+                    filter_counts.setdefault("sell_on_holding", 0)
+                    filter_counts["sell_on_holding"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "sell_on_holding",
+                        "detail": f"SELL skipped — position-monitor handles exit for {symbol}",
+                    })
+                    logger.info("Held symbol: skipping SELL for %s (monitor owns exits)", symbol)
+                    outcome_tracker[symbol] = False
+                    continue
+
                 # Adjust SELL signals: force to MIS/intraday if user doesn't hold the stock
                 from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
@@ -264,6 +312,24 @@ class GenerateSignalsSkill(SkillBase):
                     prediction.signal_type, holding_period, product,
                     symbol, held_symbols, expected_days,
                 )
+
+                # Intraday cutoff: skip intraday signals after configured time
+                if holding_period == "intraday":
+                    cutoff_str = self.ctx.config.market_hours.intraday_cutoff
+                    cutoff_parts = cutoff_str.split(":")
+                    cutoff_time = time(int(cutoff_parts[0]), int(cutoff_parts[1]))
+                    if datetime.now(IST).time() >= cutoff_time:
+                        filter_counts.setdefault("intraday_cutoff", 0)
+                        filter_counts["intraday_cutoff"] += 1
+                        rejection_details.append({
+                            "symbol": symbol, "reason": "intraday_cutoff",
+                            "detail": f"intraday signal after {cutoff_str} cutoff",
+                        })
+                        logger.info(
+                            "Intraday cutoff: skipping %s %s (after %s)",
+                            prediction.signal_type, symbol, cutoff_str,
+                        )
+                        continue
 
                 # Override target/SL with ATR multipliers interpolated for holding duration
                 from yolovest.strategy.holding_period import interpolate_atr_multipliers
@@ -305,12 +371,15 @@ class GenerateSignalsSkill(SkillBase):
                 if is_reentry:
                     signal["reentry"] = True
 
-                # Step 5: Confidence filter
-                # Use elevated threshold for recently traded symbols
-                effective_min = min_confidence
+                # Step 5: Confidence filter (asymmetric per signal type)
+                base_threshold = (
+                    min_confidence_buy if prediction.signal_type == "BUY"
+                    else min_confidence_sell
+                )
+                effective_min = base_threshold
                 is_repeat = symbol in recently_traded
                 if is_repeat and repeat_lookback > 0:
-                    effective_min = max(min_confidence, repeat_min_conf)
+                    effective_min = max(base_threshold, repeat_min_conf)
 
                 if signal["confidence_score"] >= effective_min:
                     # Re-entry: require higher confidence than original trade
@@ -333,6 +402,7 @@ class GenerateSignalsSkill(SkillBase):
                             continue
 
                     filter_counts["passed"] += 1
+                    outcome_tracker[symbol] = True
                     await self.ctx.db.insert_signal(signal)
                     signals_generated.append(signal)
                     await self.broadcast("signal_generated", {
@@ -341,31 +411,33 @@ class GenerateSignalsSkill(SkillBase):
                         "confidence": prediction.confidence,
                         "entry_price": prediction.entry_price,
                     })
-                elif is_repeat and signal["confidence_score"] >= min_confidence:
+                elif is_repeat and signal["confidence_score"] >= base_threshold:
                     # Would have passed normal threshold but blocked by repeat rule
                     filter_counts.setdefault("repeat_low_confidence", 0)
                     filter_counts["repeat_low_confidence"] += 1
+                    outcome_tracker[symbol] = False
                     rejection_details.append({
                         "symbol": symbol, "reason": "repeat_low_confidence",
                         "detail": (
                             f"{prediction.signal_type} @ {prediction.confidence:.2f} "
-                            f"< {effective_min} (repeat threshold, normal={min_confidence})"
+                            f"< {effective_min} (repeat threshold, base={base_threshold})"
                         ),
                     })
                     logger.info(
-                        "Repeat confidence filter for %s: %s @ %.2f < %.2f (repeat, normal=%.2f)",
+                        "Repeat confidence filter for %s: %s @ %.2f < %.2f (repeat, base=%.2f)",
                         symbol, prediction.signal_type, prediction.confidence,
-                        effective_min, min_confidence,
+                        effective_min, base_threshold,
                     )
                 else:
                     filter_counts["low_confidence"] += 1
+                    outcome_tracker[symbol] = False
                     rejection_details.append({
                         "symbol": symbol, "reason": "low_confidence",
-                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {min_confidence}",
+                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {base_threshold}",
                     })
                     logger.info(
                         "Low confidence for %s: %s @ %.2f < %.2f",
-                        symbol, prediction.signal_type, prediction.confidence, min_confidence,
+                        symbol, prediction.signal_type, prediction.confidence, base_threshold,
                     )
 
             except Exception as e:
@@ -380,6 +452,19 @@ class GenerateSignalsSkill(SkillBase):
             len(signals_generated), len(watchlist), filter_counts,
         )
 
+        # Persist rotation outcomes so market-scan can cooldown stale symbols.
+        if rotation_cfg.rotation_enabled and outcome_tracker:
+            threshold = rotation_cfg.rotation_no_signal_threshold
+            cooldown_hours = rotation_cfg.rotation_cooldown_hours
+            for sym, produced in outcome_tracker.items():
+                try:
+                    await self.ctx.db.record_signal_outcome(
+                        sym, produced,
+                        threshold=threshold, cooldown_hours=cooldown_hours,
+                    )
+                except Exception:
+                    logger.exception("Failed to record signal outcome for %s", sym)
+
         return SkillResult(
             success=True,
             skill_name=self.name,
@@ -388,12 +473,109 @@ class GenerateSignalsSkill(SkillBase):
                 "signals_generated": len(signals_generated),
                 "signals": signals_generated,  # full signal dicts for downstream skills
                 "diagnostics": {
-                    "min_confidence_threshold": min_confidence,
+                    "min_confidence_threshold": min_confidence,  # legacy (min of buy/sell)
+                    "min_confidence_buy": min_confidence_buy,
+                    "min_confidence_sell": min_confidence_sell,
                     "filter_counts": filter_counts,
                     "rejection_details": rejection_details,
                 },
             },
         )
+
+    async def _predict_balanced(
+        self,
+        symbol: str,
+        daily_features: dict,
+        intraday_features: dict | None,
+        current_price: float | None,
+        fallback_period: str,
+        fallback_product: str,
+        fallback_days: int,
+    ) -> tuple[Any, str, str, int]:
+        """Balanced mode: run both intraday and swing models, pick higher confidence.
+
+        Returns (prediction, holding_period, product, expected_days).
+        """
+        from yolovest.config import _MODE_HOLDING_DAYS
+        from yolovest.strategy.holding_period import decide_holding_period
+
+        # Check intraday cutoff — if past cutoff, skip intraday model entirely
+        cutoff_str = self.ctx.config.market_hours.intraday_cutoff
+        cutoff_parts = cutoff_str.split(":")
+        past_intraday_cutoff = datetime.now(IST).time() >= time(int(cutoff_parts[0]), int(cutoff_parts[1]))
+
+        if past_intraday_cutoff:
+            # Only run swing model
+            try:
+                swing_pred = await self.ctx.ml.predict_swing(symbol, daily_features, current_price=current_price)
+            except Exception as e:
+                logger.debug("Balanced: swing model failed for %s: %s", symbol, e)
+                swing_pred = None
+            if swing_pred and swing_pred.signal_type != "HOLD":
+                mode_days = _MODE_HOLDING_DAYS.get("balanced", (0, 15))
+                vol_cfg = self.ctx.config.strategy.volatility
+                now_time = datetime.now(IST).time()
+                _, product, expected_days = decide_holding_period(
+                    daily_features, ["short_term", "long_term"], vol_cfg, now_time,
+                    mode_days_range=(max(1, mode_days[0]), mode_days[1]),
+                )
+                label = "swing" if expected_days <= 5 else "positional" if expected_days <= 15 else "long_term"
+                return swing_pred, label, "CNC", expected_days
+            return swing_pred or intraday_features, fallback_period, fallback_product, fallback_days
+
+        # Run both models concurrently
+        intra_feat = intraday_features or daily_features
+        intra_pred, swing_pred = await asyncio.gather(
+            self.ctx.ml.predict_intraday(symbol, intra_feat, current_price=current_price),
+            self.ctx.ml.predict_swing(symbol, daily_features, current_price=current_price),
+            return_exceptions=True,
+        )
+
+        # Resolve exceptions to None
+        if isinstance(intra_pred, BaseException):
+            logger.debug("Balanced: intraday model failed for %s: %s", symbol, intra_pred)
+            intra_pred = None
+        if isinstance(swing_pred, BaseException):
+            logger.debug("Balanced: swing model failed for %s: %s", symbol, swing_pred)
+            swing_pred = None
+
+        # Filter out HOLD signals (confidence is meaningless for HOLD)
+        intra_conf = intra_pred.confidence if intra_pred and intra_pred.signal_type != "HOLD" else -1
+        swing_conf = swing_pred.confidence if swing_pred and swing_pred.signal_type != "HOLD" else -1
+
+        if intra_conf < 0 and swing_conf < 0:
+            # Both HOLD or both failed — return the swing HOLD (or intraday if no swing)
+            prediction = swing_pred or intra_pred
+            return prediction, fallback_period, fallback_product, fallback_days
+
+        if intra_conf >= swing_conf:
+            # Intraday wins
+            logger.debug(
+                "Balanced %s: intraday wins (%.2f %s) vs swing (%.2f %s)",
+                symbol, intra_conf, intra_pred.signal_type,
+                swing_conf, swing_pred.signal_type if swing_pred else "N/A",
+            )
+            return intra_pred, "intraday", "MIS", 0
+        else:
+            # Swing wins — compute proper holding days
+            mode_days = _MODE_HOLDING_DAYS.get("balanced", (0, 15))
+            vol_cfg = self.ctx.config.strategy.volatility
+            now_time = datetime.now(IST).time()
+            _, product, expected_days = decide_holding_period(
+                daily_features,
+                ["short_term", "long_term"],  # exclude intraday since swing won
+                vol_cfg,
+                now_time,
+                mode_days_range=(max(1, mode_days[0]), mode_days[1]),
+            )
+            label = "swing" if expected_days <= 5 else "positional" if expected_days <= 15 else "long_term"
+            logger.debug(
+                "Balanced %s: swing wins (%.2f %s) vs intraday (%.2f %s) — %s (%dd)",
+                symbol, swing_conf, swing_pred.signal_type,
+                intra_conf, intra_pred.signal_type if intra_pred else "N/A",
+                label, expected_days,
+            )
+            return swing_pred, label, "CNC", expected_days
 
     async def _decide_holding_period(
         self, features: dict, existing_positions: list[dict] | None = None,
@@ -475,6 +657,7 @@ class GenerateSignalsSkill(SkillBase):
             try:
                 current_price = await self.ctx.market_data.get_ltp(symbol)
             except Exception:
+                logger.debug("LTP unavailable for %s re-entry check, using bar close", symbol)
                 # Fall back to last bar close
                 if bars:
                     current_price = bars[-1].close
@@ -532,4 +715,5 @@ class GenerateSignalsSkill(SkillBase):
                         return float(conf)
             return None
         except Exception:
+            logger.debug("Failed to get last trade confidence for %s", symbol, exc_info=True)
             return None

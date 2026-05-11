@@ -86,7 +86,10 @@ def _verify_token(token: str) -> str:
 
 
 def _extract_broker_capital(margins: dict[str, Any]) -> float:
-    """Extract total capital from Kite margins response.
+    """Extract free cash + utilised margin from Kite margins response.
+
+    This represents the trading account's cash side (excluding holdings value).
+    For total net worth use _compute_total_capital() which adds holdings value.
 
     Kite margins() returns different structures depending on the SDK version:
     - {"equity": {"net": X, "available": {"cash": Y, ...}, "utilised": {...}}}
@@ -125,6 +128,126 @@ def _extract_broker_capital(margins: dict[str, Any]) -> float:
 
     logger.warning("Could not extract capital from margins: %s", list(margins.keys()))
     return 0.0
+
+
+def _holdings_value(holdings: list[dict[str, Any]]) -> float:
+    """Sum the current market value of all delivery holdings.
+
+    Each holding from kite.holdings() has fields like:
+    - quantity / opening_quantity
+    - last_price (current LTP) or close_price (yesterday's close)
+    - average_price (cost basis)
+    """
+    total = 0.0
+    for h in holdings or []:
+        qty = h.get("quantity") or h.get("opening_quantity") or 0
+        if qty <= 0:
+            continue
+        # Prefer LTP, fall back to close, then to average price
+        price = (
+            h.get("last_price")
+            or h.get("close_price")
+            or h.get("average_price")
+            or 0
+        )
+        try:
+            total += float(qty) * float(price)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _extract_available_cash(margins: dict[str, Any]) -> float:
+    """Extract free trading cash (not deployed) from Kite margins."""
+    equity = margins.get("equity", {})
+    if isinstance(equity, dict):
+        avail = equity.get("available", {})
+        if isinstance(avail, dict):
+            for k in ("cash", "live_balance", "adhoc_margin", "opening_balance"):
+                v = avail.get(k)
+                if v is not None:
+                    return float(v)
+    avail = margins.get("available", {})
+    if isinstance(avail, dict):
+        v = avail.get("cash") or avail.get("live_balance")
+        if v is not None:
+            return float(v)
+    return 0.0
+
+
+def _extract_utilised_margin(margins: dict[str, Any]) -> float:
+    """Extract margin currently locked in open intraday positions."""
+    equity = margins.get("equity", {})
+    if isinstance(equity, dict):
+        used = equity.get("utilised", {})
+        if isinstance(used, dict):
+            v = used.get("debits") or used.get("net")
+            if v is not None:
+                return float(v)
+    return 0.0
+
+
+def _compute_holdings_breakdown(holdings: list[dict[str, Any]]) -> dict[str, float]:
+    """Sum invested cost basis and current market value across delivery holdings."""
+    invested = 0.0
+    current = 0.0
+    for h in holdings or []:
+        qty = h.get("quantity") or h.get("opening_quantity") or 0
+        if qty <= 0:
+            continue
+        avg = h.get("average_price") or 0
+        ltp = h.get("last_price") or h.get("close_price") or avg or 0
+        try:
+            invested += float(qty) * float(avg)
+            current += float(qty) * float(ltp)
+        except (TypeError, ValueError):
+            continue
+    return {"invested": invested, "current": current}
+
+
+async def _compute_capital_breakdown(broker: Any) -> dict[str, float]:
+    """Return a structured breakdown of broker capital.
+
+    Keys:
+        available_cash: free funds ready to deploy
+        utilised_margin: margin locked in open intraday positions
+        holdings_invested: total buy price of CNC delivery holdings
+        holdings_current: current market value of CNC delivery holdings
+        total: available_cash + utilised_margin + holdings_current
+    """
+    breakdown = {
+        "available_cash": 0.0,
+        "utilised_margin": 0.0,
+        "holdings_invested": 0.0,
+        "holdings_current": 0.0,
+        "total": 0.0,
+    }
+    try:
+        margins = await broker.get_margins()
+        if margins:
+            breakdown["available_cash"] = _extract_available_cash(margins)
+            breakdown["utilised_margin"] = _extract_utilised_margin(margins)
+    except Exception:
+        logger.debug("Margins fetch failed", exc_info=True)
+    try:
+        holdings = await broker.get_holdings()
+        h = _compute_holdings_breakdown(holdings)
+        breakdown["holdings_invested"] = h["invested"]
+        breakdown["holdings_current"] = h["current"]
+    except Exception:
+        logger.debug("Holdings fetch failed", exc_info=True)
+    breakdown["total"] = (
+        breakdown["available_cash"]
+        + breakdown["utilised_margin"]
+        + breakdown["holdings_current"]
+    )
+    return breakdown
+
+
+async def _compute_total_capital(broker: Any) -> float:
+    """Backward-compat wrapper. Returns the total of the breakdown."""
+    bd = await _compute_capital_breakdown(broker)
+    return bd["total"]
 
 
 # WebSocket connection manager
@@ -279,7 +402,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             if saved_pw:
                 _password["current"] = saved_pw
         except Exception:
-            pass
+            logger.warning("Failed to load persisted dashboard password", exc_info=True)
 
     def verify_credentials(
         request: Request,
@@ -337,18 +460,22 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         If broker is authenticated, syncs available funds from Zerodha.
         """
-        # Sync capital from broker if authenticated
+        # Sync capital breakdown (cash + utilised + holdings) if authenticated
         try:
             if await ctx.broker.is_authenticated():
-                margins = await ctx.broker.get_margins()
-                if margins:
-                    broker_capital = _extract_broker_capital(margins)
-                    if broker_capital > 0:
-                        await ctx.db.set_system_state("initial_capital", str(broker_capital))
+                bd = await _compute_capital_breakdown(ctx.broker)
+                if bd["total"] > 0:
+                    import json as _json
+                    await ctx.db.set_system_state("initial_capital", str(bd["total"]))
+                    await ctx.db.set_system_state("capital_breakdown", _json.dumps(bd))
+                    logger.info("Portfolio: synced broker capital ₹%.2f (cash=%.2f, used=%.2f, hold=%.2f)",
+                                bd["total"], bd["available_cash"], bd["utilised_margin"], bd["holdings_current"])
+                else:
+                    logger.warning("Portfolio: total broker capital is 0, keeping previous value")
         except Exception:
-            pass  # Broker not configured or API failed — use DB value
+            logger.debug("Broker capital sync failed, using DB value", exc_info=True)
 
-        portfolio = await ctx.db.get_portfolio_state()
+        portfolio = await ctx.db.get_portfolio_state(mode=ctx.config.mode)
         return portfolio
 
     @app.post("/api/capital")
@@ -367,27 +494,25 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def sync_capital_from_broker(
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Sync capital from Zerodha broker account."""
+        """Sync capital (cash + holdings value) from Zerodha broker account."""
         try:
             if not await ctx.broker.is_authenticated():
                 return {"success": False, "error": "Broker not authenticated"}
-            margins = await ctx.broker.get_margins()
-            if not margins:
-                return {"success": False, "error": "No margin data from broker"}
-            logger.info("Kite margins response: equity keys=%s",
-                        list(margins.get("equity", {}).keys()) if isinstance(margins.get("equity"), dict) else margins.get("equity"))
-            broker_capital = _extract_broker_capital(margins)
-            if broker_capital is None:
-                return {"success": False, "error": "Could not extract capital from margins data"}
+            broker_capital = await _compute_total_capital(ctx.broker)
+            if broker_capital <= 0:
+                return {"success": False, "error": "Broker reported zero total capital"}
             await ctx.db.set_system_state("initial_capital", str(broker_capital))
             return {"success": True, "initial_capital": broker_capital}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @app.get("/api/positions")
-    async def get_positions(user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
+    async def get_positions(
+        user: str = Depends(verify_credentials),
+        mode: str | None = Query(None, description="Filter by mode: paper, live, or omit for current"),
+    ) -> list[dict[str, Any]]:
         """Current open positions."""
-        return await ctx.db.get_open_positions()
+        return await ctx.db.get_open_positions(mode=mode or ctx.config.mode)
 
     # Track whether we've already sent a broker-expired Telegram alert this session
     # to avoid spamming on every page load / auto-refresh.
@@ -406,6 +531,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         try:
             authenticated = await ctx.broker.is_authenticated()
         except Exception:
+            logger.debug("Broker auth check failed for holdings request", exc_info=True)
             authenticated = False
 
         if not authenticated:
@@ -457,6 +583,150 @@ def create_app(ctx: AppContext) -> FastAPI:
                 detail=f"Broker error: {e}. Token may be expired — re-authenticate via Settings.",
             )
 
+    @app.post("/api/review")
+    async def review_symbols(
+        body: dict[str, Any] | None = None,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Run ML review on any symbols and return recommendations.
+
+        Body: {"symbols": ["SYM1", "SYM2"]} — review specific symbols.
+        Omit body or symbols to review all current holdings.
+        Works for any NSE symbol, whether held or not.
+        """
+        from yolovest.data.features import compute_features
+
+        body = body or {}
+        requested = body.get("symbols")
+
+        # Get holdings context (for P&L display, not for filtering)
+        holdings = []
+        try:
+            holdings = await ctx.broker.get_holdings()
+        except Exception:
+            pass
+        holding_map = {h["tradingsymbol"]: h for h in (holdings or []) if h.get("quantity", 0) > 0}
+
+        if requested:
+            symbols = [s.upper() for s in requested]
+        elif holding_map:
+            symbols = list(holding_map.keys())
+        else:
+            return {"recommendations": [], "error": "Provide symbols or authenticate with Kite for holdings review"}
+
+        from yolovest.data.features import IndicatorConfig
+        ind = ctx.config.strategy.indicators
+        indicator_cfg = IndicatorConfig(
+            ema_periods=ctx.config.strategy.ema_periods,
+            rsi=ind.rsi, macd=ind.macd, bollinger_bands=ind.bollinger_bands,
+            vwap=ind.vwap, atr=ind.atr, volume_profile=ind.volume_profile,
+            obv=ind.obv, supertrend=ind.supertrend,
+        )
+        recommendations = []
+
+        for symbol in symbols:
+            held = holding_map.get(symbol)
+            rec: dict[str, Any] = {
+                "symbol": symbol,
+                "held": held is not None,
+                "quantity": held.get("quantity", 0) if held else 0,
+                "average_price": held.get("average_price", 0) if held else 0,
+                "last_price": held.get("last_price", 0) if held else 0,
+                "pnl_pct": 0,
+                "action": "HOLD",
+                "confidence": 0,
+                "signal_type": "HOLD",
+                "reasoning": "",
+            }
+
+            entry = rec["average_price"]
+            ltp = rec["last_price"]
+
+            # Fetch LTP if not from holdings
+            if ltp <= 0:
+                try:
+                    ltp = await ctx.market_data.get_ltp(symbol)
+                    rec["last_price"] = ltp
+                except Exception:
+                    pass
+
+            if entry > 0 and ltp > 0:
+                rec["pnl_pct"] = round((ltp - entry) / entry * 100, 2)
+
+            try:
+                bars = await ctx.db.get_ohlcv(symbol, "daily", days=365)
+                if not bars or len(bars) < 50:
+                    rec["reasoning"] = f"Insufficient data ({len(bars) if bars else 0} bars)"
+                    recommendations.append(rec)
+                    continue
+
+                features = compute_features(bars, indicator_cfg)
+                if not features:
+                    rec["reasoning"] = "Feature computation failed"
+                    recommendations.append(rec)
+                    continue
+
+                # Run both models
+                intra_pred = None
+                swing_pred = None
+                if ctx.ml:
+                    try:
+                        swing_pred = await ctx.ml.predict_swing(symbol, features, current_price=ltp or None)
+                    except Exception:
+                        pass
+                    try:
+                        intra_pred = await ctx.ml.predict_intraday(symbol, features, current_price=ltp or None)
+                    except Exception:
+                        pass
+
+                # Pick best prediction
+                pred = None
+                if swing_pred and swing_pred.signal_type != "HOLD":
+                    pred = swing_pred
+                if intra_pred and intra_pred.signal_type != "HOLD":
+                    if pred is None or intra_pred.confidence > pred.confidence:
+                        pred = intra_pred
+
+                if pred is None:
+                    rsi = features.get("rsi_14", 50)
+                    rec["action"] = "HOLD"
+                    rec["confidence"] = max(
+                        (swing_pred.confidence if swing_pred else 0),
+                        (intra_pred.confidence if intra_pred else 0),
+                    )
+                    parts = []
+                    if rsi < 30:
+                        parts.append("oversold (RSI %.0f)" % rsi)
+                    elif rsi > 70:
+                        parts.append("overbought (RSI %.0f)" % rsi)
+                    if held and rec["pnl_pct"] > 10:
+                        parts.append("consider partial profit booking (%.1f%% up)" % rec["pnl_pct"])
+                        rec["action"] = "TIGHTEN_SL"
+                    elif held and rec["pnl_pct"] < -10:
+                        parts.append("significant drawdown (%.1f%%)" % rec["pnl_pct"])
+                    rec["reasoning"] = "; ".join(parts) if parts else "No strong directional signal"
+                else:
+                    rec["signal_type"] = pred.signal_type
+                    rec["confidence"] = round(pred.confidence, 2)
+                    if pred.signal_type == "SELL":
+                        rec["action"] = "SELL" if held else "SHORT"
+                        rec["target_price"] = round(pred.target_price, 2) if hasattr(pred, "target_price") else None
+                        rec["stop_loss_price"] = round(pred.stop_loss_price, 2) if hasattr(pred, "stop_loss_price") else None
+                        rec["reasoning"] = f"ML SELL signal at {pred.confidence:.0%} confidence"
+                    elif pred.signal_type == "BUY":
+                        rec["action"] = "BUY_MORE" if held else "BUY"
+                        rec["target_price"] = round(pred.target_price, 2) if hasattr(pred, "target_price") else None
+                        rec["stop_loss_price"] = round(pred.stop_loss_price, 2) if hasattr(pred, "stop_loss_price") else None
+                        rec["reasoning"] = f"ML BUY signal at {pred.confidence:.0%} confidence"
+
+            except Exception as e:
+                rec["reasoning"] = f"Analysis failed: {e}"
+
+            recommendations.append(rec)
+
+        recommendations.sort(key=lambda r: (r["action"] != "HOLD", r["confidence"]), reverse=True)
+        return {"recommendations": recommendations}
+
     @app.get("/api/locked-holdings")
     async def get_locked_holdings(
         _user: str = Depends(verify_credentials),
@@ -474,6 +744,32 @@ def create_app(ctx: AppContext) -> FastAPI:
         await ctx.db.lock_symbol(symbol, notes)
         logger.info("Locked holding: %s (notes: %s)", symbol, notes)
         return {"success": True, "symbol": symbol.upper(), "locked": True}
+
+    @app.post("/api/locked-holdings/bulk")
+    async def bulk_lock_holdings(
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Bulk lock or unlock multiple holdings.
+
+        Body: {"symbols": ["SYM1", "SYM2"], "action": "lock" | "unlock", "notes": "optional"}
+        """
+        symbols = body.get("symbols", [])
+        action = body.get("action", "lock")
+        notes = body.get("notes")
+        if not symbols:
+            raise HTTPException(status_code=400, detail="symbols list is required")
+        results = {}
+        for sym in symbols:
+            sym = sym.upper()
+            if action == "lock":
+                await ctx.db.lock_symbol(sym, notes)
+                results[sym] = "locked"
+            else:
+                removed = await ctx.db.unlock_symbol(sym)
+                results[sym] = "unlocked" if removed else "not_found"
+        logger.info("Bulk %s: %s", action, results)
+        return {"success": True, "action": action, "results": results}
 
     @app.delete("/api/locked-holdings/{symbol}")
     async def unlock_holding(
@@ -565,9 +861,12 @@ def create_app(ctx: AppContext) -> FastAPI:
             return {"success": False, "error": str(e)}
 
     @app.get("/api/trades/today")
-    async def get_todays_trades(user: str = Depends(verify_credentials)) -> list[dict[str, Any]]:
+    async def get_todays_trades(
+        user: str = Depends(verify_credentials),
+        mode: str | None = Query(None, description="Filter by mode: paper, live, or omit for current"),
+    ) -> list[dict[str, Any]]:
         """Today's trades."""
-        return await ctx.db.get_todays_trades()
+        return await ctx.db.get_todays_trades(mode=mode or ctx.config.mode)
 
     @app.get("/api/trades")
     async def get_trades(
@@ -575,11 +874,13 @@ def create_app(ctx: AppContext) -> FastAPI:
         end: str | None = Query(None, description="End date YYYY-MM-DD"),
         symbol: str | None = Query(None),
         limit: int = Query(100, ge=1, le=1000),
+        mode: str | None = Query(None, description="Filter by mode: paper, live, or omit for current"),
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Trade history with optional date range and symbol filter."""
         return await ctx.db.get_trades_history(
-            start_date=start, end_date=end, symbol=symbol, limit=limit
+            start_date=start, end_date=end, symbol=symbol, limit=limit,
+            mode=mode or ctx.config.mode,
         )
 
     @app.get("/api/equity-curve")
@@ -588,7 +889,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Daily equity curve data for charting."""
-        return await ctx.db.get_equity_curve(days=days)
+        return await ctx.db.get_equity_curve(days=days, mode=ctx.config.mode)
 
     @app.get("/api/pnl-calendar")
     async def get_pnl_calendar(
@@ -596,11 +897,25 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Daily PnL for calendar heatmap: {date, pnl, trade_count, wins, losses}."""
-        return await ctx.db.get_daily_pnl_calendar(days=days)
+        return await ctx.db.get_daily_pnl_calendar(days=days, mode=ctx.config.mode)
 
     # ------------------------------------------------------------------
     # Trade Detail View
     # ------------------------------------------------------------------
+
+    @app.delete("/api/trades/{trade_id}")
+    async def delete_trade(
+        trade_id: str, user: str = Depends(verify_credentials)
+    ) -> dict[str, Any]:
+        """Delete a specific trade record (e.g., ghost/paper trades with wrong mode)."""
+        cursor = await ctx.db.conn.execute(
+            "DELETE FROM trades WHERE trade_id = ?", (trade_id,),
+        )
+        await ctx.db.conn.commit()
+        if cursor.rowcount > 0:
+            logger.info("Deleted trade %s", trade_id)
+            return {"success": True, "trade_id": trade_id}
+        raise HTTPException(status_code=404, detail="Trade not found")
 
     @app.get("/api/trades/{trade_id}")
     async def get_trade_detail(
@@ -637,6 +952,13 @@ def create_app(ctx: AppContext) -> FastAPI:
     ) -> list[dict[str, Any]]:
         """Prediction accuracy scoreboard."""
         return await ctx.db.get_prediction_scoreboard(group_type)
+
+    @app.get("/api/recommendations")
+    async def get_recommendations(
+        user: str = Depends(verify_credentials),
+    ) -> list[dict[str, Any]]:
+        """Today's signals with disposition (executed/pending/rejected)."""
+        return await ctx.db.get_todays_recommendations()
 
     # ------------------------------------------------------------------
     # Historical Reports
@@ -730,7 +1052,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Slippage analysis."""
-        return await ctx.db.get_slippage_stats(symbol=symbol, days=days)
+        return await ctx.db.get_slippage_stats(symbol=symbol, days=days, mode=ctx.config.mode)
 
     @app.get("/api/llm-accuracy")
     async def get_llm_accuracy(
@@ -738,7 +1060,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """LLM review accuracy vs actual trade outcomes."""
-        return await ctx.db.get_llm_review_accuracy(days=days)
+        return await ctx.db.get_llm_review_accuracy(days=days, mode=ctx.config.mode)
 
     @app.get("/api/audit")
     async def get_audit_log(
@@ -795,7 +1117,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             try:
                 broker_authenticated = await ctx.broker.is_authenticated()
             except Exception:
-                pass
+                logger.debug("Broker auth check failed on integrations page", exc_info=True)
         broker_margins: dict[str, Any] | None = None
         results["zerodha"] = {
             "configured": broker_configured,
@@ -846,6 +1168,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             ok = await ctx.llm.ping()
             return {"success": ok}
         except Exception as exc:
+            logger.warning("Gemini ping failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
     @app.post("/api/integrations/zerodha/authenticate")
@@ -867,7 +1190,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 try:
                     margins = await ctx.broker.get_margins()
                 except Exception:
-                    pass
+                    logger.debug("Failed to fetch margins after Zerodha auth", exc_info=True)
             return {"success": ok, "margins": margins}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
@@ -899,7 +1222,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 try:
                     await ctx.notify.send("Kite authenticated successfully.")
                 except Exception:
-                    pass
+                    logger.debug("Failed to send Kite auth success notification", exc_info=True)
                 return RedirectResponse(url="/integrations?zerodha_auth=success")
             else:
                 return RedirectResponse(url="/integrations?zerodha_auth=failed")
@@ -926,7 +1249,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "transaction_type": body.get("transaction_type"),
             })
         except Exception:
-            pass
+            logger.debug("Failed to broadcast order update via WebSocket", exc_info=True)
 
         return {"status": "ok"}
 
@@ -1121,17 +1444,17 @@ def create_app(ctx: AppContext) -> FastAPI:
                 if model:
                     result["production"][model_type] = model
             except Exception:
-                pass
+                logger.debug("Failed to get production model for %s", model_type, exc_info=True)
         try:
             shadow_models = await ctx.db.get_all_shadow_models()
             result["shadow"] = shadow_models
         except Exception:
-            pass
+            logger.debug("Failed to get shadow models", exc_info=True)
         try:
             retired_models = await ctx.db.get_retired_models()
             result["retired"] = retired_models
         except Exception:
-            pass
+            logger.debug("Failed to get retired models", exc_info=True)
         return result
 
     @app.post("/api/ml-models/{model_type}/{version}/promote")
@@ -1222,7 +1545,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Today's predictions with linked symbols and confidence."""
         return await ctx.db.get_todays_predictions(
             limit=limit, offset=offset, symbol=symbol,
-            direction=direction, model=model,
+            direction=direction, model=model, mode=ctx.config.mode,
         )
 
     @app.get("/api/predictions/unscored")
@@ -1269,14 +1592,14 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """This week's trades."""
-        return await ctx.db.get_weekly_trades()
+        return await ctx.db.get_weekly_trades(mode=ctx.config.mode)
 
     @app.get("/api/weekly/predictions")
     async def get_weekly_predictions(
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """This week's predictions."""
-        return await ctx.db.get_weekly_predictions()
+        return await ctx.db.get_weekly_predictions(mode=ctx.config.mode)
 
     @app.get("/api/weekly/llm-reviews")
     async def get_weekly_llm_reviews(
@@ -1294,8 +1617,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Portfolio risk breakdown by stock and sector."""
-        portfolio = await ctx.db.get_portfolio_state()
-        positions = await ctx.db.get_open_positions()
+        portfolio = await ctx.db.get_portfolio_state(mode=ctx.config.mode)
+        positions = await ctx.db.get_open_positions(mode=ctx.config.mode)
         stock_exposures = portfolio.get("stock_exposures", {})
         sector_counts = portfolio.get("sector_counts", {})
 
@@ -1427,7 +1750,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 else:
                     llm_reviewed_today += cnt
         except Exception:
-            pass
+            logger.debug("Failed to fetch LLM review counts", exc_info=True)
 
         return {
             "kill_switch_active": kill_switch,
@@ -1472,14 +1795,14 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Trades for a specific symbol."""
-        return await ctx.db.get_symbol_trades(symbol.upper(), limit)
+        return await ctx.db.get_symbol_trades(symbol.upper(), limit, mode=ctx.config.mode)
 
     @app.get("/api/symbol/{symbol}/predictions")
     async def get_symbol_predictions(
         symbol: str, user: str = Depends(verify_credentials)
     ) -> list[dict[str, Any]]:
         """Predictions for a specific symbol."""
-        return await ctx.db.get_symbol_predictions(symbol.upper())
+        return await ctx.db.get_symbol_predictions(symbol.upper(), mode=ctx.config.mode)
 
     # ------------------------------------------------------------------
     # Strategy Performance (Feature #5)
@@ -1490,7 +1813,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Aggregate trade performance by signal type, product, sector, time, holding period."""
-        return await ctx.db.get_strategy_performance()
+        return await ctx.db.get_strategy_performance(mode=ctx.config.mode)
 
     # ------------------------------------------------------------------
     # Execution Quality (Feature #8)
@@ -1502,7 +1825,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Detailed execution quality metrics: slippage by hour/size, fill rate."""
-        return await ctx.db.get_execution_quality(days=days)
+        return await ctx.db.get_execution_quality(days=days, mode=ctx.config.mode)
 
     # ------------------------------------------------------------------
     # Correlation Data (Feature #7)
@@ -1514,7 +1837,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Correlation matrix for open positions' symbols."""
-        positions = await ctx.db.get_open_positions()
+        positions = await ctx.db.get_open_positions(mode=ctx.config.mode)
         watchlist = await ctx.db.get_watchlist()
         # Use symbols from positions + top watchlist
         symbols = list({p.get("symbol", "") for p in positions if p.get("symbol")})
@@ -1816,7 +2139,9 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "shortlist_size": 0,
                 "signals": [],
                 "diagnostics": {
-                    "min_confidence_threshold": cfg.risk.min_confidence_score,
+                    "min_confidence_threshold": min(cfg.risk.min_confidence_buy, cfg.risk.min_confidence_sell),
+                    "min_confidence_buy": cfg.risk.min_confidence_buy,
+                    "min_confidence_sell": cfg.risk.min_confidence_sell,
                     "ml_available": ctx.ml is not None,
                     "filter_counts": {
                         "insufficient_bars": 0, "feature_computation_failed": 0,
@@ -1834,7 +2159,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         # Build held symbols set for SELL signal adjustment
         open_positions = await ctx.db.get_open_positions()
         held_symbols = {p["symbol"] for p in open_positions}
-        min_confidence = cfg.risk.min_confidence_score
+        min_confidence_buy = cfg.risk.min_confidence_buy
+        min_confidence_sell = cfg.risk.min_confidence_sell
 
         if ml_unavailable:
             logger.warning("Dry-run: ML model not loaded — cannot generate signals. "
@@ -1903,7 +2229,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 try:
                     current_price = await ctx.market_data.get_ltp(symbol)
                 except Exception:
-                    pass  # fall back to features["close"] in _predict()
+                    logger.debug("LTP unavailable for dry-run %s, using bar close", symbol)
 
                 # Decide holding period based on features and selected strategy mode
                 now_time = dt.now(IST).time()
@@ -1912,8 +2238,46 @@ def create_app(ctx: AppContext) -> FastAPI:
                     mode_days_range=mode_days_range,
                 )
                 use_intraday = holding_period == "intraday"
+                is_balanced = effective_mode == "balanced"
 
-                if use_intraday:
+                if is_balanced:
+                    # Balanced mode: run both models, pick higher confidence
+                    import asyncio as _aio
+
+                    intra_feat = {**features}
+                    intraday_bars = await ctx.db.get_ohlcv(symbol, "5minute", days=1)
+                    if intraday_bars:
+                        intra_feat["close"] = intraday_bars[-1].close
+
+                    intra_pred, swing_pred = await _aio.gather(
+                        ctx.ml.predict_intraday(symbol, intra_feat, current_price=current_price),
+                        ctx.ml.predict_swing(symbol, features, current_price=current_price),
+                        return_exceptions=True,
+                    )
+                    if isinstance(intra_pred, BaseException):
+                        intra_pred = None
+                    if isinstance(swing_pred, BaseException):
+                        swing_pred = None
+
+                    intra_conf = intra_pred.confidence if intra_pred and intra_pred.signal_type != "HOLD" else -1
+                    swing_conf = swing_pred.confidence if swing_pred and swing_pred.signal_type != "HOLD" else -1
+
+                    if intra_conf < 0 and swing_conf < 0:
+                        prediction = swing_pred or intra_pred
+                    elif intra_conf >= swing_conf:
+                        prediction = intra_pred
+                        holding_period, product, expected_days = "intraday", "MIS", 0
+                    else:
+                        prediction = swing_pred
+                        _, product, expected_days = decide_holding_period(
+                            features, ["short_term", "long_term"],
+                            cfg.strategy.volatility, now_time,
+                            mode_days_range=(max(1, mode_days_range[0]) if mode_days_range else 1, mode_days_range[1] if mode_days_range else 15),
+                        )
+                        holding_period = "swing" if expected_days <= 5 else "positional" if expected_days <= 15 else "long_term"
+                        product = "CNC"
+                    use_intraday = holding_period == "intraday"
+                elif use_intraday:
                     prediction = await ctx.ml.predict_intraday(
                         symbol, features, current_price=current_price,
                     )
@@ -1932,16 +2296,20 @@ def create_app(ctx: AppContext) -> FastAPI:
                     logger.info("Dry-run: HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
                     continue
 
-                if prediction.confidence < min_confidence:
+                threshold = (
+                    min_confidence_buy if prediction.signal_type == "BUY"
+                    else min_confidence_sell
+                )
+                if prediction.confidence < threshold:
                     filter_counts["low_confidence"] += 1
                     rejection_details.append({
                         "symbol": symbol,
                         "reason": "low_confidence",
-                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {min_confidence}",
+                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {threshold}",
                     })
                     logger.info(
                         "Dry-run: Low confidence for %s: %s @ %.2f < %.2f",
-                        symbol, prediction.signal_type, prediction.confidence, min_confidence,
+                        symbol, prediction.signal_type, prediction.confidence, threshold,
                     )
                     continue
 
@@ -2025,7 +2393,9 @@ def create_app(ctx: AppContext) -> FastAPI:
             "shortlist_size": len(shortlist),
             "signals": signals_out,
             "diagnostics": {
-                "min_confidence_threshold": min_confidence,
+                "min_confidence_threshold": min(cfg.risk.min_confidence_buy, cfg.risk.min_confidence_sell),
+                "min_confidence_buy": cfg.risk.min_confidence_buy,
+                "min_confidence_sell": cfg.risk.min_confidence_sell,
                 "ml_available": ctx.ml is not None,
                 "filter_counts": filter_counts,
                 "rejection_details": rejection_details,
@@ -2095,6 +2465,33 @@ def create_app(ctx: AppContext) -> FastAPI:
             logger.info("Unquarantined symbol %s", symbol.upper())
         return {"success": removed, "symbol": symbol.upper()}
 
+    @app.put("/api/quarantined-symbols/{symbol}/replacement")
+    async def set_replacement_symbol(
+        symbol: str,
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Set a replacement symbol for a quarantined symbol.
+
+        Send {"replacement": "NEWNAME"} to set, or {"replacement": null} to clear.
+        """
+        replacement = body.get("replacement")
+        if replacement is not None:
+            replacement = str(replacement).strip().upper()
+            if not replacement:
+                replacement = None
+        updated = await ctx.db.set_replacement_symbol(symbol, replacement)
+        if updated:
+            logger.info(
+                "Set replacement for quarantined %s -> %s",
+                symbol.upper(), replacement,
+            )
+        return {
+            "success": updated,
+            "symbol": symbol.upper(),
+            "replacement": replacement,
+        }
+
     def _model_dir() -> str:
         return getattr(ctx.config.strategy, "model_dir", "./models")
 
@@ -2121,6 +2518,20 @@ def create_app(ctx: AppContext) -> FastAPI:
             backup_dir, filename, model_dir=_model_dir(),
         )
         return {"success": True, **result}
+
+    @app.post("/api/bulk-delete/{group}")
+    async def bulk_delete(
+        group: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete a group of related data: paper, live, dry_runs, predictions, signals."""
+        try:
+            deleted = await ctx.db.bulk_delete(group)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        total = sum(deleted.values())
+        logger.info("Bulk delete [%s]: %d rows", group, total)
+        return {"success": True, "group": group, "deleted": deleted, "total": total}
 
     @app.post("/api/reset")
     async def reset_all_data(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
@@ -2156,11 +2567,20 @@ def create_app(ctx: AppContext) -> FastAPI:
         _user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Get all trades awaiting manual approval."""
-        # Expire old pending trades first
-        expired = await ctx.db.expire_pending_trades(max_age_minutes=30)
+        # Expire stale pending trades — use generous timeout so trades
+        # survive server restarts and user away periods
+        expired = await ctx.db.expire_pending_trades(max_age_minutes=480)  # 8 hours (full trading day)
         if expired:
-            logger.info("Expired %d stale pending trades", expired)
+            logger.info("Expired %d stale pending trades (>8h old)", expired)
         return await ctx.db.get_pending_trades()
+
+    @app.post("/api/clear-signals")
+    async def clear_todays_signals(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Clear today's signals and pending trades to allow signal regeneration."""
+        result = await ctx.db.clear_todays_signals()
+        return {"success": True, **result}
 
     @app.post("/api/pending-trades/{trade_id}/approve")
     async def approve_pending_trade(
@@ -2181,14 +2601,36 @@ def create_app(ctx: AppContext) -> FastAPI:
         # Execute the trade
         from yolovest.skills.trade_execute import TradeExecuteSkill
         skill = TradeExecuteSkill(ctx)
-        result = await skill.execute(signal=signal)
+        logger.info(
+            "Executing approved trade #%d: %s %s (mode=%s)",
+            trade_id, signal.get("signal_type"), signal.get("symbol"), ctx.config.mode,
+        )
+        result = await skill.safe_execute(signal=signal)
 
         if result.success:
             trade = result.data.get("trade", {}) if result.data else {}
-            logger.info("Approved and executed pending trade #%d: %s %s",
-                        trade_id, trade.get("signal_type"), trade.get("symbol"))
-            return {"success": True, "trade": trade}
-        return {"success": False, "error": result.error}
+            exec_mode = result.data.get("mode", ctx.config.mode) if result.data else ctx.config.mode
+            logger.info(
+                "Trade #%d executed: %s %s mode=%s order=%s trade_id=%s",
+                trade_id, trade.get("signal_type"), trade.get("symbol"),
+                exec_mode, trade.get("order_id", "N/A"), trade.get("trade_id", "N/A"),
+            )
+            return {"success": True, "trade": trade, "mode": exec_mode}
+        logger.error(
+            "Trade #%d execution failed: %s", trade_id, result.error,
+        )
+        # Revert pending trade back to 'pending' so user can retry
+        try:
+            await ctx.db.conn.execute(
+                "UPDATE pending_trades SET status = 'pending', decided_at = NULL, "
+                "decided_by = NULL WHERE id = ? AND status = 'approved'",
+                (trade_id,),
+            )
+            await ctx.db.conn.commit()
+            logger.info("Reverted pending trade #%d back to pending", trade_id)
+        except Exception:
+            logger.debug("Failed to revert pending trade #%d", trade_id, exc_info=True)
+        return {"success": False, "error": result.error, "reverted": True}
 
     @app.post("/api/manual-trade")
     async def create_manual_trade(
@@ -2347,6 +2789,10 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         if "mode" in updates:
             logger.info("Trading mode changed: %s -> %s", old_config.mode, new_config.mode)
+            # Sync to broker — it stores its own _mode for order routing
+            if hasattr(ctx.broker, "_mode"):
+                ctx.broker._mode = new_config.mode
+                logger.info("Broker mode synced to: %s", new_config.mode)
 
         logger.info("Config updated via UI: %s", list(updates.keys()))
 
@@ -2371,6 +2817,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 instance = cls(ctx)
                 schedule = instance.schedule
             except Exception:
+                logger.debug("Failed to instantiate skill %s for schedule", name, exc_info=True)
                 schedule = cls.schedule
             out.append({
                 "name": name,
@@ -2431,7 +2878,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                         duration_ms=result.duration_ms,
                     )
                 except Exception:
-                    pass
+                    logger.debug("Failed to log audit for manual skill %s", skill_name, exc_info=True)
                 await broadcast_ws("skill_completed", {
                     "skill": skill_name,
                     "success": result.success,

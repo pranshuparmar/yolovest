@@ -39,9 +39,10 @@ class NewsDigestSkill(SkillBase):
     async def execute(self, **kwargs: Any) -> SkillResult:
         cfg = self.ctx.config.news_digest
         max_headlines = cfg.max_headlines
+        telegram_limit = 5  # Telegram messages have a 4096 char limit
         today = now_ist().strftime("%Y-%m-%d")
 
-        # Fetch today's articles
+        # Fetch today's articles (all of them for the digest result)
         articles = await self.ctx.db.get_news_articles(
             date_from=today, limit=max_headlines + 1,
         )
@@ -58,8 +59,9 @@ class NewsDigestSkill(SkillBase):
             port = self.ctx.config.dashboard.port
             news_url = f"http://localhost:{port}/news"
 
-        # Format message
-        if not headlines:
+        # Telegram message — only top N to stay within message size limit
+        tg_headlines = articles[:telegram_limit]
+        if not tg_headlines:
             msg = (
                 f"News Digest — {today}\n\n"
                 "No news articles ingested today.\n"
@@ -67,7 +69,7 @@ class NewsDigestSkill(SkillBase):
             )
         else:
             lines = [f"News Digest — {today}\n"]
-            for i, a in enumerate(headlines, 1):
+            for i, a in enumerate(tg_headlines, 1):
                 source = a.get("source", "")
                 headline = a.get("headline", "")
                 url = a.get("url", "")
@@ -76,10 +78,9 @@ class NewsDigestSkill(SkillBase):
                     lines.append(f"{i}. {headline}{source_tag}\n   {url}")
                 else:
                     lines.append(f"{i}. {headline}{source_tag}")
-            if has_more:
-                lines.append(
-                    f"\n+{total_today - max_headlines} more — {news_url}"
-                )
+            remaining = total_today - telegram_limit
+            if remaining > 0:
+                lines.append(f"\n+{remaining} more — {news_url}")
             msg = "\n".join(lines)
 
         await self.ctx.notify.send(msg, alert_type="daily_summary")

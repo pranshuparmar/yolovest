@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { usePendingTrades, useApprovePendingTrade, useRejectPendingTrade } from "../hooks/queries";
+import { usePendingTrades, useApprovePendingTrade, useRejectPendingTrade, useClearTodaysSignals } from "../hooks/queries";
 import clsx from "clsx";
 
 function fmt(n: number, d = 2) {
@@ -156,6 +156,26 @@ function OverrideRow({
   );
 }
 
+export function ClearSignalsButton() {
+  const clearSignals = useClearTodaysSignals();
+  return (
+    <button
+      onClick={() => {
+        if (!window.confirm("Clear today's signals and pending trades? Next heartbeat will regenerate fresh signals.")) return;
+        clearSignals.mutate(undefined, {
+          onSuccess: (data) => {
+            alert(`Cleared ${data.signals_deleted} signals and ${data.pending_deleted} pending trades. Next heartbeat will regenerate.`);
+          },
+        });
+      }}
+      disabled={clearSignals.isPending}
+      className="px-2.5 py-1 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 disabled:opacity-50 transition-colors"
+    >
+      {clearSignals.isPending ? "Clearing..." : "Clear & Regenerate Signals"}
+    </button>
+  );
+}
+
 export function PendingTradesBanner() {
   const { data: pending } = usePendingTrades();
   const approve = useApprovePendingTrade();
@@ -184,24 +204,27 @@ export function PendingTradesBanner() {
           </h3>
           <span className="text-xs text-gray-500">Click Edit to override before approving</span>
         </div>
-        {pending.length > 1 && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleApproveAll}
-              disabled={approve.isPending}
-              className="px-2.5 py-1 rounded text-xs font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors"
-            >
-              Approve All
-            </button>
-            <button
-              onClick={handleRejectAll}
-              disabled={reject.isPending}
-              className="px-2.5 py-1 rounded text-xs font-medium bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 transition-colors"
-            >
-              Reject All
-            </button>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {pending.length > 1 && (
+            <>
+              <button
+                onClick={handleApproveAll}
+                disabled={approve.isPending}
+                className="px-2.5 py-1 rounded text-xs font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors"
+              >
+                Approve All
+              </button>
+              <button
+                onClick={handleRejectAll}
+                disabled={reject.isPending}
+                className="px-2.5 py-1 rounded text-xs font-medium bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 transition-colors"
+              >
+                Reject All
+              </button>
+            </>
+          )}
+          <ClearSignalsButton />
+        </div>
       </div>
 
       <div className="overflow-x-auto max-h-80 overflow-y-auto">

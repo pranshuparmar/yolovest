@@ -20,8 +20,8 @@ from yolovest.http_utils import scraper_headers
 
 logger = logging.getLogger(__name__)
 
-# Rate limit: max 2 requests per second to be polite
-_RATE_LIMIT_DELAY = 0.5
+# Rate limit: be gentle with Screener.in to avoid 429s
+_RATE_LIMIT_DELAY = 2.0
 
 
 class ScreenerScraper:

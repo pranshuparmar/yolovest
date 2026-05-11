@@ -250,8 +250,8 @@ class TestCheckAndFire:
         scheduler._now = lambda: now
         await scheduler._check_and_fire()
 
-        # last_run is still set (the skill was "due" and processed)
-        assert "cron-a" in scheduler._last_run
+        # last_run is NOT set when should_run() returns False (skill can retry next tick)
+        assert "cron-a" not in scheduler._last_run
 
     async def test_double_fire_prevented(self, cron_context):
         """Running _check_and_fire twice at the same time should not fire twice."""

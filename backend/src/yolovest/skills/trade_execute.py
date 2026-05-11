@@ -63,6 +63,23 @@ class TradeExecuteSkill(SkillBase):
         signal = kwargs["signal"]
         is_paper = self.ctx.config.mode == "paper"
 
+        # Safety check: verify broker mode matches config mode
+        broker_mode = getattr(self.ctx.broker, "_mode", None)
+        if broker_mode and broker_mode != self.ctx.config.mode:
+            logger.error(
+                "trade-execute: MODE MISMATCH — config.mode=%s but broker._mode=%s. "
+                "Syncing broker to config. This may indicate a hot-reload missed the broker.",
+                self.ctx.config.mode, broker_mode,
+            )
+            self.ctx.broker._mode = self.ctx.config.mode
+            is_paper = self.ctx.config.mode == "paper"
+
+        logger.info(
+            "trade-execute: mode=%s for %s %s",
+            "PAPER" if is_paper else "LIVE",
+            signal.get("signal_type"), signal.get("symbol"),
+        )
+
         if is_paper:
             return await self._execute_paper(signal)
         else:
@@ -79,6 +96,7 @@ class TradeExecuteSkill(SkillBase):
         try:
             entry = await self.ctx.market_data.get_ltp(signal["symbol"])
         except Exception:
+            logger.debug("LTP unavailable for paper trade %s, using signal price", signal["symbol"])
             entry = signal["entry_price"]
         slippage_pct = self.ctx.config.execution.paper_slippage_pct
 
@@ -142,7 +160,7 @@ class TradeExecuteSkill(SkillBase):
             "stop_loss_price": signal["stop_loss_price"],
             "target_price": signal["target_price"],
             "product": signal.get("product", "MIS"),
-            "status": "filled",
+            "status": "open",
             "mode": "paper",
             "slippage": round(slippage, 2),
             "estimated_costs": est_costs,
@@ -183,6 +201,12 @@ class TradeExecuteSkill(SkillBase):
         last_error = None
         product = signal.get("product", "MIS")
 
+        logger.info(
+            "trade-execute: LIVE START %s %s qty=%s product=%s entry=%.2f",
+            signal.get("signal_type"), signal.get("symbol"),
+            signal.get("position_size"), product, signal.get("entry_price", 0),
+        )
+
         # Idempotency check: prevent duplicate orders on crash/restart.
         # Uses agent_memory with a TTL to track in-flight executions.
         dedup_key = _signal_dedup_key(signal)
@@ -221,6 +245,7 @@ class TradeExecuteSkill(SkillBase):
                     },
                 )
         except Exception:
+            logger.debug("LTP unavailable for live trade %s, using signal price", signal["symbol"])
             order_price = signal["entry_price"]
 
         scaled_cfg = cfg.scaled_entry
@@ -249,8 +274,8 @@ class TradeExecuteSkill(SkillBase):
                     # Wait for first leg to fill
                     await asyncio.sleep(0.5)
                     leg1_status = await self.ctx.broker.get_order_status(leg1_order_id)
-                    leg1_filled = leg1_status.get("filled_quantity", leg1_qty)
-                    leg1_fill_price = leg1_status.get("average_price", order_price)
+                    leg1_filled = leg1_status.get("filled_quantity") or 0
+                    leg1_fill_price = leg1_status.get("average_price") or order_price
 
                     if leg1_filled == 0:
                         # First leg didn't fill — fall back to market order
@@ -264,8 +289,8 @@ class TradeExecuteSkill(SkillBase):
                         )
                         await asyncio.sleep(1)
                         leg1_status = await self.ctx.broker.get_order_status(leg1_order_id)
-                        leg1_filled = leg1_status.get("filled_quantity", leg1_qty)
-                        leg1_fill_price = leg1_status.get("average_price", order_price)
+                        leg1_filled = leg1_status.get("filled_quantity") or leg1_qty
+                        leg1_fill_price = leg1_status.get("average_price") or order_price
 
                     # Wait before placing second leg
                     await asyncio.sleep(scaled_cfg.second_leg_delay_sec)
@@ -292,9 +317,9 @@ class TradeExecuteSkill(SkillBase):
                     for _ in range(cfg.order_timeout_sec):
                         await asyncio.sleep(1)
                         leg2_status = await self.ctx.broker.get_order_status(leg2_order_id)
-                        leg2_filled = leg2_status.get("filled_quantity", 0)
+                        leg2_filled = leg2_status.get("filled_quantity") or 0
                         if leg2_filled >= leg2_qty:
-                            leg2_fill_price = leg2_status.get("average_price", leg2_price)
+                            leg2_fill_price = leg2_status.get("average_price") or leg2_price
                             break
 
                     if leg2_filled < leg2_qty:
@@ -315,12 +340,12 @@ class TradeExecuteSkill(SkillBase):
                         ) / actual_qty
                         order_id = leg1_order_id  # primary order for tracking
 
-                    # Place SL order for actual filled quantity
+                    # Place SL-M (stop-loss market) order for actual filled quantity
                     sl_order_id = await self.ctx.broker.place_order(
                         symbol=signal["symbol"],
                         side=sl_side,
                         quantity=actual_qty,
-                        order_type="SL",
+                        order_type="SL-M",
                         trigger_price=signal["stop_loss_price"],
                         product=product,
                     )
@@ -338,7 +363,7 @@ class TradeExecuteSkill(SkillBase):
                         "order_id": order_id,
                         "sl_order_id": sl_order_id,
                         "product": product,
-                        "status": "filled",
+                        "status": "open",
                         "mode": "live",
                         "slippage": slippage,
                         "scaled_entry": True,
@@ -361,7 +386,8 @@ class TradeExecuteSkill(SkillBase):
                             f"Order {order_id} {verified_status} by exchange"
                         )
 
-                    trade["status"] = verified_status.lower() if verified_status else "filled"
+                    # COMPLETE/filled from Kite means the order filled — position is "open"
+                    trade["status"] = "open"
 
                     logger.info(
                         "trade-execute: LIVE scaled %s %s leg1=%d@%.2f leg2=%d@%.2f avg=%.2f (id=%s)",
@@ -388,7 +414,7 @@ class TradeExecuteSkill(SkillBase):
                         symbol=signal["symbol"],
                         side="SELL" if signal["signal_type"] == "BUY" else "BUY",
                         quantity=signal["position_size"],
-                        order_type="SL",
+                        order_type="SL-M",
                         trigger_price=signal["stop_loss_price"],
                         product=product,
                     )
@@ -398,13 +424,13 @@ class TradeExecuteSkill(SkillBase):
                     order_status = await self.ctx.broker.get_order_status(order_id)
 
                     # Check for partial fill within timeout
-                    filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                    filled_qty = order_status.get("filled_quantity") or 0
                     if filled_qty < signal["position_size"]:
                         # Wait up to order_timeout_sec for full fill
                         for _ in range(cfg.order_timeout_sec):
                             await asyncio.sleep(1)
                             order_status = await self.ctx.broker.get_order_status(order_id)
-                            filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                            filled_qty = order_status.get("filled_quantity") or 0
                             if filled_qty >= signal["position_size"]:
                                 break
 
@@ -426,7 +452,7 @@ class TradeExecuteSkill(SkillBase):
                                 )
                                 await asyncio.sleep(1)
                                 order_status = await self.ctx.broker.get_order_status(order_id)
-                                filled_qty = order_status.get("filled_quantity", signal["position_size"])
+                                filled_qty = order_status.get("filled_quantity") or signal["position_size"]
                             else:
                                 # Partial fill — adjust SL order to match filled quantity
                                 await self.ctx.broker.cancel_order(sl_order_id)
@@ -434,15 +460,15 @@ class TradeExecuteSkill(SkillBase):
                                     symbol=signal["symbol"],
                                     side="SELL" if signal["signal_type"] == "BUY" else "BUY",
                                     quantity=filled_qty,
-                                    order_type="SL",
+                                    order_type="SL-M",
                                     trigger_price=signal["stop_loss_price"],
                                     product=product,
                                 )
 
                     actual_qty = filled_qty if filled_qty > 0 else signal["position_size"]
 
-                    # Compute slippage
-                    fill_price = order_status.get("average_price", signal["entry_price"])
+                    # Compute slippage — use entry price if avg_price is 0/None (unfilled)
+                    fill_price = order_status.get("average_price") or signal["entry_price"]
                     slippage = abs(fill_price - signal["entry_price"])
 
                     trade = {
@@ -456,7 +482,7 @@ class TradeExecuteSkill(SkillBase):
                         "order_id": order_id,
                         "sl_order_id": sl_order_id,
                         "product": product,
-                        "status": order_status.get("status", "open"),
+                        "status": "open",  # position is open until target/SL/square-off closes it
                         "mode": "live",
                         "slippage": slippage,
                     }
@@ -479,7 +505,8 @@ class TradeExecuteSkill(SkillBase):
                             f"Order {order_id} {verified_status} by exchange"
                         )
 
-                    trade["status"] = verified_status.lower() if verified_status else "filled"
+                    # COMPLETE/filled from Kite means the order filled — position is "open"
+                    trade["status"] = "open"
 
                 trade_id = await self.ctx.db.insert_trade(trade)
                 trade["trade_id"] = trade_id
@@ -515,7 +542,35 @@ class TradeExecuteSkill(SkillBase):
                     "trade-execute: %s %s attempt %d failed: %s",
                     signal["signal_type"], signal["symbol"], attempt + 1, e,
                 )
-                if attempt < cfg.max_order_retries:
+                # CRITICAL: Before retrying, check if the "failed" order actually
+                # went through on the broker. Zerodha sometimes returns errors
+                # AFTER placing the order, causing duplicate orders on retry.
+                if attempt < cfg.max_order_retries and self.ctx.config.mode == "live":
+                    try:
+                        recent_orders = await asyncio.to_thread(self.ctx.broker._kite.orders)
+                        symbol_orders = [
+                            o for o in (recent_orders or [])
+                            if o.get("tradingsymbol") == signal["symbol"]
+                            and o.get("status") in ("COMPLETE", "OPEN", "TRIGGER PENDING")
+                            and o.get("transaction_type") == ("BUY" if signal["signal_type"] == "BUY" else "SELL")
+                        ]
+                        # Check for orders placed in the last 2 minutes
+                        from datetime import datetime, timedelta
+                        cutoff = datetime.now() - timedelta(minutes=2)
+                        recent = [
+                            o for o in symbol_orders
+                            if o.get("order_timestamp") and o["order_timestamp"] > cutoff
+                        ]
+                        if recent:
+                            logger.error(
+                                "trade-execute: ABORT RETRY — found %d recent %s orders for %s on broker "
+                                "despite error. The 'failed' order likely executed. Not retrying.",
+                                len(recent), signal["signal_type"], signal["symbol"],
+                            )
+                            break
+                    except Exception:
+                        logger.debug("Could not check broker orders before retry", exc_info=True)
+
                     delay = cfg.retry_base_delay_sec * (2**attempt)
                     await asyncio.sleep(delay)
 

@@ -24,6 +24,9 @@ def _make_bars(n: int) -> list[OHLCVBar]:
 def signal_skill(app_context):
     app_context.ml = AsyncMock()
     app_context.ml.has_shadow = lambda model_type: False
+    app_context.config.strategy.mode = "short_term"
+    app_context.config.strategy.allowed_holding_periods = ["short_term", "long_term"]
+    app_context.config.market_hours.intraday_cutoff = "23:59"
     return GenerateSignalsSkill(app_context)
 
 
@@ -69,7 +72,7 @@ class TestGenerateSignalsDiagnostics:
         assert result.data["signals_generated"] == 0
         diag = result.data["diagnostics"]
         assert diag["filter_counts"]["low_confidence"] == 2
-        assert diag["min_confidence_threshold"] == 0.65
+        assert diag["min_confidence_threshold"] == 0.60
         assert all(r["reason"] == "low_confidence" for r in diag["rejection_details"])
 
     async def test_insufficient_bars_counted(self, signal_skill):
@@ -211,6 +214,7 @@ class TestHoldingPeriodDecision:
     async def test_intraday_when_high_vol_and_volume_and_morning(self, signal_skill):
         """High ATR%, high relative volume, morning → intraday/MIS."""
         signal_skill.ctx.config.strategy.mode = "balanced"
+        signal_skill.ctx.config.strategy.allowed_holding_periods = ["intraday", "short_term", "long_term"]
         features = {
             "atr_pct": 0.025,
             "relative_volume": 2.0,
@@ -228,6 +232,7 @@ class TestHoldingPeriodDecision:
     async def test_no_intraday_after_1400(self, signal_skill):
         """After 14:00 IST, intraday should not be selected in balanced mode."""
         signal_skill.ctx.config.strategy.mode = "balanced"
+        signal_skill.ctx.config.strategy.allowed_holding_periods = ["intraday", "short_term", "long_term"]
         features = {
             "atr_pct": 0.025,
             "relative_volume": 2.0,
@@ -245,6 +250,7 @@ class TestHoldingPeriodDecision:
     async def test_1w_when_strong_trend(self, signal_skill):
         """Strong EMA alignment + SuperTrend → longer hold / CNC."""
         signal_skill.ctx.config.strategy.mode = "balanced"
+        signal_skill.ctx.config.strategy.allowed_holding_periods = ["intraday", "short_term", "long_term"]
         features = {
             "atr_pct": 0.012,
             "relative_volume": 1.0,
@@ -261,6 +267,7 @@ class TestHoldingPeriodDecision:
     async def test_3d_default_fallback(self, signal_skill):
         """Weak trend in balanced mode → short-term hold."""
         signal_skill.ctx.config.strategy.mode = "balanced"
+        signal_skill.ctx.config.strategy.allowed_holding_periods = ["intraday", "short_term", "long_term"]
         features = {
             "atr_pct": 0.008,
             "relative_volume": 0.8,
@@ -464,6 +471,7 @@ class TestSellHoldingsAdjustment:
 
     async def test_sell_signal_keeps_cnc_when_held(self, signal_skill):
         """Full pipeline: SELL signal for held stock keeps CNC."""
+        signal_skill.ctx.config.risk.skip_sell_on_holdings = False
         signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
             {"symbol": "BEL"},
         ])

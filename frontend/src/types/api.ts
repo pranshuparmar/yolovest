@@ -10,12 +10,30 @@ export interface PortfolioState {
   available_cash: number;
   exposure_pct: number;
   open_positions: number;
+  system_positions: number;
+  adopted_positions: number;
+  system_position_value: number;
+  adopted_position_value: number;
   stock_exposures: Record<string, number>;
   sector_counts: Record<string, number>;
   daily_pnl_pct: number;
   weekly_pnl_pct: number;
+  daily_pnl: number;
+  weekly_pnl: number;
   trades_today: number;
   minutes_since_last_loss: number;
+  // Broker-synced capital breakdown
+  available_funds: number;
+  utilised_margin: number;
+  pending_trade_value: number;
+  locked_total: number;
+  holdings_invested: number;
+  holdings_current: number;
+  holdings_unrealized_pnl: number;
+  holdings_unrealized_pnl_pct: number;
+  total_portfolio_value: number;
+  total_pnl: number;
+  all_time_realized_pnl: number;
 }
 
 export interface Trade {
@@ -187,6 +205,29 @@ export interface Report {
   report_type: "daily" | "weekly";
   report_date: string;
   content: Record<string, unknown>;
+  created_at: string;
+}
+
+export type SignalDisposition =
+  | "pending"
+  | "risk_rejected"
+  | "llm_rejected"
+  | "awaiting_approval"
+  | "executed"
+  | "recently_rejected_dedup";
+
+export interface Recommendation {
+  id: number;
+  symbol: string;
+  signal_type: "BUY" | "SELL";
+  entry_price: number;
+  target_price: number;
+  stop_loss_price: number;
+  position_size: number;
+  confidence_score: number;
+  model_version: string;
+  disposition: SignalDisposition;
+  disposition_reason: string | null;
   created_at: string;
 }
 

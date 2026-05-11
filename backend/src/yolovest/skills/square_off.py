@@ -47,6 +47,7 @@ class SquareOffSkill(SkillBase):
             h, m = int(parts[0]), int(parts[1])
             self.schedule = f"{m} {h} * * 1-5"  # weekdays only
         except (ValueError, IndexError):
+            logger.warning("Invalid square_off time %r, using default 15:15", sq_time)
             self.schedule = "15 15 * * 1-5"  # fallback default
 
     def should_run(self) -> bool:
@@ -74,7 +75,7 @@ class SquareOffSkill(SkillBase):
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         force = kwargs.get("force", False)  # True when called from kill-switch
-        positions = await self.ctx.db.get_open_positions()
+        positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
 
         # Filter to MIS (intraday) only, unless force=True (kill switch closes everything)
         if not force:
@@ -89,6 +90,26 @@ class SquareOffSkill(SkillBase):
             return SkillResult(
                 success=True, skill_name=self.name,
                 data={"squared_off": [], "total_pnl": 0, "failures": [], "force": force},
+            )
+
+        # In manual mode (non-force), notify user instead of auto-closing.
+        # MIS positions MUST close by EOD — warn urgently via Telegram.
+        if self.ctx.config.execution.transaction_mode == "manual" and not force:
+            symbols = [p["symbol"] for p in positions]
+            logger.warning(
+                "square-off: %d MIS positions need closing but manual mode is active: %s",
+                len(positions), symbols,
+            )
+            await self.ctx.notify.send(
+                f"URGENT: {len(positions)} MIS positions must close before 3:30 PM!\n"
+                f"Symbols: {', '.join(symbols)}\n"
+                f"Approve exits on dashboard or Zerodha will auto-square with penalty.",
+                alert_type="errors",
+            )
+            return SkillResult(
+                success=True, skill_name=self.name,
+                data={"squared_off": [], "total_pnl": 0, "failures": [],
+                      "manual_mode_warning": symbols, "force": force},
             )
 
         deadline = self._get_hard_deadline()
@@ -195,9 +216,22 @@ class SquareOffSkill(SkillBase):
             product=pos.get("product", "MIS"),
         )
 
-        # Get fill price
-        order_status = await self.ctx.broker.get_order_status(exit_order_id)
-        exit_price = order_status.get("average_price")
+        # Get fill price — wait for fill if not immediate
+        exit_price = None
+        for _ in range(10):
+            order_status = await self.ctx.broker.get_order_status(exit_order_id)
+            exit_price = order_status.get("average_price")
+            if exit_price and exit_price > 0:
+                break
+            await asyncio.sleep(0.5)
+
+        if not exit_price or exit_price <= 0:
+            # Fallback: use last known price for PnL estimate
+            logger.warning(
+                "square-off: no fill price for %s exit order %s, using entry price",
+                pos["symbol"], exit_order_id,
+            )
+            exit_price = pos["entry_price"]
 
         # Compute PnL with transaction costs
         qty = pos["quantity"]
@@ -212,7 +246,7 @@ class SquareOffSkill(SkillBase):
             entry, exit_price, qty, product=product,
             cost_config=self.ctx.config.transaction_costs,
         )
-        pnl = gross_pnl - costs
+        pnl = round(gross_pnl - costs, 2)
 
         await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)
         return {"symbol": pos["symbol"], "pnl": pnl}

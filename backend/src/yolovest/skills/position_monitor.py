@@ -127,7 +127,13 @@ class PositionMonitorSkill(SkillBase):
                     cost_config=self.ctx.config.transaction_costs,
                 )
                 pnl = round(gross_pnl - costs, 2)
-                await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+
+                if self.ctx.config.execution.transaction_mode == "manual":
+                    await self._queue_exit_for_approval(
+                        pos, current_price, pnl, "target_hit",
+                    )
+                else:
+                    await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
                 targets_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
                     "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
@@ -150,7 +156,13 @@ class PositionMonitorSkill(SkillBase):
                     cost_config=self.ctx.config.transaction_costs,
                 )
                 pnl = round(gross_pnl - costs, 2)
-                await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+
+                if self.ctx.config.execution.transaction_mode == "manual":
+                    await self._queue_exit_for_approval(
+                        pos, current_price, pnl, "stop_loss_hit",
+                    )
+                else:
+                    await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
                 stops_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
                     "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
@@ -523,6 +535,64 @@ class PositionMonitorSkill(SkillBase):
         )
         return {**result_base, "action": "closed", "reason": reason, "pnl": pnl}
 
+    async def _queue_exit_for_approval(
+        self,
+        pos: dict[str, Any],
+        exit_price: float,
+        pnl: float,
+        reason: str,
+    ) -> None:
+        """Queue an exit as a pending trade instead of auto-closing (manual mode)."""
+        symbol = pos.get("symbol", "?")
+        qty = pos.get("quantity", 0)
+        product = pos.get("product", "CNC")
+        entry = pos.get("entry_price", 0)
+        exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
+
+        existing = await self.ctx.db.get_pending_trade_by_symbol(symbol)
+        if existing:
+            logger.info(
+                "position-monitor: %s %s — pending exit already queued (id=%s)",
+                reason.upper(), symbol, existing.get("id"),
+            )
+            return
+
+        signal = {
+            "symbol": symbol,
+            "signal_type": exit_side,
+            "entry_price": exit_price,
+            "target_price": exit_price,
+            "stop_loss_price": exit_price,
+            "position_size": qty,
+            "confidence_score": 1.0,
+            "product": product,
+            "model_version": f"exit_{reason}",
+        }
+        pending_id = await self.ctx.db.insert_pending_trade(signal)
+        invested = round(qty * entry, 2)
+        current_val = round(qty * exit_price, 2)
+        pnl_pct = round((pnl / invested) * 100, 2) if invested > 0 else 0
+
+        logger.info(
+            "position-monitor: queued %s exit for %s (reason=%s, pending_id=%d, pnl=₹%.2f)",
+            exit_side, symbol, reason, pending_id, pnl,
+        )
+        logger.info(
+            "position-monitor: %s %s — queued for approval (manual mode)",
+            reason.upper(), symbol,
+        )
+        await self.ctx.notify.send(
+            f"Pending Exit — {reason.upper().replace('_', ' ')}\n"
+            f"{exit_side} <b>{symbol}</b> x{qty} ({product})\n"
+            f"  Entry: ₹{entry:.2f} → LTP: ₹{exit_price:.2f}\n"
+            f"  Invested: ₹{invested:,.2f} | Current: ₹{current_val:,.2f}\n"
+            f"  PnL: ₹{pnl:,.2f} ({pnl_pct:+.2f}%)\n"
+            f"  SL: ₹{pos.get('stop_loss_price', 0):.2f} | Target: ₹{pos.get('target_price', 0):.2f}\n"
+            f"Approve: /approve {symbol}\n"
+            f"Reject: /reject {symbol}",
+            alert_type="trade_entry",
+        )
+
     async def _close_expired_position(
         self,
         pos: dict[str, Any],
@@ -541,7 +611,11 @@ class PositionMonitorSkill(SkillBase):
             cost_config=self.ctx.config.transaction_costs,
         )
         pnl = round(gross_pnl - costs, 2)
-        await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+
+        if self.ctx.config.execution.transaction_mode == "manual":
+            await self._queue_exit_for_approval(pos, current_price, pnl, "holding_expiry")
+        else:
+            await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
         return pnl
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:
@@ -591,6 +665,14 @@ class PositionMonitorSkill(SkillBase):
         qty = pos.get("quantity", 0)
         close_qty = round(qty * cfg.first_close_pct)
         if close_qty <= 0:
+            return False
+
+        # In manual mode, skip auto partial profit — user controls all exits
+        if self.ctx.config.execution.transaction_mode == "manual":
+            logger.info(
+                "position-monitor: partial profit target crossed for %s but skipping (manual mode)",
+                pos["symbol"],
+            )
             return False
 
         # Place the partial exit order

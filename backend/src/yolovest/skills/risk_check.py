@@ -46,6 +46,7 @@ class RiskCheckSkill(SkillBase):
         cfg = self.ctx.config.risk
         portfolio = await self.ctx.db.get_portfolio_state(
             weekly_reset_day=cfg.weekly_reset_day,
+            mode=self.ctx.config.mode,
         )
 
         # Kill switch
@@ -86,9 +87,26 @@ class RiskCheckSkill(SkillBase):
             remaining = cfg.loss_cooldown_minutes - portfolio["minutes_since_last_loss"]
             return self._reject(signal, f"Loss cooldown active ({remaining:.0f}min remaining)")
 
-        # Max open positions
-        if portfolio["open_positions"] >= cfg.max_open_positions:
-            return self._reject(signal, f"Max open positions reached ({cfg.max_open_positions})")
+        # Max open positions (system-generated trades only; adopted holdings
+        # are pre-existing investments and don't count toward the trading limit).
+        # Include pending approvals to prevent over-generation in manual mode.
+        pending_count = 0
+        if self.ctx.config.execution.transaction_mode == "manual":
+            try:
+                pending = await self.ctx.db.get_pending_trades()
+                pending_count = len(pending)
+            except Exception:
+                logger.debug("Failed to count pending trades", exc_info=True)
+        system_positions = portfolio.get("system_positions", portfolio["open_positions"])
+        adopted_positions = portfolio.get("adopted_positions", 0)
+        effective_positions = system_positions + pending_count
+        if effective_positions >= cfg.max_open_positions:
+            return self._reject(
+                signal,
+                f"Max open positions reached ({effective_positions} = "
+                f"{system_positions} system + {pending_count} pending, "
+                f"limit={cfg.max_open_positions}; {adopted_positions} adopted not counted)",
+            )
 
         # Max portfolio exposure
         if portfolio["exposure_pct"] >= cfg.max_portfolio_exposure_pct:
@@ -153,7 +171,7 @@ class RiskCheckSkill(SkillBase):
                     signal["symbol"], entry, fresh_ltp, drift_pct * 100,
                 )
         except Exception:
-            pass  # LTP unavailable — proceed with signal's entry_price
+            logger.debug("LTP unavailable for %s price drift check", signal["symbol"])
 
         # Position sizing based on max risk per trade
         risk_amount = capital * cfg.max_risk_per_trade_pct
@@ -249,6 +267,7 @@ class RiskCheckSkill(SkillBase):
             penalty = min(excess * 10, 0.30)
             return penalty
         except Exception:
+            logger.debug("Slippage penalty calc failed for %s", symbol, exc_info=True)
             return 0.0
 
     def _reject(self, signal: dict[str, Any], reason: str) -> SkillResult:
@@ -304,7 +323,7 @@ class RiskCheckSkill(SkillBase):
             )
             return None
 
-        open_positions = await self.ctx.db.get_open_positions()
+        open_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
         if not open_positions:
             return None
 
@@ -337,6 +356,7 @@ class RiskCheckSkill(SkillBase):
                     sym, days=cfg.lookback_days,
                 )
             except Exception:
+                logger.debug("Failed to get OHLCV for correlation check: %s", sym)
                 continue
 
             if not sym_bars:

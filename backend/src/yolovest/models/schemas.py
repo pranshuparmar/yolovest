@@ -96,16 +96,30 @@ class Position(BaseModel):
 class PortfolioState(BaseModel):
     """Current snapshot of the portfolio for risk checks."""
 
-    total_capital: float = Field(ge=0)  # cash + unrealized
-    available_cash: float = Field(ge=0)
+    total_capital: float = Field(ge=0)  # legacy: initial + realized PnL
+    available_cash: float = Field(ge=0)  # legacy: total_capital - system_position_value
     exposure_pct: float = Field(ge=0.0, le=1.0)
     open_positions: int = Field(default=0, ge=0)
     stock_exposures: dict[str, float] = Field(default_factory=dict)  # symbol -> %
     sector_counts: dict[str, int] = Field(default_factory=dict)  # sector -> count
     daily_pnl_pct: float = 0.0
     weekly_pnl_pct: float = 0.0
+    daily_pnl: float = 0.0  # absolute realized PnL today
+    weekly_pnl: float = 0.0  # absolute realized PnL this week
     trades_today: int = Field(default=0, ge=0)
     minutes_since_last_loss: float = Field(default=0.0, ge=0)
+    # Broker-synced capital breakdown
+    available_funds: float = 0.0  # free cash from Kite available.cash
+    utilised_margin: float = 0.0  # margin locked in open intraday MIS positions
+    pending_trade_value: float = 0.0  # sum of pending-approval trade values
+    locked_total: float = 0.0  # utilised_margin + pending_trade_value
+    holdings_invested: float = 0.0  # total buy price of CNC delivery holdings
+    holdings_current: float = 0.0  # current market value of CNC delivery holdings
+    holdings_unrealized_pnl: float = 0.0  # holdings_current - holdings_invested
+    holdings_unrealized_pnl_pct: float = 0.0
+    total_portfolio_value: float = 0.0  # available_funds + utilised + holdings_current
+    total_pnl: float = 0.0  # all-time realized + holdings unrealized
+    all_time_realized_pnl: float = 0.0
 
 
 # ---------------------------------------------------------------------------

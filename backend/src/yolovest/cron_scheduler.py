@@ -156,7 +156,10 @@ class CronScheduler:
 
             # Fire the skill
             result = await self._run_skill(name, skill)
-            self._last_run[name] = now
+            # Only mark as run if the skill actually executed (not skipped)
+            skipped = result.data.get("skipped", False) if result.data else False
+            if not skipped:
+                self._last_run[name] = now
 
             # Audit log (best-effort)
             try:

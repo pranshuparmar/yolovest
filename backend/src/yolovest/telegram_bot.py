@@ -96,6 +96,10 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("approve", self._cmd_approve))
         self._app.add_handler(CommandHandler("reject", self._cmd_reject))
         self._app.add_handler(CommandHandler("trade", self._cmd_trade))
+        self._app.add_handler(CommandHandler("clear", self._cmd_clear_signals))
+        self._app.add_handler(CommandHandler("review", self._cmd_review))
+        self._app.add_handler(CommandHandler("skills", self._cmd_skills))
+        self._app.add_handler(CommandHandler("run", self._cmd_run_skill))
         self._app.add_handler(CommandHandler("holiday", self._cmd_holiday))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
 
@@ -169,18 +173,25 @@ class TelegramBot:
         """Handle /start — quick status summary."""
         mode = self._ctx.config.mode.upper()
         kill_active = await self._ctx.db.is_kill_switch_active()
-        positions = await self._ctx.db.get_open_positions()
-        trades = await self._ctx.db.get_todays_trades()
+        positions = await self._ctx.db.get_open_positions(mode=self._ctx.config.mode)
+        trades = await self._ctx.db.get_todays_trades(mode=self._ctx.config.mode)
         pending = await self._ctx.db.get_pending_trades()
         total_pnl = sum(t.get("pnl", 0) for t in trades if t.get("pnl") is not None)
         sign = "+" if total_pnl >= 0 else ""
 
+        system_pos = [p for p in positions if p.get("origin") != "adopted"]
+        adopted_pos = [p for p in positions if p.get("origin") == "adopted"]
+
         msg = (
             f"<b>YoloVest</b> — {mode}"
             f"{' | PAUSED' if kill_active else ''}\n"
-            f"Positions: {len(positions)} | "
-            f"Trades today: {len(trades)} | "
-            f"PnL: {sign}₹{_fmt_inr(total_pnl)}\n"
+            f"Positions: {len(system_pos)}"
+        )
+        if adopted_pos:
+            msg += f" (+{len(adopted_pos)} holdings)"
+        msg += (
+            f" | Trades today: {len(trades)}"
+            f" | PnL: {sign}₹{_fmt_inr(total_pnl)}\n"
         )
         if pending:
             msg += f"<b>{len(pending)} pending</b> — /pending to review\n"
@@ -198,6 +209,7 @@ class TelegramBot:
 
             "<b>Trading</b>\n"
             "/pending — Show pending trades\n"
+            "/clear — Clear today's signals &amp; regenerate\n"
             "/approve SYMBOL — Approve as-is\n"
             "/approve SYMBOL BUY 422 427 420 — Full override\n"
             "/approve SYMBOL BUY 422 427 420 CNC 50 — Override + product + qty\n"
@@ -210,6 +222,10 @@ class TelegramBot:
             "/trade BUY RELIANCE 2500 2550 2475 — Manual trade\n"
             "/trade SELL INFY 422 415 427 CNC 50 — With product + qty\n\n"
 
+            "<b>Analysis</b>\n"
+            "/review — ML review of all holdings\n"
+            "/review GAIL TCS — Review specific holdings\n\n"
+
             "<b>Monitoring</b>\n"
             "/status — System status + integrations\n"
             "/pnl — Today's PnL summary\n"
@@ -220,6 +236,10 @@ class TelegramBot:
             "/stop — Pause trading (kill switch)\n"
             "/kill — Square off everything + pause\n"
             "/resume — Resume trading\n\n"
+
+            "<b>Skills</b>\n"
+            "/skills — List all skills\n"
+            "/run SKILL — Execute a skill\n\n"
 
             "<b>Setup</b>\n"
             "/auth TOKEN — Daily Kite auth\n"
@@ -241,19 +261,19 @@ class TelegramBot:
         try:
             gemini_ok = await self._ctx.llm.ping()
         except Exception:
-            pass
+            logger.debug("Gemini ping failed during /status", exc_info=True)
 
         broker_ok = False
         try:
             broker_ok = await self._ctx.broker.is_authenticated()
         except Exception:
-            pass
+            logger.debug("Broker auth check failed during /status", exc_info=True)
 
         market_data_ok = False
         try:
             market_data_ok = await self._ctx.market_data.health_check()
         except Exception:
-            pass
+            logger.debug("Market data health check failed during /status", exc_info=True)
 
         def icon(ok: bool) -> str:
             return "OK" if ok else "DOWN"
@@ -274,32 +294,50 @@ class TelegramBot:
 
     async def _cmd_pnl(self, update: Any, context: Any) -> None:
         """Handle /pnl command."""
-        trades = await self._ctx.db.get_todays_trades()
+        trades = await self._ctx.db.get_todays_trades(mode=self._ctx.config.mode)
         total_pnl = sum(t.get("pnl", 0) for t in trades if t.get("pnl") is not None)
         wins = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
         losses = sum(1 for t in trades if (t.get("pnl") or 0) < 0)
 
         sign = "+" if total_pnl >= 0 else ""
         await update.message.reply_html(
-            f"<b>Today's PnL</b>\n"
+            f"<b>Today's PnL ({self._ctx.config.mode.upper()})</b>\n"
             f"Total: {sign}₹{_fmt_inr(total_pnl)}\n"
             f"Trades: {len(trades)} (W:{wins} L:{losses})"
         )
 
     async def _cmd_positions(self, update: Any, context: Any) -> None:
         """Handle /positions command."""
-        positions = await self._ctx.db.get_open_positions()
+        positions = await self._ctx.db.get_open_positions(mode=self._ctx.config.mode)
         if not positions:
             await update.message.reply_text("No open positions.")
             return
 
-        lines = ["<b>Open Positions</b>"]
-        for pos in positions:
-            lines.append(
-                f"  {pos.get('signal_type', '?')} {pos.get('symbol', '?')} "
-                f"qty={pos.get('quantity', 0)} @ ₹{_fmt_inr(pos.get('entry_price', 0))}"
-            )
-        await update.message.reply_html("\n".join(lines))
+        system_pos = [p for p in positions if p.get("origin") != "adopted"]
+        adopted_pos = [p for p in positions if p.get("origin") == "adopted"]
+
+        lines = []
+        if system_pos:
+            lines.append(f"<b>Active Trades ({len(system_pos)})</b>")
+            for pos in system_pos:
+                lines.append(
+                    f"  {pos.get('signal_type', '?')} <b>{pos.get('symbol', '?')}</b> "
+                    f"x{pos.get('quantity', 0)} @ ₹{_fmt_inr(pos.get('entry_price', 0))}"
+                    f"  SL ₹{_fmt_inr(pos.get('stop_loss_price', 0))} → Target ₹{_fmt_inr(pos.get('target_price', 0))}"
+                )
+
+        if adopted_pos:
+            lines.append(f"\n<b>Adopted Holdings ({len(adopted_pos)})</b>")
+            for pos in adopted_pos:
+                lines.append(
+                    f"  {pos.get('signal_type', '?')} <b>{pos.get('symbol', '?')}</b> "
+                    f"x{pos.get('quantity', 0)} @ ₹{_fmt_inr(pos.get('entry_price', 0))}"
+                )
+
+        if not lines:
+            await update.message.reply_text("No open positions.")
+        else:
+            await update.message.reply_html("\n".join(lines))
 
     async def _cmd_stop(self, update: Any, context: Any) -> None:
         """Handle /stop — pause trading."""
@@ -353,6 +391,9 @@ class TelegramBot:
         request_token = args[0]
         try:
             await self._ctx.broker.authenticate(request_token)
+            # Sync token to Kite data provider (paid data plan)
+            from yolovest.main import _sync_kite_data_token
+            _sync_kite_data_token(self._ctx)
             margins = await self._ctx.broker.get_margins()
             cash = margins.get("available_cash", margins.get("equity", {}).get("available", "?"))
             await update.message.reply_html(
@@ -442,6 +483,177 @@ class TelegramBot:
             "<i>/reject SYMBOL</i>"
         )
         await update.message.reply_html(msg)
+
+    async def _cmd_clear_signals(self, update: Any, context: Any) -> None:
+        """Handle /clear — clear today's signals and pending trades to allow regeneration."""
+        result = await self._ctx.db.clear_todays_signals()
+        sig = result["signals_deleted"]
+        pend = result["pending_deleted"]
+        await update.message.reply_html(
+            f"<b>Cleared</b>\n"
+            f"Signals deleted: {sig}\n"
+            f"Pending trades deleted: {pend}\n\n"
+            f"Next heartbeat will regenerate fresh signals."
+        )
+
+    async def _cmd_review(self, update: Any, context: Any) -> None:
+        """Handle /review [SYMBOL ...] — ML review of any symbol or all holdings."""
+        from yolovest.data.features import IndicatorConfig, compute_features
+
+        args = context.args
+
+        # Build symbol list: explicit args, or fall back to all holdings
+        holdings = await self._ctx.broker.get_holdings()
+        holding_map = {h["tradingsymbol"]: h for h in (holdings or []) if h.get("quantity", 0) > 0}
+
+        if args:
+            symbols = [a.upper() for a in args]
+        elif holding_map:
+            symbols = list(holding_map.keys())
+        else:
+            await update.message.reply_text("Usage: /review SYMBOL [SYMBOL ...]\nOr authenticate with Kite to review all holdings.")
+            return
+
+        await update.message.reply_text(f"Reviewing {len(symbols)} symbol{'s' if len(symbols) != 1 else ''}...")
+
+        ind = self._ctx.config.strategy.indicators
+        indicator_cfg = IndicatorConfig(
+            ema_periods=self._ctx.config.strategy.ema_periods,
+            rsi=ind.rsi, macd=ind.macd, bollinger_bands=ind.bollinger_bands,
+            vwap=ind.vwap, atr=ind.atr, volume_profile=ind.volume_profile,
+            obv=ind.obv, supertrend=ind.supertrend,
+        )
+        lines = []
+        for symbol in symbols[:15]:
+            # Get price context — from holdings if held, else from market data
+            held = holding_map.get(symbol)
+            entry = held.get("average_price", 0) if held else 0
+            ltp = held.get("last_price", 0) if held else 0
+            qty = held.get("quantity", 0) if held else 0
+
+            if ltp <= 0:
+                try:
+                    ltp = await self._ctx.market_data.get_ltp(symbol)
+                except Exception:
+                    pass
+
+            pnl_pct = ((ltp - entry) / entry * 100) if entry > 0 and ltp > 0 else 0
+            held_label = f"x{qty}" if qty > 0 else "not held"
+
+            action = "HOLD"
+            conf = 0.0
+            reason = ""
+            try:
+                bars = await self._ctx.db.get_ohlcv(symbol, "daily", days=365)
+                if not bars or len(bars) < 50:
+                    reason = f"insufficient data ({len(bars) if bars else 0} bars)"
+                    lines.append(f"⚪ <b>{symbol}</b> ({held_label}) — {reason}")
+                    continue
+
+                features = compute_features(bars, indicator_cfg)
+                if features and self._ctx.ml:
+                    swing_pred = None
+                    intra_pred = None
+                    try:
+                        swing_pred = await self._ctx.ml.predict_swing(symbol, features, current_price=ltp or None)
+                    except Exception:
+                        pass
+                    try:
+                        intra_pred = await self._ctx.ml.predict_intraday(symbol, features, current_price=ltp or None)
+                    except Exception:
+                        pass
+
+                    # Pick best non-HOLD prediction
+                    pred = None
+                    if swing_pred and swing_pred.signal_type != "HOLD":
+                        pred = swing_pred
+                    if intra_pred and intra_pred.signal_type != "HOLD":
+                        if pred is None or intra_pred.confidence > pred.confidence:
+                            pred = intra_pred
+
+                    if pred:
+                        action = "SELL" if pred.signal_type == "SELL" else "BUY" if not held else "BUY MORE"
+                        conf = pred.confidence
+                        reason = f"{pred.confidence:.0%} confidence"
+                    else:
+                        conf = max(
+                            (swing_pred.confidence if swing_pred else 0),
+                            (intra_pred.confidence if intra_pred else 0),
+                        )
+                        if held and pnl_pct > 10:
+                            action = "TIGHTEN SL"
+                            reason = f"{pnl_pct:+.1f}% — consider partial booking"
+                        else:
+                            reason = "no strong signal"
+            except Exception:
+                reason = "analysis failed"
+
+            icon = {"SELL": "🔴", "BUY": "🟢", "BUY MORE": "🟢", "TIGHTEN SL": "🟡"}.get(action, "⚪")
+            price_line = f"₹{ltp:.2f}" if ltp > 0 else "LTP unavailable"
+            if held and entry > 0:
+                price_line = f"₹{entry:.2f}→₹{ltp:.2f} ({pnl_pct:+.1f}%)"
+            lines.append(
+                f"{icon} <b>{symbol}</b> ({held_label}) — {action} ({conf:.0%})\n"
+                f"    {price_line} | {reason}"
+            )
+
+        msg = "<b>Symbol Review</b>\n\n" + "\n\n".join(lines)
+        await update.message.reply_html(msg)
+
+    async def _cmd_skills(self, update: Any, context: Any) -> None:
+        """Handle /skills — list all registered skills."""
+        from yolovest.skills import SKILL_REGISTRY
+
+        lines = []
+        for name in sorted(SKILL_REGISTRY):
+            cls = SKILL_REGISTRY[name]
+            trigger = cls.trigger.value
+            lines.append(f"<b>{name}</b> ({trigger}) — {cls.description}")
+
+        msg = "<b>Available Skills</b>\n\n" + "\n".join(lines)
+        msg += "\n\n<i>/run SKILL_NAME</i> to execute"
+        await update.message.reply_html(msg)
+
+    async def _cmd_run_skill(self, update: Any, context: Any) -> None:
+        """Handle /run <skill_name> — execute a skill and report result."""
+        from yolovest.skills import SKILL_REGISTRY
+
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "Usage: /run SKILL_NAME\nUse /skills to see available skills."
+            )
+            return
+
+        skill_name = args[0].lower()
+        if skill_name not in SKILL_REGISTRY:
+            await update.message.reply_text(
+                f"Unknown skill: {skill_name}\n"
+                f"Available: {', '.join(sorted(SKILL_REGISTRY.keys()))}"
+            )
+            return
+
+        await update.message.reply_text(f"Running {skill_name}...")
+
+        skill_cls = SKILL_REGISTRY[skill_name]
+        skill = skill_cls(self._ctx)
+        result = await skill.safe_execute()
+
+        if result.success:
+            # Extract key metrics from result data
+            summary_parts = []
+            if result.data:
+                for k, v in result.data.items():
+                    if isinstance(v, (str, int, float, bool)) and k not in ("mode",):
+                        summary_parts.append(f"{k}: {v}")
+            summary = "\n".join(summary_parts[:10]) if summary_parts else "No details"
+            await update.message.reply_html(
+                f"<b>{skill_name}</b> completed in {result.duration_ms:.0f}ms\n\n{summary}"
+            )
+        else:
+            await update.message.reply_text(
+                f"{skill_name} FAILED ({result.duration_ms:.0f}ms):\n{result.error}"
+            )
 
     async def _cmd_approve(self, update: Any, context: Any) -> None:
         """Handle /approve <symbol> [overrides] — approve a pending trade with optional overrides.
@@ -584,22 +796,50 @@ class TelegramBot:
         # Execute the approved trade
         from yolovest.skills.trade_execute import TradeExecuteSkill
         skill = TradeExecuteSkill(self._ctx)
-        result = await skill.execute(signal=signal)
+        mode = self._ctx.config.mode
+        logger.info(
+            "Executing approved trade: %s %s (mode=%s)",
+            signal.get("signal_type"), signal.get("symbol"), mode,
+        )
+        result = await skill.safe_execute(signal=signal)
 
         if result.success:
             trade = result.data.get("trade", {}) if result.data else {}
+            exec_mode = result.data.get("mode", mode) if result.data else mode
             msg = (
-                f"Approved & executed: {trade.get('signal_type')} {trade.get('symbol')} "
+                f"<b>Executed ({exec_mode.upper()})</b>: "
+                f"{trade.get('signal_type')} <b>{trade.get('symbol')}</b> "
                 f"{trade.get('product', 'MIS')} qty={trade.get('quantity')} "
                 f"@ ₹{trade.get('fill_price', 0):.2f}\n"
                 f"  Target: ₹{trade.get('target_price', 0):.2f} | "
-                f"SL: ₹{trade.get('stop_loss_price', 0):.2f}"
+                f"SL: ₹{trade.get('stop_loss_price', 0):.2f}\n"
+                f"  Order: {trade.get('order_id', 'N/A')} | "
+                f"Trade: {trade.get('trade_id', 'N/A')}"
             )
             if override_notes:
                 msg += f"\n  [OVERRIDE: {'; '.join(override_notes)}]"
             await update.message.reply_html(msg)
         else:
-            await update.message.reply_text(f"Approved but execution failed: {result.error}")
+            logger.error(
+                "Trade execution failed for %s: %s",
+                signal.get("symbol"), result.error,
+            )
+            # Revert pending trade back to 'pending' so user can retry
+            sym = signal.get("symbol", "?")
+            try:
+                await self._ctx.db.conn.execute(
+                    "UPDATE pending_trades SET status = 'pending', decided_at = NULL, "
+                    "decided_by = NULL WHERE id = ? AND status = 'approved'",
+                    (trade_id,),
+                )
+                await self._ctx.db.conn.commit()
+                logger.info("Reverted pending trade #%d (%s) back to pending after execution failure", trade_id, sym)
+            except Exception:
+                logger.debug("Failed to revert pending trade #%d", trade_id, exc_info=True)
+            await update.message.reply_text(
+                f"FAILED: {sym} execution error:\n{result.error}\n\n"
+                f"Trade reverted to pending — /approve {sym} to retry."
+            )
 
     async def _cmd_reject(self, update: Any, context: Any) -> None:
         """Handle /reject <symbol> — reject a pending trade."""

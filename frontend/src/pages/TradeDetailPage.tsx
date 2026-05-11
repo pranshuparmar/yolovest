@@ -1,5 +1,5 @@
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { useTradeDetail } from "../hooks/queries";
+import { useTradeDetail, useDeleteTrade } from "../hooks/queries";
 import clsx from "clsx";
 import { parseUTC, getTimezone } from "../utils/datetime";
 
@@ -127,6 +127,7 @@ export function TradeDetailPage() {
   const { tradeId } = useParams<{ tradeId: string }>();
   const navigate = useNavigate();
   const { data, isLoading, error } = useTradeDetail(tradeId || "");
+  const deleteTrade = useDeleteTrade();
 
   if (isLoading) return <div className="h-96 animate-pulse bg-gray-900 rounded-lg" />;
 
@@ -143,6 +144,7 @@ export function TradeDetailPage() {
 
   return (
     <div className="space-y-6">
+      <div className="flex items-center justify-between">
       <div className="flex items-center gap-3">
         <button onClick={() => navigate("/trades")} className="text-gray-500 hover:text-gray-300 text-sm">&larr; Back</button>
         <h2 className="text-lg font-semibold">
@@ -152,6 +154,17 @@ export function TradeDetailPage() {
             data.signal_type === "BUY" ? "bg-emerald-900/40 text-emerald-400" : "bg-red-900/40 text-red-400"
           )}>{data.signal_type}</span>
         </h2>
+      </div>
+      <button
+        onClick={() => {
+          if (!window.confirm(`Delete trade ${data.trade_id} (${data.symbol})? This cannot be undone.`)) return;
+          deleteTrade.mutate(data.trade_id, { onSuccess: () => navigate("/trades") });
+        }}
+        disabled={deleteTrade.isPending}
+        className="px-2.5 py-1 rounded text-xs bg-red-900/60 hover:bg-red-800 text-red-400 disabled:opacity-50 transition-colors"
+      >
+        {deleteTrade.isPending ? "Deleting..." : "Delete Trade"}
+      </button>
       </div>
 
       {/* Visual Reasoning Chain */}

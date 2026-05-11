@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding } from "../hooks/queries";
+import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLockHoldings, useReviewHoldings } from "../hooks/queries";
 import clsx from "clsx";
 import type { ManualOrder } from "../types/api";
 
@@ -195,6 +195,23 @@ export function HoldingsPage() {
 
   const lockHolding = useLockHolding();
   const unlockHolding = useUnlockHolding();
+  const bulkLock = useBulkLockHoldings();
+  const review = useReviewHoldings();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  type Rec = { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number };
+
+  const toggleSelect = (sym: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(sym)) next.delete(sym); else next.add(sym);
+      return next;
+    });
+  };
+  const toggleAll = () => {
+    if (!holdings) return;
+    if (selected.size === holdings.length) setSelected(new Set());
+    else setSelected(new Set(holdings.map((h) => h.tradingsymbol)));
+  };
 
   const holdings = response?.holdings;
   const brokerAuthenticated = response?.broker_authenticated ?? true;
@@ -229,6 +246,13 @@ export function HoldingsPage() {
             {isFetching ? "Refreshing..." : "Refresh"}
           </button>
           <button
+            onClick={() => review.mutate(selected.size > 0 ? [...selected] : undefined)}
+            disabled={review.isPending}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors disabled:opacity-50"
+          >
+            {review.isPending ? "Reviewing..." : selected.size > 0 ? `Review ${selected.size} Selected` : "Review All"}
+          </button>
+          <button
             onClick={() => setOrderForm({})}
             className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white transition-colors"
           >
@@ -245,6 +269,65 @@ export function HoldingsPage() {
           isLocked={orderForm.locked}
           onClose={() => setOrderForm(null)}
         />
+      )}
+
+      {/* Recommendations panel */}
+      {review.data && review.data.recommendations.length > 0 && (
+        <div className="bg-gray-900 border border-blue-800/50 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-blue-800/30 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-blue-400">ML Recommendations</h3>
+            <button onClick={() => review.reset()} className="text-xs text-gray-500 hover:text-gray-300">Dismiss</button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                  <th className="py-2 px-3 text-left">Symbol</th>
+                  <th className="py-2 px-3 text-center">Action</th>
+                  <th className="py-2 px-3 text-right">Confidence</th>
+                  <th className="py-2 px-3 text-right">P&L</th>
+                  <th className="py-2 px-3 text-left">Reasoning</th>
+                  <th className="py-2 px-3 text-center">Act</th>
+                </tr>
+              </thead>
+              <tbody>
+                {review.data.recommendations.map((r: Rec) => (
+                  <tr key={r.symbol} className="border-b border-gray-800/50 hover:bg-gray-800/20">
+                    <td className="py-2 px-3 font-medium text-gray-200">{r.symbol}</td>
+                    <td className="py-2 px-3 text-center">
+                      <span className={clsx("px-1.5 py-0.5 rounded text-xs font-medium", {
+                        "bg-red-900/40 text-red-400": r.action === "SELL" || r.action === "SHORT",
+                        "bg-emerald-900/40 text-emerald-400": r.action === "BUY_MORE" || r.action === "BUY",
+                        "bg-amber-900/40 text-amber-400": r.action === "TIGHTEN_SL",
+                        "bg-gray-800 text-gray-400": r.action === "HOLD",
+                      })}>{r.action.replace("_", " ")}</span>
+                      {!r.held && <span className="text-[10px] text-gray-600 ml-1">not held</span>}
+                    </td>
+                    <td className="py-2 px-3 text-right font-mono text-gray-300">{(r.confidence * 100).toFixed(0)}%</td>
+                    <td className={clsx("py-2 px-3 text-right font-mono", r.pnl_pct >= 0 ? "text-emerald-400" : "text-red-400")}>
+                      {r.pnl_pct >= 0 ? "+" : ""}{r.pnl_pct.toFixed(1)}%
+                    </td>
+                    <td className="py-2 px-3 text-gray-400 text-xs max-w-xs">{r.reasoning}</td>
+                    <td className="py-2 px-3 text-center">
+                      {(r.action === "SELL" || r.action === "SHORT") && (
+                        <button
+                          onClick={() => setOrderForm({ symbol: r.symbol, side: "SELL" })}
+                          className="px-2 py-0.5 rounded text-xs bg-red-900/40 text-red-400 hover:bg-red-800/50"
+                        >Sell</button>
+                      )}
+                      {(r.action === "BUY_MORE" || r.action === "BUY") && (
+                        <button
+                          onClick={() => setOrderForm({ symbol: r.symbol, side: "BUY" })}
+                          className="px-2 py-0.5 rounded text-xs bg-emerald-900/40 text-emerald-400 hover:bg-emerald-800/50"
+                        >Buy</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
       {/* Broker auth expired banner */}
@@ -327,10 +410,36 @@ export function HoldingsPage() {
         </div>
       ) : (
         <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+          {selected.size > 0 && (
+            <div className="px-4 py-2 bg-blue-900/20 border-b border-blue-800/50 flex items-center gap-3">
+              <span className="text-xs text-blue-300">{selected.size} selected</span>
+              <button
+                onClick={() => {
+                  bulkLock.mutate({ symbols: [...selected], action: "lock" }, { onSuccess: () => setSelected(new Set()) });
+                }}
+                disabled={bulkLock.isPending}
+                className="px-2 py-0.5 rounded text-xs bg-amber-900/50 text-amber-400 hover:bg-amber-800 disabled:opacity-50"
+              >Lock Selected</button>
+              <button
+                onClick={() => {
+                  bulkLock.mutate({ symbols: [...selected], action: "unlock" }, { onSuccess: () => setSelected(new Set()) });
+                }}
+                disabled={bulkLock.isPending}
+                className="px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-300 hover:bg-gray-600 disabled:opacity-50"
+              >Unlock Selected</button>
+              <button
+                onClick={() => setSelected(new Set())}
+                className="px-2 py-0.5 rounded text-xs text-gray-500 hover:text-gray-300"
+              >Clear</button>
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                  <th className="py-2 px-2 text-center w-8">
+                    <input type="checkbox" checked={holdings.length > 0 && selected.size === holdings.length} onChange={toggleAll} className="rounded bg-gray-800 border-gray-600" />
+                  </th>
                   <th className="py-2 px-3 text-left">Symbol</th>
                   <th className="py-2 px-3 text-right">Qty</th>
                   <th className="py-2 px-3 text-right">Avg Price</th>
@@ -354,6 +463,9 @@ export function HoldingsPage() {
                       key={h.tradingsymbol}
                       className="border-b border-gray-800/50 hover:bg-gray-800/30"
                     >
+                      <td className="py-2.5 px-2 text-center w-8">
+                        <input type="checkbox" checked={selected.has(h.tradingsymbol)} onChange={() => toggleSelect(h.tradingsymbol)} className="rounded bg-gray-800 border-gray-600" />
+                      </td>
                       <td className="py-2.5 px-3">
                         <span className="font-medium text-gray-200">
                           {h.tradingsymbol}

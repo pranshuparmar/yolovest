@@ -8,6 +8,8 @@ import {
   useResetAllData,
   useQuarantinedSymbols,
   useUnquarantineSymbol,
+  useSetReplacementSymbol,
+  useBulkDelete,
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
@@ -141,6 +143,95 @@ function TableRow({
   );
 }
 
+function ReplacementInput({ symbol, current }: { symbol: string; current: string | null }) {
+  const [value, setValue] = useState(current ?? "");
+  const [dirty, setDirty] = useState(false);
+  const setReplacement = useSetReplacementSymbol();
+
+  const save = () => {
+    const trimmed = value.trim().toUpperCase();
+    setReplacement.mutate(
+      { symbol, replacement: trimmed || null },
+      { onSuccess: () => setDirty(false) },
+    );
+  };
+
+  return (
+    <div className="flex items-center gap-1">
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => { setValue(e.target.value); setDirty(true); }}
+        onKeyDown={(e) => { if (e.key === "Enter") save(); }}
+        placeholder="e.g. TMPV"
+        className="w-20 px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-xs text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+      />
+      {dirty && (
+        <button
+          onClick={save}
+          disabled={setReplacement.isPending}
+          className="px-1.5 py-0.5 rounded text-[10px] bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-30"
+        >
+          {setReplacement.isPending ? "..." : "Set"}
+        </button>
+      )}
+      {!dirty && current && (
+        <span className="text-[10px] text-green-500">active</span>
+      )}
+    </div>
+  );
+}
+
+const BULK_GROUPS = [
+  { id: "paper", label: "Paper Mode Data", description: "All paper trades, predictions, signals, pending trades", color: "amber" },
+  { id: "live", label: "Live Mode Data", description: "All live trades, predictions, signals, pending trades", color: "red" },
+  { id: "dry_runs", label: "Dry Runs", description: "All dry run signal previews", color: "amber" },
+  { id: "predictions", label: "Predictions", description: "All predictions, scoreboard, and failure analyses", color: "amber" },
+  { id: "signals", label: "Signals", description: "All generated signals (today's dedup will reset)", color: "amber" },
+] as const;
+
+function BulkDeleteSection() {
+  const bulkDelete = useBulkDelete();
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-800">
+        <h3 className="text-sm font-semibold text-gray-300">Bulk Delete</h3>
+        <p className="text-xs text-gray-500 mt-0.5">Delete groups of related data. Individual trades can be deleted from the trade detail page.</p>
+      </div>
+      <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        {BULK_GROUPS.map((g) => (
+          <div key={g.id} className="flex items-center justify-between border border-gray-800 rounded px-3 py-2">
+            <div>
+              <p className="text-sm text-gray-200">{g.label}</p>
+              <p className="text-[10px] text-gray-500">{g.description}</p>
+            </div>
+            <button
+              onClick={() => {
+                const msg = g.id === "live"
+                  ? `DELETE ALL LIVE DATA? This includes real trades and cannot be undone!`
+                  : `Delete all ${g.label.toLowerCase()}? This cannot be undone.`;
+                if (!window.confirm(msg)) return;
+                if (g.id === "live" && !window.confirm("Are you absolutely sure? This deletes REAL trade history.")) return;
+                bulkDelete.mutate(g.id, {
+                  onSuccess: (data) => alert(`Deleted ${data.total} rows from: ${Object.entries(data.deleted).filter(([,v]) => v > 0).map(([k,v]) => `${k}(${v})`).join(", ") || "nothing"}`),
+                });
+              }}
+              disabled={bulkDelete.isPending}
+              className={`px-2 py-1 rounded text-xs shrink-0 disabled:opacity-50 transition-colors ${
+                g.color === "red"
+                  ? "bg-red-900/60 hover:bg-red-800 text-red-400"
+                  : "bg-amber-900/60 hover:bg-amber-800 text-amber-400"
+              }`}
+            >
+              {bulkDelete.isPending ? "..." : "Delete"}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function QuarantinedSymbolsSection() {
   const { data: symbols, isLoading } = useQuarantinedSymbols();
   const unquarantine = useUnquarantineSymbol();
@@ -150,7 +241,7 @@ function QuarantinedSymbolsSection() {
       <div className="px-4 py-3 border-b border-gray-800">
         <h3 className="text-sm font-semibold text-gray-300">Quarantined Symbols</h3>
         <p className="text-xs text-gray-500 mt-0.5">
-          Symbols auto-blocked after 3 consecutive data fetch failures. Excluded from all pipelines until manually unblocked.
+          Symbols auto-blocked after 3 consecutive data fetch failures. Set a replacement symbol to use an alternative instead of skipping.
         </p>
       </div>
       {isLoading ? (
@@ -166,6 +257,7 @@ function QuarantinedSymbolsSection() {
               <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
                 <th className="py-2 px-4 text-left">Symbol</th>
                 <th className="py-2 px-4 text-right">Failures</th>
+                <th className="py-2 px-4 text-left">Replacement</th>
                 <th className="py-2 px-4 text-left">Last Error</th>
                 <th className="py-2 px-4 text-right">Quarantined</th>
                 <th className="py-2 px-4 text-center">Actions</th>
@@ -176,6 +268,9 @@ function QuarantinedSymbolsSection() {
                 <tr key={s.symbol} className="border-b border-gray-800 hover:bg-gray-800/30">
                   <td className="py-2 px-4 font-medium text-gray-200">{s.symbol}</td>
                   <td className="py-2 px-4 text-right text-red-400">{s.consecutive_failures}</td>
+                  <td className="py-2 px-4">
+                    <ReplacementInput symbol={s.symbol} current={s.replacement_symbol} />
+                  </td>
                   <td className="py-2 px-4 text-gray-400 text-xs max-w-xs truncate">{s.last_error}</td>
                   <td className="py-2 px-4 text-right text-gray-400 text-xs">
                     {s.quarantined_at
@@ -488,6 +583,9 @@ export function DataManagementPage() {
 
       {/* Quarantined Symbols */}
       <QuarantinedSymbolsSection />
+
+      {/* Bulk Delete */}
+      <BulkDeleteSection />
 
       {/* Factory Reset - Danger Zone */}
       <div className="bg-gray-900 border border-red-900/50 rounded-lg overflow-hidden">

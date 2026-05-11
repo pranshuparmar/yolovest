@@ -28,9 +28,12 @@ Flow:
 """
 
 import contextlib
+import logging
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+logger = logging.getLogger(__name__)
 
 
 class KillSwitchSkill(SkillBase):
@@ -71,7 +74,7 @@ class KillSwitchSkill(SkillBase):
                 await self.ctx.broker.cancel_order(order["order_id"])
                 cancelled += 1
             except Exception:
-                pass  # log but continue
+                logger.warning("Failed to cancel order %s", order.get("order_id"), exc_info=True)
 
         await self.ctx.notify.send(
             f"STOP: Trading paused. {cancelled} pending orders cancelled.\n"

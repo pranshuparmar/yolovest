@@ -5,7 +5,8 @@ import { TradesTable } from "../components/TradesTable";
 import { RiskExposureChart } from "../components/RiskExposureChart";
 import { EconomicCalendarWidget } from "../components/EconomicCalendarWidget";
 import { PremarketCard } from "../components/PremarketCard";
-import { PendingTradesBanner } from "../components/PendingTradesBanner";
+import { PendingTradesBanner, ClearSignalsButton } from "../components/PendingTradesBanner";
+import { RecommendationsPanel } from "../components/RecommendationsPanel";
 import { useTradesToday, useSystemState } from "../hooks/queries";
 
 export function DashboardPage() {
@@ -18,12 +19,15 @@ export function DashboardPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Dashboard</h2>
-        {systemState?.kill_switch_active && (
-          <span className="px-3 py-1 rounded text-xs font-bold bg-red-900/60 text-red-400 animate-pulse">
-            KILL SWITCH ACTIVE
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold">Dashboard</h2>
+          {systemState?.kill_switch_active && (
+            <span className="px-3 py-1 rounded text-xs font-bold bg-red-900/60 text-red-400 animate-pulse">
+              KILL SWITCH ACTIVE
+            </span>
+          )}
+        </div>
+        <ClearSignalsButton />
       </div>
 
       <PendingTradesBanner />
@@ -72,6 +76,8 @@ export function DashboardPage() {
         <PremarketCard />
         <EconomicCalendarWidget />
       </div>
+
+      <RecommendationsPanel />
 
       <EquityChart days={30} />
 

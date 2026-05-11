@@ -11,6 +11,7 @@ import type {
   ScoreboardEntry,
   SlippageStats,
   LLMAccuracy,
+  Recommendation,
   Report,
   AuditEntry,
   IntegrationsStatus,
@@ -85,6 +86,9 @@ export const api = {
   tradeDetail: (tradeId: string) =>
     apiFetch<TradeDetail>(`/api/trades/${tradeId}`),
 
+  deleteTrade: (tradeId: string) =>
+    apiFetch<{ success: boolean; trade_id: string }>(`/api/trades/${tradeId}`, { method: "DELETE" }),
+
   equityCurve: (days = 30) =>
     apiFetch<EquityCurvePoint[]>(`/api/equity-curve?days=${days}`),
 
@@ -125,6 +129,8 @@ export const api = {
     const qs = q.toString();
     return apiFetch<Report[]>(`/api/reports${qs ? "?" + qs : ""}`);
   },
+
+  recommendations: () => apiFetch<Recommendation[]>("/api/recommendations"),
 
   slippage: (params?: { symbol?: string; days?: number }) => {
     const q = new URLSearchParams();
@@ -378,6 +384,14 @@ export const api = {
   rejectPendingTrade: (tradeId: number) =>
     apiFetch<{ success: boolean }>(`/api/pending-trades/${tradeId}/reject`, { method: "POST" }),
 
+  clearTodaysSignals: () =>
+    apiFetch<{ success: boolean; signals_deleted: number; pending_deleted: number }>("/api/clear-signals", { method: "POST" }),
+
+  bulkDelete: (group: string) =>
+    apiFetch<{ success: boolean; group: string; deleted: Record<string, number>; total: number }>(
+      `/api/bulk-delete/${group}`, { method: "POST" },
+    ),
+
   manualTrade: (trade: { symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; product?: string; position_size?: number }) =>
     apiFetch<{ success: boolean; trade?: Record<string, unknown>; error?: string | null }>("/api/manual-trade", {
       method: "POST",
@@ -407,16 +421,34 @@ export const api = {
     apiFetch<{ success: boolean; deleted: number }>(`/api/dry-run/${runId}`, { method: "DELETE" }),
 
   quarantinedSymbols: () =>
-    apiFetch<{ symbol: string; consecutive_failures: number; last_error: string; quarantined_at: string; updated_at: string }[]>("/api/quarantined-symbols"),
+    apiFetch<{ symbol: string; consecutive_failures: number; last_error: string; quarantined_at: string; updated_at: string; replacement_symbol: string | null }[]>("/api/quarantined-symbols"),
 
   unquarantineSymbol: (symbol: string) =>
     apiFetch<{ success: boolean; symbol: string }>(`/api/quarantined-symbols/${symbol}`, { method: "DELETE" }),
+
+  setReplacementSymbol: (symbol: string, replacement: string | null) =>
+    apiFetch<{ success: boolean; symbol: string; replacement: string | null }>(
+      `/api/quarantined-symbols/${symbol}/replacement`,
+      { method: "PUT", body: JSON.stringify({ replacement }) },
+    ),
 
   lockHolding: (symbol: string) =>
     apiFetch<{ success: boolean; symbol: string; locked: boolean }>(`/api/locked-holdings/${symbol}`, { method: "POST" }),
 
   unlockHolding: (symbol: string) =>
     apiFetch<{ success: boolean; symbol: string; locked: boolean }>(`/api/locked-holdings/${symbol}`, { method: "DELETE" }),
+
+  bulkLockHoldings: (symbols: string[], action: "lock" | "unlock", notes?: string) =>
+    apiFetch<{ success: boolean; action: string; results: Record<string, string> }>(
+      "/api/locked-holdings/bulk",
+      { method: "POST", body: JSON.stringify({ symbols, action, notes }) },
+    ),
+
+  reviewHoldings: (symbols?: string[]) =>
+    apiFetch<{ recommendations: { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number }[] }>(
+      "/api/review",
+      { method: "POST", body: JSON.stringify(symbols ? { symbols } : {}) },
+    ),
 
   listSkills: () =>
     apiFetch<{ name: string; description: string; trigger: string; schedule: string | null }[]>(

@@ -211,13 +211,37 @@ class HeartbeatOrchestrator:
 
         return results
 
+    @staticmethod
+    def _today_start() -> str:
+        """Return today's start time in UTC ISO format for signal cleanup."""
+        from yolovest.timezone import UTC, now_ist
+        return now_ist().replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        ).astimezone(UTC).isoformat()
+
     async def _broadcast(self, event_type: str, data: dict[str, Any]) -> None:
         """Publish an event to the event bus (bridged to WebSocket)."""
         try:
             from yolovest.events import Event
             await self._ctx.event_bus.publish(Event(event_type=event_type, data=data))
         except Exception:
-            pass
+            logger.debug("Failed to broadcast event %s", event_type, exc_info=True)
+
+    def _signal_symbol(self, signal: object) -> str:
+        if isinstance(signal, dict):
+            return signal.get("symbol", "")
+        return getattr(signal, "symbol", "") or ""
+
+    async def _set_disposition(
+        self, signal: object, disposition: str, reason: str | None = None
+    ) -> None:
+        symbol = self._signal_symbol(signal)
+        if not symbol:
+            return
+        try:
+            await self._ctx.db.update_signal_disposition(symbol, disposition, reason)
+        except Exception:
+            logger.debug("Failed to update signal disposition", exc_info=True)
 
     async def _execute_signal_chain(
         self, signal: object, index: int
@@ -240,14 +264,14 @@ class HeartbeatOrchestrator:
         results[f"{prefix}/risk-check"] = risk_result
         if not risk_result.success:
             logger.info("risk-check failed for signal %d — skipping", index)
+            await self._set_disposition(signal, "risk_rejected", "risk-check skill failed")
             return results
 
         # Check risk approval and use adjusted signal
         if risk_result.data and not risk_result.data.get("approved", True):
-            logger.info(
-                "risk-check rejected signal %d: %s",
-                index, risk_result.data.get("rejection_reason"),
-            )
+            reason = risk_result.data.get("rejection_reason", "")
+            logger.info("risk-check rejected signal %d: %s", index, reason)
+            await self._set_disposition(signal, "risk_rejected", reason)
             return results
         if risk_result.data and risk_result.data.get("signal"):
             signal = risk_result.data["signal"]  # use risk-adjusted signal (position size)
@@ -263,13 +287,16 @@ class HeartbeatOrchestrator:
                 )
             else:
                 logger.info("llm-review failed for signal %d — skipping", index)
+                await self._set_disposition(signal, "llm_rejected", "llm-review skill failed")
                 return results
 
         # Check LLM decision (if it succeeded)
         if llm_result.success:
             approved = llm_result.data.get("approved", True)
             if not approved:
+                reason = llm_result.data.get("reasoning", "LLM rejected signal")
                 logger.info("LLM rejected signal %d", index)
+                await self._set_disposition(signal, "llm_rejected", reason)
                 return results
             # Use updated signal from LLM (may have been resized)
             if llm_result.data.get("signal"):
@@ -277,20 +304,75 @@ class HeartbeatOrchestrator:
 
         # Manual approval mode — queue instead of executing
         if self._ctx.config.execution.transaction_mode == "manual":
+            # Dedup: skip if a pending entry already exists for this symbol
+            sym_for_dedup = signal.get("symbol", "") if isinstance(signal, dict) else ""
+            sig_type_for_dedup = signal.get("signal_type", "") if isinstance(signal, dict) else ""
+            if sym_for_dedup:
+                existing = await self._ctx.db.get_pending_trade_by_symbol(sym_for_dedup)
+                if existing:
+                    logger.info(
+                        "Manual mode: skipping %s — pending trade already exists (id=%s)",
+                        sym_for_dedup, existing.get("id"),
+                    )
+                    await self._set_disposition(
+                        signal, "awaiting_approval", "pending trade already exists"
+                    )
+                    results[f"{prefix}/pending"] = SkillResult(
+                        success=True, skill_name="pending-approval",
+                        data={"skipped": True, "reason": "pending_exists", "symbol": sym_for_dedup},
+                    )
+                    return results
+
+                # Respect user rejection: don't re-queue within the cooldown window
+                cooldown_hours = self._ctx.config.execution.rejection_cooldown_hours
+                if await self._ctx.db.was_recently_rejected(sym_for_dedup, sig_type_for_dedup, hours=cooldown_hours):
+                    logger.info(
+                        "Manual mode: skipping %s %s — user rejected recently",
+                        sig_type_for_dedup, sym_for_dedup,
+                    )
+                    await self._set_disposition(
+                        signal, "recently_rejected_dedup",
+                        f"user rejected within last {cooldown_hours}h",
+                    )
+                    results[f"{prefix}/pending"] = SkillResult(
+                        success=True, skill_name="pending-approval",
+                        data={"skipped": True, "reason": "recently_rejected", "symbol": sym_for_dedup},
+                    )
+                    return results
+
             pending_id = await self._ctx.db.insert_pending_trade(signal)
-            symbol = signal.get("symbol", "?") if isinstance(signal, dict) else "?"
+            await self._set_disposition(
+                signal, "awaiting_approval", f"pending_id={pending_id}"
+            )
+            symbol = sym_for_dedup or "?"
             sig_type = signal.get("signal_type", "?") if isinstance(signal, dict) else "?"
             conf = signal.get("confidence_score", 0) if isinstance(signal, dict) else 0
             entry = signal.get("entry_price", 0) if isinstance(signal, dict) else 0
+            target = signal.get("target_price", 0) if isinstance(signal, dict) else 0
+            sl = signal.get("stop_loss_price", 0) if isinstance(signal, dict) else 0
+            qty = signal.get("position_size", 0) if isinstance(signal, dict) else 0
+            product = signal.get("product", "MIS") if isinstance(signal, dict) else "MIS"
+            holding = signal.get("expected_holding_period", "") if isinstance(signal, dict) else ""
+            days = signal.get("expected_holding_days", 0) if isinstance(signal, dict) else 0
+            investment = round(qty * entry, 2)
+            risk = round(qty * abs(entry - sl), 2)
+            reward = round(qty * abs(target - entry), 2)
+            rr_ratio = round(reward / risk, 2) if risk > 0 else 0
+
             logger.info(
                 "Manual mode: queued %s %s @ %.2f conf=%.0f%% (pending_id=%d)",
                 sig_type, symbol, entry, conf * 100, pending_id,
             )
+            hold_label = f"{holding} ({days}d)" if days > 0 else holding or "intraday"
             await self._ctx.notify.send(
-                f"Pending approval: {sig_type} {symbol} @ ₹{entry:.2f} "
-                f"(conf {conf:.0%})\n"
-                f"Approve: /approve {pending_id}\n"
-                f"Reject: /reject {pending_id}",
+                f"Pending Entry\n"
+                f"{sig_type} <b>{symbol}</b> x{qty} ({product}) — {hold_label}\n"
+                f"  Entry: ₹{entry:.2f} | Target: ₹{target:.2f} | SL: ₹{sl:.2f}\n"
+                f"  Investment: ₹{investment:,.2f}\n"
+                f"  Risk: ₹{risk:,.2f} | Reward: ₹{reward:,.2f} (R:R {rr_ratio}:1)\n"
+                f"  Confidence: {conf:.0%}\n"
+                f"Approve: /approve {symbol}\n"
+                f"Reject: /reject {symbol}",
                 alert_type="trade_entry",
             )
             results[f"{prefix}/pending"] = SkillResult(
@@ -303,9 +385,21 @@ class HeartbeatOrchestrator:
         trade_result = await self._run_skill("trade-execute", signal=signal)
         results[f"{prefix}/trade-execute"] = trade_result
         if not trade_result.success:
-            logger.warning("trade-execute failed for signal %d", index)
+            symbol = signal.get("symbol", "?") if isinstance(signal, dict) else "?"
+            logger.warning("trade-execute failed for signal %d (%s): %s", index, symbol, trade_result.error)
+            # Remove signal from DB so it's not blocked by already_signaled dedup
+            # and can be regenerated on the next heartbeat
+            try:
+                await self._ctx.db.conn.execute(
+                    "DELETE FROM signals WHERE symbol = ? AND created_at >= ?",
+                    (symbol, self._today_start()),
+                )
+                await self._ctx.db.conn.commit()
+                logger.info("Removed failed signal for %s so it can be retried next heartbeat", symbol)
+            except Exception:
+                logger.debug("Failed to remove signal for %s", symbol, exc_info=True)
             await self._ctx.notify.send(
-                f"Trade execution failed for signal {index}: {trade_result.error}",
+                f"Trade execution failed for {symbol}: {trade_result.error}",
                 alert_type="errors",
             )
             return results
@@ -315,6 +409,7 @@ class HeartbeatOrchestrator:
         if trade_result.success and trade_result.data:
             trade = trade_result.data.get("trade", {})
             trade_id = trade.get("trade_id") or trade.get("order_id")
+            await self._set_disposition(signal, "executed", f"trade_id={trade_id}")
         predict_result = await self._run_skill(
             "predict-track", signal=signal, mode="log", trade_id=trade_id
         )
@@ -342,7 +437,22 @@ class HeartbeatOrchestrator:
             )
 
         logger.info("Running skill: %s", name)
-        result = await skill.safe_execute(**kwargs)
+        # Timeout to prevent a hung skill from blocking the entire heartbeat
+        _SKILL_TIMEOUT_SEC = 300  # 5 minutes max per skill
+        try:
+            result = await asyncio.wait_for(
+                skill.safe_execute(**kwargs), timeout=_SKILL_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Skill '%s' TIMED OUT after %ds — force-skipping",
+                name, _SKILL_TIMEOUT_SEC,
+            )
+            result = SkillResult(
+                success=False,
+                skill_name=name,
+                error=f"Timed out after {_SKILL_TIMEOUT_SEC}s",
+            )
         logger.info(
             "Skill %s completed: success=%s, duration=%.1fms",
             name,
@@ -363,7 +473,7 @@ class HeartbeatOrchestrator:
                 duration_ms=result.duration_ms,
             )
         except Exception:
-            pass
+            logger.debug("Failed to log audit for skill %s", name, exc_info=True)
 
         # Broadcast skill completion to WebSocket clients
         if self._on_skill_complete is not None:
@@ -378,7 +488,7 @@ class HeartbeatOrchestrator:
                     if result.data else {},
                 })
             except Exception:
-                pass  # Never let broadcast failures affect the pipeline
+                logger.debug("Skill completion broadcast failed for %s", name, exc_info=True)
 
         return result
 

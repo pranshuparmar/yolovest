@@ -53,6 +53,18 @@ export function useTradesToday() {
   });
 }
 
+export function useDeleteTrade() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.deleteTrade,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["trades"] });
+      qc.invalidateQueries({ queryKey: ["portfolio"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+    },
+  });
+}
+
 export function useTrades(params?: {
   start?: string;
   end?: string;
@@ -98,6 +110,21 @@ export function useUnlockHolding() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.unlockHolding,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["holdings"] }),
+  });
+}
+
+export function useReviewHoldings() {
+  return useMutation({
+    mutationFn: (symbols?: string[]) => api.reviewHoldings(symbols),
+  });
+}
+
+export function useBulkLockHoldings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ symbols, action, notes }: { symbols: string[]; action: "lock" | "unlock"; notes?: string }) =>
+      api.bulkLockHoldings(symbols, action, notes),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["holdings"] }),
   });
 }
@@ -176,6 +203,15 @@ export function useReports(params?: {
     queryKey: ["reports", params],
     queryFn: () => api.reports(params),
     staleTime: 60_000,
+  });
+}
+
+export function useRecommendations() {
+  return useQuery({
+    queryKey: ["recommendations"],
+    queryFn: () => api.recommendations(),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
   });
 }
 
@@ -656,6 +692,29 @@ export function useRejectPendingTrade() {
   });
 }
 
+export function useBulkDelete() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.bulkDelete,
+    onSuccess: () => {
+      qc.invalidateQueries();
+    },
+  });
+}
+
+export function useClearTodaysSignals() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.clearTodaysSignals,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pending-trades"] });
+      qc.invalidateQueries({ queryKey: ["signals"] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+      qc.invalidateQueries({ queryKey: ["system-status"] });
+    },
+  });
+}
+
 export function useResetAllData() {
   const qc = useQueryClient();
   return useMutation({
@@ -740,6 +799,17 @@ export function useUnquarantineSymbol() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.unquarantineSymbol,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["quarantined-symbols"] });
+    },
+  });
+}
+
+export function useSetReplacementSymbol() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ symbol, replacement }: { symbol: string; replacement: string | null }) =>
+      api.setReplacementSymbol(symbol, replacement),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["quarantined-symbols"] });
     },

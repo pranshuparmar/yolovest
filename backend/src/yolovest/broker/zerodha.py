@@ -86,6 +86,8 @@ class ZerodhaBroker(BrokerBase):
         max_retries: int = 3,
         retry_base_delay: float = 2.0,
         db: Any = None,
+        kite_data_enabled: bool = False,
+        market_data: Any = None,
     ) -> None:
         self._api_key = api_key
         self._api_secret = api_secret
@@ -93,6 +95,8 @@ class ZerodhaBroker(BrokerBase):
         self._paper_slippage_pct = paper_slippage_pct
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
+        self._kite_data_enabled = kite_data_enabled
+        self._market_data = market_data
         self._access_token: str | None = None
         self._kite: Any = None
         self._db = db  # For persisting access token across restarts
@@ -298,6 +302,50 @@ class ZerodhaBroker(BrokerBase):
         )
         return order_id
 
+    async def _fetch_ltp_for_limit(self, symbol: str) -> float:
+        """Fetch LTP for MARKET→LIMIT conversion.
+
+        Tries sources in order:
+        1. market_data ingester (TVDatafeed/JugaadData — always available)
+        2. kite.ltp() (requires paid data plan)
+        3. kite.ohlc() (requires paid data plan)
+        Returns 0 if all sources fail.
+        """
+        # 1. Market data ingester (no paid plan needed)
+        if self._market_data:
+            try:
+                return await self._market_data.get_ltp(symbol)
+            except Exception as e:
+                logger.debug("market_data.get_ltp failed for %s: %s", symbol, e)
+
+        nse_key = f"NSE:{symbol}"
+
+        # 2. kite.ltp() (paid plan)
+        if self._kite_data_enabled and self._kite:
+            try:
+                async with self._rate_limiter:
+                    data = await asyncio.to_thread(self._kite.ltp, nse_key)
+                ltp = data.get(nse_key, {}).get("last_price", 0)
+                if ltp and ltp > 0:
+                    return float(ltp)
+            except Exception as e:
+                logger.debug("kite.ltp failed for %s: %s", symbol, e)
+
+        # 3. kite.ohlc() (paid plan)
+        if self._kite:
+            try:
+                async with self._rate_limiter:
+                    data = await asyncio.to_thread(self._kite.ohlc, nse_key)
+                quote = data.get(nse_key, {})
+                ltp = quote.get("last_price") or quote.get("ohlc", {}).get("close", 0)
+                if ltp and ltp > 0:
+                    return float(ltp)
+            except Exception as e:
+                logger.debug("kite.ohlc failed for %s: %s", symbol, e)
+
+        logger.warning("All LTP sources failed for %s MARKET→LIMIT conversion", symbol)
+        return 0.0
+
     async def _live_place_order(
         self,
         symbol: str,
@@ -308,9 +356,33 @@ class ZerodhaBroker(BrokerBase):
         price: float | None,
         trigger_price: float | None,
     ) -> str:
-        """Place order via Kite API with retry."""
+        """Place order via Kite API with retry.
+
+        Zerodha no longer allows MARKET orders without market protection
+        via API. All MARKET orders are auto-converted to LIMIT at LTP
+        with a small buffer to ensure fill.
+        """
         if self._kite is None:
             raise RuntimeError("Not authenticated")
+
+        # Convert MARKET → LIMIT at LTP ± buffer (Zerodha API restriction).
+        # Try sources in order: market_data (ingester), kite.ltp (paid), kite.ohlc (paid).
+        if order_type == "MARKET":
+            ltp = await self._fetch_ltp_for_limit(symbol)
+            if ltp and ltp > 0:
+                buffer = 0.005 if self._kite_data_enabled else 0.01
+                tick = 0.05
+                if side == "BUY":
+                    raw = ltp * (1 + buffer)
+                    price = round(round(raw / tick) * tick, 2)
+                else:
+                    raw = ltp * (1 - buffer)
+                    price = round(round(raw / tick) * tick, 2)
+                order_type = "LIMIT"
+                logger.info(
+                    "MARKET→LIMIT conversion: %s %s LTP=%.2f → price=%.2f",
+                    side, symbol, ltp, price,
+                )
 
         kite_side = "BUY" if side == "BUY" else "SELL"
         params: dict[str, Any] = {

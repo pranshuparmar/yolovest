@@ -198,4 +198,4 @@ class TestMissingRequiredFields:
     def test_risk_uses_defaults(self):
         risk = RiskConfig()
         assert risk.max_risk_per_trade_pct == 0.02
-        assert risk.max_open_positions == 3
+        assert risk.max_open_positions == 10

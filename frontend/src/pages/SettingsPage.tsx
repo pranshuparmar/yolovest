@@ -175,6 +175,9 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "scanning.weights.news_sentiment": "Weight: News Sentiment",
   "scanning.weights.fundamental": "Weight: Fundamental",
   "scanning.weights.volatility": "Weight: Volatility",
+  "scanning.rotation_enabled": "Rotate Stale Symbols",
+  "scanning.rotation_no_signal_threshold": "Rotation Threshold (heartbeats)",
+  "scanning.rotation_cooldown_hours": "Rotation Cooldown (hrs)",
   "strategy.mode": "Strategy Mode",
   "strategy.min_training_samples": "Min Training Samples",
   "strategy.ema_periods": "EMA Periods",
@@ -224,7 +227,10 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.trailing_sl_enabled": "Trailing Stop Loss",
   "risk.trailing_sl_trigger_multiple": "Trailing SL Trigger (× risk)",
   "risk.trailing_sl_step_pct": "Trailing SL Step",
-  "risk.min_confidence_score": "Min Confidence Score",
+  "risk.min_confidence_score": "Min Confidence Score (legacy)",
+  "risk.min_confidence_buy": "Min Confidence (BUY)",
+  "risk.min_confidence_sell": "Min Confidence (SELL)",
+  "risk.skip_sell_on_holdings": "Skip SELL on Holdings",
   "risk.max_trades_per_day": "Max Trades / Day",
   "risk.kill_switch_enabled": "Kill Switch",
   "risk.llm_review_enabled": "LLM Trade Review",
@@ -270,6 +276,7 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "execution.order_timeout_sec": "Order Timeout (sec)",
   "execution.price_drift_max_pct": "Max Price Drift",
   "execution.transaction_mode": "Transaction Mode",
+  "execution.rejection_cooldown_hours": "Rejection Cooldown (hours)",
   // Scaled Entry
   "execution.scaled_entry.enabled": "Scaled Entry",
   "execution.scaled_entry.legs": "Entry Legs",
@@ -286,6 +293,7 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "market_hours.order_end": "Order End",
   "market_hours.square_off": "Square Off Time",
   "market_hours.square_off_extension": "Square Off Extension",
+  "market_hours.intraday_cutoff": "Intraday Cutoff",
   "market_hours.timezone": "Timezone",
   "database.backup_enabled": "Backups Enabled",
   "database.retention.ohlcv_days": "OHLCV Retention (days)",
@@ -338,6 +346,9 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "scanning.weights.news_sentiment": "Weight for news sentiment in composite score.",
   "scanning.weights.fundamental": "Weight for fundamental data (PE, promoter holding) in composite score.",
   "scanning.weights.volatility": "Weight for ATR% volatility preference in composite score. All weights must sum to 1.0.",
+  "scanning.rotation_enabled": "Evict symbols from the watchlist after consecutive heartbeats with no actionable signal so fresh candidates get a turn.",
+  "scanning.rotation_no_signal_threshold": "How many consecutive heartbeats a symbol can go without producing a signal before being placed on cooldown.",
+  "scanning.rotation_cooldown_hours": "How long an evicted symbol stays out of the watchlist before market-scan can re-add it.",
   "strategy.mode": "Controls which holding periods are allowed and how stocks are selected.",
   "strategy.min_training_samples": "Minimum data points required to train an ML model.",
   "strategy.ema_periods": "Exponential moving average periods used in technical analysis.",
@@ -387,7 +398,10 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "risk.trailing_sl_enabled": "Automatically trail stop loss upward as price moves in your favor.",
   "risk.trailing_sl_trigger_multiple": "Activate trailing SL when profit reaches this multiple of risk.",
   "risk.trailing_sl_step_pct": "Trail the stop loss in steps of this percentage.",
-  "risk.min_confidence_score": "Minimum ML confidence to take a trade (0–1).",
+  "risk.min_confidence_score": "Legacy combined threshold. Buy/Sell thresholds below take precedence.",
+  "risk.min_confidence_buy": "Minimum ML confidence for a BUY signal (0–1).",
+  "risk.min_confidence_sell": "Minimum ML confidence for a SELL signal (0–1). Set higher than BUY to avoid exit noise.",
+  "risk.skip_sell_on_holdings": "Don't generate SELL signals for symbols you already hold — position-monitor handles exits.",
   "risk.max_trades_per_day": "Maximum trades per day including re-entries.",
   "risk.kill_switch_enabled": "Allow /stop and /kill commands to halt all trading.",
   "risk.llm_review_enabled": "Gemini reviews each trade before execution (APPROVE/REJECT/RESIZE).",
@@ -433,6 +447,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "execution.order_timeout_sec": "Cancel unfilled order remainder after this many seconds.",
   "execution.price_drift_max_pct": "Reject signal if current price drifted more than this from entry price.",
   "execution.transaction_mode": "Auto executes immediately. Manual requires approval via Telegram/UI.",
+  "execution.rejection_cooldown_hours": "After rejecting a trade, don't re-queue the same symbol+side for this many hours. 0 = no cooldown, 168 = 7 days.",
   "execution.scaled_entry.enabled": "Split orders into multiple legs for better average entry price.",
   "execution.scaled_entry.legs": "Number of entry legs (2 = split into two orders).",
   "execution.scaled_entry.second_leg_offset_pct": "Second leg limit price offset from entry (0.005 = 0.5% lower for BUY).",
@@ -448,6 +463,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "market_hours.order_end": "Latest time for new orders.",
   "market_hours.square_off": "Auto square-off time for intraday (MIS) positions.",
   "market_hours.square_off_extension": "Extra window for square-off orders after order_end.",
+  "market_hours.intraday_cutoff": "No new intraday (MIS) signals after this time. Swing/CNC signals are unaffected.",
   "market_hours.timezone": "Timezone for all market hour calculations.",
   "database.backup_enabled": "Enable daily automatic database backups.",
   "database.retention.ohlcv_days": "Keep OHLCV price data for this many days.",
@@ -515,13 +531,23 @@ function formatHint(fullKey: string): string | null {
 // ---------------------------------------------------------------------------
 
 function InfoIcon({ description }: { description?: string }) {
+  const [open, setOpen] = useState(false);
   if (!description) return null;
   return (
-    <span
-      className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-gray-800 text-gray-500 text-[9px] font-bold cursor-help shrink-0 hover:bg-gray-700 hover:text-gray-300"
-      title={description}
-    >
-      i
+    <span className="relative inline-flex shrink-0">
+      <button
+        type="button"
+        className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-gray-800 text-gray-500 text-[9px] font-bold cursor-help shrink-0 hover:bg-gray-700 hover:text-gray-300"
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        onBlur={() => setOpen(false)}
+      >
+        i
+      </button>
+      {open && (
+        <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-50 w-56 px-2.5 py-1.5 rounded bg-gray-800 border border-gray-700 text-[11px] text-gray-300 leading-snug shadow-lg whitespace-normal">
+          {description}
+        </span>
+      )}
     </span>
   );
 }

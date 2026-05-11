@@ -229,6 +229,7 @@ def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
             paper_slippage_pct=config.execution.paper_slippage_pct,
             max_retries=config.execution.max_order_retries,
             retry_base_delay=float(config.execution.retry_base_delay_sec),
+            kite_data_enabled=config.market_data.kite_data_enabled,
         )
     return _StubBroker()
 
@@ -260,7 +261,16 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
             try:
                 from yolovest.data.kite_data import KiteDataProvider
 
-                kite_provider = KiteDataProvider(api_key=kite_key)
+                # Share rate limiter with broker to stay under Kite's 10 req/s
+                broker_limiter = None
+                try:
+                    from yolovest.broker.zerodha import ZerodhaBroker
+                    broker_limiter = ZerodhaBroker._shared_rate_limiter
+                except (ImportError, AttributeError):
+                    pass
+                kite_provider = KiteDataProvider(
+                    api_key=kite_key, rate_limiter=broker_limiter,
+                )
                 daily_providers.append(kite_provider)
                 logger.info("Kite Connect data provider enabled as primary")
             except Exception as e:
@@ -275,18 +285,21 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
         return _StubMarketData()
 
     intraday = None
-    # Kite handles intraday too, so skip tvDatafeed if Kite is primary
+    intraday_fallback = None
+    # Kite handles intraday too — use it as primary with tvDatafeed as fallback
     if config.market_data.kite_data_enabled and daily_providers:
         from yolovest.data.kite_data import KiteDataProvider
 
         if isinstance(daily_providers[0], KiteDataProvider):
-            intraday = daily_providers[0]  # Kite handles all intervals
+            intraday = daily_providers[0]
+            intraday_fallback = TVDatafeedProvider()
     if intraday is None and config.market_data.intraday_provider == "tvdatafeed":
         intraday = TVDatafeedProvider()
 
     return MarketDataIngester(
         daily_providers=daily_providers,
         intraday_provider=intraday,
+        intraday_fallback=intraday_fallback,
         stale_threshold_minutes=config.market_data.stale_threshold_minutes,
     )
 
@@ -350,14 +363,16 @@ def build_context(config: AppConfig) -> AppContext:
     db = _build_db(config)
     broker = _build_broker(config)
     # Pass DB to broker for token persistence (if real broker)
+    market_data = _build_market_data(config)
     if isinstance(broker, ZerodhaBroker):
         broker._db = db
+        broker._market_data = market_data
     return AppContext(
         config=config,
         db=cast(DatabaseProtocol, db),
         broker=cast(BrokerProtocol, broker),
         llm=cast(LLMProtocol, _build_llm(config)),
-        market_data=cast(MarketDataProtocol, _build_market_data(config)),
+        market_data=cast(MarketDataProtocol, market_data),
         notify=cast(NotifierProtocol, Notifier(config)),
         market_hours=MarketHoursChecker(config),
         event_bus=EventBus(),
@@ -427,17 +442,6 @@ async def async_main(args: argparse.Namespace) -> None:
         config.mode = args.mode
 
     logger.info("YoloVest starting in %s mode", config.mode)
-    logger.info(
-        "Config toggles: llm.enabled=%s, telegram.enabled=%s, "
-        "news_enabled=%s, scrapers_enabled=%s, kite_data_enabled=%s, "
-        "llm_review_enabled=%s",
-        config.llm.enabled,
-        config.notifications.telegram.enabled,
-        config.market_data.news_enabled,
-        config.market_data.scrapers_enabled,
-        config.market_data.kite_data_enabled,
-        config.risk.llm_review_enabled,
-    )
 
     # Build context
     ctx = build_context(config)
@@ -455,13 +459,31 @@ async def async_main(args: argparse.Namespace) -> None:
             else:
                 db_values = await ctx.db.get_all_config()
                 ctx.config = apply_db_config(ctx.config, db_values)
+                config = ctx.config  # update local ref for downstream use
                 ctx.market_hours = MarketHoursChecker(ctx.config)
-                # Update Notifier's config reference (it holds the old object)
                 if hasattr(ctx.notify, "_config"):
                     ctx.notify._config = ctx.config
+                # Sync broker mode from DB config
+                if hasattr(ctx.broker, "_mode"):
+                    ctx.broker._mode = ctx.config.mode
                 logger.info("Loaded %d config values from DB", len(db_values))
         except Exception:
             logger.warning("Failed to load config from DB, using file defaults", exc_info=True)
+
+    # Log effective config (after DB overrides are applied)
+    logger.info(
+        "Config toggles: mode=%s, llm.enabled=%s, telegram.enabled=%s, "
+        "news_enabled=%s, scrapers_enabled=%s, kite_data_enabled=%s, "
+        "llm_review_enabled=%s, transaction_mode=%s",
+        config.mode,
+        config.llm.enabled,
+        config.notifications.telegram.enabled,
+        config.market_data.news_enabled,
+        config.market_data.scrapers_enabled,
+        config.market_data.kite_data_enabled,
+        config.risk.llm_review_enabled,
+        config.execution.transaction_mode,
+    )
 
     # Restore Zerodha session from persisted access token
     if isinstance(ctx.broker, ZerodhaBroker):
@@ -524,7 +546,7 @@ async def async_main(args: argparse.Namespace) -> None:
                         shadow["model_type"], shadow["version"], e,
                     )
         except Exception:
-            pass
+            logger.warning("Failed to load shadow models", exc_info=True)
 
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
@@ -555,7 +577,7 @@ async def async_main(args: argparse.Namespace) -> None:
         ):
             ctx.event_bus.subscribe(event_type, _ws_bridge)
     except Exception:
-        pass
+        logger.warning("Failed to set up WebSocket event bridge", exc_info=True)
 
     # Build CRON scheduler sharing the same skill instances
     cron_scheduler = CronScheduler(ctx, orchestrator._skills)
@@ -588,6 +610,12 @@ async def async_main(args: argparse.Namespace) -> None:
         ctx.config.news_digest = new_config.news_digest
         # Update market hours checker with new config
         ctx.market_hours = MarketHoursChecker(ctx.config)
+        # Sync mode to broker
+        if new_config.mode != ctx.config.mode:
+            ctx.config.mode = new_config.mode
+            if hasattr(ctx.broker, "_mode"):
+                ctx.broker._mode = new_config.mode
+                logger.info("Broker mode synced to: %s", new_config.mode)
         reloaded = [
             "risk", "scanning", "heartbeat", "market_hours", "execution",
             "transaction_costs", "strategy", "notifications", "reports",

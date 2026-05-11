@@ -4,9 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses Google Gemini for LLM reasoning, XGBoost for ML signals, and Zerodha Kite Connect for execution. Market data comes from free providers (jugaad-data, yfinance, tvDatafeed) with optional Kite data plan support.
-
-**Current state:** Fully implemented and production-ready. All features complete.
+YoloVest is an AI-driven Indian stock trading platform. It uses Google Gemini for LLM reasoning, XGBoost for ML signals, and Zerodha Kite Connect for execution. Market data comes from free providers (jugaad-data, yfinance, tvDatafeed) with optional paid Kite data plan support.
 
 ## Project Structure
 
@@ -14,15 +12,34 @@ YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses 
 /
 ├── backend/          — Python backend (FastAPI + trading engine)
 │   ├── src/yolovest/ — Main package
+│   │   ├── broker/        — Broker integration (base.py, zerodha.py)
+│   │   ├── dashboard/     — FastAPI REST API + WebSocket (app.py)
+│   │   ├── data/          — Market data, DB layer, features, scrapers
+│   │   ├── llm/           — LLM integration (base.py, gemini.py)
+│   │   ├── models/        — Pydantic data contracts (schemas.py)
+│   │   ├── news/          — News scrapers + aggregator (5 sources)
+│   │   ├── skills/        — Skills extending SkillBase
+│   │   ├── strategy/      — ML signal generation, holding period logic, backtesting
+│   │   ├── main.py        — Entry point, context builder
+│   │   ├── orchestrator.py — Heartbeat pipeline coordinator
+│   │   ├── config.py      — Nested Pydantic config classes
+│   │   ├── context.py     — AppContext + Protocol types
+│   │   ├── telegram_bot.py — Telegram command handlers
+│   │   ├── cron_scheduler.py — CRON skill scheduler
+│   │   └── ...            — timezone, memory, costs, events, notify, watchdog
 │   ├── tests/        — Tests (mirrors src/ structure)
-│   ├── migrations/   — SQL migration files (001-009)
+│   ├── migrations/   — SQL migration files
 │   ├── pyproject.toml
-│   ├── Dockerfile
-│   └── config.example.yaml
+│   └── Dockerfile
 ├── frontend/         — React SPA (Vite + TypeScript + Tailwind)
 │   ├── src/
+│   │   ├── pages/         — Page components
+│   │   ├── components/    — Reusable UI components
+│   │   ├── api/           — API client + endpoint definitions
+│   │   ├── hooks/         — React Query hooks, WebSocket, auth
+│   │   ├── types/         — TypeScript type definitions
+│   │   └── utils/         — datetime, csvExport helpers
 │   ├── Dockerfile
-│   ├── nginx.conf
 │   └── package.json
 ├── docker-compose.yml
 └── CLAUDE.md
@@ -32,19 +49,20 @@ YoloVest is a fully autonomous AI-driven Indian stock trading platform. It uses 
 
 ### Abstraction Layers (ABCs)
 
-- **`BrokerBase`** (`broker/base.py`) → `ZerodhaBroker` — execution only (free tier), or with optional data plan
+- **`BrokerBase`** (`broker/base.py`) → `ZerodhaBroker` — execution + paper simulation. Shared rate limiter (`Semaphore(8)`) across broker and KiteDataProvider to respect Kite's 10 req/s aggregate limit. MARKET orders auto-converted to LIMIT with 1% protection buffer (Zerodha API requirement). SL-M converted to SL with limit price.
 - **`LLMBase`** (`llm/base.py`) → `GeminiLLM` — 7 methods: `ping`, `review_trade`, `analyze_sentiment`, `summarize_with_web_grounding`, `validate_watchlist`, `summarize_market_day`, `analyze_prediction_failures`
-- **`MarketDataBase`** (`data/base.py`) → `JugaadDataProvider` (primary) → `YFinanceProvider` (fallback) → `TVDatafeedProvider` (intraday) → `KiteDataProvider` (optional paid plan)
+- **`MarketDataBase`** (`data/base.py`) → `JugaadDataProvider` (primary) → `YFinanceProvider` (fallback) → `TVDatafeedProvider` (intraday) → `KiteDataProvider` (optional paid plan). Fallback chain with staleness validation and quality checks.
 - **`NewsSource`** (`news/base.py`) → MoneyControl, ET Markets, LiveMint (RSS), NSE Official (API), Google Finance (scraper)
 - **`MLBase`** (`strategy/ml_base.py`) → `XGBoostSignalModel` with Platt scaling calibration
 
 ### Skill System
 
-16 skills extend `SkillBase` (in `backend/src/yolovest/skills/base.py`). Each skill has:
+Skills extend `SkillBase` (in `backend/src/yolovest/skills/base.py`). Each skill has:
 - `async execute(**kwargs) -> SkillResult`
 - `should_run() -> bool`
+- `async safe_execute()` — wraps execute with exception logging (`logger.exception`)
 - A trigger type: `HEARTBEAT`, `CRON`, `EVENT`, or `MANUAL`
-- Access to shared context via `self.ctx` (config, db, broker, llm, market_data, news_aggregator, memory, etc.)
+- Access to shared context via `self.ctx`
 
 Skills are registered in `SKILL_REGISTRY` dict in `backend/src/yolovest/skills/__init__.py`.
 
@@ -52,11 +70,44 @@ Skills are registered in `SKILL_REGISTRY` dict in `backend/src/yolovest/skills/_
 
 ```
 health-check → ingest-data → market-scan → generate-signals
-  → [per signal]: risk-check → llm-review → trade-execute → predict-track
-  → position-monitor
+  → [per signal]: risk-check → llm-review → [manual: queue pending] OR [auto: trade-execute] → predict-track
+  → position-monitor (always runs)
 ```
 
-Error propagation: if `ingest-data` fails, skip scan+signals but always run `position-monitor`. If `health-check` fails, abort entire heartbeat.
+Error propagation: if `ingest-data` fails, skip scan+signals but always run `position-monitor`. If `health-check` fails, abort entire heartbeat. If `trade-execute` fails, signal is removed from DB so it can be retried next heartbeat. In manual mode, failed executions revert the pending trade back to `status='pending'`.
+
+### Strategy Modes
+
+- **`balanced`**: Runs both `predict_intraday()` and `predict_swing()` concurrently per stock, picks higher confidence. After `intraday_cutoff` (default 14:30 IST), only swing model runs.
+- **`intraday`**: Only intraday model (MIS, same-day).
+- **`short_term`**: Only swing model (2-5 day holds).
+- **`long_term`**: Only swing model (5-66 day holds, CNC).
+
+Holding period per stock is dynamic based on ATR%, trend strength, position-mix bias, and market regime.
+
+### Mode Filtering (Paper vs Live)
+
+All trade/position/prediction queries filter by `ctx.config.mode`. Paper and live data never mix in any view, skill, or API endpoint.
+
+**Critical**: When switching mode via Settings UI or config reload, `ctx.broker._mode` is synced automatically. `trade_execute` has a safety check that detects and auto-fixes broker/config mode mismatches.
+
+### Manual Approval Flow
+
+When `execution.transaction_mode == "manual"`:
+1. Signal passes risk-check → LLM review → queued to `pending_trades` table
+2. Telegram notification: `/approve SYMBOL` or `/reject SYMBOL`
+3. Dashboard: `PendingTradesBanner` with approve/reject/edit buttons
+4. On approval: executes immediately via `trade_execute`
+5. On execution failure: pending trade reverts to `status='pending'` for retry
+6. Pending trades auto-expire after 30 minutes
+
+### Position Adoption
+
+Position-monitor auto-adopts untracked broker positions/holdings:
+1. Compares `broker.get_positions()` + `broker.get_holdings()` vs local DB
+2. Untracked positions (not locked) are adopted with ATR-based SL/target
+3. Trade record created with `origin='adopted'`, auto-added to watchlist
+4. Locked holdings are never adopted or auto-managed
 
 ### AppContext
 
@@ -68,127 +119,132 @@ Error propagation: if `ingest-data` fails, skip scan+signals but always run `pos
 
 All data exchange between skills uses typed Pydantic models in `backend/src/yolovest/models/schemas.py`: `Signal`, `Trade`, `Position`, `PortfolioState`, `TradeContext`, `TradeReview`, `SentimentResult`, `OHLCVBar`, `Prediction`, `NewsArticle`, `MLPrediction`, `BacktestResult`.
 
-## What's Implemented
+## Database
 
-### Data Pipeline
-- **Market data**: JugaadDataProvider (NSE daily), YFinanceProvider (fallback), TVDatafeedProvider (intraday), KiteDataProvider (optional paid plan). Fallback chain with staleness validation and quality checks.
-- **News**: NewsAggregator with 5 sources (MoneyControl, ET Markets, LiveMint RSS, NSE Official API, Google Finance scraper). SHA256 dedup. Toggleable via `market_data.news_enabled`.
-- **Fundamentals**: Screener.in scraper (PE, PB, debt ratios, promoter holdings). Toggleable via `market_data.scrapers_enabled`.
-- **Technicals**: Trendlyne scraper (momentum scores, volume breakouts, DMA signals). Toggleable via `market_data.scrapers_enabled`.
-- **Economic calendar**: RBI MPC (primary, high impact), FOMC (secondary context, medium impact), NSE earnings dates. Dynamic year handling.
-- **Feature engineering**: RSI, MACD, Bollinger Bands, VWAP, ATR, OBV, SuperTrend, Volume Profile, EMA. Pure functions, toggleable via config.
-- **Bhavcopy importer**: NSE historical CSV import for backtesting seed data
-- **Symbol quarantine**: Auto-blocks symbols after 3 consecutive fetch failures. Excluded from all pipelines. Unblock via API.
+SQLite with WAL mode. Schema versioned via numbered migration scripts in `backend/migrations/`.
 
-### Intelligence Layer
-- **ML signals**: XGBoost with Platt scaling, walk-forward backtesting, model versioning, shadow A/B testing, automatic promotion/retirement. Fresh LTP used for entry/target/SL pricing.
-- **Sentiment**: Gemini-powered sentiment analysis per symbol from aggregated news. Toggleable via `llm.enabled`.
-- **Market scanning**: Weighted composite scoring (technical, volume, sentiment, fundamental) with sector rotation analysis and Gemini cross-validation. Volume-based tiebreaking prevents alphabetical bias.
+### Key Tables
 
-### Risk & Execution
-- **Risk check**: Kill switch, market hours enforcement, daily/weekly circuit breakers, max positions, portfolio/single-stock exposure caps, sector correlation limits, mandatory SL validation, ATR-based position sizing, slippage feedback loop, early close day handling, price drift validation (configurable via `execution.price_drift_max_pct`)
-- **LLM review**: Gemini trade approval gate with full context. APPROVE/REJECT/RESIZE. Fallback to rules-only. Toggleable via `risk.llm_review_enabled`.
-- **Trade execution**: Paper mode (simulated slippage with fresh LTP) + live mode (Kite API with price drift rejection). Returns trade_id for prediction linkage.
-- **Position monitor**: Broker reconciliation, trailing SL, target/SL hit detection, unrealized PnL
-- **Square-off**: Auto close MIS at EOD with transaction cost modeling. Respects early close days.
-- **Signal dedup**: Symbols with existing signals or open positions today are skipped.
-- **Symbol cooldown**: Hard block for `symbol_cooldown_days` after last trade, elevated confidence threshold (`symbol_repeat_min_confidence`) for `symbol_repeat_lookback_days`.
+| Table | Purpose |
+|-------|---------|
+| `trades` | All trade records. Key columns: `mode` (paper/live), `status` (open/closed), `origin` (system/adopted) |
+| `signals` | Generated signals (used for dedup via `get_todays_signaled_symbols`) |
+| `predictions` | ML predictions with `mode` column. Scored against actuals. |
+| `pending_trades` | Manual approval queue. Uses Python ISO timestamps for correct expiry comparison. |
+| `quarantined_symbols` | Auto-blocked after 3 fetch failures. `replacement_symbol` for pipeline substitution. |
+| `locked_holdings` | User-protected holdings — never auto-sold or auto-adopted. |
+| `config` | Key-value store for UI-editable settings (dot-notation keys). |
+| `ohlcv` | OHLCV bars. Unique on (symbol, interval, timestamp). |
+| `watchlist` | Auto-generated by market-scan. Adopted symbols auto-added. |
+| `user_watchlist` | User-managed, persists across market-scan refreshes. |
+| `dry_run_results` | Signal preview with next-day scoring. |
+| `audit_log` | Skill execution audit trail. |
+| `agent_memory` | Cross-restart state persistence with TTL. |
 
-### Self-Learning & Reporting
-- **Prediction tracking**: Log predictions with trade linkage, score against actuals, maintain scoreboard
-- **Failure analysis**: Gemini analyzes prediction failures during scoring (5+ failures) and weekly retraining
-- **LLM review accuracy**: Compares APPROVE/REJECT decisions vs actual trade PnL outcomes
-- **Slippage stats**: Per-symbol slippage aggregation fed back into position sizing
-- **Reports**: Daily (trades, PnL, win rate, slippage, predictions) and weekly (cumulative PnL, LLM accuracy, slippage trends, best/worst trades)
+## Telegram Commands
 
-### Dashboard & Deployment
-- **React frontend**: SPA in `frontend/` built with Vite + TypeScript + Tailwind CSS + Recharts. All timestamps localized to IST (`timeZone: "Asia/Kolkata"`). Dev server: `cd frontend && npm run dev`.
-- **FastAPI backend**: REST endpoints + WebSocket. Basic auth. CORS middleware. Dry-run signal preview with diagnostics.
-- **Telegram bot**: `/start`, `/status`, `/pnl`, `/positions`, `/stop`, `/kill`, `/resume`, `/auth`
-- **Agent memory**: Cross-restart state persistence via `agent_memory` DB table with TTL support
-- **Database maintenance**: CRON skill for daily backups, data retention cleanup (OHLCV, audit logs, predictions), old backup pruning
-- **Docker**: Separate backend and frontend containers via docker-compose. Backend (Python), frontend (nginx + React build).
-
-## Key Files
-
-- **`backend/src/yolovest/main.py`** — Entry point. Builds context, starts orchestrator, Telegram, dashboard.
-- **`backend/src/yolovest/orchestrator.py`** — Heartbeat pipeline, error propagation, mutex, memory persistence
-- **`backend/src/yolovest/context.py`** — `AppContext`, all Protocol types, `MarketHoursChecker` (early close aware)
-- **`backend/src/yolovest/config.py`** — All config models with validators. Service toggles: `llm.enabled`, `market_data.news_enabled`, `market_data.scrapers_enabled`.
-- **`backend/src/yolovest/models/schemas.py`** — All Pydantic data contracts
-- **`backend/src/yolovest/data/db.py`** — SQLite database layer + migration runner + agent memory + quarantine methods
-- **`backend/src/yolovest/data/ingester.py`** — Fallback chain orchestrator for market data
-- **`backend/src/yolovest/data/features.py`** — Technical indicator computation (pure functions)
-- **`backend/src/yolovest/data/google_finance.py`** — Google Finance scraper (Indian indices primary, global context secondary)
-- **`backend/src/yolovest/data/kite_data.py`** — Optional Kite Connect data provider
-- **`backend/src/yolovest/data/economic_calendar.py`** — RBI MPC (primary) + FOMC (secondary context) + NSE earnings
-- **`backend/src/yolovest/broker/zerodha.py`** — Zerodha Kite Connect broker (paper + live)
-- **`backend/src/yolovest/llm/gemini.py`** — Google Gemini LLM (all 7 methods)
-- **`backend/src/yolovest/memory.py`** — Agent memory persistence
-- **`backend/src/yolovest/news/`** — News scrapers + aggregator with dedup
-- **`backend/src/yolovest/strategy/ml_signal.py`** — XGBoost model for signal generation
-- **`backend/src/yolovest/strategy/backtest.py`** — Walk-forward backtesting engine
-- **`backend/src/yolovest/dashboard/app.py`** — FastAPI backend (REST endpoints + WebSocket + CORS)
-- **`frontend/`** — React SPA (Vite + TypeScript + Tailwind CSS + Recharts)
-- **`frontend/src/api/`** — API client with Basic Auth and endpoint definitions
-- **`frontend/src/pages/`** — Dashboard, Positions, Trades, TradeDetail, Watchlist, Analytics, Reports, Audit, Integrations, DryRun, Login, etc.
-- **`frontend/src/components/`** — Reusable UI: EquityChart, PortfolioCards, TradesTable, PositionsTable, SlippageChart, LLMAccuracyCard, etc.
-- **`frontend/src/hooks/`** — React Query hooks, WebSocket hook, auth hook
-- **`backend/migrations/`** — Numbered SQL migration files (001-017)
-- **`backend/config.example.yaml`** — File-only config keys (secrets, paths, server binding)
+| Command | Purpose |
+|---------|---------|
+| `/start` | Quick status summary |
+| `/help` | Full command reference |
+| `/status` | System health + integration checks |
+| `/pnl` | Today's PnL summary |
+| `/positions` | Open positions |
+| `/pending` | Show pending trades |
+| `/approve SYMBOL [overrides]` | Approve pending trade (supports full/partial overrides) |
+| `/reject SYMBOL` | Reject pending trade |
+| `/trade BUY SYMBOL ENTRY TARGET SL [PRODUCT] [QTY]` | Manual trade |
+| `/clear` | Clear today's signals + pending trades for regeneration |
+| `/review [SYMBOL ...]` | ML review of any symbol or all holdings |
+| `/skills` | List all registered skills |
+| `/run SKILL_NAME` | Execute a skill |
+| `/stop` | Pause trading (kill switch) |
+| `/kill` | Emergency square-off + pause |
+| `/resume` | Resume trading |
+| `/auth TOKEN` | Daily Kite re-auth (syncs to KiteDataProvider) |
+| `/holiday [add\|rm DATE]` | Manage market holidays |
 
 ## Configuration
 
-Config is split between a YAML file (file-only keys) and a SQLite `config` table (everything else, editable via UI).
+Config is split between a YAML file (file-only keys) and a SQLite `config` table (everything else, editable via Settings UI). On first start, code defaults are populated into the `config` table. Thereafter, changes are made via UI or API and hot-applied to the running config.
 
 ### File-only keys (config.yaml)
-Secrets, filesystem paths (fixed by Docker volume mounts), and server binding:
+Secrets, filesystem paths, and server binding:
 - `broker.api_key`, `broker.api_secret`, `llm.api_key`
 - `database.path`, `database.backup_dir`, `market_data.bhavcopy_dir`
 - `dashboard.host`, `dashboard.port`, `dashboard.password`
 - `log.log_dir`, `log.max_bytes`, `log.backup_count`
 - `notifications.telegram.bot_token`, `notifications.telegram.chat_id`
 
-### DB-editable keys (~129 keys, managed via Settings page)
-On first start, code defaults are populated into the `config` table. Thereafter, changes are made via:
-- **UI**: Settings page (`/settings`) with grouped, type-aware form inputs
-- **API**: `GET /api/config`, `PUT /api/config` (validates via Pydantic before persisting)
-- Changes are hot-applied to the running config immediately.
+### Key Config Sections
 
-### Service toggles
+| Section | Key Fields |
+|---------|-----------|
+| `mode` | `"paper"` or `"live"` — controls broker execution and data filtering |
+| `strategy.mode` | `"balanced"` / `"intraday"` / `"short_term"` / `"long_term"` |
+| `risk` | max_risk_per_trade_pct, max_open_positions, max_single_stock_pct, max_portfolio_exposure_pct, daily_loss_limit_pct, weekly_loss_limit_pct |
+| `market_hours` | open, close, square_off, `intraday_cutoff` (no MIS signals after this time) |
+| `execution` | transaction_mode ("auto"/"manual"), max_order_retries, price_drift_max_pct |
+| `market_data` | kite_data_enabled, news_enabled, scrapers_enabled |
 
-| Service | Config key | Default | What it controls |
-|---------|-----------|---------|-----------------|
-| Gemini LLM | `llm.enabled` | `false` | Sentiment analysis, trade review, failure analysis |
-| News sources | `market_data.news_enabled` | `true` | MoneyControl, ET Markets, LiveMint RSS feeds |
-| Scrapers | `market_data.scrapers_enabled` | `true` | Screener.in, Trendlyne, Google Finance, NSE, Economic Calendar |
-| Kite data | `market_data.kite_data_enabled` | `false` | Paid Kite Connect historical data API |
-| Telegram | `notifications.telegram.enabled` | `false` | Telegram bot and notifications |
-| LLM review gate | `risk.llm_review_enabled` | `true` | Gemini trade approval (falls back to rules-only if LLM disabled) |
+### Service Toggles
 
-### Holidays & early close days
-Stored in DB config (`market_hours.holidays`, `market_hours.early_close_days`). Managed via:
-- **UI**: Calendar page (`/calendar`) — Outlook-style weekly/monthly view with inline add/remove
-- **API**: `GET/POST/DELETE /api/holidays`
-- **Telegram**: `/holiday`, `/holiday add YYYY-MM-DD|today|tomorrow`, `/holiday rm YYYY-MM-DD|today|tomorrow`
+| Service | Config key | Default |
+|---------|-----------|---------|
+| Gemini LLM | `llm.enabled` | `false` |
+| News sources | `market_data.news_enabled` | `true` |
+| Scrapers | `market_data.scrapers_enabled` | `true` |
+| Kite data | `market_data.kite_data_enabled` | `false` |
+| Telegram | `notifications.telegram.enabled` | `false` |
+| LLM review gate | `risk.llm_review_enabled` | `true` |
 
 ## Domain Context
 
 - **MIS** = Margin Intraday (auto-squared by broker at EOD). **CNC** = Cash and Carry (delivery, held overnight).
-- **SL-M** = Stop-Loss Market order. **GIFT Nifty** = offshore Nifty futures (pre-market indicator).
-- Market hours: 9:15 AM - 3:30 PM IST. Square-off at 3:15 PM. ~15 NSE holidays/year.
-- Kite API rate limit: 10 req/s aggregate. Daily re-auth required (user pastes request_token via Telegram).
+- **SL** = Stop-Loss Limit (requires both price and trigger_price). App converts SL-M to SL with 1% buffer.
+- Market hours: 9:15 AM - 3:30 PM IST. Square-off at 3:15 PM. Intraday cutoff at 2:30 PM (configurable).
+- Kite API: 10 req/s aggregate limit (shared semaphore between broker + data provider). MARKET orders converted to LIMIT with 1% protection buffer.
+- Daily re-auth required (user pastes request_token via Telegram `/auth` or dashboard).
+- SELL signals for stocks not in holdings are forced to MIS/intraday (Indian equity rules: no overnight short selling for retail).
 
 ## Conventions
 
 - Python 3.11+, async throughout
 - All skills follow the same pattern: extend `SkillBase`, implement `execute()` and `should_run()`
-- Every skill logs a completion summary at INFO level with key metrics
-- Config via YAML (file-only keys) + DB `config` table (everything else) + Pydantic validation. Secrets via environment variables (never in config files or DB).
-- SQLite with WAL mode. Schema versioned via numbered migration scripts in `backend/migrations/`.
-- Paper trading mode by default — live trading requires explicit `mode: live` in config file.
-- India-first design: RBI MPC is primary economic event; global indices tracked as secondary sentiment context only.
-- All UI timestamps use `timeZone: "Asia/Kolkata"` for consistent IST display.
-- Destructive actions (delete dry run, unquarantine symbol) require user confirmation.
-- Tests use pytest-asyncio with `asyncio_mode = "auto"`. Run with `cd backend && PYTHONPATH=src python -m pytest tests/ -v`.
-- Frontend uses Vite + TypeScript + Tailwind CSS. Run with `cd frontend && npm run dev`. Build with `npm run build`.
+- `safe_execute()` wraps all skill execution with `logger.exception()` on failure
+- Config via YAML (file-only keys) + DB `config` table (everything else) + Pydantic validation. Startup log prints effective values AFTER DB overrides are applied.
+- SQLite with WAL mode. Schema versioned via numbered migration scripts.
+- Paper mode by default — live trading requires explicit `mode: live`.
+- All trade/position queries filter by `ctx.config.mode` — paper and live data never mix.
+- Trades track `origin` ('system' or 'adopted') and `mode` ('paper' or 'live').
+- Predictions track `mode` separately for clean analytics.
+- Pending trades use Python ISO timestamps (not SQLite `datetime('now')`) for correct expiry comparison.
+- Broker retry helper skips permanent errors (validation, margin, auth) — only retries transient errors.
+- Before retrying order placement, checks Kite for recent completed orders to prevent duplicates.
+- All timestamps use IST for market logic, UTC for DB storage.
+- Frontend uses Vite + TypeScript + Tailwind CSS. All UI timestamps localized to IST.
+- Destructive actions require user confirmation.
+- Tests: `cd backend && PYTHONPATH=src python -m pytest tests/ -v`
+- Frontend dev: `cd frontend && npm run dev`. Build: `npm run build`.
+
+## Key Files
+
+- **`main.py`** — Entry point. Builds context, starts orchestrator + Telegram + dashboard. Syncs broker mode on startup and config change.
+- **`orchestrator.py`** — Heartbeat pipeline, per-signal chain, manual approval queueing, signal cleanup on execution failure.
+- **`context.py`** — `AppContext`, Protocol types, `MarketHoursChecker`.
+- **`config.py`** — Config models. `_MODE_HOLDING_DAYS` maps strategy modes to day ranges. `apply_db_config()` for hot-reload.
+- **`data/db.py`** — SQLite layer. All trade queries accept `mode` parameter. `clear_todays_signals()`, `bulk_delete()`.
+- **`data/kite_data.py`** — Optional Kite data provider. Shared rate limiter. LTP=0 rejected. Token cache cleared on re-auth.
+- **`data/ingester.py`** — Fallback chain. Deduplicates providers. Quarantine replacement swapping.
+- **`broker/zerodha.py`** — MARKET→LIMIT conversion, SL-M→SL conversion, shared rate limiter, permanent error detection, paper orders match Kite API field names (`filled_quantity`, `average_price`, `tradingsymbol`).
+- **`skills/generate_signals.py`** — Balanced dual-model, intraday cutoff, SELL→MIS for non-holdings.
+- **`skills/trade_execute.py`** — Mode mismatch safety check, fill_price=0 handling, duplicate order prevention.
+- **`skills/position_monitor.py`** — Broker exit on target/SL hit (cancel SL + place market order), trailing SL with try-except (DB not updated if broker fails), position adoption from holdings.
+- **`skills/risk_check.py`** — Counts pending trades toward max_open_positions in manual mode.
+- **`skills/report_generate.py`** — Daily (16:00) and weekly (Friday). Uses `predictions_result["items"]` (paginated dict).
+- **`telegram_bot.py`** — `/review` works for any NSE symbol (not just holdings). `/approve` uses symbol name. Token sync on `/auth`.
+- **`dashboard/app.py`** — Mode passed to all trade/position/prediction queries. `POST /api/review` for ML review of any symbol.
+- **`frontend/src/pages/HoldingsPage.tsx`** — Multi-select checkboxes, bulk lock/unlock, ML review panel with actionable recommendations.
+- **`frontend/src/pages/WatchlistPage.tsx`** — Quick ML Review input for any symbol.
+- **`frontend/src/components/PendingTradesBanner.tsx`** — Approval UI + `ClearSignalsButton`.
+- **`frontend/src/pages/SettingsPage.tsx`** — Click-to-toggle info tooltips (mobile-friendly).

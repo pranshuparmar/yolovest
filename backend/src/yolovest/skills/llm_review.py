@@ -75,6 +75,20 @@ class LLMReviewSkill(SkillBase):
                     },
                 )
             elif review.decision == "RESIZE":
+                if not isinstance(review.adjusted_size, int) or review.adjusted_size <= 0:
+                    logger.warning(
+                        "llm-review: REJECT %s — LLM returned invalid adjusted_size=%s",
+                        signal["symbol"], review.adjusted_size,
+                    )
+                    return SkillResult(
+                        success=True,
+                        skill_name=self.name,
+                        data={
+                            "approved": False,
+                            "signal": signal,
+                            "llm_reasoning": f"Invalid adjusted_size: {review.adjusted_size}",
+                        },
+                    )
                 logger.info(
                     "llm-review: RESIZE %s %d→%d — %s",
                     signal["symbol"], signal["position_size"],
@@ -147,7 +161,7 @@ class LLMReviewSkill(SkillBase):
             try:
                 sentiment_model = SentimentResult(**sentiment_dict)
             except Exception:
-                pass  # sentiment is optional
+                logger.debug("Failed to parse sentiment for %s", symbol, exc_info=True)
 
         # Build typed PremarketContext (may be None)
         premarket_model = None
@@ -156,7 +170,7 @@ class LLMReviewSkill(SkillBase):
             try:
                 premarket_model = PremarketContext(**premarket_dict)
             except Exception:
-                pass  # premarket is optional
+                logger.debug("Failed to parse premarket context", exc_info=True)
 
         sector_rotation = await self.ctx.db.get_sector_rotation()
         todays_trades_raw = await self.ctx.db.get_todays_trades()
@@ -167,7 +181,7 @@ class LLMReviewSkill(SkillBase):
             try:
                 todays_trades.append(Trade(**t))
             except Exception:
-                pass
+                logger.debug("Failed to parse trade record for LLM context", exc_info=True)
 
         return TradeContext(
             signal=signal_model,

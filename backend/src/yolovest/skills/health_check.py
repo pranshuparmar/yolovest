@@ -86,6 +86,7 @@ class HealthCheckSkill(SkillBase):
                     from yolovest.timezone import now_utc
                     await self.ctx.db.set_system_state("last_llm_ping_ok", now_utc().isoformat())
         except Exception:
+            logger.debug("LLM health check failed", exc_info=True)
             checks["llm"] = False  # non-critical, fallback exists
 
         # Check 4: Market data (at least one provider up)
@@ -106,7 +107,7 @@ class HealthCheckSkill(SkillBase):
 
         # Graceful degradation — protect positions on critical failure
         if critical_failures and self.ctx.market_hours.is_market_hours():
-            open_positions = await self.ctx.db.get_open_positions()
+            open_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
             if open_positions:
                 await self.ctx.notify.send(
                     f"CRITICAL: {len(critical_failures)} system failures detected. "
@@ -144,6 +145,7 @@ class HealthCheckSkill(SkillBase):
             # Warn if less than 100MB free
             return usage.free > 100 * 1024 * 1024
         except Exception:
+            logger.debug("Disk space check failed", exc_info=True)
             return True  # assume OK if we can't check
 
     async def _check_position_consistency(self) -> bool:
@@ -162,6 +164,7 @@ class HealthCheckSkill(SkillBase):
             )
             return local_count == broker_count
         except Exception:
+            logger.warning("Position consistency check failed", exc_info=True)
             return False
 
     # Track last broker auth reminder time (monotonic, per-process)
