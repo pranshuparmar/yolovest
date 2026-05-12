@@ -363,9 +363,8 @@ def build_context(config: AppConfig, db: Any = None) -> AppContext:
 
     if db is None:
         db = _build_db(config)
-    # One shared rate limiter for all Kite calls — broker (orders, profile,
-    # holdings) and KiteDataProvider (quote, historical) draw from the same
-    # 10 req/s + 8 concurrent budget so they can't combine to exceed quota.
+    # Shared Kite rate limiter — broker and KiteDataProvider use the same
+    # instance so all Kite calls draw from one combined budget.
     from yolovest.broker.kite_rate_limiter import KiteRateLimiter
     kite_rate_limiter = KiteRateLimiter(calls_per_second=10.0, concurrency=8)
     broker = _build_broker(config, rate_limiter=kite_rate_limiter)

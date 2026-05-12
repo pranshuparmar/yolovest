@@ -106,9 +106,8 @@ class ZerodhaBroker(BrokerBase):
         # and only re-verify via API when the token is expected to be expired.
         # This avoids a kite.profile() call on every heartbeat/page load.
         self._auth_cache_valid_until: float = 0.0
-        # Shared rate limiter: 10 req/s + 8 concurrent. Pass-in keeps it
-        # shared with KiteDataProvider so quote/order/historical calls
-        # all draw from the same per-second budget.
+        # Shared rate limiter for Kite API calls. Accepts an injected
+        # instance so it can be shared with KiteDataProvider.
         if rate_limiter is None:
             from yolovest.broker.kite_rate_limiter import KiteRateLimiter
             rate_limiter = KiteRateLimiter(calls_per_second=10.0, concurrency=8)

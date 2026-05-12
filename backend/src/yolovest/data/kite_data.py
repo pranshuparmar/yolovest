@@ -69,9 +69,8 @@ class KiteDataProvider(MarketDataBase):
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._kite: Any = None
-        # Shared rate limiter: 10 req/s + 8 concurrent, ideally the same
-        # instance the broker uses so quote/order/historical calls all
-        # draw from one budget.
+        # Shared rate limiter. Pass the same instance the broker uses so
+        # quote, order, and historical calls all draw from one budget.
         if rate_limiter is None:
             from yolovest.broker.kite_rate_limiter import KiteRateLimiter
             rate_limiter = KiteRateLimiter(calls_per_second=10.0, concurrency=8)
@@ -84,18 +83,14 @@ class KiteDataProvider(MarketDataBase):
         # Tracks whether _prewarm_token_cache has populated the cache from
         # the full NSE instrument master. Cleared on set_access_token().
         self._token_cache_warmed: bool = False
-        # Time-based throttle for historical_data. Kite's historical API has
-        # a tighter per-second limit (~3 req/s) than the general 10 req/s
-        # quote/order quota. A semaphore alone doesn't enforce time — long
-        # sequential runs (e.g. /run ingest-universe over 500 symbols) saw
-        # "Too many requests" errors despite no concurrent calls. Lock +
-        # last-call timestamp enforces a minimum interval between requests.
+        # Time-based throttle for historical_data. The historical endpoint
+        # has a tighter per-second limit than the general quote/order quota,
+        # and a semaphore alone doesn't enforce inter-call spacing.
         self._historical_lock = asyncio.Lock()
         self._historical_last_call: float = 0.0
-        # 0.4s -> max 2.5 req/s, safely under Kite's 3 req/s historical cap.
+        # Minimum interval between historical fetches.
         self._historical_min_interval_sec: float = 0.4
-        # When a 429 ("Too many requests") fires, back off this much before
-        # the next attempt. Reset to default on a successful call.
+        # Back-off interval applied after a 429 response.
         self._historical_cooldown_sec: float = 10.0
 
     def set_access_token(self, token: str) -> None:

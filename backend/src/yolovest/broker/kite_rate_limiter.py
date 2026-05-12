@@ -4,16 +4,13 @@ Combines two constraints in one async context manager:
 
 1. Concurrency cap — at most ``concurrency`` calls in flight at once.
 2. Time-based interval — at least ``1.0 / calls_per_second`` between
-   successive call entries. Enforced FIFO so a busy thread can't
+   successive call entries. Enforced FIFO so a busy waiter can't
    monopolize the wait.
 
-A single instance is shared between ``ZerodhaBroker`` and
-``KiteDataProvider`` so quote/order/historical calls all draw from the
-same per-second budget — matching Kite's actual quota model.
-
-Endpoint-specific tighter throttles (e.g. ``historical_data`` at 3 req/s
-vs the general 10 req/s) stack on top of this limiter rather than
-replacing it.
+A single instance can be shared between ``ZerodhaBroker`` and
+``KiteDataProvider`` so all Kite calls draw from one combined budget.
+Endpoint-specific tighter throttles stack on top of this limiter
+rather than replacing it.
 """
 
 import asyncio

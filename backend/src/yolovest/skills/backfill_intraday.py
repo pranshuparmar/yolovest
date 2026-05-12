@@ -1,16 +1,12 @@
 """Skill: backfill-intraday — Bulk historical 5-minute OHLCV backfill.
 
-Trigger: MANUAL — run via dashboard or Telegram once you've enabled the
-Kite paid data plan, to give the intraday model real historical depth
-instead of the few sessions accumulated by the heartbeat.
+Trigger: MANUAL — run via dashboard or Telegram when the Kite paid data
+plan is enabled, to give the intraday model historical depth beyond
+what the heartbeat has accumulated.
 
-Mirrors backfill-data but targets the 5-minute interval over a shorter
-default window (1 year of intraday is plenty; 3 years would explode DB
-size with little ML benefit). Kite's per-call limit for 5-minute bars
-is 100 days, so KiteDataProvider transparently paginates.
-
-Estimated runtime for ~130 symbols: 5–10 minutes (each symbol triggers
-multiple chunked Kite calls, paced to leave headroom for the heartbeat).
+Mirrors backfill-data but targets the 5-minute interval. KiteDataProvider
+paginates transparently when the requested window exceeds Kite's
+per-call limit for the interval.
 """
 
 import logging
@@ -25,13 +21,9 @@ class BackfillIntradaySkill(BackfillDataSkill):
     description = "Bulk-fetch historical 5-minute intraday OHLCV"
 
     _DEFAULT_INTERVAL = "5minute"
-    # Inherits _PER_SYMBOL_DELAY_SEC=0 from BackfillDataSkill. Pacing is
-    # enforced by KiteDataProvider's _throttle_historical (2.5 req/s) plus
-    # the shared KiteRateLimiter (10 req/s general). No skill-level sleep
-    # needed.
 
     def _default_days(self) -> int:
-        # 1 year of 5-minute bars ≈ 250 trading days × 75 bars = ~19k rows/symbol.
-        # Going beyond that bloats the DB without meaningfully improving the
-        # intraday model (which uses recent volatility/momentum, not multi-year trends).
+        # Lookback window for intraday history. Longer windows balloon
+        # row counts (~75 bars per trading day per symbol) for marginal
+        # ML benefit on short-horizon models.
         return 365

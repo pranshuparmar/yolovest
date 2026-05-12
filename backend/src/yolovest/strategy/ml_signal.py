@@ -459,9 +459,8 @@ class XGBoostSignalModel(MLBase):
                 "num_class": 3,
                 "eval_metric": "mlogloss",
                 "random_state": 42,
-                # 'hist' uses bucketed feature values instead of holding
-                # the full sorted matrix in memory. ~50% RAM saving with
-                # no measurable accuracy hit. Crucial on the 1.8 GB host.
+                # Histogram tree method: bins continuous features into a
+                # fixed number of buckets, avoiding the full sorted matrix.
                 "tree_method": params.get("tree_method", "hist"),
             }
 
