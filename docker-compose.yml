@@ -62,6 +62,22 @@ services:
       - ./scripts/cert-backup-loop.sh:/loop.sh:ro
     entrypoint: ["/bin/sh", "/loop.sh"]
 
+  cert-heal:
+    image: alpine:3
+    container_name: yolovest-cert-heal
+    restart: unless-stopped
+    networks:
+      - yolovest
+    depends_on:
+      - letsencrypt
+    environment:
+      - INTERVAL_SEC=15
+    volumes:
+      - certs:/etc/nginx/certs
+      - ./nginx/heal-cert-symlinks.sh:/heal-cert-symlinks.sh:ro
+      - ./nginx/cert-heal-loop.sh:/loop.sh:ro
+    entrypoint: ["/bin/sh", "/loop.sh"]
+
   backend:
     build: ./backend
     container_name: yolovest-backend

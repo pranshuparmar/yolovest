@@ -61,16 +61,27 @@ runs the heal step on the next start.
 
 ### 3. Defensive cert-symlink heal on container start
 
-`nginx/heal-cert-symlinks.sh` is invoked as the container's
+`nginx/heal-cert-symlinks.sh` is invoked as the nginx-proxy
 `entrypoint` before nginx boots. For every per-domain directory it
 ensures the top-level symlinks exist, creating any that are missing.
 Idempotent and safe to re-run.
 
-This is a workaround for the failure mode, not a root-cause fix. It
-keeps the site up while upstream bugs in nginx-proxy or
-acme-companion get sorted out.
+### 4. Continuous cert-heal sidecar
 
-### 4. Periodic volume backups
+A `cert-heal` service runs the same heal script in a loop every
+`INTERVAL_SEC` seconds (default 15). This catches the case where
+acme-companion removes the top-level symlinks as part of an attempted
+renewal — for example when the ACME HTTP-01 challenge fails because
+Let's Encrypt can't reach port 80, the symlinks get cleaned up but
+not restored. The sidecar restores them within seconds, keeping HTTPS
+serving even while the underlying renewal problem is investigated.
+
+If you ever see `Verification error... Timeout during connect` in
+the letsencrypt container's logs, that's the trigger for this
+failure mode — check that port 80 is reachable from the public
+internet so ACME challenges can complete.
+
+### 5. Periodic volume backups
 
 A `cert-backup` sidecar runs as part of the compose stack. It
 snapshots the `certs` named volume into `./backups/certs/` as a
