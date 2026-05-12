@@ -216,6 +216,7 @@ class ModelRetrainSkill(SkillBase):
         y: list[int] = []
         sample_weights: list[float] = []
         feature_names: list[str] = []
+        feature_names_set: set[str] = set()
 
         for sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
@@ -269,11 +270,20 @@ class ModelRetrainSkill(SkillBase):
                 else:
                     label = 1  # HOLD
 
-                # Sort keys for consistent feature ordering across samples
-                sorted_keys = sorted(features.keys())
-                if not feature_names:
-                    feature_names = sorted_keys
-                X.append([features[k] for k in sorted_keys])
+                # Maintain a stable feature_names list across all samples.
+                # Indicators that need more history (e.g. EMA-200) only
+                # appear in features once enough bars are in the window —
+                # so later samples may produce keys the first sample
+                # didn't have. When that happens, extend feature_names
+                # and backfill 0.0 into every prior row so np.array(X)
+                # ends up rectangular instead of inhomogeneous.
+                for k in features:
+                    if k not in feature_names_set:
+                        feature_names.append(k)
+                        feature_names_set.add(k)
+                        for existing in X:
+                            existing.append(0.0)
+                X.append([features.get(k, 0.0) for k in feature_names])
                 y.append(label)
                 sample_weights.append(sym_weight)
 
