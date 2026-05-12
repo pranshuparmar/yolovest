@@ -45,7 +45,12 @@ class IngestUniverseSkill(SkillBase):
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         universe = kwargs.get("universe", self.ctx.config.scanning.universe)
-        days = int(kwargs.get("days", 365))
+        # Default to the configured backfill window. Daily cron re-runs are
+        # mostly cache hits due to upsert idempotency, so a wider default
+        # doesn't hurt and lets a manual /run ingest-universe pull the
+        # full backfill window in one shot.
+        default_days = self.ctx.config.market_data.backfill_days
+        days = int(kwargs.get("days", default_days))
 
         symbols = await self._resolve_universe_symbols(universe)
         logger.info(
@@ -102,7 +107,8 @@ class IngestUniverseSkill(SkillBase):
         )
 
     async def _resolve_universe_symbols(self, universe: str) -> list[str]:
-        """Get constituents: cached → live fetch → bundled fallback.
+        """Get constituents: cached → live fetch → bundled fallback,
+        then apply user-configured quarantine replacements.
 
         Cached results in system_state expire after 7 days. On expiry or
         cache miss we hit niftyindices.com. If that fails (timeout, HTTP
@@ -110,24 +116,33 @@ class IngestUniverseSkill(SkillBase):
         """
         cache_key = f"universe_constituents:{universe}"
 
-        cached = await self._read_universe_cache(cache_key)
-        if cached:
+        raw = await self._read_universe_cache(cache_key)
+        if raw:
             logger.info(
-                "Using cached %s constituents (%d symbols)", universe, len(cached),
+                "Using cached %s constituents (%d symbols)", universe, len(raw),
             )
-            return cached
+        else:
+            raw = await fetch_live_constituents(universe)  # type: ignore[arg-type]
+            if raw:
+                await self._write_universe_cache(cache_key, raw)
+            else:
+                raw = get_universe_symbols(universe)  # type: ignore[arg-type]
+                logger.warning(
+                    "Live fetch failed for %s; using bundled list (%d symbols)",
+                    universe, len(raw),
+                )
 
-        live = await fetch_live_constituents(universe)  # type: ignore[arg-type]
-        if live:
-            await self._write_universe_cache(cache_key, live)
-            return live
-
-        bundled = get_universe_symbols(universe)  # type: ignore[arg-type]
-        logger.warning(
-            "Live fetch failed for %s; using bundled list (%d symbols)",
-            universe, len(bundled),
-        )
-        return bundled
+        # Apply user-set quarantine replacements (e.g. ZOMATO -> ETERNAL).
+        # This is the single point where replacements get applied for the
+        # universe ingest path — db.set_replacement_symbol wires to here.
+        resolved = await self.ctx.db.resolve_symbols_with_replacements(raw)
+        if len(resolved) != len(raw):
+            logger.info(
+                "Applied %d quarantine replacement(s) to %s universe "
+                "(%d -> %d symbols after substitution + dedup)",
+                len(raw) - len(resolved), universe, len(raw), len(resolved),
+            )
+        return resolved
 
     async def _read_universe_cache(self, key: str) -> list[str] | None:
         """Return cached symbol list if fresh (≤ TTL), else None."""

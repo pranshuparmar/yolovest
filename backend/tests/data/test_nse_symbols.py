@@ -74,3 +74,15 @@ class TestBundledFallback:
     def test_get_universe_symbols_nifty500_matches_bundled_subset(self):
         symbols = get_universe_symbols("nifty500")
         assert symbols == NIFTY_500_SUBSET
+
+
+class TestUniverseAliases:
+    """The Settings UI exposes 'all' — it should resolve to a live source,
+    not silently fall back to the bundled list."""
+
+    def test_all_alias_maps_to_nifty500(self):
+        from yolovest.data.nse_symbols import _NIFTY_CSV_URLS, _UNIVERSE_ALIASES
+
+        assert _UNIVERSE_ALIASES.get("all") == "nifty500"
+        # And nifty500 has a real URL configured
+        assert "nifty500" in _NIFTY_CSV_URLS

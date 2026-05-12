@@ -134,6 +134,9 @@ class BackfillDataSkill(SkillBase):
             logger.info(
                 "backfill-data: no tracked symbols found, falling back to seed_symbols",
             )
-            return list(self.ctx.config.scanning.seed_symbols)
+            base = list(self.ctx.config.scanning.seed_symbols)
+        else:
+            base = sorted(symbols)
 
-        return sorted(symbols)
+        # Apply user-configured quarantine replacements (ZOMATO -> ETERNAL, etc.)
+        return await self.ctx.db.resolve_symbols_with_replacements(base)

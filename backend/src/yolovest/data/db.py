@@ -3051,6 +3051,28 @@ class Database:
         rows = await cursor.fetchall()
         return {r[0]: r[1] for r in rows}
 
+    async def resolve_symbols_with_replacements(
+        self, symbols: list[str],
+    ) -> list[str]:
+        """Substitute quarantined symbols with their configured replacements.
+
+        Used by ingest skills so that user-configured swaps (e.g. ZOMATO ->
+        ETERNAL after the corporate rename) actually take effect in the
+        pipeline. The output is deduplicated while preserving input order.
+        """
+        repl = await self.get_quarantine_replacements()
+        if not repl:
+            return list(symbols)
+        seen: set[str] = set()
+        out: list[str] = []
+        for s in symbols:
+            new = repl.get(s, s)
+            if not new or new in seen:
+                continue
+            seen.add(new)
+            out.append(new)
+        return out
+
     # ------------------------------------------------------------------
     # Dry-Run Signal Preview
     # ------------------------------------------------------------------

@@ -91,3 +91,49 @@ class TestUniverseResolution:
             symbols = await skill._resolve_universe_symbols("nifty500")
 
         assert symbols == ["X", "Y"]
+
+
+class TestQuarantineReplacementsInResolution:
+    """User-configured replacements must be substituted in the resolved list."""
+
+    async def test_replacement_is_substituted(self, skill):
+        skill.ctx.db.get_system_state = AsyncMock(return_value=None)
+        skill.ctx.db.set_system_state = AsyncMock()
+        # ZOMATO -> ETERNAL substitution wired via set_replacement_symbol
+        skill.ctx.db.resolve_symbols_with_replacements = AsyncMock(
+            return_value=["RELIANCE", "ETERNAL", "TCS"],
+        )
+        with patch(
+            "yolovest.skills.ingest_universe.fetch_live_constituents",
+            new=AsyncMock(return_value=["RELIANCE", "ZOMATO", "TCS"]),
+        ):
+            symbols = await skill._resolve_universe_symbols("nifty500")
+
+        # The substituted list is what gets returned
+        assert symbols == ["RELIANCE", "ETERNAL", "TCS"]
+        # ... and resolve_symbols_with_replacements was called with the raw live list
+        skill.ctx.db.resolve_symbols_with_replacements.assert_awaited_once_with(
+            ["RELIANCE", "ZOMATO", "TCS"],
+        )
+
+
+class TestDaysDefaultsToConfig:
+    """ingest-universe should default to config.market_data.backfill_days, not 365."""
+
+    async def test_uses_config_backfill_days(self, skill):
+        skill.ctx.config.market_data.backfill_days = 1825
+        skill.ctx.db.get_system_state = AsyncMock(return_value=None)
+        skill.ctx.db.set_system_state = AsyncMock()
+        skill.ctx.db.resolve_symbols_with_replacements = AsyncMock(return_value=["RELIANCE"])
+        skill.ctx.db.upsert_ohlcv = AsyncMock(return_value=0)
+        skill.ctx.market_data.get_ohlcv = AsyncMock(return_value=[])
+
+        with patch(
+            "yolovest.skills.ingest_universe.fetch_live_constituents",
+            new=AsyncMock(return_value=["RELIANCE"]),
+        ):
+            result = await skill.execute()
+
+        # The 'days' value passed to get_ohlcv must reflect the config, not 365
+        call_args = skill.ctx.market_data.get_ohlcv.call_args_list[0]
+        assert call_args.kwargs.get("days") == 1825 or call_args.args[2] == 1825

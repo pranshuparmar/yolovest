@@ -81,14 +81,19 @@ class IngestDataSkill(SkillBase):
         a watchlist, ingest-data targets those shortlisted symbols for the
         expensive deep pass (news, sentiment, fundamentals). On a fresh install
         before the first scan, falls back to seed_symbols.
+
+        Quarantine replacements are applied before returning.
         """
         try:
             watchlist = await self.ctx.db.get_combined_watchlist()
             if watchlist:
-                return [s["symbol"] for s in watchlist]
+                base = [s["symbol"] for s in watchlist]
+                return await self.ctx.db.resolve_symbols_with_replacements(base)
         except Exception:
             pass
-        return self.ctx.config.scanning.seed_symbols
+        return await self.ctx.db.resolve_symbols_with_replacements(
+            list(self.ctx.config.scanning.seed_symbols),
+        )
 
     async def _select_priority_symbols(self, limit: int = 15) -> list[str]:
         """Symbols worth spending NSE's per-symbol rate budget on.
@@ -126,9 +131,11 @@ class IngestDataSkill(SkillBase):
             logger.debug("ingest-data: could not read watchlist", exc_info=True)
 
         if not ordered:
-            return list(self.ctx.config.scanning.seed_symbols)
+            return await self.ctx.db.resolve_symbols_with_replacements(
+                list(self.ctx.config.scanning.seed_symbols),
+            )
 
-        return ordered[:limit]
+        return await self.ctx.db.resolve_symbols_with_replacements(ordered[:limit])
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         symbols = kwargs.get("symbols") or await self._get_active_symbols()

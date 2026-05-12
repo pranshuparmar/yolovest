@@ -113,6 +113,13 @@ _NIFTY_CSV_URLS: dict[str, str] = {
     "nifty500": "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv",
 }
 
+# UI-friendly aliases that map to a concrete index. "all" is the catch-all
+# label in the Settings dropdown — treat it as the broadest live source we
+# have (Nifty 500) rather than the partial bundled list.
+_UNIVERSE_ALIASES: dict[str, str] = {
+    "all": "nifty500",
+}
+
 
 def parse_constituent_csv(body: str) -> list[str]:
     """Parse a niftyindices.com constituent CSV into a list of NSE symbols.
@@ -155,7 +162,10 @@ async def fetch_live_constituents(
     parse failure, empty result). Caller should fall back to the bundled
     list in that case.
     """
-    url = _NIFTY_CSV_URLS.get(universe)
+    resolved = _UNIVERSE_ALIASES.get(universe, universe)
+    if resolved != universe:
+        logger.info("Universe alias '%s' resolved to '%s' for live fetch", universe, resolved)
+    url = _NIFTY_CSV_URLS.get(resolved)
     if not url:
         logger.warning("No live URL configured for universe '%s'", universe)
         return None
