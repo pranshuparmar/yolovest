@@ -1,9 +1,10 @@
-# TLS / HTTPS Recovery
+# TLS / HTTPS Reliability
+
+This document covers the failure mode where the dashboard becomes
+unreachable over HTTPS even though all containers report healthy, plus
+the layered preventive measures and recovery procedure.
 
 ## Symptom
-
-The dashboard hostname becomes unreachable over HTTPS even though DNS,
-firewall rules, and all containers are healthy.
 
 - Browser shows `ERR_SSL_PROTOCOL_ERROR` or similar.
 - `curl -vk https://<domain>` returns `TLS alert, unrecognized name`.
@@ -22,38 +23,83 @@ nginx-proxy expects flat-file cert symlinks at the top of
 ```
 
 acme-companion creates these symlinks alongside the per-domain
-directory it issues into:
+directory it issues into. If those top-level symlinks go missing
+while the per-domain directory survives — most commonly across a
+`docker compose down && up` cycle — nginx-proxy can't find
+certificates by its expected name pattern and falls back to a config
+containing `ssl_reject_handshake on;`. Every TLS connection is then
+refused with "unrecognized name" and the site is dark.
 
+## Preventive measures (in place)
+
+The defense is layered rather than reliant on any one mechanism.
+
+### 1. Pinned image versions
+
+`docker-compose.yml` pins both images to specific tags rather than
+implicit `:latest`:
+
+```yaml
+nginxproxy/nginx-proxy:1.10.1
+nginxproxy/acme-companion:2.6.3
 ```
-/etc/nginx/certs/<domain>/cert.pem
-/etc/nginx/certs/<domain>/chain.pem
-/etc/nginx/certs/<domain>/fullchain.pem
-/etc/nginx/certs/<domain>/key.pem
+
+This prevents silent upstream behaviour changes between deploys. Bump
+the tags deliberately after testing.
+
+### 2. Healthcheck that fails on the broken state
+
+`nginx/tls-healthcheck.sh` runs as the nginx-proxy container's
+healthcheck. It marks the container unhealthy when either:
+
+- the generated config contains `ssl_reject_handshake on;`, or
+- a per-domain cert directory exists without its expected top-level
+  `<domain>.crt` / `<domain>.key` symlinks.
+
+An unhealthy state triggers Docker's restart policy, which in turn
+runs the heal step on the next start.
+
+### 3. Defensive cert-symlink heal on container start
+
+`nginx/heal-cert-symlinks.sh` is invoked as the container's
+`entrypoint` before nginx boots. For every per-domain directory it
+ensures the top-level symlinks exist, creating any that are missing.
+Idempotent and safe to re-run.
+
+This is a workaround for the failure mode, not a root-cause fix. It
+keeps the site up while upstream bugs in nginx-proxy or
+acme-companion get sorted out.
+
+### 4. Periodic volume backups
+
+`scripts/backup-certs.sh` snapshots the `certs` named volume to
+`./backups/certs/` as a timestamped tar.gz. Run it from host cron so
+a corrupted or wiped certs volume can be restored without re-issuing
+from Let's Encrypt (which rate-limits to 5 certificates per name per
+week).
+
+Suggested crontab entry (daily at 02:00):
+
+```cron
+0 2 * * * cd /path/to/yolovest && ./scripts/backup-certs.sh \
+    >> ./backups/certs/backup.log 2>&1
 ```
 
-If the symlinks ever go missing while the per-domain directory
-survives — most commonly across `docker compose down && up` cycles —
-nginx-proxy can't find certificates by its expected name pattern and
-falls back to a config containing `ssl_reject_handshake on;`.
+Tune via env vars:
 
-## Preventive measure (already in place)
+```sh
+VOLUME=yolovest_certs \
+BACKUP_DIR=./backups/certs \
+RETENTION_DAYS=14 \
+./scripts/backup-certs.sh
+```
 
-`nginx/heal-cert-symlinks.sh` runs as the nginx-proxy container
-entrypoint before nginx boots. It iterates every
-`/etc/nginx/certs/<domain>/` directory and ensures the expected
-top-level symlinks exist, creating any that are missing. Idempotent
-and safe to re-run.
+## Manual recovery
 
-The wiring lives in `docker-compose.yml` under the `nginx-proxy`
-service's `entrypoint:` override.
-
-## Manual recovery (if the preventive measure is bypassed or fails)
-
-Enter the proxy container and recreate the symlinks by hand:
+### Recover from a missing-symlink state (no volume restore needed)
 
 ```sh
 docker exec -it nginx-proxy sh
-
 cd /etc/nginx/certs
 for d in */; do
     domain=${d%/}
@@ -62,27 +108,46 @@ for d in */; do
     ln -sf "$d/key.pem"       "$domain.key"
     [ -f "$d/chain.pem" ] && ln -sf "$d/chain.pem" "$domain.chain.pem"
 done
-
 nginx -s reload
 exit
+
+docker restart nginx-proxy
 ```
 
-Verify HTTPS works again:
+### Restore a backed-up volume (after wipe or corruption)
+
+```sh
+# Stop the proxy and acme-companion so nothing is writing during restore.
+docker compose stop nginx-proxy letsencrypt
+
+# Locate the most recent snapshot.
+LATEST=$(ls -t backups/certs/certs-*.tar.gz | head -1)
+
+# Restore into the named volume.
+docker run --rm \
+    -v yolovest_certs:/target \
+    -v "$(realpath "$LATEST")":/snapshot.tar.gz:ro \
+    alpine:3 \
+    sh -c 'cd /target && tar -xzf /snapshot.tar.gz'
+
+docker compose start nginx-proxy letsencrypt
+```
+
+Verify HTTPS works:
 
 ```sh
 curl -vk https://<domain> 2>&1 | head -20
 ```
 
-If TLS handshake still fails, restart nginx-proxy to force config
-regeneration:
+## Considered, deferred
 
-```sh
-docker restart nginx-proxy
-```
+### Migrating off nginx-proxy + acme-companion
 
-## Related
+A move to Caddy or Traefik would eliminate the failure mode entirely
+because both manage TLS via a single in-process state machine rather
+than coordinating two separate containers through a shared volume of
+symlinks. Trade-off: a one-time configuration migration plus
+learning a different proxy DSL.
 
-- nginx-proxy issue tracker:
-  <https://github.com/nginx-proxy/nginx-proxy/issues>
-- acme-companion docs:
-  <https://github.com/nginx-proxy/acme-companion>
+Tracked separately as a P3 item; the layered measures above are
+sufficient for current scale.

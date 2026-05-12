@@ -1,6 +1,6 @@
 services:
   nginx-proxy:
-    image: nginxproxy/nginx-proxy
+    image: nginxproxy/nginx-proxy:1.10.1
     container_name: nginx-proxy
     restart: always
     networks:
@@ -8,11 +8,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    # Heal cert symlinks before booting nginx. Guards against the
-    # acme-companion + nginx-proxy failure mode where the per-domain
-    # cert directory survives a restart but the top-level <domain>.crt /
-    # <domain>.key symlinks go missing, which makes nginx-proxy generate
-    # a fallback config with `ssl_reject_handshake on;`.
+    # Defensive symlink heal before nginx boots. Documented in
+    # docs/tls-recovery.md.
     entrypoint:
       - /bin/sh
       - -c
@@ -24,9 +21,16 @@ services:
       - html:/usr/share/nginx/html
       - ./nginx/custom.conf:/etc/nginx/conf.d/zz-custom.conf:ro
       - ./nginx/heal-cert-symlinks.sh:/heal-cert-symlinks.sh:ro
+      - ./nginx/tls-healthcheck.sh:/tls-healthcheck.sh:ro
+    healthcheck:
+      test: ["CMD", "/tls-healthcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   letsencrypt:
-    image: nginxproxy/acme-companion
+    image: nginxproxy/acme-companion:2.6.3
     container_name: letsencrypt
     restart: always
     networks:
