@@ -45,6 +45,23 @@ services:
       - vhost:/etc/nginx/vhost.d
       - html:/usr/share/nginx/html
 
+  cert-backup:
+    image: alpine:3
+    container_name: yolovest-cert-backup
+    restart: unless-stopped
+    networks:
+      - yolovest
+    depends_on:
+      - letsencrypt
+    environment:
+      - INTERVAL_SEC=86400
+      - RETENTION_DAYS=14
+    volumes:
+      - certs:/source:ro
+      - ./backups/certs:/backup
+      - ./scripts/cert-backup-loop.sh:/loop.sh:ro
+    entrypoint: ["/bin/sh", "/loop.sh"]
+
   backend:
     build: ./backend
     container_name: yolovest-backend

@@ -72,26 +72,34 @@ acme-companion get sorted out.
 
 ### 4. Periodic volume backups
 
-`scripts/backup-certs.sh` snapshots the `certs` named volume to
-`./backups/certs/` as a timestamped tar.gz. Run it from host cron so
-a corrupted or wiped certs volume can be restored without re-issuing
-from Let's Encrypt (which rate-limits to 5 certificates per name per
-week).
+A `cert-backup` sidecar runs as part of the compose stack. It
+snapshots the `certs` named volume into `./backups/certs/` as a
+timestamped tar.gz every 24h and prunes snapshots older than the
+retention window. No host cron required — the container handles
+scheduling itself.
 
-Suggested crontab entry (daily at 02:00):
+The first snapshot is written immediately on container start, so a
+fresh `docker compose up` produces a backup within seconds.
 
-```cron
-0 2 * * * cd /path/to/yolovest && ./scripts/backup-certs.sh \
-    >> ./backups/certs/backup.log 2>&1
+Tunable via env in `docker-compose.yml`:
+
+```yaml
+cert-backup:
+  environment:
+    - INTERVAL_SEC=86400    # seconds between snapshots
+    - RETENTION_DAYS=14     # prune older than this
 ```
 
-Tune via env vars:
+Force a fresh snapshot:
 
 ```sh
-VOLUME=yolovest_certs \
-BACKUP_DIR=./backups/certs \
-RETENTION_DAYS=14 \
-./scripts/backup-certs.sh
+docker compose restart cert-backup
+```
+
+Inspect what's been backed up:
+
+```sh
+ls -lh ./backups/certs/
 ```
 
 ## Manual recovery
