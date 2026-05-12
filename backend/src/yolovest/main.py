@@ -217,7 +217,9 @@ def _build_db(config: AppConfig) -> Database | _StubDB:
     return Database(config.database.path)
 
 
-def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
+def _build_broker(
+    config: AppConfig, rate_limiter: Any = None,
+) -> ZerodhaBroker | _StubBroker:
     """Build broker — real if API keys set, stub otherwise."""
     api_key = config.broker.api_key.get_secret_value()
     api_secret = config.broker.api_secret.get_secret_value()
@@ -230,6 +232,7 @@ def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
             max_retries=config.execution.max_order_retries,
             retry_base_delay=float(config.execution.retry_base_delay_sec),
             kite_data_enabled=config.market_data.kite_data_enabled,
+            rate_limiter=rate_limiter,
         )
     return _StubBroker()
 
@@ -244,7 +247,9 @@ def _build_llm(config: AppConfig) -> GeminiLLM | _StubLLM:
     return _StubLLM()
 
 
-def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketData:
+def _build_market_data(
+    config: AppConfig, rate_limiter: Any = None,
+) -> MarketDataIngester | _StubMarketData:
     """Build market data ingester with provider fallback chain.
 
     If kite_data_enabled is True and broker API keys are set, Kite Connect
@@ -261,15 +266,8 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
             try:
                 from yolovest.data.kite_data import KiteDataProvider
 
-                # Share rate limiter with broker to stay under Kite's 10 req/s
-                broker_limiter = None
-                try:
-                    from yolovest.broker.zerodha import ZerodhaBroker
-                    broker_limiter = ZerodhaBroker._shared_rate_limiter
-                except (ImportError, AttributeError):
-                    pass
                 kite_provider = KiteDataProvider(
-                    api_key=kite_key, rate_limiter=broker_limiter,
+                    api_key=kite_key, rate_limiter=rate_limiter,
                 )
                 daily_providers.append(kite_provider)
                 logger.info("Kite Connect data provider enabled as primary")
@@ -365,9 +363,14 @@ def build_context(config: AppConfig, db: Any = None) -> AppContext:
 
     if db is None:
         db = _build_db(config)
-    broker = _build_broker(config)
+    # One shared rate limiter for all Kite calls — broker (orders, profile,
+    # holdings) and KiteDataProvider (quote, historical) draw from the same
+    # 10 req/s + 8 concurrent budget so they can't combine to exceed quota.
+    from yolovest.broker.kite_rate_limiter import KiteRateLimiter
+    kite_rate_limiter = KiteRateLimiter(calls_per_second=10.0, concurrency=8)
+    broker = _build_broker(config, rate_limiter=kite_rate_limiter)
     # Pass DB to broker for token persistence (if real broker)
-    market_data = _build_market_data(config)
+    market_data = _build_market_data(config, rate_limiter=kite_rate_limiter)
     if isinstance(broker, ZerodhaBroker):
         broker._db = db
         broker._market_data = market_data

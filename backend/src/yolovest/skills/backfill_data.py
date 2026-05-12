@@ -30,9 +30,11 @@ class BackfillDataSkill(SkillBase):
     # Subclasses (e.g. BackfillIntradaySkill) override these to switch interval.
     _DEFAULT_INTERVAL = "daily"
 
-    # Small inter-symbol delay so backfill doesn't drain the Kite rate-limit
-    # budget shared with the heartbeat (10 req/s aggregate).
-    _PER_SYMBOL_DELAY_SEC = 0.15
+    # Pacing is now handled centrally by KiteRateLimiter (general 10 req/s)
+    # plus KiteDataProvider._throttle_historical (tighter 2.5 req/s on the
+    # historical_data endpoint). The per-symbol skill-level sleep this used
+    # to do is redundant and only slowed things down.
+    _PER_SYMBOL_DELAY_SEC = 0.0
 
     def _default_days(self) -> int:
         """Default lookback in days. Subclasses can override."""

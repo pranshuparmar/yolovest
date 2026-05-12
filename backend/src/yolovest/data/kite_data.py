@@ -62,15 +62,20 @@ class KiteDataProvider(MarketDataBase):
         access_token: str | None = None,
         max_retries: int = 3,
         retry_base_delay: float = 1.0,
-        rate_limiter: asyncio.Semaphore | None = None,
+        rate_limiter: Any = None,
     ) -> None:
         self._api_key = api_key
         self._access_token = access_token
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._kite: Any = None
-        # Share rate limiter with broker to respect Kite's 10 req/s aggregate limit
-        self._rate_limiter = rate_limiter or asyncio.Semaphore(8)
+        # Shared rate limiter: 10 req/s + 8 concurrent, ideally the same
+        # instance the broker uses so quote/order/historical calls all
+        # draw from one budget.
+        if rate_limiter is None:
+            from yolovest.broker.kite_rate_limiter import KiteRateLimiter
+            rate_limiter = KiteRateLimiter(calls_per_second=10.0, concurrency=8)
+        self._rate_limiter = rate_limiter
         # Lock to prevent race condition when refreshing the kite client
         self._init_lock = asyncio.Lock()
         # Instrument token cache: symbol -> instrument_token

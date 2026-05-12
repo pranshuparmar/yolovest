@@ -25,9 +25,10 @@ class BackfillIntradaySkill(BackfillDataSkill):
     description = "Bulk-fetch historical 5-minute intraday OHLCV"
 
     _DEFAULT_INTERVAL = "5minute"
-    # Heavier per-call than daily (multiple chunks per symbol), so be more
-    # conservative about how often we hit Kite to keep heartbeat unblocked.
-    _PER_SYMBOL_DELAY_SEC = 0.3
+    # Inherits _PER_SYMBOL_DELAY_SEC=0 from BackfillDataSkill. Pacing is
+    # enforced by KiteDataProvider's _throttle_historical (2.5 req/s) plus
+    # the shared KiteRateLimiter (10 req/s general). No skill-level sleep
+    # needed.
 
     def _default_days(self) -> int:
         # 1 year of 5-minute bars ≈ 250 trading days × 75 bars = ~19k rows/symbol.

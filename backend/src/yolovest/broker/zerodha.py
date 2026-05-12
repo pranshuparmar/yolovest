@@ -88,6 +88,7 @@ class ZerodhaBroker(BrokerBase):
         db: Any = None,
         kite_data_enabled: bool = False,
         market_data: Any = None,
+        rate_limiter: Any = None,
     ) -> None:
         self._api_key = api_key
         self._api_secret = api_secret
@@ -105,8 +106,13 @@ class ZerodhaBroker(BrokerBase):
         # and only re-verify via API when the token is expected to be expired.
         # This avoids a kite.profile() call on every heartbeat/page load.
         self._auth_cache_valid_until: float = 0.0
-        # Rate limiter: 8 concurrent to stay under Kite's 10 req/s
-        self._rate_limiter = asyncio.Semaphore(8)
+        # Shared rate limiter: 10 req/s + 8 concurrent. Pass-in keeps it
+        # shared with KiteDataProvider so quote/order/historical calls
+        # all draw from the same per-second budget.
+        if rate_limiter is None:
+            from yolovest.broker.kite_rate_limiter import KiteRateLimiter
+            rate_limiter = KiteRateLimiter(calls_per_second=10.0, concurrency=8)
+        self._rate_limiter = rate_limiter
         # Circuit breaker: trip after 5 consecutive API failures, 30s cooldown
         self._circuit_breaker = BrokerCircuitBreaker(
             failure_threshold=5, cooldown_sec=30.0,
