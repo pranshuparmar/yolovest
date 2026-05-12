@@ -58,10 +58,15 @@ services:
     deploy:
       resources:
         limits:
-          # 3 GB: XGBoost retrain on full Nifty 500 × 5y daily peaks near
-          # 1.5-2 GB. The previous 1536M ceiling silently OOM-killed the
-          # process mid-train (Docker SIGKILLs leave no Python traceback).
-          memory: 3072M
+          # Host has only 1.8 GB RAM. After OS (~200 MB), nginx-proxy,
+          # letsencrypt, and frontend (~128 MB), ~1.2 GB is the practical
+          # ceiling for the backend container. XGBoost retrain over the
+          # full universe pushes near this and triggers host OOM kill on
+          # the largest process. Mitigations in order of leverage:
+          #   1. Add swap on the host (mkswap, swapon) — free, instant.
+          #   2. Use tree_method='hist' in ml_signal.py (cuts ~50%).
+          #   3. Upgrade EC2 to t3.medium (4 GB) or larger.
+          memory: 1280M
     logging:
       driver: json-file
       options:
