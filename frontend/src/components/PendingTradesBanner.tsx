@@ -187,6 +187,12 @@ export function PendingTradesBanner() {
 
   if (!pending || pending.length === 0) return null;
 
+  const totalQty = pending.reduce((sum, t) => sum + t.position_size, 0);
+  const totalInvestment = pending.reduce(
+    (sum, t) => sum + t.entry_price * t.position_size,
+    0,
+  );
+
   const handleApproveAll = () => {
     if (!window.confirm(`Approve all ${pending.length} pending trades?`)) return;
     for (const t of pending) approve.mutate({ tradeId: t.id });
@@ -200,12 +206,23 @@ export function PendingTradesBanner() {
   return (
     <div className="bg-amber-900/20 border border-amber-800 rounded-lg overflow-hidden">
       <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-2 border-b border-amber-800/50">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-x-3 gap-y-1 flex-wrap">
           <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
           <h3 className="text-sm font-semibold text-amber-400">
             {pending.length} trade{pending.length > 1 ? "s" : ""} awaiting approval
           </h3>
-          <span className="text-xs text-gray-500">Click Edit to override before approving</span>
+          <span className="text-xs text-gray-500">·</span>
+          <span className="text-xs text-gray-400">
+            Total qty <span className="text-gray-200 font-medium">{totalQty}</span>
+          </span>
+          <span className="text-xs text-gray-500">·</span>
+          <span className="text-xs text-gray-400">
+            Investment{" "}
+            <span className="text-amber-300 font-semibold font-mono">
+              {"₹"}{fmt(totalInvestment, 0)}
+            </span>
+          </span>
+          <span className="text-xs text-gray-500 w-full md:w-auto">Click Edit to override before approving</span>
         </div>
         <div className="flex items-center gap-2">
           {pending.length > 1 && (
@@ -322,23 +339,6 @@ export function PendingTradesBanner() {
               )
             )}
           </tbody>
-          <tfoot>
-            <tr className="border-t-2 border-amber-700/50 bg-amber-950/40 font-semibold">
-              <td colSpan={6} className="py-2 px-3 text-right text-xs uppercase tracking-wide text-amber-300">
-                Grand Total
-              </td>
-              <td className="py-2 px-3 text-right text-gray-300">
-                {pending.reduce((sum, t) => sum + t.position_size, 0)}
-              </td>
-              <td className="py-2 px-3 text-right font-mono text-amber-300">
-                {"₹"}{fmt(
-                  pending.reduce((sum, t) => sum + t.entry_price * t.position_size, 0),
-                  0,
-                )}
-              </td>
-              <td />
-            </tr>
-          </tfoot>
         </table>
       </div>
     </div>
