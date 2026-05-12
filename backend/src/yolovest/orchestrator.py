@@ -340,6 +340,7 @@ class HeartbeatOrchestrator:
                     )
                     return results
 
+            signal.setdefault("mode", self._ctx.config.mode)
             pending_id = await self._ctx.db.insert_pending_trade(signal)
             await self._set_disposition(
                 signal, "awaiting_approval", f"pending_id={pending_id}"

@@ -430,6 +430,7 @@ class GenerateSignalsSkill(SkillBase):
 
                     filter_counts["passed"] += 1
                     outcome_tracker[symbol] = True
+                    signal.setdefault("mode", self.ctx.config.mode)
                     await self.ctx.db.insert_signal(signal)
                     signals_generated.append(signal)
                     await self.broadcast("signal_generated", {

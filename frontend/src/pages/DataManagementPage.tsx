@@ -183,8 +183,8 @@ function ReplacementInput({ symbol, current }: { symbol: string; current: string
 }
 
 const BULK_GROUPS = [
-  { id: "paper", label: "Paper Mode Data", description: "Paper-mode trades + predictions (signals & pending unaffected — they share both modes)", color: "amber" },
-  { id: "live", label: "Live Mode Data", description: "Live-mode trades + predictions (signals & pending unaffected — they share both modes)", color: "red" },
+  { id: "paper", label: "Paper Mode Data", description: "Paper-mode trades, predictions, signals, and pending approvals", color: "amber" },
+  { id: "live", label: "Live Mode Data", description: "Live-mode trades, predictions, signals, and pending approvals", color: "red" },
   { id: "dry_runs", label: "Dry Runs", description: "All dry run signal previews", color: "amber" },
   { id: "predictions", label: "Predictions — All Modes", description: "All predictions, scoreboard, and failure analyses across both paper and live", color: "amber" },
   { id: "signals", label: "Signals — All Modes", description: "All generated signals across both paper and live (today's dedup will reset)", color: "amber" },

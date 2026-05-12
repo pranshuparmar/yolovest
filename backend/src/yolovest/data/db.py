@@ -896,11 +896,14 @@ class Database:
     # ------------------------------------------------------------------
 
     async def insert_signal(self, signal: dict[str, Any]) -> None:
-        """Persist a generated signal."""
+        """Persist a generated signal. Caller should set `mode` to the
+        active trading mode so bulk-delete and analytics can scope by it.
+        """
         await self.conn.execute(
             "INSERT INTO signals (symbol, signal_type, entry_price, target_price, "
             "stop_loss_price, position_size, confidence_score, model_version, "
-            "features_snapshot, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            "features_snapshot, mode, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
             (
                 signal["symbol"],
                 signal["signal_type"],
@@ -911,6 +914,7 @@ class Database:
                 signal["confidence_score"],
                 signal.get("model_version", ""),
                 json.dumps(signal.get("features_snapshot", {})),
+                signal.get("mode", "paper"),
             ),
         )
         await self.conn.commit()
@@ -2697,14 +2701,19 @@ class Database:
     # ------------------------------------------------------------------
 
     async def insert_pending_trade(self, signal: dict[str, Any]) -> int:
-        """Queue a trade signal for manual approval. Returns the pending trade ID."""
+        """Queue a trade signal for manual approval. Returns the pending trade ID.
+
+        Caller should set `mode` on the signal dict so bulk-delete and
+        per-mode listings can scope correctly.
+        """
         import json
         ts_now = now_utc().isoformat()
         cursor = await self.conn.execute(
             "INSERT INTO pending_trades "
             "(symbol, signal_type, entry_price, target_price, stop_loss_price, "
-            "position_size, confidence_score, model_version, product, signal_data, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "position_size, confidence_score, model_version, product, signal_data, "
+            "mode, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 signal.get("symbol"),
                 signal.get("signal_type"),
@@ -2716,6 +2725,7 @@ class Database:
                 signal.get("model_version"),
                 signal.get("product", "MIS"),
                 json.dumps(signal),
+                signal.get("mode", "paper"),
                 ts_now,
             ),
         )
@@ -3299,25 +3309,15 @@ class Database:
         """Delete a group of related data. Returns {table: rows_deleted}.
 
         Groups:
-        - paper: all paper-mode trades + predictions
-        - live: all live-mode trades + predictions
+        - paper / live: trades + predictions + signals + pending_trades for that mode
         - dry_runs: all dry run results
-        - predictions: all predictions across modes
-        - signals: all signals across modes
-        - pending_trades: all queued pending trades across modes
-
-        Notes:
-        - signals and pending_trades tables have no `mode` column, so
-          mode-scoped deletion isn't possible without a join through
-          referenced trade IDs. Paper/live groups intentionally skip
-          these tables to avoid wiping the other mode's data.
-        - To clear signals or pending trades, use the dedicated groups.
+        - predictions / signals / pending_trades: clears the table across all modes
         """
         deleted: dict[str, int] = {}
 
         if group in ("paper", "live"):
             mode = group
-            for table in ("trades", "predictions"):
+            for table in ("trades", "predictions", "signals", "pending_trades"):
                 try:
                     cursor = await self.conn.execute(
                         f"DELETE FROM {table} WHERE mode = ?", (mode,),  # noqa: S608
@@ -3325,7 +3325,7 @@ class Database:
                     deleted[table] = cursor.rowcount
                 except Exception:
                     deleted[table] = 0
-            # llm_reviews for paper-mode trades only (live trades may keep audit trail)
+            # llm_reviews for paper-mode trades only (live trades keep audit trail)
             if group == "paper":
                 try:
                     cursor = await self.conn.execute(

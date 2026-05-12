@@ -355,20 +355,64 @@ class TestBulkDelete:
         )
         assert await cur.fetchone() is None
 
-    async def test_paper_delete_does_not_touch_signals(self, db):
-        """Signals share both modes with no mode column. Mode-scoped
-        delete must leave them alone."""
+    async def test_paper_delete_only_removes_paper_signals(self, db):
+        await db.insert_signal({
+            "symbol": "RELIANCE", "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "mode": "paper",
+        })
+        await db.insert_signal({
+            "symbol": "TCS", "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "mode": "live",
+        })
+
+        await db.bulk_delete("paper")
+
+        cur = await db.read_conn.execute("SELECT symbol, mode FROM signals")
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "TCS"
+        assert rows[0][1] == "live"
+
+    async def test_paper_delete_only_removes_paper_pending_trades(self, db):
+        await db.insert_pending_trade({
+            "symbol": "RELIANCE", "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "mode": "paper",
+        })
+        await db.insert_pending_trade({
+            "symbol": "TCS", "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "mode": "live",
+        })
+
+        await db.bulk_delete("paper")
+
+        cur = await db.read_conn.execute("SELECT symbol, mode FROM pending_trades")
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "TCS"
+        assert rows[0][1] == "live"
+
+    async def test_insert_signal_defaults_to_paper_mode(self, db):
+        """If caller forgets to set mode, signal lands in paper bucket."""
         await db.insert_signal({
             "symbol": "RELIANCE", "signal_type": "BUY",
             "entry_price": 100.0, "target_price": 105.0,
             "stop_loss_price": 95.0, "position_size": 1,
             "confidence_score": 0.7, "model_version": "v1",
         })
-
-        await db.bulk_delete("paper")
-
-        cur = await db.read_conn.execute("SELECT COUNT(*) FROM signals")
-        assert (await cur.fetchone())[0] == 1
+        cur = await db.read_conn.execute("SELECT mode FROM signals")
+        assert (await cur.fetchone())[0] == "paper"
 
     async def test_signals_group_clears_signals(self, db):
         for _ in range(3):

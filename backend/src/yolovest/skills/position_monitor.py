@@ -567,6 +567,7 @@ class PositionMonitorSkill(SkillBase):
             "confidence_score": 1.0,
             "product": product,
             "model_version": f"exit_{reason}",
+            "mode": self.ctx.config.mode,
         }
         pending_id = await self.ctx.db.insert_pending_trade(signal)
         invested = round(qty * entry, 2)
