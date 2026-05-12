@@ -3054,23 +3054,42 @@ class Database:
     async def resolve_symbols_with_replacements(
         self, symbols: list[str],
     ) -> list[str]:
-        """Substitute quarantined symbols with their configured replacements.
+        """Apply quarantine policy to a raw symbol list.
 
-        Used by ingest skills so that user-configured swaps (e.g. ZOMATO ->
-        ETERNAL after the corporate rename) actually take effect in the
-        pipeline. The output is deduplicated while preserving input order.
+        Used by ingest skills so user-configured swaps actually take effect
+        and quarantined symbols don't leak into the pipeline.
+
+        Policy:
+          - Symbol is not quarantined → keep as-is.
+          - Symbol is quarantined AND has a replacement → use the
+            replacement (e.g. ZOMATO -> ETERNAL after the corporate rename).
+          - Symbol is quarantined WITHOUT a replacement → drop entirely.
+            (Quarantine means data fetch failed 3+ times. Without a
+            user-supplied replacement, the symbol shouldn't appear in any
+            downstream operation.)
+
+        Output is deduplicated while preserving input order.
         """
         repl = await self.get_quarantine_replacements()
-        if not repl:
-            return list(symbols)
+        quarantined = await self.get_all_quarantined_symbol_set()
         seen: set[str] = set()
         out: list[str] = []
         for s in symbols:
-            new = repl.get(s, s)
-            if not new or new in seen:
-                continue
-            seen.add(new)
-            out.append(new)
+            if s in quarantined:
+                target = repl.get(s)
+                if not target:
+                    # Quarantined and no replacement → drop
+                    continue
+                # Quarantined with replacement → swap
+                if target in seen:
+                    continue
+                seen.add(target)
+                out.append(target)
+            else:
+                if s in seen:
+                    continue
+                seen.add(s)
+                out.append(s)
         return out
 
     # ------------------------------------------------------------------

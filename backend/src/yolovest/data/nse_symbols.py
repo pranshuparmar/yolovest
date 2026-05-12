@@ -81,7 +81,7 @@ NIFTY_500_SUBSET = _deduped
 
 
 def get_universe_symbols(
-    universe: Literal["nifty50", "nifty500", "all"] = "nifty500",
+    universe: Literal["nifty50", "nifty100", "nifty200", "nifty500", "all"] = "nifty500",
 ) -> list[str]:
     """Return the bundled (static) symbol list for the requested universe.
 
@@ -89,15 +89,18 @@ def get_universe_symbols(
     For up-to-date constituents, prefer fetch_live_constituents() instead.
 
     Args:
-        universe: One of "nifty50", "nifty500", or "all".
-            "all" is treated the same as "nifty500" (bundled subset).
+        universe: One of "nifty50", "nifty100", "nifty200", "nifty500", or
+            "all". "all" is a legacy alias for "nifty500" (kept for
+            backwards-compat with existing DB config). nifty100/nifty200
+            don't have bundled lists — they fall through to NIFTY_500_SUBSET
+            (a superset) since the live fetch is the primary path for them.
 
     Returns:
         List of NSE symbol strings.
     """
     if universe == "nifty50":
         return list(NIFTY_50)
-    # nifty500 and "all" both use the broader list
+    # nifty100, nifty200, nifty500, and "all" all use the broader bundled list
     return list(NIFTY_500_SUBSET)
 
 

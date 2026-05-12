@@ -122,7 +122,7 @@ class ScanningWeights(BaseModel):
 
 
 class ScanningConfig(BaseModel):
-    universe: str = "nifty500"  # "nifty500", "nifty50", "all"
+    universe: str = "nifty500"  # "nifty50" | "nifty100" | "nifty200" | "nifty500"
     universe_cron: str = "30 8 * * 1-5"  # daily 8:30 AM IST on weekdays
     seed_symbols: list[str] = Field(
         default_factory=lambda: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]

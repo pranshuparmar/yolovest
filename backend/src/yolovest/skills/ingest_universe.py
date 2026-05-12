@@ -65,6 +65,7 @@ class IngestUniverseSkill(SkillBase):
             "total_bars_stored": 0,
             "errors": [],
             "cache_hits": 0,
+            "newly_quarantined": [],
         }
 
         for idx, symbol in enumerate(symbols):
@@ -78,7 +79,15 @@ class IngestUniverseSkill(SkillBase):
                     )
                     results["total_bars_stored"] += count
                     results["symbols_ingested"] += 1
+                    # Reset failure counter on a clean fetch
+                    try:
+                        await self.ctx.db.record_fetch_success(symbol)
+                    except Exception:
+                        logger.debug("record_fetch_success failed", exc_info=True)
                 else:
+                    # Empty result counts as a soft failure — the symbol may
+                    # be delisted or the data plan doesn't cover it.
+                    await self._record_failure(symbol, "no data returned", results)
                     logger.debug("No data returned for %s", symbol)
 
                 # Broadcast progress every 10 symbols
@@ -92,6 +101,7 @@ class IngestUniverseSkill(SkillBase):
             except Exception as e:
                 results["errors"].append(f"{symbol}: {e}")
                 logger.debug("Universe fetch failed for %s: %s", symbol, e)
+                await self._record_failure(symbol, str(e), results)
 
         error_count = len(results["errors"])
         if error_count:
@@ -163,6 +173,27 @@ class IngestUniverseSkill(SkillBase):
         except Exception:
             logger.debug("Could not decode universe cache for %s", key, exc_info=True)
         return None
+
+    async def _record_failure(
+        self, symbol: str, reason: str, results: dict[str, Any],
+    ) -> None:
+        """Bump the per-symbol failure counter; if it hits the quarantine
+        threshold, log loudly so the user knows the replacement (if any)
+        needs attention.
+        """
+        try:
+            now_quarantined = await self.ctx.db.record_fetch_failure(symbol, reason)
+        except Exception:
+            logger.debug("record_fetch_failure failed", exc_info=True)
+            return
+        if now_quarantined:
+            results["newly_quarantined"].append(symbol)
+            logger.warning(
+                "ingest-universe: %s auto-quarantined after repeated fetch "
+                "failures (last: %s). Set a replacement via the Quarantine "
+                "page or it will be skipped on next run.",
+                symbol, reason,
+            )
 
     async def _write_universe_cache(self, key: str, symbols: list[str]) -> None:
         try:

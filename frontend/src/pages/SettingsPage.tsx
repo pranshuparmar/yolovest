@@ -79,8 +79,9 @@ const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
   ],
   "scanning.universe": [
     { value: "nifty50", label: "Nifty 50" },
+    { value: "nifty100", label: "Nifty 100" },
+    { value: "nifty200", label: "Nifty 200" },
     { value: "nifty500", label: "Nifty 500" },
-    { value: "all", label: "All" },
   ],
   "execution.transaction_mode": [
     { value: "auto", label: "Auto (execute immediately)" },

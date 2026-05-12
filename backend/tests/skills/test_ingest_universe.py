@@ -126,6 +126,7 @@ class TestDaysDefaultsToConfig:
         skill.ctx.db.set_system_state = AsyncMock()
         skill.ctx.db.resolve_symbols_with_replacements = AsyncMock(return_value=["RELIANCE"])
         skill.ctx.db.upsert_ohlcv = AsyncMock(return_value=0)
+        skill.ctx.db.record_fetch_success = AsyncMock()
         skill.ctx.market_data.get_ohlcv = AsyncMock(return_value=[])
 
         with patch(
@@ -137,3 +138,77 @@ class TestDaysDefaultsToConfig:
         # The 'days' value passed to get_ohlcv must reflect the config, not 365
         call_args = skill.ctx.market_data.get_ohlcv.call_args_list[0]
         assert call_args.kwargs.get("days") == 1825 or call_args.args[2] == 1825
+
+
+class TestFailureTracking:
+    """Per-symbol fetch failures must increment the quarantine counter so
+    replacement symbols that also fail get auto-quarantined."""
+
+    async def test_records_failure_on_exception(self, skill):
+        skill.ctx.config.market_data.backfill_days = 365
+        skill.ctx.db.get_system_state = AsyncMock(return_value=None)
+        skill.ctx.db.set_system_state = AsyncMock()
+        skill.ctx.db.resolve_symbols_with_replacements = AsyncMock(
+            return_value=["BADSYMBOL"],
+        )
+        skill.ctx.db.record_fetch_failure = AsyncMock(return_value=False)
+        skill.ctx.db.record_fetch_success = AsyncMock()
+        skill.ctx.market_data.get_ohlcv = AsyncMock(
+            side_effect=ValueError("delisted"),
+        )
+
+        with patch(
+            "yolovest.skills.ingest_universe.fetch_live_constituents",
+            new=AsyncMock(return_value=["BADSYMBOL"]),
+        ):
+            await skill.execute()
+
+        skill.ctx.db.record_fetch_failure.assert_awaited()
+        call = skill.ctx.db.record_fetch_failure.call_args
+        assert call.args[0] == "BADSYMBOL"
+        assert "delisted" in call.args[1]
+
+    async def test_reports_newly_quarantined(self, skill):
+        """When record_fetch_failure returns True (3rd consecutive failure),
+        the symbol should appear in results['newly_quarantined']."""
+        skill.ctx.config.market_data.backfill_days = 365
+        skill.ctx.db.get_system_state = AsyncMock(return_value=None)
+        skill.ctx.db.set_system_state = AsyncMock()
+        skill.ctx.db.resolve_symbols_with_replacements = AsyncMock(
+            return_value=["BADSYMBOL"],
+        )
+        skill.ctx.db.record_fetch_failure = AsyncMock(return_value=True)
+        skill.ctx.db.record_fetch_success = AsyncMock()
+        skill.ctx.market_data.get_ohlcv = AsyncMock(
+            side_effect=ValueError("delisted"),
+        )
+
+        with patch(
+            "yolovest.skills.ingest_universe.fetch_live_constituents",
+            new=AsyncMock(return_value=["BADSYMBOL"]),
+        ):
+            result = await skill.execute()
+
+        assert "BADSYMBOL" in result.data["newly_quarantined"]
+
+    async def test_records_success_clears_failures(self, skill):
+        """A clean fetch must reset the counter via record_fetch_success."""
+        from yolovest.models.schemas import OHLCVBar
+        from datetime import datetime
+
+        bars = [OHLCVBar(timestamp=datetime(2026, 5, 1), open=1, high=2, low=1, close=1.5, volume=100)]
+        skill.ctx.config.market_data.backfill_days = 365
+        skill.ctx.db.get_system_state = AsyncMock(return_value=None)
+        skill.ctx.db.set_system_state = AsyncMock()
+        skill.ctx.db.resolve_symbols_with_replacements = AsyncMock(return_value=["RELIANCE"])
+        skill.ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        skill.ctx.db.record_fetch_success = AsyncMock()
+        skill.ctx.market_data.get_ohlcv = AsyncMock(return_value=bars)
+
+        with patch(
+            "yolovest.skills.ingest_universe.fetch_live_constituents",
+            new=AsyncMock(return_value=["RELIANCE"]),
+        ):
+            await skill.execute()
+
+        skill.ctx.db.record_fetch_success.assert_awaited_with("RELIANCE")

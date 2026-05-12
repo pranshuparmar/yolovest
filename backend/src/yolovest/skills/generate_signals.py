@@ -34,6 +34,32 @@ class GenerateSignalsSkill(SkillBase):
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         watchlist = await self.ctx.db.get_combined_watchlist()
+        # Apply quarantine policy to watchlist entries:
+        #   - Quarantined + replacement → rewrite the entry's symbol
+        #     to the replacement (preserves its composite scores).
+        #   - Quarantined + no replacement → drop the entry.
+        #   - Active symbol → keep as-is.
+        # Algorithmic watchlist is already quarantine-clean (market-scan reads
+        # from get_nse_universe which excludes quarantined), but user_watchlist
+        # entries pinned before quarantine can otherwise leak through here.
+        repl = await self.ctx.db.get_quarantine_replacements()
+        quarantined = await self.ctx.db.get_all_quarantined_symbol_set()
+        if repl or quarantined:
+            filtered: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for w in watchlist:
+                sym = w["symbol"]
+                if sym in quarantined:
+                    target = repl.get(sym)
+                    if not target:
+                        continue  # drop
+                    w = {**w, "symbol": target}
+                    sym = target
+                if sym in seen:
+                    continue
+                seen.add(sym)
+                filtered.append(w)
+            watchlist = filtered
         signals_generated = []
         risk_cfg = self.ctx.config.risk
         min_confidence_buy = risk_cfg.min_confidence_buy

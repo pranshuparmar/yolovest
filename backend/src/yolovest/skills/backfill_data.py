@@ -56,6 +56,7 @@ class BackfillDataSkill(SkillBase):
             "symbols_processed": 0,
             "total_bars_stored": 0,
             "errors": [],
+            "newly_quarantined": [],
         }
 
         if not symbols:
@@ -79,12 +80,18 @@ class BackfillDataSkill(SkillBase):
                         symbol, interval, bars, source_label,
                     )
                     results["total_bars_stored"] += count
+                    try:
+                        await self.ctx.db.record_fetch_success(symbol)
+                    except Exception:
+                        logger.debug("record_fetch_success failed", exc_info=True)
                 else:
                     logger.warning("%s: no data returned for %s", self.name, symbol)
+                    await self._record_failure(symbol, "no data returned", results)
                 results["symbols_processed"] += 1
             except Exception as e:
                 results["errors"].append(f"{symbol}: {e}")
                 logger.warning("%s: failed for %s: %s", self.name, symbol, e)
+                await self._record_failure(symbol, str(e), results)
 
             # Progress log every 25 symbols so long runs are visible
             if idx % 25 == 0 or idx == len(symbols):
@@ -104,6 +111,24 @@ class BackfillDataSkill(SkillBase):
             skill_name=self.name,
             data=results,
         )
+
+    async def _record_failure(
+        self, symbol: str, reason: str, results: dict[str, Any],
+    ) -> None:
+        """Bump the per-symbol failure counter; surface auto-quarantine."""
+        try:
+            now_quarantined = await self.ctx.db.record_fetch_failure(symbol, reason)
+        except Exception:
+            logger.debug("record_fetch_failure failed", exc_info=True)
+            return
+        if now_quarantined:
+            results["newly_quarantined"].append(symbol)
+            logger.warning(
+                "%s: %s auto-quarantined after repeated fetch failures (last: %s). "
+                "Configure a replacement on the Quarantine page or it will be "
+                "skipped on the next run.",
+                self.name, symbol, reason,
+            )
 
     async def _collect_tracked_symbols(self) -> list[str]:
         """Default symbol set: every stock the system currently tracks.
