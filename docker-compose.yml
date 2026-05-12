@@ -8,12 +8,22 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    # Heal cert symlinks before booting nginx. Guards against the
+    # acme-companion + nginx-proxy failure mode where the per-domain
+    # cert directory survives a restart but the top-level <domain>.crt /
+    # <domain>.key symlinks go missing, which makes nginx-proxy generate
+    # a fallback config with `ssl_reject_handshake on;`.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - /heal-cert-symlinks.sh && exec /app/docker-entrypoint.sh forego start -r
     volumes:
       - /var/run/docker.sock:/tmp/docker.sock:ro
       - certs:/etc/nginx/certs
       - vhost:/etc/nginx/vhost.d
       - html:/usr/share/nginx/html
       - ./nginx/custom.conf:/etc/nginx/conf.d/zz-custom.conf:ro
+      - ./nginx/heal-cert-symlinks.sh:/heal-cert-symlinks.sh:ro
 
   letsencrypt:
     image: nginxproxy/acme-companion
