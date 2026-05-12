@@ -2,13 +2,17 @@
 
 Trigger: MANUAL — run via dashboard or Telegram to seed historical data.
 
-Fetches N days of daily OHLCV for all watchlist symbols using the existing
-market data provider chain (jugaad → yfinance fallback). Upserts into DB
-with deduplication, so it's safe to run repeatedly.
+Fetches N days of daily OHLCV for every symbol the system currently tracks
+(watchlist + user_watchlist + market-regime index), using the active provider
+chain. Upserts into DB with deduplication, so it's safe to run repeatedly.
 
-Typical use: bootstrapping a fresh install so model-retrain has enough bars.
+Typical use:
+- Bootstrapping a fresh install so model-retrain has enough bars.
+- Refreshing all history after upgrading data providers (e.g. switching from
+  free providers to a paid Kite plan) to eliminate adjustment/source drift.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -23,22 +27,39 @@ class BackfillDataSkill(SkillBase):
     trigger = SkillTrigger.MANUAL
     schedule = None
 
+    # Small inter-symbol delay so backfill doesn't drain the Kite rate-limit
+    # budget shared with the heartbeat (10 req/s aggregate).
+    _PER_SYMBOL_DELAY_SEC = 0.15
+
     def should_run(self) -> bool:
         return True
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         default_days = self.ctx.config.market_data.backfill_days
         days = int(kwargs.get("days", default_days))
-        symbols = kwargs.get("symbols", self.ctx.config.scanning.seed_symbols)
+
+        symbols = kwargs.get("symbols")
+        if symbols is None:
+            symbols = await self._collect_tracked_symbols()
 
         results: dict[str, Any] = {
             "days_requested": days,
+            "symbols_total": len(symbols),
             "symbols_processed": 0,
             "total_bars_stored": 0,
             "errors": [],
         }
 
-        for symbol in symbols:
+        if not symbols:
+            logger.warning("backfill-data: no symbols to process")
+            return SkillResult(success=True, skill_name=self.name, data=results)
+
+        logger.info(
+            "backfill-data: starting — %d symbols × %d days",
+            len(symbols), days,
+        )
+
+        for idx, symbol in enumerate(symbols, 1):
             try:
                 bars = await self.ctx.market_data.get_ohlcv(
                     symbol, "daily", days=days, skip_stale_check=True,
@@ -46,13 +67,24 @@ class BackfillDataSkill(SkillBase):
                 if bars:
                     count = await self.ctx.db.upsert_ohlcv(symbol, "daily", bars, "backfill")
                     results["total_bars_stored"] += count
-                    logger.info("Backfilled %s: %d bars stored", symbol, count)
                 else:
-                    logger.warning("No data returned for %s", symbol)
+                    logger.warning("backfill-data: no data returned for %s", symbol)
                 results["symbols_processed"] += 1
             except Exception as e:
                 results["errors"].append(f"{symbol}: {e}")
-                logger.warning("Backfill failed for %s: %s", symbol, e)
+                logger.warning("backfill-data: failed for %s: %s", symbol, e)
+
+            # Progress log every 25 symbols so long runs are visible
+            if idx % 25 == 0 or idx == len(symbols):
+                logger.info(
+                    "backfill-data: progress %d/%d — bars_stored=%d, errors=%d",
+                    idx, len(symbols),
+                    results["total_bars_stored"], len(results["errors"]),
+                )
+
+            # Pace requests so a concurrent heartbeat can still get through
+            if idx < len(symbols):
+                await asyncio.sleep(self._PER_SYMBOL_DELAY_SEC)
 
         all_failed = results["symbols_processed"] == 0 and len(results["errors"]) > 0
         return SkillResult(
@@ -60,3 +92,36 @@ class BackfillDataSkill(SkillBase):
             skill_name=self.name,
             data=results,
         )
+
+    async def _collect_tracked_symbols(self) -> list[str]:
+        """Default symbol set: every stock the system currently tracks.
+
+        Composed of: market-scan watchlist + user-pinned watchlist + the
+        market-regime index. Falls back to scanning.seed_symbols only if
+        nothing is tracked yet (truly fresh install).
+        """
+        symbols: set[str] = set()
+        try:
+            for row in await self.ctx.db.get_watchlist():
+                if sym := row.get("symbol"):
+                    symbols.add(sym)
+        except Exception:
+            logger.debug("backfill-data: could not read watchlist", exc_info=True)
+        try:
+            for row in await self.ctx.db.get_user_watchlist():
+                if sym := row.get("symbol"):
+                    symbols.add(sym)
+        except Exception:
+            logger.debug("backfill-data: could not read user_watchlist", exc_info=True)
+
+        regime = self.ctx.config.strategy.market_regime
+        if regime.enabled and regime.index_symbol:
+            symbols.add(regime.index_symbol)
+
+        if not symbols:
+            logger.info(
+                "backfill-data: no tracked symbols found, falling back to seed_symbols",
+            )
+            return list(self.ctx.config.scanning.seed_symbols)
+
+        return sorted(symbols)
