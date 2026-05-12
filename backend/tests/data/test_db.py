@@ -242,6 +242,79 @@ class TestWatchlist:
         assert len(result) == 1
         assert result[0]["symbol"] == "TCS"
 
+    async def test_shadow_prediction_stores_mode(self, db):
+        """Regression: insert_shadow_prediction must store the trading mode.
+        Previously omitted the mode column, so all shadow predictions
+        defaulted to 'paper' in the DB even when generated in live mode —
+        polluting paper analytics and confusing bulk delete by mode."""
+        pred_id = await db.insert_shadow_prediction({
+            "symbol": "RELIANCE",
+            "predicted_direction": "BUY",
+            "predicted_target": 100.0,
+            "predicted_stop_loss": 90.0,
+            "expected_holding_period": "intraday",
+            "model_version": "swing_v1",
+            "mode": "live",
+        })
+        row = await db.read_conn.execute(
+            "SELECT mode, is_shadow FROM predictions WHERE prediction_id = ?",
+            (pred_id,),
+        )
+        result = await row.fetchone()
+        assert result is not None
+        assert result[0] == "live"
+        assert result[1] == 1  # is_shadow
+
+    async def test_shadow_prediction_defaults_to_paper(self, db):
+        """If caller doesn't pass mode (legacy code path), default to paper."""
+        pred_id = await db.insert_shadow_prediction({
+            "symbol": "RELIANCE",
+            "predicted_direction": "BUY",
+            "predicted_target": 100.0,
+            "predicted_stop_loss": 90.0,
+            "expected_holding_period": "intraday",
+            "model_version": "swing_v1",
+        })
+        row = await db.read_conn.execute(
+            "SELECT mode FROM predictions WHERE prediction_id = ?",
+            (pred_id,),
+        )
+        result = await row.fetchone()
+        assert result[0] == "paper"
+
+    async def test_score_prediction_sets_scored_at(self, db):
+        """Regression: feedback queries filter on predictions.scored_at;
+        score_prediction must populate it."""
+        pred_id = await db.insert_prediction({
+            "symbol": "RELIANCE",
+            "trade_id": None,
+            "predicted_direction": "BUY",
+            "predicted_target": 100.0,
+            "predicted_stop_loss": 90.0,
+            "expected_holding_period": "intraday",
+            "model_version": "swing_v1",
+            "mode": "live",
+        })
+        await db.score_prediction(
+            prediction_id=pred_id,
+            actual_price=105.0,
+            direction_correct=True,
+            target_hit=True,
+            actual_pnl_pct=5.0,
+        )
+        row = await db.read_conn.execute(
+            "SELECT scored_at FROM predictions WHERE prediction_id = ?",
+            (pred_id,),
+        )
+        result = await row.fetchone()
+        assert result[0] is not None  # populated with datetime('now')
+
+    async def test_get_feedback_data_does_not_raise(self, db):
+        """Regression: 'no such column: p.scored_at' from feedback query."""
+        # Empty DB — should still execute the query without error
+        data = await db.get_feedback_data(lookback_days=14)
+        assert isinstance(data, dict)
+
     async def test_upsert_watchlist_concurrent_with_other_write(self, db):
         """Regression: upsert_watchlist must not raise
         'cannot start a transaction within a transaction' when another

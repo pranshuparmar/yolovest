@@ -1897,6 +1897,7 @@ class Database:
         pred_id = f"SP-{uuid.uuid4().hex[:8]}"
         ts_now = now_utc().isoformat()
         symbol = prediction.get("symbol")
+        mode = prediction.get("mode", "paper")
 
         from yolovest.models.schemas import _parse_holding_period
 
@@ -1911,17 +1912,19 @@ class Database:
             await self.conn.execute(
                 "INSERT INTO predictions (prediction_id, symbol, signal_id, trade_id, created_at, "
                 "prediction_end_time, actual_price, direction_correct, target_hit, "
-                "actual_pnl_pct, is_shadow, model_version) "
-                "VALUES (?, ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?)",
-                (pred_id, symbol, ts_now, end_time.isoformat(), prediction.get("model_version")),
+                "actual_pnl_pct, is_shadow, model_version, mode) "
+                "VALUES (?, ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?, ?)",
+                (pred_id, symbol, ts_now, end_time.isoformat(),
+                 prediction.get("model_version"), mode),
             )
         else:
             await self.conn.execute(
                 "INSERT INTO predictions (prediction_id, signal_id, trade_id, created_at, "
                 "prediction_end_time, actual_price, direction_correct, target_hit, "
-                "actual_pnl_pct, is_shadow, model_version) "
-                "VALUES (?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?)",
-                (pred_id, ts_now, end_time.isoformat(), prediction.get("model_version")),
+                "actual_pnl_pct, is_shadow, model_version, mode) "
+                "VALUES (?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?, ?)",
+                (pred_id, ts_now, end_time.isoformat(),
+                 prediction.get("model_version"), mode),
             )
 
         # Also link to the latest signal for this symbol (best-effort)
@@ -2123,7 +2126,8 @@ class Database:
         """Update a prediction with actual outcome."""
         await self.conn.execute(
             "UPDATE predictions SET actual_price = ?, direction_correct = ?, "
-            "target_hit = ?, actual_pnl_pct = ? WHERE prediction_id = ?",
+            "target_hit = ?, actual_pnl_pct = ?, scored_at = datetime('now') "
+            "WHERE prediction_id = ?",
             (
                 actual_price,
                 1 if direction_correct else 0,

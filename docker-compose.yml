@@ -58,7 +58,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
+          # 3 GB: XGBoost retrain on full Nifty 500 × 5y daily peaks near
+          # 1.5-2 GB. The previous 1536M ceiling silently OOM-killed the
+          # process mid-train (Docker SIGKILLs leave no Python traceback).
+          memory: 3072M
     logging:
       driver: json-file
       options:

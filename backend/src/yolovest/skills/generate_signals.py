@@ -288,6 +288,7 @@ class GenerateSignalsSkill(SkillBase):
                                 "expected_holding_period": shadow_pred.holding_period,
                                 "model_version": shadow_pred.model_version,
                                 "entry_price": shadow_pred.entry_price,
+                                "mode": self.ctx.config.mode,
                             })
                     except Exception as e:
                         logger.debug("Shadow inference failed for %s: %s", symbol, e)
