@@ -1,8 +1,9 @@
-import { useHealth } from "../hooks/queries";
+import { useHealth, useSystemState } from "../hooks/queries";
 import clsx from "clsx";
 
 export function StatusBadge() {
   const { data, isLoading } = useHealth();
+  const { data: systemState } = useSystemState();
 
   if (isLoading || !data) {
     return <span className="text-xs text-gray-500">Loading...</span>;
@@ -36,6 +37,15 @@ export function StatusBadge() {
       >
         {data.mode.toUpperCase()}
       </span>
+      {systemState?.kill_switch_active && (
+        <span
+          className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-red-900/40 text-red-400 font-semibold"
+          title="Trading is paused. Use /resume in Telegram or the Settings page."
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+          KILL SWITCH
+        </span>
+      )}
     </div>
   );
 }

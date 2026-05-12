@@ -132,6 +132,9 @@ function OverrideRow({
           )}
         />
       </td>
+      <td className="py-2 px-3 text-right font-mono text-gray-300">
+        {"₹"}{fmt(entry * qty, 0)}
+      </td>
       <td className="py-2 px-3 text-center">
         <div className="flex items-center justify-center gap-1.5">
           <button
@@ -238,6 +241,7 @@ export function PendingTradesBanner() {
               <th className="py-2 px-3 text-right">Target</th>
               <th className="py-2 px-3 text-right">SL</th>
               <th className="py-2 px-3 text-right">Qty</th>
+              <th className="py-2 px-3 text-right">Investment</th>
               <th className="py-2 px-3 text-center">Actions</th>
             </tr>
           </thead>
@@ -287,6 +291,9 @@ export function PendingTradesBanner() {
                   <td className="py-2 px-3 text-right font-mono text-emerald-400">{fmt(t.target_price)}</td>
                   <td className="py-2 px-3 text-right font-mono text-red-400">{fmt(t.stop_loss_price)}</td>
                   <td className="py-2 px-3 text-right text-gray-400">{t.position_size}</td>
+                  <td className="py-2 px-3 text-right font-mono text-gray-300">
+                    {"₹"}{fmt(t.entry_price * t.position_size, 0)}
+                  </td>
                   <td className="py-2 px-3 text-center">
                     <div className="flex items-center justify-center gap-1.5">
                       <button
@@ -315,6 +322,23 @@ export function PendingTradesBanner() {
               )
             )}
           </tbody>
+          <tfoot>
+            <tr className="border-t-2 border-amber-700/50 bg-amber-950/40 font-semibold">
+              <td colSpan={6} className="py-2 px-3 text-right text-xs uppercase tracking-wide text-amber-300">
+                Grand Total
+              </td>
+              <td className="py-2 px-3 text-right text-gray-300">
+                {pending.reduce((sum, t) => sum + t.position_size, 0)}
+              </td>
+              <td className="py-2 px-3 text-right font-mono text-amber-300">
+                {"₹"}{fmt(
+                  pending.reduce((sum, t) => sum + t.entry_price * t.position_size, 0),
+                  0,
+                )}
+              </td>
+              <td />
+            </tr>
+          </tfoot>
         </table>
       </div>
     </div>
