@@ -90,6 +90,46 @@ class IngestDataSkill(SkillBase):
             pass
         return self.ctx.config.scanning.seed_symbols
 
+    async def _select_priority_symbols(self, limit: int = 15) -> list[str]:
+        """Symbols worth spending NSE's per-symbol rate budget on.
+
+        Composition (in order, deduped):
+          1. Open positions — we need to know about corporate actions on
+             stocks we currently hold (splits, bonuses, dividends).
+          2. Top N from the algorithmic watchlist by composite_score —
+             these are the most likely signal candidates.
+
+        Capped at `limit` to keep total NSE calls bounded. Falls back to
+        seed_symbols only if both sources are empty (truly fresh install).
+        """
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        try:
+            for pos in await self.ctx.db.get_open_positions(mode=self.ctx.config.mode):
+                sym = pos.get("symbol") if isinstance(pos, dict) else getattr(pos, "symbol", None)
+                if sym and sym not in seen:
+                    seen.add(sym)
+                    ordered.append(sym)
+        except Exception:
+            logger.debug("ingest-data: could not read open positions", exc_info=True)
+
+        try:
+            for row in await self.ctx.db.get_watchlist():
+                sym = row.get("symbol")
+                if sym and sym not in seen:
+                    seen.add(sym)
+                    ordered.append(sym)
+                if len(ordered) >= limit:
+                    break
+        except Exception:
+            logger.debug("ingest-data: could not read watchlist", exc_info=True)
+
+        if not ordered:
+            return list(self.ctx.config.scanning.seed_symbols)
+
+        return ordered[:limit]
+
     async def execute(self, **kwargs: Any) -> SkillResult:
         symbols = kwargs.get("symbols") or await self._get_active_symbols()
         results: dict[str, Any] = {
@@ -318,8 +358,11 @@ class IngestDataSkill(SkillBase):
             except Exception as e:
                 logger.warning("NSE FII/DII fetch failed: %s", e)
 
-            # Corporate actions + delivery data per symbol
-            symbols = self.ctx.config.scanning.seed_symbols
+            # Corporate actions + delivery data for the symbols that matter:
+            # open positions (corp actions directly affect what we hold) plus
+            # the top watchlist names by composite score. Capped at 15 to
+            # respect NSE's aggressive per-symbol rate limits.
+            symbols = await self._select_priority_symbols(limit=15)
             for symbol in symbols:
                 try:
                     actions = await nse.fetch_corp_actions(symbol)
