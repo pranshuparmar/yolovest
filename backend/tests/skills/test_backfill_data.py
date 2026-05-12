@@ -135,3 +135,66 @@ class TestBackfillErrorHandling:
         assert result.data["symbols_processed"] == 2
         assert len(result.data["errors"]) == 1
         assert "BADSYMBOL" in result.data["errors"][0]
+
+
+class TestBackfillIntervalKwarg:
+    """The skill should pass the requested interval through to get_ohlcv."""
+
+    async def test_default_interval_is_daily(self, backfill_skill, fake_bars):
+        ctx = backfill_skill.ctx
+        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "RELIANCE"}])
+        ctx.db.get_user_watchlist = AsyncMock(return_value=[])
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+        ctx.config.strategy.market_regime.enabled = False
+
+        await backfill_skill.execute()
+
+        call_args = ctx.market_data.get_ohlcv.call_args_list[0]
+        assert call_args.args[1] == "daily"
+
+    async def test_explicit_interval_kwarg_is_used(self, backfill_skill, fake_bars):
+        ctx = backfill_skill.ctx
+        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "RELIANCE"}])
+        ctx.db.get_user_watchlist = AsyncMock(return_value=[])
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+        ctx.config.strategy.market_regime.enabled = False
+
+        await backfill_skill.execute(interval="5minute")
+
+        call_args = ctx.market_data.get_ohlcv.call_args_list[0]
+        assert call_args.args[1] == "5minute"
+        # Source label should reflect the non-daily interval
+        upsert_args = ctx.db.upsert_ohlcv.call_args_list[0]
+        assert upsert_args.args[3] == "backfill_5minute"
+
+
+class TestBackfillIntradaySkill:
+    """The 5-minute backfill skill mirrors backfill-data with intraday defaults."""
+
+    async def test_defaults_to_5minute_interval(self, app_context, fake_bars):
+        from yolovest.skills.backfill_intraday import BackfillIntradaySkill
+
+        skill = BackfillIntradaySkill(app_context)
+        skill._PER_SYMBOL_DELAY_SEC = 0
+        ctx = skill.ctx
+        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "RELIANCE"}])
+        ctx.db.get_user_watchlist = AsyncMock(return_value=[])
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+        ctx.config.strategy.market_regime.enabled = False
+
+        result = await skill.execute()
+
+        assert result.success
+        call_args = ctx.market_data.get_ohlcv.call_args_list[0]
+        assert call_args.args[1] == "5minute"
+        # 1y default — not the 3y daily backfill window
+        assert result.data["days_requested"] == 365
+
+    async def test_registered_in_skill_registry(self):
+        from yolovest.skills import SKILL_REGISTRY
+        from yolovest.skills.backfill_intraday import BackfillIntradaySkill
+
+        assert SKILL_REGISTRY["backfill-intraday"] is BackfillIntradaySkill

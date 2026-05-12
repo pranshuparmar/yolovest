@@ -27,22 +27,30 @@ class BackfillDataSkill(SkillBase):
     trigger = SkillTrigger.MANUAL
     schedule = None
 
+    # Subclasses (e.g. BackfillIntradaySkill) override these to switch interval.
+    _DEFAULT_INTERVAL = "daily"
+
     # Small inter-symbol delay so backfill doesn't drain the Kite rate-limit
     # budget shared with the heartbeat (10 req/s aggregate).
     _PER_SYMBOL_DELAY_SEC = 0.15
+
+    def _default_days(self) -> int:
+        """Default lookback in days. Subclasses can override."""
+        return self.ctx.config.market_data.backfill_days
 
     def should_run(self) -> bool:
         return True
 
     async def execute(self, **kwargs: Any) -> SkillResult:
-        default_days = self.ctx.config.market_data.backfill_days
-        days = int(kwargs.get("days", default_days))
+        interval = kwargs.get("interval", self._DEFAULT_INTERVAL)
+        days = int(kwargs.get("days", self._default_days()))
 
         symbols = kwargs.get("symbols")
         if symbols is None:
             symbols = await self._collect_tracked_symbols()
 
         results: dict[str, Any] = {
+            "interval": interval,
             "days_requested": days,
             "symbols_total": len(symbols),
             "symbols_processed": 0,
@@ -51,34 +59,38 @@ class BackfillDataSkill(SkillBase):
         }
 
         if not symbols:
-            logger.warning("backfill-data: no symbols to process")
+            logger.warning("%s: no symbols to process", self.name)
             return SkillResult(success=True, skill_name=self.name, data=results)
 
         logger.info(
-            "backfill-data: starting — %d symbols × %d days",
-            len(symbols), days,
+            "%s: starting — %d symbols × %d days × %s",
+            self.name, len(symbols), days, interval,
         )
+
+        source_label = "backfill" if interval == "daily" else f"backfill_{interval}"
 
         for idx, symbol in enumerate(symbols, 1):
             try:
                 bars = await self.ctx.market_data.get_ohlcv(
-                    symbol, "daily", days=days, skip_stale_check=True,
+                    symbol, interval, days=days, skip_stale_check=True,
                 )
                 if bars:
-                    count = await self.ctx.db.upsert_ohlcv(symbol, "daily", bars, "backfill")
+                    count = await self.ctx.db.upsert_ohlcv(
+                        symbol, interval, bars, source_label,
+                    )
                     results["total_bars_stored"] += count
                 else:
-                    logger.warning("backfill-data: no data returned for %s", symbol)
+                    logger.warning("%s: no data returned for %s", self.name, symbol)
                 results["symbols_processed"] += 1
             except Exception as e:
                 results["errors"].append(f"{symbol}: {e}")
-                logger.warning("backfill-data: failed for %s: %s", symbol, e)
+                logger.warning("%s: failed for %s: %s", self.name, symbol, e)
 
             # Progress log every 25 symbols so long runs are visible
             if idx % 25 == 0 or idx == len(symbols):
                 logger.info(
-                    "backfill-data: progress %d/%d — bars_stored=%d, errors=%d",
-                    idx, len(symbols),
+                    "%s: progress %d/%d — bars_stored=%d, errors=%d",
+                    self.name, idx, len(symbols),
                     results["total_bars_stored"], len(results["errors"]),
                 )
 

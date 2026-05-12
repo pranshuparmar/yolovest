@@ -32,6 +32,20 @@ _INTERVAL_MAP = {
     "60minute": "60minute",
 }
 
+# Kite's per-call date-range limits for historical_data().
+# Source: https://kite.trade/docs/connect/v3/historical/
+# Exceeding these returns "Date range exceeds maximum allowed".
+_KITE_MAX_DAYS_PER_CALL = {
+    "day": 2000,
+    "60minute": 400,
+    "30minute": 200,
+    "15minute": 200,
+    "10minute": 100,
+    "5minute": 100,
+    "3minute": 100,
+    "minute": 60,
+}
+
 
 class KiteDataProvider(MarketDataBase):
     """Market data provider using Kite Connect historical data API.
@@ -127,7 +141,9 @@ class KiteDataProvider(MarketDataBase):
     ) -> list[OHLCVBar]:
         """Fetch OHLCV via Kite historical_data API.
 
-        Supports daily and intraday intervals.
+        Supports daily and intraday intervals. Automatically paginates
+        when the requested window exceeds Kite's per-interval limit
+        (see _KITE_MAX_DAYS_PER_CALL).
         """
         kite_interval = _INTERVAL_MAP.get(interval)
         if kite_interval is None:
@@ -140,10 +156,23 @@ class KiteDataProvider(MarketDataBase):
         end_date = now_ist().date()
         start_date = end_date - timedelta(days=days)
 
-        bars = await self._fetch_historical(
-            instrument_token, kite_interval, start_date, end_date
-        )
-        return bars
+        max_days = _KITE_MAX_DAYS_PER_CALL.get(kite_interval, 30)
+        if days <= max_days:
+            return await self._fetch_historical(
+                instrument_token, kite_interval, start_date, end_date,
+            )
+
+        # Window exceeds Kite's per-call limit — chunk it.
+        all_bars: list[OHLCVBar] = []
+        chunk_start = start_date
+        while chunk_start <= end_date:
+            chunk_end = min(chunk_start + timedelta(days=max_days - 1), end_date)
+            chunk = await self._fetch_historical(
+                instrument_token, kite_interval, chunk_start, chunk_end,
+            )
+            all_bars.extend(chunk)
+            chunk_start = chunk_end + timedelta(days=1)
+        return all_bars
 
     async def _fetch_historical(
         self,
