@@ -12,6 +12,7 @@ Requires:
 
 import asyncio
 import logging
+import time
 from datetime import date, datetime, timedelta
 
 from yolovest.timezone import now_ist
@@ -74,6 +75,19 @@ class KiteDataProvider(MarketDataBase):
         self._init_lock = asyncio.Lock()
         # Instrument token cache: symbol -> instrument_token
         self._token_cache: dict[str, int] = {}
+        # Time-based throttle for historical_data. Kite's historical API has
+        # a tighter per-second limit (~3 req/s) than the general 10 req/s
+        # quote/order quota. A semaphore alone doesn't enforce time — long
+        # sequential runs (e.g. /run ingest-universe over 500 symbols) saw
+        # "Too many requests" errors despite no concurrent calls. Lock +
+        # last-call timestamp enforces a minimum interval between requests.
+        self._historical_lock = asyncio.Lock()
+        self._historical_last_call: float = 0.0
+        # 0.4s -> max 2.5 req/s, safely under Kite's 3 req/s historical cap.
+        self._historical_min_interval_sec: float = 0.4
+        # When a 429 ("Too many requests") fires, back off this much before
+        # the next attempt. Reset to default on a successful call.
+        self._historical_cooldown_sec: float = 10.0
 
     def set_access_token(self, token: str) -> None:
         """Update the access token after daily re-authentication.
@@ -181,12 +195,19 @@ class KiteDataProvider(MarketDataBase):
         start: date,
         end: date,
     ) -> list[OHLCVBar]:
-        """Fetch historical data with retry logic."""
+        """Fetch historical data with retry logic and rate limiting.
+
+        Enforces a minimum interval between calls (time-based throttle)
+        in addition to the semaphore. When Kite returns 429 ("Too many
+        requests"), back off for self._historical_cooldown_sec before
+        the next attempt to let the server-side rate window reset.
+        """
         kite = self._get_kite()
         last_error: Exception | None = None
 
         for attempt in range(self._max_retries):
             try:
+                await self._throttle_historical()
                 async with self._rate_limiter:
                     data = await asyncio.to_thread(
                         kite.historical_data,
@@ -210,15 +231,45 @@ class KiteDataProvider(MarketDataBase):
             except Exception as e:
                 last_error = e
                 if attempt < self._max_retries - 1:
-                    delay = self._retry_base_delay * (2 ** attempt)
-                    logger.warning(
-                        "Kite historical fetch failed (attempt %d/%d), "
-                        "retrying in %.1fs: %s",
-                        attempt + 1, self._max_retries, delay, e,
-                    )
+                    if self._is_rate_limit_error(e):
+                        # Hard back-off: server-side window needs time to
+                        # clear. Don't double-tap with a tight retry.
+                        delay = self._historical_cooldown_sec
+                        logger.warning(
+                            "Kite historical rate-limited (attempt %d/%d), "
+                            "cooling down %.1fs: %s",
+                            attempt + 1, self._max_retries, delay, e,
+                        )
+                    else:
+                        delay = self._retry_base_delay * (2 ** attempt)
+                        logger.warning(
+                            "Kite historical fetch failed (attempt %d/%d), "
+                            "retrying in %.1fs: %s",
+                            attempt + 1, self._max_retries, delay, e,
+                        )
                     await asyncio.sleep(delay)
 
         raise last_error  # type: ignore[misc]
+
+    async def _throttle_historical(self) -> None:
+        """Ensure at least _historical_min_interval_sec since the last call."""
+        async with self._historical_lock:
+            now = time.monotonic()
+            elapsed = now - self._historical_last_call
+            wait = self._historical_min_interval_sec - elapsed
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._historical_last_call = time.monotonic()
+
+    @staticmethod
+    def _is_rate_limit_error(exc: Exception) -> bool:
+        """Detect Kite's 'Too many requests' response across error types."""
+        msg = str(exc).lower()
+        return (
+            "too many requests" in msg
+            or "rate limit" in msg
+            or "429" in msg
+        )
 
     async def get_quote(self, symbol: str) -> dict[str, Any]:
         """Get real-time quote via Kite API."""

@@ -130,6 +130,11 @@ def parse_constituent_csv(body: str) -> list[str]:
     Expected columns: 'Company Name', 'Industry', 'Symbol', 'Series',
     'ISIN Code'. Filters to Series == 'EQ' (equity, excludes Z/BE/etc.)
     when the Series column is present.
+
+    Also drops NSE-issued placeholder tickers — primarily ``DUMMY*``
+    symbols, which NSE introduces during corporate actions (demergers,
+    splits) as temporary entries. They don't resolve to a real
+    instrument_token on Kite and aren't tradable.
     """
     reader = csv.DictReader(io.StringIO(body))
     symbols: list[str] = []
@@ -144,6 +149,9 @@ def parse_constituent_csv(body: str) -> list[str]:
         # If series is exposed, restrict to EQ; otherwise accept everything.
         if series and series.upper() != "EQ":
             continue
+        # Drop NSE placeholder tickers — these aren't tradable.
+        if _is_placeholder_symbol(sym):
+            continue
         symbols.append(sym.upper())
     # Dedup while preserving order
     seen: set[str] = set()
@@ -153,6 +161,15 @@ def parse_constituent_csv(body: str) -> list[str]:
             seen.add(s)
             deduped.append(s)
     return deduped
+
+
+def _is_placeholder_symbol(symbol: str) -> bool:
+    """NSE creates DUMMY* tickers as temporary entries during corporate
+    actions. They appear in index constituent lists but don't resolve to
+    a real Kite instrument_token. Filter them out at the source.
+    """
+    upper = symbol.strip().upper()
+    return upper.startswith("DUMMY")
 
 
 async def fetch_live_constituents(

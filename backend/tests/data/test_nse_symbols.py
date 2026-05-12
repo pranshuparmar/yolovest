@@ -61,6 +61,28 @@ class TestParseConstituentCsv:
     def test_empty_csv_returns_empty_list(self):
         assert parse_constituent_csv("Symbol,Series\n") == []
 
+    def test_filters_dummy_placeholder_tickers(self):
+        """NSE issues DUMMYVEDL1-4 etc during corporate actions; these
+        aren't tradable and Kite has no instrument_token for them."""
+        csv_body = (
+            "Company Name,Industry,Symbol,Series,ISIN Code\n"
+            "Reliance,Energy,RELIANCE,EQ,INE002A01018\n"
+            "Vedanta Dummy 1,Materials,DUMMYVEDL1,EQ,INE_DUMMY1\n"
+            "Vedanta Dummy 2,Materials,DUMMYVEDL2,EQ,INE_DUMMY2\n"
+            "TCS,IT,TCS,EQ,INE467B01029\n"
+        )
+        symbols = parse_constituent_csv(csv_body)
+        assert symbols == ["RELIANCE", "TCS"]
+
+    def test_dummy_filter_is_case_insensitive(self):
+        csv_body = (
+            "Symbol,Series\n"
+            "dummyXYZ,EQ\n"
+            "Dummy123,EQ\n"
+            "RELIANCE,EQ\n"
+        )
+        assert parse_constituent_csv(csv_body) == ["RELIANCE"]
+
 
 class TestBundledFallback:
     """The static bundled list remains accessible regardless of live fetch."""

@@ -84,3 +84,50 @@ class TestKitePagination:
 
         # 200 days at max 60 per call -> ceil(200/60) = 4 calls
         assert mock_fetch.call_count == 4
+
+
+@pytest.mark.skipif(
+    not _has_module("kiteconnect"),
+    reason="kiteconnect not installed",
+)
+class TestKiteThrottling:
+    """Sequential historical fetches must self-throttle to stay under
+    Kite's 3 req/s historical limit, and on 429 must back off hard."""
+
+    async def test_throttle_enforces_min_interval(self):
+        """Two consecutive historical calls must be spaced by at least
+        _historical_min_interval_sec."""
+        import time as _time
+        from yolovest.data.kite_data import KiteDataProvider
+
+        prov = KiteDataProvider(api_key="x", access_token="y")
+        prov._historical_min_interval_sec = 0.1
+        # First call: no wait needed
+        t0 = _time.monotonic()
+        await prov._throttle_historical()
+        # Second call: must wait at least the interval
+        await prov._throttle_historical()
+        elapsed = _time.monotonic() - t0
+        assert elapsed >= 0.1
+
+    def test_rate_limit_error_detection(self):
+        """_is_rate_limit_error must catch Kite's 'Too many requests' message
+        regardless of error class."""
+        from yolovest.data.kite_data import KiteDataProvider
+
+        assert KiteDataProvider._is_rate_limit_error(
+            Exception("Too many requests")
+        )
+        assert KiteDataProvider._is_rate_limit_error(
+            ValueError("HTTP 429 received")
+        )
+        assert KiteDataProvider._is_rate_limit_error(
+            RuntimeError("rate limit exceeded")
+        )
+        # Negatives — genuine errors shouldn't be misclassified
+        assert not KiteDataProvider._is_rate_limit_error(
+            Exception("Instrument token not found")
+        )
+        assert not KiteDataProvider._is_rate_limit_error(
+            ValueError("Invalid date range")
+        )
