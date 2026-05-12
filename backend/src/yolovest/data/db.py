@@ -181,7 +181,6 @@ class Database:
 
                 # Run remaining statements in a transaction
                 if other_stmts:
-                    await self.conn.execute("BEGIN")
                     try:
                         for stmt in other_stmts:
                             await self.conn.execute(stmt)
@@ -287,7 +286,9 @@ class Database:
         """Upsert multiple config values in a single transaction. Returns count."""
         if not items:
             return 0
-        await self.conn.execute("BEGIN")
+        # First DML auto-begins a transaction (Python sqlite3 default
+        # isolation_level). Explicit BEGIN would conflict with concurrent
+        # writers sharing the same aiosqlite connection.
         try:
             for key, value in items.items():
                 await self.conn.execute(
@@ -379,8 +380,12 @@ class Database:
     # ------------------------------------------------------------------
 
     async def upsert_watchlist(self, stocks: list[dict[str, Any]]) -> None:
-        """Replace watchlist with new scored stocks (atomic)."""
-        await self.conn.execute("BEGIN")
+        """Replace watchlist with new scored stocks (atomic).
+
+        Relies on Python sqlite3's default deferred isolation: the first
+        DML auto-begins, commit() ends. Explicit BEGIN here would conflict
+        with any other concurrent writer on the same connection.
+        """
         try:
             await self.conn.execute("DELETE FROM watchlist")
             for stock in stocks:
@@ -1132,8 +1137,12 @@ class Database:
         return dict[str, Any](row) if row else None
 
     async def promote_model(self, model_type: str, version: str) -> None:
-        """Promote a shadow model to production, retire the current production."""
-        await self.conn.execute("BEGIN")
+        """Promote a shadow model to production, retire the current production.
+
+        First UPDATE auto-begins the transaction (Python sqlite3 default
+        deferred isolation), commit() ends it. Explicit BEGIN omitted —
+        it conflicts when other writers are active on the same connection.
+        """
         try:
             # Retire current production
             await self.conn.execute(

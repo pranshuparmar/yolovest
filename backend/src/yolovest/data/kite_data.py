@@ -76,10 +76,14 @@ class KiteDataProvider(MarketDataBase):
             from yolovest.broker.kite_rate_limiter import KiteRateLimiter
             rate_limiter = KiteRateLimiter(calls_per_second=10.0, concurrency=8)
         self._rate_limiter = rate_limiter
-        # Lock to prevent race condition when refreshing the kite client
+        # Lock to prevent race condition when refreshing the kite client.
+        # Also used to serialize the one-shot instrument cache warm-up.
         self._init_lock = asyncio.Lock()
         # Instrument token cache: symbol -> instrument_token
         self._token_cache: dict[str, int] = {}
+        # Tracks whether _prewarm_token_cache has populated the cache from
+        # the full NSE instrument master. Cleared on set_access_token().
+        self._token_cache_warmed: bool = False
         # Time-based throttle for historical_data. Kite's historical API has
         # a tighter per-second limit (~3 req/s) than the general 10 req/s
         # quote/order quota. A semaphore alone doesn't enforce time — long
@@ -103,6 +107,7 @@ class KiteDataProvider(MarketDataBase):
         self._access_token = token
         self._kite = None  # _get_kite() will re-create with new token
         self._token_cache.clear()  # instrument tokens may change across sessions
+        self._token_cache_warmed = False
 
     def _get_kite(self) -> Any:
         """Lazy-init Kite Connect client.
@@ -122,37 +127,52 @@ class KiteDataProvider(MarketDataBase):
 
     _INDEX_SYMBOLS = {"NIFTY 50", "NIFTY BANK", "NIFTY IT", "NIFTY NEXT 50"}
 
+    async def _prewarm_token_cache(self) -> None:
+        """Fetch the NSE instrument master once and cache every
+        tradingsymbol -> instrument_token mapping.
+
+        Without this, every cache miss in _get_instrument_token would
+        re-download the full instrument master (~5k entries, multi-MB),
+        making bulk operations like ingest-universe N+1 expensive AND
+        burning through the Kite rate-limit budget.
+        """
+        kite = self._get_kite()
+        async with self._rate_limiter:
+            instruments = await asyncio.to_thread(kite.instruments, "NSE")
+        for inst in instruments:
+            sym = inst.get("tradingsymbol")
+            token = inst.get("instrument_token")
+            if sym and token and sym not in self._token_cache:
+                self._token_cache[sym] = token
+        self._token_cache_warmed = True
+        logger.info(
+            "Kite instrument cache warmed: %d tradingsymbols indexed",
+            len(self._token_cache),
+        )
+
     async def _get_instrument_token(self, symbol: str) -> int:
         """Resolve NSE symbol to Kite instrument token.
 
-        Handles both regular NSE stocks and NSE indices (NIFTY 50, etc.).
-        Caches results to avoid repeated API calls.
+        Pre-warms the full instrument master on first miss, then serves
+        all subsequent lookups from memory. Handles both regular NSE
+        stocks and NSE indices (NIFTY 50, etc.).
         """
         if symbol in self._token_cache:
             return self._token_cache[symbol]
 
-        kite = self._get_kite()
+        # First miss — populate cache from a single instruments() call.
+        # Use the init_lock so concurrent first-misses don't all download.
+        async with self._init_lock:
+            if symbol not in self._token_cache and not getattr(
+                self, "_token_cache_warmed", False,
+            ):
+                await self._prewarm_token_cache()
 
-        # Index symbols live on a separate "indices" exchange in Kite
+        if symbol in self._token_cache:
+            return self._token_cache[symbol]
+
         if symbol in self._INDEX_SYMBOLS:
-            instruments = await asyncio.to_thread(kite.instruments, "NSE")
-            for inst in instruments:
-                if inst["tradingsymbol"] == symbol and inst["instrument_type"] == "EQ":
-                    self._token_cache[symbol] = inst["instrument_token"]
-                    return inst["instrument_token"]
-            # Fallback: try with "INDICES" segment (Kite uses instrument_type)
-            for inst in instruments:
-                if inst["tradingsymbol"] == symbol:
-                    self._token_cache[symbol] = inst["instrument_token"]
-                    return inst["instrument_token"]
             raise ValueError(f"Index instrument token not found for {symbol}")
-
-        instruments = await asyncio.to_thread(kite.instruments, "NSE")
-        for inst in instruments:
-            if inst["tradingsymbol"] == symbol:
-                self._token_cache[symbol] = inst["instrument_token"]
-                return inst["instrument_token"]
-
         raise ValueError(f"Instrument token not found for {symbol}")
 
     async def get_ohlcv(

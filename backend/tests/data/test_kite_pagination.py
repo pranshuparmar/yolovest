@@ -131,3 +131,48 @@ class TestKiteThrottling:
         assert not KiteDataProvider._is_rate_limit_error(
             ValueError("Invalid date range")
         )
+
+
+@pytest.mark.skipif(
+    not _has_module("kiteconnect"),
+    reason="kiteconnect not installed",
+)
+class TestInstrumentCachePrewarming:
+    """Regression: _get_instrument_token must NOT call kite.instruments()
+    once per symbol — that's an N+1 that exhausts the rate-limit budget."""
+
+    async def test_prewarm_fetches_instruments_only_once(self):
+        from unittest.mock import MagicMock, patch
+        from yolovest.data.kite_data import KiteDataProvider
+
+        prov = KiteDataProvider(api_key="x", access_token="y")
+        fake_kite = MagicMock()
+        fake_kite.instruments.return_value = [
+            {"tradingsymbol": "RELIANCE", "instrument_token": 1},
+            {"tradingsymbol": "TCS", "instrument_token": 2},
+            {"tradingsymbol": "INFY", "instrument_token": 3},
+        ]
+        prov._kite = fake_kite
+
+        # Three sequential lookups should result in exactly one
+        # instruments() call, with all subsequent lookups served from cache.
+        t1 = await prov._get_instrument_token("RELIANCE")
+        t2 = await prov._get_instrument_token("TCS")
+        t3 = await prov._get_instrument_token("INFY")
+
+        assert t1 == 1
+        assert t2 == 2
+        assert t3 == 3
+        assert fake_kite.instruments.call_count == 1
+
+    async def test_cache_warmed_flag_reset_on_token_refresh(self):
+        from yolovest.data.kite_data import KiteDataProvider
+
+        prov = KiteDataProvider(api_key="x", access_token="y")
+        prov._token_cache_warmed = True
+        prov._token_cache = {"RELIANCE": 1}
+
+        prov.set_access_token("new-token")
+
+        assert prov._token_cache_warmed is False
+        assert prov._token_cache == {}

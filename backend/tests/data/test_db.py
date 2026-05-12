@@ -242,6 +242,36 @@ class TestWatchlist:
         assert len(result) == 1
         assert result[0]["symbol"] == "TCS"
 
+    async def test_upsert_watchlist_concurrent_with_other_write(self, db):
+        """Regression: upsert_watchlist must not raise
+        'cannot start a transaction within a transaction' when another
+        coro is writing on the same connection. Previously the explicit
+        BEGIN clashed with the implicit auto-begin from a concurrent DML.
+        """
+        import asyncio
+        from datetime import datetime
+        from yolovest.models.schemas import OHLCVBar
+
+        bars = [
+            OHLCVBar(
+                timestamp=datetime(2026, 5, 1),
+                open=100, high=101, low=99, close=100.5, volume=1000,
+            ),
+        ]
+
+        async def writer_a():
+            for _ in range(5):
+                await db.upsert_ohlcv("RELIANCE", "daily", bars, "test")
+
+        async def writer_b():
+            for i in range(5):
+                await db.upsert_watchlist([
+                    {"symbol": f"SYM{i}", "composite_score": 0.5, "sector": "Test"},
+                ])
+
+        # Should complete without raising 'transaction within a transaction'
+        await asyncio.gather(writer_a(), writer_b())
+
 
 class TestOpenPositions:
     async def test_no_open_positions(self, db):
