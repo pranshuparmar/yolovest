@@ -23,7 +23,4 @@ class BackfillIntradaySkill(BackfillDataSkill):
     _DEFAULT_INTERVAL = "5minute"
 
     def _default_days(self) -> int:
-        # Lookback window for intraday history. Longer windows balloon
-        # row counts (~75 bars per trading day per symbol) for marginal
-        # ML benefit on short-horizon models.
-        return 365
+        return self.ctx.config.market_data.intraday_backfill_days

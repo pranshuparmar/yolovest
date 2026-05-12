@@ -3299,32 +3299,33 @@ class Database:
         """Delete a group of related data. Returns {table: rows_deleted}.
 
         Groups:
-        - paper: all paper mode trades, signals, predictions, pending trades
-        - live: all live mode trades, signals, predictions, pending trades
+        - paper: all paper-mode trades + predictions
+        - live: all live-mode trades + predictions
         - dry_runs: all dry run results
-        - predictions: all predictions and scoreboard
-        - signals: all signals
+        - predictions: all predictions across modes
+        - signals: all signals across modes
+        - pending_trades: all queued pending trades across modes
+
+        Notes:
+        - signals and pending_trades tables have no `mode` column, so
+          mode-scoped deletion isn't possible without a join through
+          referenced trade IDs. Paper/live groups intentionally skip
+          these tables to avoid wiping the other mode's data.
+        - To clear signals or pending trades, use the dedicated groups.
         """
         deleted: dict[str, int] = {}
 
         if group in ("paper", "live"):
             mode = group
-            for table, col in [
-                ("trades", "mode"), ("predictions", "mode"),
-                ("signals", None), ("pending_trades", None),
-            ]:
+            for table in ("trades", "predictions"):
                 try:
-                    if col:
-                        cursor = await self.conn.execute(
-                            f"DELETE FROM {table} WHERE {col} = ?", (mode,),  # noqa: S608
-                        )
-                    else:
-                        # signals/pending_trades don't have mode — delete by date match with trades
-                        cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
+                    cursor = await self.conn.execute(
+                        f"DELETE FROM {table} WHERE mode = ?", (mode,),  # noqa: S608
+                    )
                     deleted[table] = cursor.rowcount
                 except Exception:
                     deleted[table] = 0
-            # Also clean up related data
+            # llm_reviews for paper-mode trades only (live trades may keep audit trail)
             if group == "paper":
                 try:
                     cursor = await self.conn.execute(
@@ -3356,6 +3357,13 @@ class Database:
                 deleted["signals"] = cursor.rowcount
             except Exception:
                 deleted["signals"] = 0
+
+        elif group == "pending_trades":
+            try:
+                cursor = await self.conn.execute("DELETE FROM pending_trades")
+                deleted["pending_trades"] = cursor.rowcount
+            except Exception:
+                deleted["pending_trades"] = 0
 
         else:
             raise ValueError(f"Unknown group: {group}")

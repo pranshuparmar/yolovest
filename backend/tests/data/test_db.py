@@ -315,6 +315,87 @@ class TestWatchlist:
         data = await db.get_feedback_data(lookback_days=14)
         assert isinstance(data, dict)
 
+
+class TestBulkDelete:
+    """Regression: bulk_delete([paper|live]) previously wiped ALL rows
+    from signals / pending_trades — there was no mode column on those
+    tables, so the code just deleted everything. Now those tables are
+    skipped in paper/live groups and have their own dedicated groups."""
+
+    async def _insert_prediction(self, db, mode: str) -> str:
+        return await db.insert_prediction({
+            "symbol": "RELIANCE",
+            "trade_id": None,
+            "predicted_direction": "BUY",
+            "predicted_target": 100.0,
+            "predicted_stop_loss": 90.0,
+            "expected_holding_period": "intraday",
+            "model_version": "swing_v1",
+            "mode": mode,
+        })
+
+    async def test_paper_delete_preserves_live_predictions(self, db):
+        live_pred = await self._insert_prediction(db, "live")
+        paper_pred = await self._insert_prediction(db, "paper")
+
+        result = await db.bulk_delete("paper")
+
+        assert result.get("predictions", 0) == 1
+        # Live prediction must survive
+        cur = await db.read_conn.execute(
+            "SELECT prediction_id FROM predictions WHERE mode = 'live'"
+        )
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == live_pred
+        # Paper prediction gone
+        cur = await db.read_conn.execute(
+            "SELECT prediction_id FROM predictions WHERE prediction_id = ?",
+            (paper_pred,),
+        )
+        assert await cur.fetchone() is None
+
+    async def test_paper_delete_does_not_touch_signals(self, db):
+        """Signals share both modes with no mode column. Mode-scoped
+        delete must leave them alone."""
+        await db.insert_signal({
+            "symbol": "RELIANCE", "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+        })
+
+        await db.bulk_delete("paper")
+
+        cur = await db.read_conn.execute("SELECT COUNT(*) FROM signals")
+        assert (await cur.fetchone())[0] == 1
+
+    async def test_signals_group_clears_signals(self, db):
+        for _ in range(3):
+            await db.insert_signal({
+                "symbol": "RELIANCE", "signal_type": "BUY",
+                "entry_price": 100.0, "target_price": 105.0,
+                "stop_loss_price": 95.0, "position_size": 1,
+                "confidence_score": 0.7, "model_version": "v1",
+            })
+
+        result = await db.bulk_delete("signals")
+
+        assert result["signals"] == 3
+        cur = await db.read_conn.execute("SELECT COUNT(*) FROM signals")
+        assert (await cur.fetchone())[0] == 0
+
+    async def test_pending_trades_group_exists(self, db):
+        """Dedicated bulk group for clearing pending trades."""
+        result = await db.bulk_delete("pending_trades")
+        # Empty DB — just verify the group is recognized
+        assert "pending_trades" in result
+
+    async def test_unknown_group_raises(self, db):
+        import pytest
+        with pytest.raises(ValueError):
+            await db.bulk_delete("not_a_group")
+
     async def test_upsert_watchlist_concurrent_with_other_write(self, db):
         """Regression: upsert_watchlist must not raise
         'cannot start a transaction within a transaction' when another

@@ -183,11 +183,12 @@ function ReplacementInput({ symbol, current }: { symbol: string; current: string
 }
 
 const BULK_GROUPS = [
-  { id: "paper", label: "Paper Mode Data", description: "All paper trades, predictions, signals, pending trades", color: "amber" },
-  { id: "live", label: "Live Mode Data", description: "All live trades, predictions, signals, pending trades", color: "red" },
+  { id: "paper", label: "Paper Mode Data", description: "Paper-mode trades + predictions (signals & pending unaffected — they share both modes)", color: "amber" },
+  { id: "live", label: "Live Mode Data", description: "Live-mode trades + predictions (signals & pending unaffected — they share both modes)", color: "red" },
   { id: "dry_runs", label: "Dry Runs", description: "All dry run signal previews", color: "amber" },
-  { id: "predictions", label: "Predictions", description: "All predictions, scoreboard, and failure analyses", color: "amber" },
-  { id: "signals", label: "Signals", description: "All generated signals (today's dedup will reset)", color: "amber" },
+  { id: "predictions", label: "Predictions — All Modes", description: "All predictions, scoreboard, and failure analyses across both paper and live", color: "amber" },
+  { id: "signals", label: "Signals — All Modes", description: "All generated signals across both paper and live (today's dedup will reset)", color: "amber" },
+  { id: "pending_trades", label: "Pending Trades — All Modes", description: "All queued pending approvals across both paper and live", color: "amber" },
 ] as const;
 
 function BulkDeleteSection() {
