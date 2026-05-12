@@ -90,13 +90,13 @@ class RiskCheckSkill(SkillBase):
         # Max open positions (system-generated trades only; adopted holdings
         # are pre-existing investments and don't count toward the trading limit).
         # Include pending approvals to prevent over-generation in manual mode.
-        pending_count = 0
+        pending: list[dict[str, Any]] = []
         if self.ctx.config.execution.transaction_mode == "manual":
             try:
                 pending = await self.ctx.db.get_pending_trades()
-                pending_count = len(pending)
             except Exception:
-                logger.debug("Failed to count pending trades", exc_info=True)
+                logger.debug("Failed to load pending trades", exc_info=True)
+        pending_count = len(pending)
         system_positions = portfolio.get("system_positions", portfolio["open_positions"])
         adopted_positions = portfolio.get("adopted_positions", 0)
         effective_positions = system_positions + pending_count
@@ -108,11 +108,27 @@ class RiskCheckSkill(SkillBase):
                 f"limit={cfg.max_open_positions}; {adopted_positions} adopted not counted)",
             )
 
-        # Max portfolio exposure
-        if portfolio["exposure_pct"] >= cfg.max_portfolio_exposure_pct:
+        # Max portfolio exposure — include pending-trade notional in manual mode.
+        # Without this, manual mode can queue a stack of pending trades whose
+        # combined notional far exceeds the cap (open positions report 0%
+        # until each pending trade is approved). Approving them all in one
+        # batch would then exceed max_portfolio_exposure_pct.
+        capital_for_exposure = portfolio["total_capital"]
+        pending_notional = sum(
+            float(t.get("entry_price") or 0) * float(t.get("position_size") or 0)
+            for t in pending
+        )
+        pending_exposure_pct = (
+            pending_notional / capital_for_exposure if capital_for_exposure > 0 else 0
+        )
+        effective_exposure_pct = portfolio["exposure_pct"] + pending_exposure_pct
+        if effective_exposure_pct >= cfg.max_portfolio_exposure_pct:
             return self._reject(
                 signal,
-                f"Portfolio exposure limit ({cfg.max_portfolio_exposure_pct:.0%})",
+                f"Portfolio exposure limit ({effective_exposure_pct:.0%} = "
+                f"{portfolio['exposure_pct']:.0%} open + "
+                f"{pending_exposure_pct:.0%} pending, "
+                f"cap={cfg.max_portfolio_exposure_pct:.0%})",
             )
 
         # Max single stock exposure
