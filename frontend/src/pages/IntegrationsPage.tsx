@@ -8,7 +8,9 @@ import {
   useChangePassword,
   useUpdateCapital,
   useSyncCapital,
+  useUpdateConfig,
 } from "../hooks/queries";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../hooks/useAuth";
 
 function StatusDot({ ok }: { ok: boolean }) {
@@ -75,6 +77,15 @@ export function IntegrationsPage() {
   const authZerodha = useAuthenticateZerodha();
   const testTelegram = useTestTelegram();
   const sendTelegram = useSendTelegram();
+  const updateConfig = useUpdateConfig();
+  const qc = useQueryClient();
+
+  const toggleEnabled = (key: string, current: boolean) => {
+    updateConfig.mutate(
+      { [key]: !current },
+      { onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }) },
+    );
+  };
 
   const { login } = useAuth();
   const changePassword = useChangePassword();
@@ -149,8 +160,24 @@ export function IntegrationsPage() {
             <div className="flex justify-between">
               <span>Status</span>
               <Badge
-                label={gemini.connected ? "Connected" : gemini.configured ? "Disconnected" : "Not configured"}
-                color={gemini.connected ? "green" : gemini.configured ? "red" : "amber"}
+                label={
+                  !gemini.enabled
+                    ? "Inactive"
+                    : gemini.connected
+                    ? "Connected"
+                    : gemini.configured
+                    ? "Disconnected"
+                    : "Not configured"
+                }
+                color={
+                  !gemini.enabled
+                    ? "amber"
+                    : gemini.connected
+                    ? "green"
+                    : gemini.configured
+                    ? "red"
+                    : "amber"
+                }
               />
             </div>
             {gemini.model && (
@@ -162,13 +189,21 @@ export function IntegrationsPage() {
           </div>
 
           <div className="mt-auto pt-3 border-t border-gray-800 space-y-2">
-            <ActionButton
-              onClick={() => pingGemini.mutate()}
-              loading={pingGemini.isPending}
-              variant="primary"
-            >
-              Test Connection
-            </ActionButton>
+            <div className="flex gap-2">
+              <ActionButton
+                onClick={() => pingGemini.mutate()}
+                loading={pingGemini.isPending}
+                variant="primary"
+              >
+                Test Connection
+              </ActionButton>
+              <ActionButton
+                onClick={() => toggleEnabled("llm.enabled", gemini.enabled)}
+                loading={updateConfig.isPending}
+              >
+                {gemini.enabled ? "Mark Inactive" : "Mark Active"}
+              </ActionButton>
+            </div>
             {pingGemini.data && (
               <ResultToast success={pingGemini.data.success} error={pingGemini.data.error} />
             )}
@@ -286,12 +321,22 @@ export function IntegrationsPage() {
           </div>
 
           <div className="mt-auto pt-3 border-t border-gray-800 space-y-2">
-            <ActionButton
-              onClick={() => testTelegram.mutate()}
-              loading={testTelegram.isPending}
-            >
-              Send Test Message
-            </ActionButton>
+            <div className="flex gap-2">
+              <ActionButton
+                onClick={() => testTelegram.mutate()}
+                loading={testTelegram.isPending}
+              >
+                Send Test Message
+              </ActionButton>
+              <ActionButton
+                onClick={() =>
+                  toggleEnabled("notifications.telegram.enabled", telegram.enabled)
+                }
+                loading={updateConfig.isPending}
+              >
+                {telegram.enabled ? "Mark Inactive" : "Mark Active"}
+              </ActionButton>
+            </div>
             {testTelegram.data && (
               <ResultToast success={testTelegram.data.success} error={testTelegram.data.error} />
             )}

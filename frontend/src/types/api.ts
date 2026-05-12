@@ -232,6 +232,7 @@ export interface Recommendation {
 }
 
 export interface GeminiStatus {
+  enabled: boolean;
   configured: boolean;
   connected: boolean;
   model: string;

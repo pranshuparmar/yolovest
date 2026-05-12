@@ -345,10 +345,13 @@ def _build_news_aggregator(config: AppConfig) -> Any:
         return None
 
 
-def build_context(config: AppConfig) -> AppContext:
+def build_context(config: AppConfig, db: Any = None) -> AppContext:
     """Build the application context with real implementations where configured.
 
     Falls back to stubs when API keys or providers are not configured.
+    If `db` is provided, it's used directly (allowing the caller to load DB
+    config values before broker/market_data are constructed). Otherwise a
+    fresh DB instance is built from config.
     """
     from typing import cast
 
@@ -360,7 +363,8 @@ def build_context(config: AppConfig) -> AppContext:
         NotifierProtocol,
     )
 
-    db = _build_db(config)
+    if db is None:
+        db = _build_db(config)
     broker = _build_broker(config)
     # Pass DB to broker for token persistence (if real broker)
     market_data = _build_market_data(config)
@@ -441,34 +445,29 @@ async def async_main(args: argparse.Namespace) -> None:
     if args.mode is not None:
         config.mode = args.mode
 
-    logger.info("YoloVest starting in %s mode", config.mode)
-
-    # Build context
-    ctx = build_context(config)
-
-    # Initialize database if real (not stub)
-    if isinstance(ctx.db, Database):
-        await ctx.db.initialize()
-
-        # Populate or load DB-editable config
+    # Initialize DB and load persisted config BEFORE building broker/market_data.
+    # Without this, toggles like kite_data_enabled stored in the DB would not
+    # take effect until restart (the ingester/broker chain is frozen at build).
+    db = _build_db(config)
+    if isinstance(db, Database):
+        await db.initialize()
         try:
-            if await ctx.db.is_config_empty():
+            if await db.is_config_empty():
                 defaults = get_db_editable_defaults()
-                await ctx.db.set_config_bulk(defaults)
+                await db.set_config_bulk(defaults)
                 logger.info("Populated %d config defaults into DB", len(defaults))
             else:
-                db_values = await ctx.db.get_all_config()
-                ctx.config = apply_db_config(ctx.config, db_values)
-                config = ctx.config  # update local ref for downstream use
-                ctx.market_hours = MarketHoursChecker(ctx.config)
-                if hasattr(ctx.notify, "_config"):
-                    ctx.notify._config = ctx.config
-                # Sync broker mode from DB config
-                if hasattr(ctx.broker, "_mode"):
-                    ctx.broker._mode = ctx.config.mode
+                db_values = await db.get_all_config()
+                config = apply_db_config(config, db_values)
                 logger.info("Loaded %d config values from DB", len(db_values))
         except Exception:
             logger.warning("Failed to load config from DB, using file defaults", exc_info=True)
+
+    # Log effective mode AFTER DB config has been applied
+    logger.info("YoloVest starting in %s mode", config.mode)
+
+    # Build context with the now-effective config and the pre-built DB
+    ctx = build_context(config, db=db)
 
     # Log effective config (after DB overrides are applied)
     logger.info(
