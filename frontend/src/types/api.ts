@@ -47,6 +47,8 @@ export interface Trade {
   target_price: number;
   order_id: string | null;
   sl_order_id: string | null;
+  gtt_id: number | null;
+  origin: "system" | "adopted" | null;
   product: "MIS" | "CNC";
   mode: "paper" | "live";
   status: string;

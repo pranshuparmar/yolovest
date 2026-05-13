@@ -153,6 +153,11 @@ export function TradeDetailPage() {
           <span className={clsx("text-sm px-2 py-0.5 rounded",
             data.signal_type === "BUY" ? "bg-emerald-900/40 text-emerald-400" : "bg-red-900/40 text-red-400"
           )}>{data.signal_type}</span>
+          {data.origin === "adopted" && (
+            <span className="ml-2 text-xs px-2 py-0.5 rounded bg-blue-900/40 text-blue-400">
+              adopted
+            </span>
+          )}
         </h2>
       </div>
       <button
@@ -172,33 +177,86 @@ export function TradeDetailPage() {
 
       {/* Trade Summary */}
       <Section title="Execution">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-          <div><p className="text-xs text-gray-500">Entry Price</p><p>₹{fmt(data.entry_price)}</p></div>
-          <div><p className="text-xs text-gray-500">Fill Price</p><p>₹{fmt(data.fill_price)}</p></div>
-          <div>
-            <p className="text-xs text-gray-500">Exit Price</p>
-            <p>{data.exit_price != null ? `₹${fmt(data.exit_price)}` : <span className="text-gray-500">—</span>}</p>
-          </div>
-          <div><p className="text-xs text-gray-500">Quantity</p><p>{data.quantity}</p></div>
-          <div><p className="text-xs text-gray-500">Slippage</p><p>{fmt(data.slippage)}</p></div>
-          {data.estimated_costs != null && (
-            <div><p className="text-xs text-gray-500">Est. Costs</p><p className="text-amber-400">₹{fmt(data.estimated_costs)}</p></div>
-          )}
-          <div><p className="text-xs text-gray-500">Stop Loss</p><p className="text-red-400">₹{fmt(data.stop_loss_price)}</p></div>
-          <div><p className="text-xs text-gray-500">Target</p><p className="text-emerald-400">₹{fmt(data.target_price)}</p></div>
-          <div><p className="text-xs text-gray-500">Product</p><p>{data.product}</p></div>
-          <div><p className="text-xs text-gray-500">Status</p><p>{data.status}</p></div>
-          <div>
-            <p className="text-xs text-gray-500">Net PnL (after costs)</p>
-            <p className={clsx(data.pnl != null && data.pnl > 0 ? "text-emerald-400" : data.pnl != null && data.pnl < 0 ? "text-red-400" : "")}>
-              {data.pnl !== null ? `₹${fmt(data.pnl)}` : "—"}
-            </p>
-          </div>
-          <div><p className="text-xs text-gray-500">Mode</p><p>{data.mode}</p></div>
-          <div><p className="text-xs text-gray-500">Created</p><p className="text-xs">{parseUTC(data.created_at).toLocaleString("en-IN", { timeZone: getTimezone() })}</p></div>
-          {data.closed_at && <div><p className="text-xs text-gray-500">Closed</p><p className="text-xs">{parseUTC(data.closed_at).toLocaleString("en-IN", { timeZone: getTimezone() })}</p></div>}
-        </div>
+        {(() => {
+          const invested = data.fill_price * data.quantity;
+          const grossPnl =
+            data.exit_price != null
+              ? (data.signal_type === "BUY"
+                  ? (data.exit_price - data.fill_price) * data.quantity
+                  : (data.fill_price - data.exit_price) * data.quantity)
+              : null;
+          const pnlPct = data.pnl != null && invested > 0 ? (data.pnl / invested) * 100 : null;
+          const pnlClass = (n: number | null) =>
+            n != null && n > 0 ? "text-emerald-400" : n != null && n < 0 ? "text-red-400" : "";
+          return (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+              <div><p className="text-xs text-gray-500">Entry Price</p><p>₹{fmt(data.entry_price)}</p></div>
+              <div><p className="text-xs text-gray-500">Fill Price</p><p>₹{fmt(data.fill_price)}</p></div>
+              <div>
+                <p className="text-xs text-gray-500">Exit Price</p>
+                <p>{data.exit_price != null ? `₹${fmt(data.exit_price)}` : <span className="text-gray-500">—</span>}</p>
+              </div>
+              <div><p className="text-xs text-gray-500">Quantity</p><p>{data.quantity}</p></div>
+              <div><p className="text-xs text-gray-500">Invested</p><p>₹{fmt(invested)}</p></div>
+              <div><p className="text-xs text-gray-500">Slippage</p><p>{fmt(data.slippage)}</p></div>
+              {data.estimated_costs != null && (
+                <div><p className="text-xs text-gray-500">Est. Costs</p><p className="text-amber-400">₹{fmt(data.estimated_costs)}</p></div>
+              )}
+              <div><p className="text-xs text-gray-500">Stop Loss</p><p className="text-red-400">₹{fmt(data.stop_loss_price)}</p></div>
+              <div><p className="text-xs text-gray-500">Target</p><p className="text-emerald-400">₹{fmt(data.target_price)}</p></div>
+              <div><p className="text-xs text-gray-500">Product</p><p>{data.product}</p></div>
+              <div><p className="text-xs text-gray-500">Status</p><p>{data.status}</p></div>
+              <div>
+                <p className="text-xs text-gray-500">Gross PnL</p>
+                <p className={clsx(pnlClass(grossPnl))}>
+                  {grossPnl != null ? `₹${fmt(grossPnl)}` : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Net PnL (after costs)</p>
+                <p className={clsx(pnlClass(data.pnl))}>
+                  {data.pnl !== null ? `₹${fmt(data.pnl)}` : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Net PnL %</p>
+                <p className={clsx(pnlClass(pnlPct))}>
+                  {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${fmt(pnlPct)}%` : "—"}
+                </p>
+              </div>
+              <div><p className="text-xs text-gray-500">Mode</p><p>{data.mode}</p></div>
+              <div><p className="text-xs text-gray-500">Created</p><p className="text-xs">{parseUTC(data.created_at).toLocaleString("en-IN", { timeZone: getTimezone() })}</p></div>
+              {data.closed_at && <div><p className="text-xs text-gray-500">Closed</p><p className="text-xs">{parseUTC(data.closed_at).toLocaleString("en-IN", { timeZone: getTimezone() })}</p></div>}
+            </div>
+          );
+        })()}
       </Section>
+
+      {/* Order IDs — for cross-reference with Zerodha */}
+      {(data.order_id || data.sl_order_id || data.gtt_id) && (
+        <Section title="Broker Order IDs">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            {data.order_id && (
+              <div>
+                <p className="text-xs text-gray-500">Entry Order</p>
+                <p className="font-mono text-xs break-all">{data.order_id}</p>
+              </div>
+            )}
+            {data.sl_order_id && (
+              <div>
+                <p className="text-xs text-gray-500">Stop-Loss Order</p>
+                <p className="font-mono text-xs break-all">{data.sl_order_id}</p>
+              </div>
+            )}
+            {data.gtt_id && (
+              <div>
+                <p className="text-xs text-gray-500">GTT (OCO)</p>
+                <p className="font-mono text-xs">{data.gtt_id}</p>
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
 
       {/* Transaction Cost Breakdown */}
       {data.cost_breakdown && (() => {
