@@ -2835,6 +2835,16 @@ class Database:
             )
         await self.conn.commit()
 
+        if decision == "rejected":
+            # Reflect the rejection on the originating signal row so the
+            # Today's Recommendations panel updates.
+            try:
+                await self.update_signal_disposition(
+                    row["symbol"], "rejected", f"rejected by {decided_by}",
+                )
+            except Exception:
+                pass
+
         if decision == "approved":
             signal_data = row["signal_data"]
             signal = json.loads(signal_data) if signal_data else dict[str, Any](row)
@@ -2875,13 +2885,25 @@ class Database:
         """Expire pending trades older than max_age_minutes.
 
         Uses both ISO format (2026-04-09T06:00:00+00:00) and SQLite format
-        (2026-04-09 06:00:00) for comparison to handle legacy rows.
+        (2026-04-09 06:00:00) for comparison to handle legacy rows. Also
+        flips the originating signals' disposition to 'expired' so the
+        Today's Recommendations panel doesn't show them as still pending.
         """
         from datetime import timedelta
         cutoff_dt = now_utc() - timedelta(minutes=max_age_minutes)
         # Compare against both formats to handle legacy rows with SQLite datetime('now')
         cutoff_iso = cutoff_dt.isoformat()
         cutoff_sql = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Collect symbols about to be expired before we UPDATE — needed so
+        # we can update the corresponding signal disposition rows.
+        cur = await self.conn.execute(
+            "SELECT symbol FROM pending_trades "
+            "WHERE status = 'pending' AND (created_at < ? OR created_at < ?)",
+            (cutoff_iso, cutoff_sql),
+        )
+        expiring_symbols = [r[0] for r in await cur.fetchall()]
+
         cursor = await self.conn.execute(
             "UPDATE pending_trades SET status = 'expired' "
             "WHERE status = 'pending' AND ("
@@ -2890,6 +2912,15 @@ class Database:
             (cutoff_iso, cutoff_sql),
         )
         await self.conn.commit()
+
+        for sym in expiring_symbols:
+            try:
+                await self.update_signal_disposition(
+                    sym, "expired", "pending trade auto-expired",
+                )
+            except Exception:
+                pass
+
         return cursor.rowcount
 
     # ------------------------------------------------------------------

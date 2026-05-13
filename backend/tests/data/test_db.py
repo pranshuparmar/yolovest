@@ -316,6 +316,64 @@ class TestWatchlist:
         assert isinstance(data, dict)
 
 
+class TestPendingDispositionSync:
+    """Pending lifecycle must keep signals.disposition in sync so the
+    Today's Recommendations panel doesn't show stale 'awaiting_approval'
+    after expire/reject."""
+
+    async def _seed(self, db, symbol: str = "RELIANCE"):
+        # Insert a signal at awaiting_approval and a matching pending row
+        await db.insert_signal({
+            "symbol": symbol, "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "mode": "paper",
+        })
+        await db.update_signal_disposition(
+            symbol, "awaiting_approval", "queued"
+        )
+        pid = await db.insert_pending_trade({
+            "symbol": symbol, "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "product": "MIS",
+            "mode": "paper",
+        })
+        return pid
+
+    async def test_reject_flips_signal_disposition(self, db):
+        pid = await self._seed(db, "RELIANCE")
+
+        await db.decide_pending_trade(pid, "rejected", "dashboard")
+
+        cur = await db.read_conn.execute(
+            "SELECT disposition FROM signals WHERE symbol = ?",
+            ("RELIANCE",),
+        )
+        row = await cur.fetchone()
+        assert row[0] == "rejected"
+
+    async def test_expire_flips_signal_disposition(self, db):
+        await self._seed(db, "TCS")
+        # Force the pending row to be older than the expiry window
+        await db.conn.execute(
+            "UPDATE pending_trades SET created_at = '2000-01-01T00:00:00' "
+            "WHERE symbol = 'TCS'"
+        )
+        await db.conn.commit()
+
+        await db.expire_pending_trades(max_age_minutes=30)
+
+        cur = await db.read_conn.execute(
+            "SELECT disposition FROM signals WHERE symbol = ?",
+            ("TCS",),
+        )
+        row = await cur.fetchone()
+        assert row[0] == "expired"
+
+
 class TestBulkDelete:
     """Regression: bulk_delete([paper|live]) previously wiped ALL rows
     from signals / pending_trades — there was no mode column on those
