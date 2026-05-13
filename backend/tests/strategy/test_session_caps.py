@@ -1,4 +1,10 @@
-"""Tests for apply_session_caps — reality-check intraday targets/SLs."""
+"""Tests for apply_session_caps — circuit-limit enforcement only.
+
+Day's high/low are intentionally NOT forward caps (they're just where the
+stock has traded so far; legitimate breakouts push past them). Only the
+exchange's upper/lower circuit limits are real forward boundaries that
+orders cannot cross.
+"""
 
 from yolovest.strategy.holding_period import apply_session_caps
 
@@ -15,72 +21,59 @@ def quote(**overrides):
 
 
 class TestBuyCaps:
-    def test_target_above_day_high_capped_at_day_high_plus_buffer(self):
-        # Day high 100, ATR 4. Target 108 → cap at 100 + 0.15*4 = 100.6
+    def test_target_above_day_high_is_allowed(self):
+        """A target above today's high is a legitimate breakout target
+        and must pass through unmodified."""
         target, sl, adj = apply_session_caps(
             "BUY", target=108.0, stop_loss=95.0, atr=4.0, quote=quote(),
-            atr_buffer=0.15,
         )
-        assert target == 100.6
-        assert sl == 95.0
-        assert len(adj) == 1
-        assert "day_high" in adj[0]
-
-    def test_target_under_day_high_unchanged(self):
-        target, sl, adj = apply_session_caps(
-            "BUY", target=99.0, stop_loss=95.0, atr=4.0, quote=quote(),
-        )
-        assert target == 99.0
+        assert target == 108.0
         assert sl == 95.0
         assert adj == []
 
-    def test_target_above_upper_circuit_hard_cap(self):
-        # Cap at upper_circuit * 0.99 when target meets or exceeds circuit.
+    def test_target_at_upper_circuit_capped(self):
         target, _, adj = apply_session_caps(
-            "BUY", target=115.0, stop_loss=95.0, atr=4.0,
-            quote=quote(high=130.0),  # high allows target by buffer math
-            atr_buffer=10.0,            # disables the day-high cap
+            "BUY", target=115.0, stop_loss=95.0, atr=4.0, quote=quote(),
         )
         assert target == 110.0 * 0.99
         assert any("upper circuit" in a for a in adj)
 
     def test_sl_below_lower_circuit_floored(self):
         _, sl, adj = apply_session_caps(
-            "BUY", target=99.0, stop_loss=75.0, atr=4.0,
-            quote=quote(lower_circuit=80.0),
+            "BUY", target=99.0, stop_loss=75.0, atr=4.0, quote=quote(),
         )
         assert sl == 80.0 * 1.01
         assert any("lower circuit" in a for a in adj)
 
 
 class TestSellCaps:
-    def test_target_below_day_low_capped(self):
-        # Day low 90, ATR 4, buffer 0.15 → cap at 90 - 0.6 = 89.4
-        target, _, adj = apply_session_caps(
+    def test_target_below_day_low_is_allowed(self):
+        """Mirror of the BUY breakout case — a SELL target below today's
+        low is a legitimate breakdown target."""
+        target, sl, adj = apply_session_caps(
             "SELL", target=85.0, stop_loss=95.0, atr=4.0, quote=quote(),
         )
-        assert target == 89.4
-        assert any("day_low" in a for a in adj)
-
-    def test_target_above_day_low_unchanged(self):
-        target, _, adj = apply_session_caps(
-            "SELL", target=91.0, stop_loss=99.0, atr=4.0, quote=quote(),
-        )
-        assert target == 91.0
+        assert target == 85.0
+        assert sl == 95.0
         assert adj == []
 
-    def test_target_below_lower_circuit_hard_cap(self):
+    def test_target_at_lower_circuit_capped(self):
         target, _, adj = apply_session_caps(
-            "SELL", target=70.0, stop_loss=99.0, atr=4.0,
-            quote=quote(low=50.0),  # low allows target by buffer
-            atr_buffer=10.0,
+            "SELL", target=70.0, stop_loss=99.0, atr=4.0, quote=quote(),
         )
         assert target == 80.0 * 1.01
         assert any("lower circuit" in a for a in adj)
 
+    def test_sl_above_upper_circuit_capped(self):
+        _, sl, adj = apply_session_caps(
+            "SELL", target=92.0, stop_loss=115.0, atr=4.0, quote=quote(),
+        )
+        assert sl == 110.0 * 0.99
+        assert any("upper circuit" in a for a in adj)
+
 
 class TestMissingQuoteFields:
-    def test_no_quote_data_is_passthrough(self):
+    def test_empty_quote_is_passthrough(self):
         target, sl, adj = apply_session_caps(
             "BUY", target=108.0, stop_loss=95.0, atr=4.0, quote={},
         )
@@ -88,30 +81,29 @@ class TestMissingQuoteFields:
         assert sl == 95.0
         assert adj == []
 
-    def test_partial_quote_only_applies_known_caps(self):
-        # Only day_high present — circuit caps don't trigger
+    def test_only_circuits_apply_when_present(self):
         target, sl, adj = apply_session_caps(
-            "BUY", target=108.0, stop_loss=95.0, atr=4.0,
-            quote={"high": 100.0},
+            "BUY", target=200.0, stop_loss=95.0, atr=4.0,
+            quote={"upper_circuit": 110.0},
         )
-        assert target == 100.6  # day-high cap applies
+        assert target == 110.0 * 0.99
         assert sl == 95.0
 
 
 class TestHDFCLIFEScenario:
-    """Reproduce the live scenario the cap was designed for."""
+    """The originally-flagged scenario: target 611.90 with day_high 608.50
+    is a LEGITIMATE breakout target. Upper circuit at 661.95 is the real
+    ceiling, and the target is well below it — should pass through."""
 
-    def test_hdfclife_611_target_capped_under_day_high(self):
-        # From a real session: day high 608.50, ATR 17.25, target 611.90.
-        target, _, adj = apply_session_caps(
+    def test_breakout_target_allowed(self):
+        target, sl, adj = apply_session_caps(
             "BUY",
             target=611.90,
             stop_loss=596.40,
             atr=17.25,
             quote=quote(high=608.50, low=598.85,
                         upper_circuit=661.95, lower_circuit=541.65),
-            atr_buffer=0.15,
         )
-        # cap = 608.50 + 0.15 * 17.25 = 611.0875
-        assert abs(target - 611.0875) < 0.01
-        assert any("day_high" in a for a in adj)
+        assert target == 611.90
+        assert sl == 596.40
+        assert adj == []

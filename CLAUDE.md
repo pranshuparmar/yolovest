@@ -115,14 +115,14 @@ Error propagation:
 
 Holding period per stock is dynamic based on ATR%, trend strength, position-mix bias, and market regime. Target/SL multipliers come from `strategy.holding_periods.{intraday,short_swing,week,long}.{target,stop_loss}`, interpolated by holding-day count.
 
-### Intraday Session Caps
+### Intraday Circuit Caps
 
-For intraday signals (`holding_period == "intraday"`) when `market_data.kite_data_enabled`, ATR-based target/SL are reality-checked against the live quote:
-- BUY target capped at `day_high + atr_buffer × ATR` (default buffer 0.15)
-- SELL target capped at `day_low − atr_buffer × ATR`
-- Hard caps at `upper_circuit × 0.99` / `lower_circuit × 1.01`
+For intraday signals (`holding_period == "intraday"`) when `market_data.kite_data_enabled`, ATR-based target/SL are constrained by the exchange's circuit limits read from the live quote:
+- BUY target capped at `upper_circuit × 0.99` (orders above won't fill)
+- SELL target capped at `lower_circuit × 1.01`
+- Stop-loss floored at the opposite circuit accordingly
 
-Configurable via `market_data.session_cap_atr_buffer`. Only intraday — multi-day swing/CNC targets legitimately extend past today's range.
+Today's session high/low are intentionally NOT enforced — they're current extremes, not forward boundaries. A breakout target above today's high is a legitimate model output and is allowed through.
 
 ### Mode Filtering (Paper vs Live)
 

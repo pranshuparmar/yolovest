@@ -296,39 +296,32 @@ def apply_session_caps(
     signal_type: str,
     target: float,
     stop_loss: float,
-    atr: float,
+    atr: float,  # kept for signature stability with prior callers
     quote: dict[str, Any],
-    atr_buffer: float = 0.15,
+    atr_buffer: float = 0.15,  # unused; kept for signature stability
 ) -> tuple[float, float, list[str]]:
-    """Reality-check intraday target/SL against today's session metrics.
+    """Constrain target/SL by exchange circuit limits.
+
+    Only the upper/lower circuit limits are real forward boundaries —
+    orders at or beyond them physically cannot fill. Today's session
+    high/low are not forward caps (they're just where the stock has
+    been so far) and intentionally not enforced here.
 
     Caps applied (for BUY; SELL mirrors):
-      - target ≤ day_high + atr_buffer * ATR
-        (refuses targets that require a multi-ATR new high mid-session)
-      - target < upper_circuit (hard cap)
-      - stop_loss > lower_circuit (hard floor)
+      - target < upper_circuit (hard cap at 99% of circuit)
+      - stop_loss > lower_circuit (hard floor at 101% of circuit)
 
     Returns:
         (new_target, new_stop_loss, list_of_adjustment_messages)
 
-    No-op for any field missing from `quote`. Intended for intraday
-    signals only — for multi-day swing/CNC, today's high/low isn't a
-    meaningful ceiling.
+    No-op for any field missing from `quote`.
     """
-    day_high = quote.get("high")
-    day_low = quote.get("low")
+    del atr, atr_buffer  # arguments retained for backward-compatible signature
     upper_circuit = quote.get("upper_circuit")
     lower_circuit = quote.get("lower_circuit")
     adjustments: list[str] = []
 
     if signal_type == "BUY":
-        if day_high and atr > 0:
-            cap = day_high + atr_buffer * atr
-            if target > cap:
-                adjustments.append(
-                    f"target {target:.2f} → {cap:.2f} (day_high {day_high:.2f} + {atr_buffer}×ATR)"
-                )
-                target = cap
         if upper_circuit and target >= upper_circuit:
             new_target = upper_circuit * 0.99
             adjustments.append(
@@ -343,13 +336,6 @@ def apply_session_caps(
             stop_loss = new_sl
 
     elif signal_type == "SELL":
-        if day_low and atr > 0:
-            cap = day_low - atr_buffer * atr
-            if target < cap:
-                adjustments.append(
-                    f"target {target:.2f} → {cap:.2f} (day_low {day_low:.2f} − {atr_buffer}×ATR)"
-                )
-                target = cap
         if lower_circuit and target <= lower_circuit:
             new_target = lower_circuit * 1.01
             adjustments.append(
