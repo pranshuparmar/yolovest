@@ -292,6 +292,80 @@ def interpolate_atr_multipliers(
     return (anchors[-1][1], anchors[-1][2])
 
 
+def apply_session_caps(
+    signal_type: str,
+    target: float,
+    stop_loss: float,
+    atr: float,
+    quote: dict[str, Any],
+    atr_buffer: float = 0.15,
+) -> tuple[float, float, list[str]]:
+    """Reality-check intraday target/SL against today's session metrics.
+
+    Caps applied (for BUY; SELL mirrors):
+      - target ≤ day_high + atr_buffer * ATR
+        (refuses targets that require a multi-ATR new high mid-session)
+      - target < upper_circuit (hard cap)
+      - stop_loss > lower_circuit (hard floor)
+
+    Returns:
+        (new_target, new_stop_loss, list_of_adjustment_messages)
+
+    No-op for any field missing from `quote`. Intended for intraday
+    signals only — for multi-day swing/CNC, today's high/low isn't a
+    meaningful ceiling.
+    """
+    day_high = quote.get("high")
+    day_low = quote.get("low")
+    upper_circuit = quote.get("upper_circuit")
+    lower_circuit = quote.get("lower_circuit")
+    adjustments: list[str] = []
+
+    if signal_type == "BUY":
+        if day_high and atr > 0:
+            cap = day_high + atr_buffer * atr
+            if target > cap:
+                adjustments.append(
+                    f"target {target:.2f} → {cap:.2f} (day_high {day_high:.2f} + {atr_buffer}×ATR)"
+                )
+                target = cap
+        if upper_circuit and target >= upper_circuit:
+            new_target = upper_circuit * 0.99
+            adjustments.append(
+                f"target {target:.2f} → {new_target:.2f} (upper circuit {upper_circuit:.2f})"
+            )
+            target = new_target
+        if lower_circuit and stop_loss <= lower_circuit:
+            new_sl = lower_circuit * 1.01
+            adjustments.append(
+                f"SL {stop_loss:.2f} → {new_sl:.2f} (lower circuit {lower_circuit:.2f})"
+            )
+            stop_loss = new_sl
+
+    elif signal_type == "SELL":
+        if day_low and atr > 0:
+            cap = day_low - atr_buffer * atr
+            if target < cap:
+                adjustments.append(
+                    f"target {target:.2f} → {cap:.2f} (day_low {day_low:.2f} − {atr_buffer}×ATR)"
+                )
+                target = cap
+        if lower_circuit and target <= lower_circuit:
+            new_target = lower_circuit * 1.01
+            adjustments.append(
+                f"target {target:.2f} → {new_target:.2f} (lower circuit {lower_circuit:.2f})"
+            )
+            target = new_target
+        if upper_circuit and stop_loss >= upper_circuit:
+            new_sl = upper_circuit * 0.99
+            adjustments.append(
+                f"SL {stop_loss:.2f} → {new_sl:.2f} (upper circuit {upper_circuit:.2f})"
+            )
+            stop_loss = new_sl
+
+    return target, stop_loss, adjustments
+
+
 def adjust_sell_for_holdings(
     signal_type: str,
     holding_period: str,

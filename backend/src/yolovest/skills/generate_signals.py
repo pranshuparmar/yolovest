@@ -380,6 +380,26 @@ class GenerateSignalsSkill(SkillBase):
                 target_price = max(target_price, 0.01)
                 stop_loss_price = max(stop_loss_price, 0.01)
 
+                # Reality-check intraday targets against today's session.
+                # ATR-based targets can sit beyond today's high (or below
+                # today's low for SELL), which means the trade needs a
+                # new session extreme to win. When the paid quote feed is
+                # active, fetch today's high/low/circuit and cap the
+                # target accordingly. Only applies to intraday holds;
+                # multi-day swing/CNC targets legitimately extend past
+                # today's range.
+                if (
+                    holding_period == "intraday"
+                    and self.ctx.config.market_data.kite_data_enabled
+                ):
+                    target_price, stop_loss_price = await self._reality_check_intraday(
+                        symbol,
+                        prediction.signal_type,
+                        target_price,
+                        stop_loss_price,
+                        atr,
+                    )
+
                 signal = {
                     "symbol": symbol,
                     "signal_type": prediction.signal_type,
@@ -509,6 +529,39 @@ class GenerateSignalsSkill(SkillBase):
                 },
             },
         )
+
+    async def _reality_check_intraday(
+        self,
+        symbol: str,
+        signal_type: str,
+        target: float,
+        stop_loss: float,
+        atr: float,
+    ) -> tuple[float, float]:
+        """Cap intraday target/SL against today's session high/low and
+        circuit limits via a live quote from the paid Kite feed.
+
+        Failure is non-fatal — if the quote fetch errors, the original
+        target/SL are returned unchanged.
+        """
+        from yolovest.strategy.holding_period import apply_session_caps
+
+        try:
+            quote = await self.ctx.market_data.get_quote(symbol)
+        except Exception:
+            logger.debug("reality-check: quote fetch failed for %s", symbol, exc_info=True)
+            return target, stop_loss
+
+        buffer = self.ctx.config.market_data.session_cap_atr_buffer
+        new_target, new_sl, adjustments = apply_session_caps(
+            signal_type, target, stop_loss, atr, quote, atr_buffer=buffer,
+        )
+        if adjustments:
+            logger.info(
+                "reality-check %s %s: %s",
+                signal_type, symbol, "; ".join(adjustments),
+            )
+        return new_target, new_sl
 
     async def _predict_balanced(
         self,

@@ -310,16 +310,21 @@ class KiteDataProvider(MarketDataBase):
             buy_depth = depth.get("buy") or []
             sell_depth = depth.get("sell") or []
 
+            ohlc = quote.get("ohlc", {}) or {}
             return {
                 "ltp": ltp,
                 "volume": quote.get("volume", 0),
                 "timestamp": quote.get("timestamp", now_ist().isoformat()),
-                "open": quote.get("ohlc", {}).get("open"),
-                "high": quote.get("ohlc", {}).get("high"),
-                "low": quote.get("ohlc", {}).get("low"),
-                "close": quote.get("ohlc", {}).get("close"),
+                "open": ohlc.get("open"),
+                "high": ohlc.get("high"),
+                "low": ohlc.get("low"),
+                "close": ohlc.get("close"),  # previous close
+                "average_price": quote.get("average_price"),
+                "upper_circuit": quote.get("upper_circuit_limit"),
+                "lower_circuit": quote.get("lower_circuit_limit"),
                 "bid": buy_depth[0].get("price") if buy_depth else None,
                 "ask": sell_depth[0].get("price") if sell_depth else None,
+                "depth": depth,
             }
         except Exception as e:
             logger.warning("Kite quote failed for %s: %s", symbol, e)
