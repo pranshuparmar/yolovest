@@ -19,7 +19,9 @@ export interface PortfolioState {
   daily_pnl_pct: number;
   weekly_pnl_pct: number;
   daily_pnl: number;
+  daily_charges: number;
   weekly_pnl: number;
+  weekly_charges: number;
   trades_today: number;
   minutes_since_last_loss: number;
   // Broker-synced capital breakdown
@@ -34,6 +36,7 @@ export interface PortfolioState {
   total_portfolio_value: number;
   total_pnl: number;
   all_time_realized_pnl: number;
+  all_time_charges: number;
 }
 
 export interface Trade {

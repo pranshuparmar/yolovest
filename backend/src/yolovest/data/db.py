@@ -1478,6 +1478,18 @@ class Database:
         all_time_pnl = row[0] if row else 0
         total_capital = initial_capital + all_time_pnl
 
+        # All-time charges from realized_costs_json — used to display gross
+        # PnL alongside net. Rows without the breakdown (legacy or never
+        # captured) contribute 0, so gross collapses to net in those cases.
+        cursor = await self.conn.execute(
+            f"SELECT COALESCE(SUM(CAST(json_extract(realized_costs_json, '$.total') AS REAL)), 0) "
+            f"FROM trades WHERE pnl IS NOT NULL "
+            f"AND realized_costs_json IS NOT NULL{mode_clause}",
+            mode_params,
+        )
+        row = await cursor.fetchone()
+        all_time_charges = row[0] if row else 0
+
         if total_capital > 0:
             for pos in positions:
                 symbol = pos.get("symbol", "")
@@ -1510,6 +1522,18 @@ class Database:
         daily_pnl = row[0] if row else 0
         daily_pnl_pct = daily_pnl / total_capital if total_capital > 0 else 0
 
+        # Daily charges (sum of realized_costs_json.total) — lets the dashboard
+        # show gross alongside net. Trades closed before this column was added,
+        # or with the field unset, contribute 0; in that case net == gross.
+        cursor = await self.conn.execute(
+            f"SELECT COALESCE(SUM(CAST(json_extract(realized_costs_json, '$.total') AS REAL)), 0) "
+            f"FROM trades WHERE closed_at >= ? AND pnl IS NOT NULL "
+            f"AND realized_costs_json IS NOT NULL{mode_clause}",
+            [today_start, *mode_params],
+        )
+        row = await cursor.fetchone()
+        daily_charges = row[0] if row else 0
+
         # Weekly realized PnL (since configured reset day at market open)
         _day_map = {
             "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
@@ -1527,6 +1551,14 @@ class Database:
         )
         row = await cursor.fetchone()
         weekly_pnl = row[0] if row else 0
+        cursor = await self.conn.execute(
+            f"SELECT COALESCE(SUM(CAST(json_extract(realized_costs_json, '$.total') AS REAL)), 0) "
+            f"FROM trades WHERE closed_at >= ? AND pnl IS NOT NULL "
+            f"AND realized_costs_json IS NOT NULL{mode_clause}",
+            [week_start.isoformat(), *mode_params],
+        )
+        row = await cursor.fetchone()
+        weekly_charges = row[0] if row else 0
         weekly_pnl_pct = weekly_pnl / total_capital if total_capital > 0 else 0
 
         # Pending trade value (app-side block: trades waiting for user approval)
@@ -1588,7 +1620,9 @@ class Database:
             "daily_pnl_pct": daily_pnl_pct,
             "weekly_pnl_pct": weekly_pnl_pct,
             "daily_pnl": round(float(daily_pnl), 2),
+            "daily_charges": round(float(daily_charges), 2),
             "weekly_pnl": round(float(weekly_pnl), 2),
+            "weekly_charges": round(float(weekly_charges), 2),
             "trades_today": trades_today,
             "minutes_since_last_loss": minutes_since_last_loss,
             # Broker-synced breakdown
@@ -1603,6 +1637,7 @@ class Database:
             "total_portfolio_value": round(total_portfolio_value, 2),
             "total_pnl": round(total_pnl_amount, 2),
             "all_time_realized_pnl": round(float(all_time_pnl), 2),
+            "all_time_charges": round(float(all_time_charges), 2),
         }
 
     # ------------------------------------------------------------------

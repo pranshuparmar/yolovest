@@ -80,7 +80,22 @@ export function TradesTable({
                       : "text-gray-500"
                 )}
               >
-                {t.pnl !== null ? `₹${fmt(t.pnl)}` : "—"}
+                {t.pnl !== null ? (
+                  <>
+                    <div>₹{fmt(t.pnl)}</div>
+                    {t.exit_price !== null && (
+                      <div className="text-[10px] text-gray-500 leading-tight">
+                        Gross ₹{fmt(
+                          (t.signal_type === "BUY"
+                            ? (t.exit_price - t.fill_price)
+                            : (t.fill_price - t.exit_price)) * t.quantity,
+                        )}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  "—"
+                )}
               </td>
               <td className="py-2 text-gray-500 text-xs whitespace-nowrap">
                 {parseUTC(t.created_at).toLocaleDateString("en-IN", {
