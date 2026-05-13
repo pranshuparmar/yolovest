@@ -101,7 +101,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      # First cold boot runs migrations, builds the broker / market-data /
+      # LLM stack, restores the Kite session, and warms the rate limiter
+      # before the FastAPI server binds. Generous start_period covers that
+      # without slowing failure detection once the app is up.
+      start_period: 90s
     deploy:
       resources:
         limits:
