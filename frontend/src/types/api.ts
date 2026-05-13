@@ -63,6 +63,7 @@ export interface CostBreakdown {
   stt: number;
   other_charges: number;
   total: number;
+  source?: "broker" | "estimate" | "contract_note";
 }
 
 export interface LLMReview {

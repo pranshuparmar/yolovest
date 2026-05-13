@@ -175,6 +175,10 @@ export function TradeDetailPage() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
           <div><p className="text-xs text-gray-500">Entry Price</p><p>₹{fmt(data.entry_price)}</p></div>
           <div><p className="text-xs text-gray-500">Fill Price</p><p>₹{fmt(data.fill_price)}</p></div>
+          <div>
+            <p className="text-xs text-gray-500">Exit Price</p>
+            <p>{data.exit_price != null ? `₹${fmt(data.exit_price)}` : <span className="text-gray-500">—</span>}</p>
+          </div>
           <div><p className="text-xs text-gray-500">Quantity</p><p>{data.quantity}</p></div>
           <div><p className="text-xs text-gray-500">Slippage</p><p>{fmt(data.slippage)}</p></div>
           {data.estimated_costs != null && (
@@ -197,16 +201,31 @@ export function TradeDetailPage() {
       </Section>
 
       {/* Transaction Cost Breakdown */}
-      {data.cost_breakdown && (
-        <Section title="Transaction Costs">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-            <div><p className="text-xs text-gray-500">Brokerage</p><p>₹{fmt(data.cost_breakdown.brokerage)}</p></div>
-            <div><p className="text-xs text-gray-500">STT ({data.product === "MIS" ? "0.025%" : "0.1%"})</p><p>₹{fmt(data.cost_breakdown.stt)}</p></div>
-            <div><p className="text-xs text-gray-500">Other (Stamp + GST + Exchange)</p><p>₹{fmt(data.cost_breakdown.other_charges)}</p></div>
-            <div><p className="text-xs text-gray-500">Total Charges</p><p className="text-amber-400 font-medium">₹{fmt(data.cost_breakdown.total)}</p></div>
-          </div>
-        </Section>
-      )}
+      {data.cost_breakdown && (() => {
+        const src = data.cost_breakdown.source;
+        const sourceLabel =
+          src === "broker" ? { text: "Broker actuals", cls: "bg-emerald-900/40 text-emerald-400" }
+          : src === "contract_note" ? { text: "Contract note", cls: "bg-emerald-900/40 text-emerald-400" }
+          : { text: "Estimate", cls: "bg-amber-900/40 text-amber-400" };
+        const sttLabel = src === "estimate"
+          ? `STT (${data.product === "MIS" ? "0.025%" : "0.1%"})`
+          : "STT";
+        return (
+          <Section title="Transaction Costs">
+            <div className="mb-3">
+              <span className={clsx("text-xs px-2 py-0.5 rounded font-medium", sourceLabel.cls)}>
+                {sourceLabel.text}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+              <div><p className="text-xs text-gray-500">Brokerage</p><p>₹{fmt(data.cost_breakdown.brokerage)}</p></div>
+              <div><p className="text-xs text-gray-500">{sttLabel}</p><p>₹{fmt(data.cost_breakdown.stt)}</p></div>
+              <div><p className="text-xs text-gray-500">Other (Stamp + GST + Exchange)</p><p>₹{fmt(data.cost_breakdown.other_charges)}</p></div>
+              <div><p className="text-xs text-gray-500">Total Charges</p><p className="text-amber-400 font-medium">₹{fmt(data.cost_breakdown.total)}</p></div>
+            </div>
+          </Section>
+        );
+      })()}
 
       {/* LLM Review full reasoning */}
       {data.llm_review && (
