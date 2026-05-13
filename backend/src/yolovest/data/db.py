@@ -1755,7 +1755,8 @@ class Database:
             "FROM watchlist w "
             "LEFT JOIN symbol_sectors ss ON w.symbol = ss.symbol "
             "WHERE COALESCE(ss.sector, w.sector) IS NOT NULL "
-            "GROUP BY sector ORDER BY avg_score DESC"
+            "GROUP BY COALESCE(ss.sector, w.sector) "
+            "ORDER BY avg_score DESC"
         )
         rows = await cursor.fetchall()
         if not rows:
