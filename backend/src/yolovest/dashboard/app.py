@@ -642,10 +642,11 @@ def create_app(ctx: AppContext) -> FastAPI:
             (exit_price - entry) * qty if trade["signal_type"] == "BUY"
             else (entry - exit_price) * qty
         )
-        from yolovest.costs import compute_transaction_costs
-        costs = compute_transaction_costs(
-            entry, exit_price, qty, product=product,
-            cost_config=ctx.config.transaction_costs,
+        from yolovest.costs import resolve_round_trip_costs
+        costs, _src = await resolve_round_trip_costs(
+            ctx.broker, symbol=symbol, signal_type=trade["signal_type"],
+            entry_price=entry, exit_price=float(exit_price), quantity=qty,
+            product=product, cost_config=ctx.config.transaction_costs,
         )
         pnl = round(gross_pnl - costs, 2)
 

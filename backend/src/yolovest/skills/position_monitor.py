@@ -22,7 +22,7 @@ import asyncio
 import logging
 from typing import Any
 
-from yolovest.costs import compute_transaction_costs
+from yolovest.costs import resolve_round_trip_costs
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 logger = logging.getLogger(__name__)
@@ -133,9 +133,10 @@ class PositionMonitorSkill(SkillBase):
                 else:
                     gross_pnl = (entry - current_price) * qty
                 product = pos.get("product", "MIS")
-                costs = compute_transaction_costs(
-                    entry, current_price, qty, product=product,
-                    cost_config=self.ctx.config.transaction_costs,
+                costs, src = await resolve_round_trip_costs(
+                    self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                    entry_price=entry, exit_price=current_price, quantity=qty,
+                    product=product, cost_config=self.ctx.config.transaction_costs,
                 )
                 pnl = round(gross_pnl - costs, 2)
 
@@ -147,8 +148,8 @@ class PositionMonitorSkill(SkillBase):
                     await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
                 targets_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
-                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
-                    symbol, current_price, pnl, costs,
+                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f src=%s)",
+                    symbol, current_price, pnl, costs, src,
                 )
                 continue
 
@@ -162,9 +163,10 @@ class PositionMonitorSkill(SkillBase):
                 else:
                     gross_pnl = (entry - current_price) * qty
                 product = pos.get("product", "MIS")
-                costs = compute_transaction_costs(
-                    entry, current_price, qty, product=product,
-                    cost_config=self.ctx.config.transaction_costs,
+                costs, src = await resolve_round_trip_costs(
+                    self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                    entry_price=entry, exit_price=current_price, quantity=qty,
+                    product=product, cost_config=self.ctx.config.transaction_costs,
                 )
                 pnl = round(gross_pnl - costs, 2)
 
@@ -176,8 +178,8 @@ class PositionMonitorSkill(SkillBase):
                     await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
                 stops_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
-                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
-                    symbol, current_price, pnl, costs,
+                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f src=%s)",
+                    symbol, current_price, pnl, costs, src,
                 )
                 continue
 
@@ -421,9 +423,10 @@ class PositionMonitorSkill(SkillBase):
                 gross_pnl = (entry - exit_price) * qty
 
             product = pos.get("product", "MIS")
-            costs = compute_transaction_costs(
-                entry, exit_price, qty, product=product,
-                cost_config=self.ctx.config.transaction_costs,
+            costs, _src = await resolve_round_trip_costs(
+                self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                entry_price=entry, exit_price=exit_price, quantity=qty,
+                product=product, cost_config=self.ctx.config.transaction_costs,
             )
             pnl = round(gross_pnl - costs, 2)
 
@@ -618,9 +621,10 @@ class PositionMonitorSkill(SkillBase):
         else:
             gross_pnl = (entry - current_price) * qty
         product = pos.get("product", "MIS")
-        costs = compute_transaction_costs(
-            entry, current_price, qty, product=product,
-            cost_config=self.ctx.config.transaction_costs,
+        costs, _src = await resolve_round_trip_costs(
+            self.ctx.broker, symbol=pos["symbol"], signal_type=pos["signal_type"],
+            entry_price=entry, exit_price=current_price, quantity=qty,
+            product=product, cost_config=self.ctx.config.transaction_costs,
         )
         pnl = round(gross_pnl - costs, 2)
 

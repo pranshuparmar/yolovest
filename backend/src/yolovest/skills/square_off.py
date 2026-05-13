@@ -20,7 +20,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from yolovest.costs import compute_transaction_costs
+from yolovest.costs import resolve_round_trip_costs
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 from yolovest.timezone import now_ist
 
@@ -242,9 +242,10 @@ class SquareOffSkill(SkillBase):
             gross_pnl = (entry - exit_price) * qty
 
         product = pos.get("product", "MIS")
-        costs = compute_transaction_costs(
-            entry, exit_price, qty, product=product,
-            cost_config=self.ctx.config.transaction_costs,
+        costs, _src = await resolve_round_trip_costs(
+            self.ctx.broker, symbol=pos["symbol"], signal_type=pos["signal_type"],
+            entry_price=entry, exit_price=exit_price, quantity=qty,
+            product=product, cost_config=self.ctx.config.transaction_costs,
         )
         pnl = round(gross_pnl - costs, 2)
 

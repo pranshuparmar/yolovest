@@ -75,6 +75,19 @@ class BrokerBase(ABC):
         """Get all CNC holdings from the broker (delivery stocks held overnight)."""
         ...
 
+    async def compute_charges(
+        self, legs: list[dict[str, Any]]
+    ) -> list[dict[str, float]] | None:
+        """Return actual per-leg charges from the broker, or None if unsupported.
+
+        Each input leg is a dict with: exchange, tradingsymbol, transaction_type,
+        variety, product, order_type, quantity, average_price. Returns a list of
+        charges breakdowns in the same order — each dict carries `brokerage`,
+        `stt`, `other_charges`, `total`. Returning None lets callers fall back
+        to a config-based estimate (e.g. paper mode, broker offline).
+        """
+        return None
+
     def get_login_url(self) -> str:
         """Get the broker login URL for daily re-authentication."""
         return ""

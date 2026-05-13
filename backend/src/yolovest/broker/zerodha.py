@@ -664,6 +664,53 @@ class ZerodhaBroker(BrokerBase):
             return []
 
     # ------------------------------------------------------------------
+    # Charges (virtual contract note)
+    # ------------------------------------------------------------------
+
+    async def compute_charges(
+        self, legs: list[dict[str, Any]]
+    ) -> list[dict[str, float]] | None:
+        """Fetch actual charges per leg from Kite's /charges/orders endpoint.
+
+        Returns None in paper mode, when not authenticated, or if the SDK
+        rejects the request — caller then falls back to the config estimate.
+        """
+        if self._mode == "paper" or self._kite is None or not legs:
+            return None
+        try:
+            async with self._rate_limiter:
+                resp = await asyncio.to_thread(
+                    self._kite.get_virtual_contract_note, legs,
+                )
+        except Exception as e:
+            logger.debug("get_virtual_contract_note failed: %s", e)
+            return None
+
+        if not isinstance(resp, list) or len(resp) != len(legs):
+            return None
+
+        out: list[dict[str, float]] = []
+        for entry in resp:
+            charges = (entry or {}).get("charges") or {}
+            brokerage = float(charges.get("brokerage") or 0.0)
+            stt = float(charges.get("transaction_tax") or 0.0)
+            gst_total = float((charges.get("gst") or {}).get("total") or 0.0)
+            other = (
+                float(charges.get("exchange_turnover_charge") or 0.0)
+                + float(charges.get("sebi_turnover_charge") or 0.0)
+                + float(charges.get("stamp_duty") or 0.0)
+                + gst_total
+            )
+            total = float(charges.get("total") or (brokerage + stt + other))
+            out.append({
+                "brokerage": round(brokerage, 2),
+                "stt": round(stt, 2),
+                "other_charges": round(other, 2),
+                "total": round(total, 2),
+            })
+        return out
+
+    # ------------------------------------------------------------------
     # Retry Helper
     # ------------------------------------------------------------------
 

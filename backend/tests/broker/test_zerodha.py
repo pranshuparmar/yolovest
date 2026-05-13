@@ -1,5 +1,7 @@
 """Tests for ZerodhaBroker — paper mode and mocked live mode."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from yolovest.broker.zerodha import ZerodhaBroker
@@ -109,3 +111,112 @@ class TestPaperMode:
         assert id1 != id2
         positions = await paper_broker.get_positions()
         assert len(positions) == 2
+
+    async def test_compute_charges_returns_none_in_paper(self, paper_broker):
+        result = await paper_broker.compute_charges([
+            {"exchange": "NSE", "tradingsymbol": "RELIANCE",
+             "transaction_type": "BUY", "variety": "regular",
+             "product": "MIS", "order_type": "MARKET",
+             "quantity": 1, "average_price": 2500.0},
+        ])
+        assert result is None
+
+
+class TestComputeChargesLive:
+    """Live-mode compute_charges with a mocked Kite client."""
+
+    @pytest.fixture
+    def live_broker(self):
+        return ZerodhaBroker(api_key="test", api_secret="test", mode="live")
+
+    async def test_maps_kite_charges_block(self, live_broker):
+        live_broker._kite = MagicMock()
+        live_broker._kite.get_virtual_contract_note = MagicMock(return_value=[
+            {
+                "type": "equity",
+                "total": 22.30,
+                "charges": {
+                    "transaction_tax": 1.50,
+                    "transaction_tax_type": "stt",
+                    "exchange_turnover_charge": 0.30,
+                    "sebi_turnover_charge": 0.05,
+                    "brokerage": 20.0,
+                    "stamp_duty": 0.10,
+                    "gst": {"igst": 0.0, "cgst": 0.18, "sgst": 0.17, "total": 0.35},
+                    "total": 22.30,
+                },
+            },
+            {
+                "type": "equity",
+                "total": 27.10,
+                "charges": {
+                    "transaction_tax": 6.30,
+                    "transaction_tax_type": "stt",
+                    "exchange_turnover_charge": 0.30,
+                    "sebi_turnover_charge": 0.05,
+                    "brokerage": 20.0,
+                    "stamp_duty": 0.10,
+                    "gst": {"total": 0.35},
+                    "total": 27.10,
+                },
+            },
+        ])
+
+        legs = [
+            {"exchange": "NSE", "tradingsymbol": "RELIANCE",
+             "transaction_type": "BUY", "variety": "regular",
+             "product": "MIS", "order_type": "MARKET",
+             "quantity": 10, "average_price": 2500.0},
+            {"exchange": "NSE", "tradingsymbol": "RELIANCE",
+             "transaction_type": "SELL", "variety": "regular",
+             "product": "MIS", "order_type": "MARKET",
+             "quantity": 10, "average_price": 2510.0},
+        ]
+        result = await live_broker.compute_charges(legs)
+
+        assert result is not None
+        assert len(result) == 2
+        assert result[0]["brokerage"] == 20.0
+        assert result[0]["stt"] == 1.50
+        # other = exchange + sebi + stamp + gst.total = 0.30 + 0.05 + 0.10 + 0.35
+        assert result[0]["other_charges"] == pytest.approx(0.80)
+        assert result[0]["total"] == 22.30
+        assert result[1]["stt"] == 6.30
+        assert result[1]["total"] == 27.10
+
+        # Verify the legs got forwarded verbatim
+        live_broker._kite.get_virtual_contract_note.assert_called_once_with(legs)
+
+    async def test_returns_none_when_kite_raises(self, live_broker):
+        live_broker._kite = MagicMock()
+        live_broker._kite.get_virtual_contract_note = MagicMock(
+            side_effect=RuntimeError("Kite API error")
+        )
+        result = await live_broker.compute_charges([
+            {"exchange": "NSE", "tradingsymbol": "RELIANCE",
+             "transaction_type": "BUY", "variety": "regular",
+             "product": "MIS", "order_type": "MARKET",
+             "quantity": 1, "average_price": 2500.0},
+        ])
+        assert result is None
+
+    async def test_returns_none_when_kite_response_count_mismatches(self, live_broker):
+        live_broker._kite = MagicMock()
+        live_broker._kite.get_virtual_contract_note = MagicMock(return_value=[
+            {"charges": {"total": 22.30}},  # only one back, two sent
+        ])
+        result = await live_broker.compute_charges([
+            {"exchange": "NSE", "tradingsymbol": "X", "transaction_type": "BUY",
+             "variety": "regular", "product": "MIS", "order_type": "MARKET",
+             "quantity": 1, "average_price": 100.0},
+            {"exchange": "NSE", "tradingsymbol": "X", "transaction_type": "SELL",
+             "variety": "regular", "product": "MIS", "order_type": "MARKET",
+             "quantity": 1, "average_price": 101.0},
+        ])
+        assert result is None
+
+    async def test_returns_none_when_no_legs(self, live_broker):
+        live_broker._kite = MagicMock()
+        result = await live_broker.compute_charges([])
+        assert result is None
+        live_broker._kite.get_virtual_contract_note.assert_not_called()
