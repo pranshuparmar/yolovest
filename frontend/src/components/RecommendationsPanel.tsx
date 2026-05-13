@@ -9,6 +9,8 @@ const DISPOSITION_LABELS: Record<SignalDisposition, string> = {
   llm_rejected: "LLM Rejected",
   awaiting_approval: "Awaiting Approval",
   executed: "Executed",
+  expired: "Expired",
+  rejected: "Rejected",
   recently_rejected_dedup: "Cooldown",
 };
 
@@ -18,6 +20,8 @@ const DISPOSITION_STYLES: Record<SignalDisposition, string> = {
   llm_rejected: "bg-red-900/50 text-red-300",
   awaiting_approval: "bg-blue-900/50 text-blue-300",
   executed: "bg-emerald-900/50 text-emerald-300",
+  expired: "bg-amber-900/50 text-amber-300",
+  rejected: "bg-rose-900/50 text-rose-300",
   recently_rejected_dedup: "bg-gray-700 text-gray-400",
 };
 
@@ -140,6 +144,8 @@ export function RecommendationsPanel() {
     { key: "all", label: `All (${items.length})` },
     { key: "executed", label: `Executed (${counts.executed || 0})` },
     { key: "awaiting_approval", label: `Pending (${counts.awaiting_approval || 0})` },
+    { key: "expired", label: `Expired (${counts.expired || 0})` },
+    { key: "rejected", label: `Rejected (${counts.rejected || 0})` },
     { key: "risk_rejected", label: `Risk Blocked (${counts.risk_rejected || 0})` },
     { key: "llm_rejected", label: `LLM Rejected (${counts.llm_rejected || 0})` },
   ];

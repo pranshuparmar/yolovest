@@ -214,6 +214,8 @@ export type SignalDisposition =
   | "llm_rejected"
   | "awaiting_approval"
   | "executed"
+  | "expired"
+  | "rejected"
   | "recently_rejected_dedup";
 
 export interface Recommendation {
