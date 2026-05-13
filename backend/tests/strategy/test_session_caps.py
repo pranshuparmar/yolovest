@@ -25,7 +25,7 @@ class TestBuyCaps:
         """A target above today's high is a legitimate breakout target
         and must pass through unmodified."""
         target, sl, adj = apply_session_caps(
-            "BUY", target=108.0, stop_loss=95.0, atr=4.0, quote=quote(),
+            "BUY", target=108.0, stop_loss=95.0, quote=quote(),
         )
         assert target == 108.0
         assert sl == 95.0
@@ -33,14 +33,14 @@ class TestBuyCaps:
 
     def test_target_at_upper_circuit_capped(self):
         target, _, adj = apply_session_caps(
-            "BUY", target=115.0, stop_loss=95.0, atr=4.0, quote=quote(),
+            "BUY", target=115.0, stop_loss=95.0, quote=quote(),
         )
         assert target == 110.0 * 0.99
         assert any("upper circuit" in a for a in adj)
 
     def test_sl_below_lower_circuit_floored(self):
         _, sl, adj = apply_session_caps(
-            "BUY", target=99.0, stop_loss=75.0, atr=4.0, quote=quote(),
+            "BUY", target=99.0, stop_loss=75.0, quote=quote(),
         )
         assert sl == 80.0 * 1.01
         assert any("lower circuit" in a for a in adj)
@@ -51,7 +51,7 @@ class TestSellCaps:
         """Mirror of the BUY breakout case — a SELL target below today's
         low is a legitimate breakdown target."""
         target, sl, adj = apply_session_caps(
-            "SELL", target=85.0, stop_loss=95.0, atr=4.0, quote=quote(),
+            "SELL", target=85.0, stop_loss=95.0, quote=quote(),
         )
         assert target == 85.0
         assert sl == 95.0
@@ -59,14 +59,14 @@ class TestSellCaps:
 
     def test_target_at_lower_circuit_capped(self):
         target, _, adj = apply_session_caps(
-            "SELL", target=70.0, stop_loss=99.0, atr=4.0, quote=quote(),
+            "SELL", target=70.0, stop_loss=99.0, quote=quote(),
         )
         assert target == 80.0 * 1.01
         assert any("lower circuit" in a for a in adj)
 
     def test_sl_above_upper_circuit_capped(self):
         _, sl, adj = apply_session_caps(
-            "SELL", target=92.0, stop_loss=115.0, atr=4.0, quote=quote(),
+            "SELL", target=92.0, stop_loss=115.0, quote=quote(),
         )
         assert sl == 110.0 * 0.99
         assert any("upper circuit" in a for a in adj)
@@ -75,7 +75,7 @@ class TestSellCaps:
 class TestMissingQuoteFields:
     def test_empty_quote_is_passthrough(self):
         target, sl, adj = apply_session_caps(
-            "BUY", target=108.0, stop_loss=95.0, atr=4.0, quote={},
+            "BUY", target=108.0, stop_loss=95.0, quote={},
         )
         assert target == 108.0
         assert sl == 95.0
@@ -83,7 +83,7 @@ class TestMissingQuoteFields:
 
     def test_only_circuits_apply_when_present(self):
         target, sl, adj = apply_session_caps(
-            "BUY", target=200.0, stop_loss=95.0, atr=4.0,
+            "BUY", target=200.0, stop_loss=95.0,
             quote={"upper_circuit": 110.0},
         )
         assert target == 110.0 * 0.99
@@ -100,7 +100,6 @@ class TestHDFCLIFEScenario:
             "BUY",
             target=611.90,
             stop_loss=596.40,
-            atr=17.25,
             quote=quote(high=608.50, low=598.85,
                         upper_circuit=661.95, lower_circuit=541.65),
         )

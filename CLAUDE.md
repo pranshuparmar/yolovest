@@ -255,7 +255,7 @@ Secrets, filesystem paths, and server binding:
 | `market_hours` | `open`, `close`, `square_off`, `intraday_cutoff` |
 | `execution` | `transaction_mode` (`auto`/`manual`), `max_order_retries`, `price_drift_max_pct` |
 | `scanning` | `universe`, `shortlist_size`, `min_avg_daily_volume`, `seed_symbols` (cold-start fallback only) |
-| `market_data` | `kite_data_enabled`, `news_enabled`, `scrapers_enabled`, `backfill_days` (daily, used by both ingest-universe and backfill-data), `intraday_backfill_days` (5-minute), `session_cap_atr_buffer` |
+| `market_data` | `kite_data_enabled`, `news_enabled`, `scrapers_enabled`, `backfill_days` (daily, used by both ingest-universe and backfill-data), `intraday_backfill_days` (5-minute) |
 
 ### Service Toggles
 

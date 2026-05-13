@@ -296,16 +296,14 @@ def apply_session_caps(
     signal_type: str,
     target: float,
     stop_loss: float,
-    atr: float,  # kept for signature stability with prior callers
     quote: dict[str, Any],
-    atr_buffer: float = 0.15,  # unused; kept for signature stability
 ) -> tuple[float, float, list[str]]:
     """Constrain target/SL by exchange circuit limits.
 
     Only the upper/lower circuit limits are real forward boundaries —
     orders at or beyond them physically cannot fill. Today's session
-    high/low are not forward caps (they're just where the stock has
-    been so far) and intentionally not enforced here.
+    high/low are intentionally not enforced (they're current extremes,
+    not forward caps; breakouts past them are legitimate).
 
     Caps applied (for BUY; SELL mirrors):
       - target < upper_circuit (hard cap at 99% of circuit)
@@ -316,7 +314,6 @@ def apply_session_caps(
 
     No-op for any field missing from `quote`.
     """
-    del atr, atr_buffer  # arguments retained for backward-compatible signature
     upper_circuit = quote.get("upper_circuit")
     lower_circuit = quote.get("lower_circuit")
     adjustments: list[str] = []

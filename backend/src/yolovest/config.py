@@ -92,12 +92,6 @@ class MarketDataConfig(BaseModel):
     sentiment_ttl_hours: int = 48  # sentiment older than this is ignored in scanning
     backfill_days: int = 1095  # daily-bar history window for backfill-data and ingest-universe
     intraday_backfill_days: int = 365  # 5-minute-bar history window for backfill-intraday
-    # Intraday target reality-check. When the paid quote feed is active,
-    # intraday signal targets are capped at `day_high + buffer * ATR`
-    # (for BUY) or `day_low - buffer * ATR` (for SELL). Smaller value =
-    # tighter cap. Set to 0 to cap exactly at today's high/low; set to
-    # a large value (e.g. 10) to effectively disable.
-    session_cap_atr_buffer: float = 0.15
 
 
 class HeartbeatConfig(BaseModel):

@@ -397,7 +397,6 @@ class GenerateSignalsSkill(SkillBase):
                         prediction.signal_type,
                         target_price,
                         stop_loss_price,
-                        atr,
                     )
 
                 signal = {
@@ -536,10 +535,9 @@ class GenerateSignalsSkill(SkillBase):
         signal_type: str,
         target: float,
         stop_loss: float,
-        atr: float,
     ) -> tuple[float, float]:
-        """Cap intraday target/SL against today's session high/low and
-        circuit limits via a live quote from the paid Kite feed.
+        """Cap intraday target/SL against the exchange's circuit limits
+        using a live quote from the paid Kite feed.
 
         Failure is non-fatal — if the quote fetch errors, the original
         target/SL are returned unchanged.
@@ -552,9 +550,8 @@ class GenerateSignalsSkill(SkillBase):
             logger.debug("reality-check: quote fetch failed for %s", symbol, exc_info=True)
             return target, stop_loss
 
-        buffer = self.ctx.config.market_data.session_cap_atr_buffer
         new_target, new_sl, adjustments = apply_session_caps(
-            signal_type, target, stop_loss, atr, quote, atr_buffer=buffer,
+            signal_type, target, stop_loss, quote,
         )
         if adjustments:
             logger.info(
