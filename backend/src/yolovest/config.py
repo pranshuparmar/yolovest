@@ -164,7 +164,7 @@ class HoldingPeriodConfig(BaseModel):
     """
 
     intraday: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=0.75, stop_loss=0.5),
+        default_factory=lambda: ATRMultipliers(target=0.6, stop_loss=0.3),
     )
     short_swing: ATRMultipliers = Field(
         default_factory=lambda: ATRMultipliers(target=1.5, stop_loss=0.75),
