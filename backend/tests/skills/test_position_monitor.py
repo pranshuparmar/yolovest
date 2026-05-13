@@ -50,6 +50,53 @@ class TestPositionMonitoring:
         assert result.success
         assert "RELIANCE" in result.data["targets_hit"]
 
+    async def test_early_exit_buffer_fires_just_below_target(
+        self, monitor_skill, open_position,
+    ):
+        """LTP within target_early_exit_pct of target should still trigger."""
+        monitor_skill.ctx.config.risk.target_early_exit_pct = 0.0015  # 0.15%
+        monitor_skill.ctx.market_hours.is_market_hours = lambda: True
+        monitor_skill.ctx.db.get_open_positions = AsyncMock(return_value=[open_position])
+        monitor_skill.ctx.broker.get_positions = AsyncMock(return_value=[])
+        # target=2600, buffer 0.15% → trigger at 2596.10. LTP 2597 should fire.
+        monitor_skill.ctx.market_data.get_ltp = AsyncMock(return_value=2597.0)
+
+        result = await monitor_skill.execute()
+
+        assert result.success
+        assert "RELIANCE" in result.data["targets_hit"]
+
+    async def test_early_exit_buffer_does_not_fire_beyond_buffer(
+        self, monitor_skill, open_position,
+    ):
+        """LTP outside the buffer band should NOT trigger target exit."""
+        monitor_skill.ctx.config.risk.target_early_exit_pct = 0.0015  # 0.15%
+        monitor_skill.ctx.market_hours.is_market_hours = lambda: True
+        monitor_skill.ctx.db.get_open_positions = AsyncMock(return_value=[open_position])
+        monitor_skill.ctx.broker.get_positions = AsyncMock(return_value=[])
+        # target=2600, trigger=2596.10. LTP 2590 is below the band, no fire.
+        monitor_skill.ctx.market_data.get_ltp = AsyncMock(return_value=2590.0)
+
+        result = await monitor_skill.execute()
+
+        assert result.success
+        assert "RELIANCE" not in result.data["targets_hit"]
+
+    async def test_zero_buffer_preserves_exact_target_behaviour(
+        self, monitor_skill, open_position,
+    ):
+        """With buffer=0 the check collapses to the original `>= target`."""
+        monitor_skill.ctx.config.risk.target_early_exit_pct = 0.0
+        monitor_skill.ctx.market_hours.is_market_hours = lambda: True
+        monitor_skill.ctx.db.get_open_positions = AsyncMock(return_value=[open_position])
+        monitor_skill.ctx.broker.get_positions = AsyncMock(return_value=[])
+        monitor_skill.ctx.market_data.get_ltp = AsyncMock(return_value=2599.99)
+
+        result = await monitor_skill.execute()
+
+        assert result.success
+        assert "RELIANCE" not in result.data["targets_hit"]
+
     async def test_stop_loss_hit_detected(self, monitor_skill, open_position):
         monitor_skill.ctx.market_hours.is_market_hours = lambda: True
         monitor_skill.ctx.db.get_open_positions = AsyncMock(return_value=[open_position])

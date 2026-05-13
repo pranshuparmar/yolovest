@@ -325,6 +325,12 @@ class RiskConfig(BaseModel):
     trailing_sl_enabled: bool = True
     trailing_sl_trigger_multiple: float = Field(default=1.5, gt=0)
     trailing_sl_step_pct: float = Field(default=0.01, gt=0, lt=1)
+    # Early-exit buffer applied to the target check. Heartbeats run every
+    # 15 min, so a price that gets within this percentage of target but
+    # never quite touches it would otherwise wait a full cycle (and may
+    # reverse). 0.0015 = 0.15% which catches a ~15 paisa gap on a ₹100
+    # stock or ₹0.75 on a ₹500 stock.
+    target_early_exit_pct: float = Field(default=0.0015, ge=0, lt=0.05)
     llm_review_enabled: bool = True
     llm_fallback_to_rules: bool = True
     max_same_sector_positions: int = Field(default=1, ge=1)

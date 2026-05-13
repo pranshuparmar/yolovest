@@ -125,9 +125,15 @@ class PositionMonitorSkill(SkillBase):
                 )
                 continue
 
-            # Target hit?
-            if (pos["signal_type"] == "BUY" and current_price >= target) or (
-                pos["signal_type"] == "SELL" and current_price <= target
+            # Target hit (with early-exit buffer). Heartbeats are 15 min
+            # apart; a price that's within `target_early_exit_pct` of target
+            # but never quite touches it would otherwise wait a full cycle
+            # and risk reversing.
+            buf = self.ctx.config.risk.target_early_exit_pct
+            buy_trigger = target * (1 - buf)
+            sell_trigger = target * (1 + buf)
+            if (pos["signal_type"] == "BUY" and current_price >= buy_trigger) or (
+                pos["signal_type"] == "SELL" and current_price <= sell_trigger
             ):
                 qty = pos.get("quantity", 0)
                 if pos["signal_type"] == "BUY":

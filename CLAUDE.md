@@ -251,7 +251,7 @@ Secrets, filesystem paths, and server binding:
 | `mode` | `"paper"` or `"live"` |
 | `strategy.mode` | `"balanced"` / `"intraday"` / `"short_term"` / `"long_term"` |
 | `strategy.holding_periods.{intraday,short_swing,week,long}.{target,stop_loss}` | ATR multipliers per holding bucket |
-| `risk` | `max_risk_per_trade_pct`, `max_open_positions`, `max_single_stock_pct`, `max_portfolio_exposure_pct` (counts pending notional), `daily_loss_limit_pct`, `weekly_loss_limit_pct`, `max_same_sector_positions` |
+| `risk` | `max_risk_per_trade_pct`, `max_open_positions`, `max_single_stock_pct`, `max_portfolio_exposure_pct` (counts pending notional), `daily_loss_limit_pct`, `weekly_loss_limit_pct`, `max_same_sector_positions`, `target_early_exit_pct` (exits when LTP within this % of target — 0.0015 default) |
 | `market_hours` | `open`, `close`, `square_off`, `intraday_cutoff` |
 | `execution` | `transaction_mode` (`auto`/`manual`), `max_order_retries`, `price_drift_max_pct` |
 | `scanning` | `universe`, `shortlist_size`, `min_avg_daily_volume`, `seed_symbols` (cold-start fallback only) |
