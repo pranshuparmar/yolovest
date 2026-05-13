@@ -78,15 +78,6 @@ class RiskCheckSkill(SkillBase):
         if portfolio["daily_pnl_pct"] <= -cfg.daily_loss_limit_pct:
             return self._reject(signal, f"Daily loss limit hit ({cfg.daily_loss_limit_pct:.0%})")
 
-        # Max trades per day
-        if portfolio["trades_today"] >= cfg.max_trades_per_day:
-            return self._reject(signal, f"Max trades/day reached ({cfg.max_trades_per_day})")
-
-        # Loss cooldown
-        if portfolio["minutes_since_last_loss"] < cfg.loss_cooldown_minutes:
-            remaining = cfg.loss_cooldown_minutes - portfolio["minutes_since_last_loss"]
-            return self._reject(signal, f"Loss cooldown active ({remaining:.0f}min remaining)")
-
         # Max open positions (system-generated trades only; adopted holdings
         # are pre-existing investments and don't count toward the trading limit).
         # Include pending approvals to prevent over-generation in manual mode.
@@ -97,6 +88,26 @@ class RiskCheckSkill(SkillBase):
             except Exception:
                 logger.debug("Failed to load pending trades", exc_info=True)
         pending_count = len(pending)
+
+        # Max trades per day — count executed today PLUS pending awaiting
+        # approval. Without this, a single heartbeat that emits multiple
+        # signals can queue them all (each sees trades_today=0 because no
+        # row has executed yet); the user then approves them and the
+        # daily cap silently overshoots.
+        effective_today = portfolio["trades_today"] + pending_count
+        if effective_today >= cfg.max_trades_per_day:
+            return self._reject(
+                signal,
+                f"Max trades/day reached ({effective_today} = "
+                f"{portfolio['trades_today']} executed + {pending_count} pending, "
+                f"limit={cfg.max_trades_per_day})",
+            )
+
+        # Loss cooldown
+        if portfolio["minutes_since_last_loss"] < cfg.loss_cooldown_minutes:
+            remaining = cfg.loss_cooldown_minutes - portfolio["minutes_since_last_loss"]
+            return self._reject(signal, f"Loss cooldown active ({remaining:.0f}min remaining)")
+
         system_positions = portfolio.get("system_positions", portfolio["open_positions"])
         adopted_positions = portfolio.get("adopted_positions", 0)
         effective_positions = system_positions + pending_count

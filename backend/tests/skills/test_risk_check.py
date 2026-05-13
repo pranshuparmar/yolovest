@@ -143,6 +143,32 @@ class TestRiskCheckRejections:
         assert not result.data["approved"]
         assert "exposure" in result.data["rejection_reason"].lower()
 
+    async def test_pending_count_in_max_trades_per_day(
+        self, risk_skill, base_signal, healthy_portfolio,
+    ):
+        """Regression: max_trades_per_day must count pending+executed.
+        Previously only counted executed; a single heartbeat that emitted
+        N signals (all with trades_today=0) would queue all N and the
+        user could approve past the daily cap."""
+        risk_skill.ctx.config.execution.transaction_mode = "manual"
+        risk_skill.ctx.config.risk.max_trades_per_day = 2
+
+        healthy_portfolio["trades_today"] = 0
+        risk_skill.ctx.db.get_portfolio_state = AsyncMock(return_value=healthy_portfolio)
+        risk_skill.ctx.market_hours.is_order_window = lambda: True
+        # 2 pending awaiting approval already
+        risk_skill.ctx.db.get_pending_trades = AsyncMock(return_value=[
+            {"symbol": "A", "entry_price": 100, "position_size": 1},
+            {"symbol": "B", "entry_price": 100, "position_size": 1},
+        ])
+
+        result = await risk_skill.execute(signal=base_signal)
+
+        assert not result.data["approved"]
+        reason = result.data["rejection_reason"].lower()
+        assert "max trades/day" in reason
+        assert "pending" in reason
+
     async def test_pending_notional_counts_toward_exposure_cap(
         self, risk_skill, base_signal, healthy_portfolio,
     ):

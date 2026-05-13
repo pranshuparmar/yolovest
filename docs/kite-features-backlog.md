@@ -146,6 +146,72 @@ table (or extra columns on `trades`).
 
 ---
 
+## P2 — Adaptive risk
+
+### Trailing SL via `modify_gtt`
+
+**What:** When a CNC position is in profit by ≥
+`trailing_sl_trigger_multiple` × initial risk, modify the existing
+GTT's stoploss leg to lock in some of the gain. Continue trailing
+upward in `trailing_sl_step_pct` increments.
+
+**Why:** Currently `position-monitor` skips trailing entirely when
+`gtt_id` is set, because trailing requires modifying an existing SL
+order and `kite.modify_gtt` needs both legs re-supplied in full
+(not just the stoploss leg). Until we implement that, GTT-attached
+positions get the broker-side exit guarantee but lose adaptive
+trailing.
+
+**Scope:**
+- `ZerodhaBroker.modify_gtt(gtt_id, sl_trigger, sl_limit, target_trigger, target_limit, last_price, ...)`.
+- `position-monitor` trail block: when `gtt_id` present and trail
+  condition met, call `modify_gtt` instead of `modify_sl_order`.
+- Test: trail moves SL up over multiple heartbeats.
+
+---
+
+## P3 — Backtest realism
+
+### Replace synthetic +1%/−0.5% scoring with a real walk-forward sim
+
+**What:** `ml_signal.py` currently scores each prediction with a
+hardcoded payoff (+1% correct, −0.5% wrong, 0% HOLD) and computes
+Sharpe / drawdown / win-rate off that synthetic stream. The metrics
+shown on the ML Models dashboard are inflated by this geometry —
+Sharpe > 5 looks great but doesn't translate to real PnL.
+
+**Why:** A proper backtest walks the test set day-by-day applying the
+full signal pipeline: risk-check, position sizing, entry slippage,
+SL/target/holding-period exits, transaction costs. The resulting
+equity curve is the honest basis for Sharpe and drawdown.
+
+**Scope:** moderate refactor. New `strategy/backtest.py` that mirrors
+the live pipeline but operates on historical OHLCV. Hooks into
+`model_retrain` to replace the synthetic scoring block. Reuses
+`compute_transaction_costs`, `apply_session_caps`, and the holding-
+period logic so backtest geometry matches production exactly.
+
+---
+
+## P3 — Observability
+
+### External uptime monitoring
+
+**What:** Run a separate monitor (Uptime Kuma, healthchecks.io, etc.)
+on a different host that hits `https://<domain>/api/health` every
+minute and alerts on failure.
+
+**Why:** The current healthcheck only fires Docker's restart policy
+locally — if the whole host is down nobody is told. External
+monitoring closes that gap, and also catches DNS / TLS / firewall
+problems the in-container healthcheck can't see.
+
+**Scope:** infrastructure change outside the repo. Recommend
+configuring on the monitoring service side pointing at the public
+endpoint, with Telegram or email as the alert channel.
+
+---
+
 ## Out of scope
 
 - **Bracket Order (BO), Cover Order (CO)** — discontinued by Zerodha
