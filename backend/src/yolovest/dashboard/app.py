@@ -158,20 +158,63 @@ def _holdings_value(holdings: list[dict[str, Any]]) -> float:
 
 
 def _extract_available_cash(margins: dict[str, Any]) -> float:
-    """Extract free trading cash (not deployed) from Kite margins."""
+    """Extract free trading cash (not deployed) from Kite margins.
+
+    Kite's equity.available.cash is the OPENING balance — it doesn't
+    reflect intraday utilisation. equity.available.live_balance (and
+    equity.net) is the truly-available figure after deducting margin
+    used by open MIS/CO positions. Prefer those; fall back to
+    `cash − utilised.debits` so the result is honest even on older
+    Kite payload shapes.
+    """
     equity = margins.get("equity", {})
     if isinstance(equity, dict):
+        # Top-level `net` is Kite's authoritative "available right now".
+        net = equity.get("net")
+        if net is not None:
+            try:
+                return float(net)
+            except (TypeError, ValueError):
+                pass
+
         avail = equity.get("available", {})
+        used = equity.get("utilised", {})
         if isinstance(avail, dict):
-            for k in ("cash", "live_balance", "adhoc_margin", "opening_balance"):
+            # Prefer live_balance / adhoc_margin (post-deduction values).
+            for k in ("live_balance", "adhoc_margin"):
                 v = avail.get(k)
                 if v is not None:
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        pass
+            # Fall back: opening cash minus utilised debits.
+            cash = avail.get("cash")
+            if cash is not None:
+                try:
+                    used_debits = 0.0
+                    if isinstance(used, dict):
+                        used_debits = float(used.get("debits") or used.get("net") or 0.0)
+                    return float(cash) - used_debits
+                except (TypeError, ValueError):
+                    pass
+            # Last resort: opening balance.
+            v = avail.get("opening_balance")
+            if v is not None:
+                try:
                     return float(v)
+                except (TypeError, ValueError):
+                    pass
+
+    # Legacy/non-Kite shape
     avail = margins.get("available", {})
     if isinstance(avail, dict):
         v = avail.get("cash") or avail.get("live_balance")
         if v is not None:
-            return float(v)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
     return 0.0
 
 
