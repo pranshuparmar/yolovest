@@ -220,3 +220,94 @@ class TestComputeChargesLive:
         result = await live_broker.compute_charges([])
         assert result is None
         live_broker._kite.get_virtual_contract_note.assert_not_called()
+
+
+class TestMarketProtection:
+    """Kite rejects MARKET / SL-M orders without market_protection. We
+    convert away from both, but residual cases must carry the parameter."""
+
+    @pytest.fixture
+    def live_broker(self):
+        b = ZerodhaBroker(api_key="test", api_secret="test", mode="live")
+        b._kite = MagicMock()
+        b._kite.place_order = MagicMock(return_value="ORD-RESIDUAL")
+        # Patch _retry_api_call to invoke fn directly so we can inspect kwargs.
+        async def _direct(fn):
+            return fn()
+        b._retry_api_call = _direct  # type: ignore[assignment]
+        return b
+
+    async def test_market_with_ltp_converts_to_limit_no_protection(self, live_broker):
+        async def _ltp(_symbol):
+            return 100.0
+        live_broker._fetch_ltp_for_limit = _ltp  # type: ignore[assignment]
+
+        await live_broker._live_place_order(
+            symbol="RELIANCE", side="BUY", quantity=1,
+            order_type="MARKET", product="MIS",
+            price=None, trigger_price=None,
+        )
+
+        kwargs = live_broker._kite.place_order.call_args.kwargs
+        assert kwargs["order_type"] == "LIMIT"
+        assert "market_protection" not in kwargs
+
+    async def test_market_without_ltp_keeps_market_with_protection(self, live_broker):
+        async def _no_ltp(_symbol):
+            return None
+        live_broker._fetch_ltp_for_limit = _no_ltp  # type: ignore[assignment]
+
+        await live_broker._live_place_order(
+            symbol="RELIANCE", side="BUY", quantity=1,
+            order_type="MARKET", product="MIS",
+            price=None, trigger_price=None,
+        )
+
+        kwargs = live_broker._kite.place_order.call_args.kwargs
+        assert kwargs["order_type"] == "MARKET"
+        assert kwargs["market_protection"] == -1
+
+    async def test_slm_with_trigger_converts_to_sl_no_protection(self, live_broker):
+        async def _ltp(_s):
+            return 100.0
+        live_broker._fetch_ltp_for_limit = _ltp  # type: ignore[assignment]
+
+        await live_broker._live_place_order(
+            symbol="RELIANCE", side="SELL", quantity=1,
+            order_type="SL-M", product="MIS",
+            price=None, trigger_price=95.0,
+        )
+
+        kwargs = live_broker._kite.place_order.call_args.kwargs
+        assert kwargs["order_type"] == "SL"
+        assert "market_protection" not in kwargs
+
+    async def test_slm_without_trigger_keeps_slm_with_protection(self, live_broker):
+        async def _ltp(_s):
+            return 100.0
+        live_broker._fetch_ltp_for_limit = _ltp  # type: ignore[assignment]
+
+        await live_broker._live_place_order(
+            symbol="RELIANCE", side="SELL", quantity=1,
+            order_type="SL-M", product="MIS",
+            price=None, trigger_price=None,  # no trigger → conversion skipped
+        )
+
+        kwargs = live_broker._kite.place_order.call_args.kwargs
+        assert kwargs["order_type"] == "SL-M"
+        assert kwargs["market_protection"] == -1
+
+    async def test_limit_never_gets_protection(self, live_broker):
+        async def _ltp(_s):
+            return 100.0
+        live_broker._fetch_ltp_for_limit = _ltp  # type: ignore[assignment]
+
+        await live_broker._live_place_order(
+            symbol="RELIANCE", side="BUY", quantity=1,
+            order_type="LIMIT", product="MIS",
+            price=99.95, trigger_price=None,
+        )
+
+        kwargs = live_broker._kite.place_order.call_args.kwargs
+        assert kwargs["order_type"] == "LIMIT"
+        assert "market_protection" not in kwargs

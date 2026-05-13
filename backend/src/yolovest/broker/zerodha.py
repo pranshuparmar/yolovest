@@ -368,9 +368,14 @@ class ZerodhaBroker(BrokerBase):
     ) -> str:
         """Place order via Kite API with retry.
 
-        Zerodha no longer allows MARKET orders without market protection
-        via API. All MARKET orders are auto-converted to LIMIT at LTP
-        with a small buffer to ensure fill.
+        Kite rejects MARKET and SL-M orders that don't carry a
+        `market_protection` value. We always convert MARKET → LIMIT (at
+        LTP ± buffer) and SL-M → SL (at trigger ± buffer) — those carry
+        explicit prices and need no protection. For the rare path where
+        conversion can't happen (LTP unavailable for MARKET, or trigger
+        missing for SL-M), the residual MARKET/SL-M is sent with
+        `market_protection=-1`, which asks Zerodha to apply the
+        exchange-defined protection band.
         """
         if self._kite is None:
             raise RuntimeError("Not authenticated")
@@ -391,6 +396,12 @@ class ZerodhaBroker(BrokerBase):
                 logger.info(
                     "MARKET→LIMIT conversion: %s %s LTP=%.2f → price=%.2f",
                     side, symbol, ltp, price,
+                )
+            else:
+                logger.warning(
+                    "MARKET→LIMIT conversion: no LTP for %s — falling back "
+                    "to MARKET with market_protection=-1 (exchange-defined)",
+                    symbol,
                 )
 
         # Convert SL-M → SL (Zerodha disabled SL-M for retail API; it errors
@@ -436,6 +447,11 @@ class ZerodhaBroker(BrokerBase):
             params["price"] = price
         if trigger_price is not None:
             params["trigger_price"] = trigger_price
+        # Any residual MARKET or SL-M must carry market_protection or Kite
+        # rejects the order. -1 instructs Zerodha to apply the exchange's
+        # own protection band (typically ~3% on equity cash).
+        if order_type in ("MARKET", "SL-M"):
+            params["market_protection"] = -1
 
         return str(await self._retry_api_call(
             lambda: self._kite.place_order(variety="regular", **params)
