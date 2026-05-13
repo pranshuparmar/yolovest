@@ -75,6 +75,17 @@ class BrokerBase(ABC):
         """Get all CNC holdings from the broker (delivery stocks held overnight)."""
         ...
 
+    async def get_executed_trades(self) -> list[dict[str, Any]]:
+        """Return today's executed trades from the broker.
+
+        Each entry should carry at minimum: tradingsymbol, transaction_type
+        ("BUY"/"SELL"), quantity, average_price, exchange, fill_timestamp.
+        Used by ghost-position reconciliation to recover the actual broker
+        fill price when a position is closed outside the system. Default
+        implementation returns an empty list — callers must tolerate it.
+        """
+        return []
+
     async def compute_charges(
         self, legs: list[dict[str, Any]]
     ) -> list[dict[str, float]] | None:

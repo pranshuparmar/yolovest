@@ -32,6 +32,7 @@ export function TradesTable({
             <th className="pb-2 pr-4">Type</th>
             <th className="pb-2 pr-4">Entry</th>
             {!compact && <th className="pb-2 pr-4">Fill</th>}
+            <th className="pb-2 pr-4">Exit</th>
             <th className="pb-2 pr-4">Qty</th>
             {!compact && <th className="pb-2 pr-4">Product</th>}
             <th className="pb-2 pr-4">Status</th>
@@ -61,6 +62,9 @@ export function TradesTable({
               </td>
               <td className="py-2 pr-4">{fmt(t.entry_price)}</td>
               {!compact && <td className="py-2 pr-4">{fmt(t.fill_price)}</td>}
+              <td className="py-2 pr-4">
+                {t.exit_price !== null ? fmt(t.exit_price) : <span className="text-gray-500">—</span>}
+              </td>
               <td className="py-2 pr-4">{t.quantity}</td>
               {!compact && <td className="py-2 pr-4 text-gray-400">{t.product}</td>}
               <td className="py-2 pr-4">

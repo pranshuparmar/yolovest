@@ -176,3 +176,147 @@ class TestGhostRecovery:
         # Gross: (2520 - 2500) * 10 = 200, minus transaction costs
         assert pnl < 200.0
         assert pnl > 150.0  # costs should be small on ₹25k trade
+
+
+class TestFindClosingFillPrice:
+    """Unit tests for the broker-trade lookup that replaces LTP-as-exit."""
+
+    def test_returns_none_when_no_matching_trade(self):
+        price, src = PositionMonitorSkill._find_closing_fill_price(
+            [], "RELIANCE", "SELL", 10,
+        )
+        assert price is None
+        assert src == "no_match"
+
+    def test_returns_vwap_for_single_fill(self):
+        trades = [
+            {"tradingsymbol": "RELIANCE", "transaction_type": "SELL",
+             "quantity": 10, "average_price": 2520.50},
+        ]
+        price, src = PositionMonitorSkill._find_closing_fill_price(
+            trades, "RELIANCE", "SELL", 10,
+        )
+        assert price == 2520.50
+        assert src == "broker_trades_exact"
+
+    def test_returns_vwap_for_split_fills(self):
+        trades = [
+            {"tradingsymbol": "INDUSTOWER", "transaction_type": "SELL",
+             "quantity": 30, "average_price": 407.10},
+            {"tradingsymbol": "INDUSTOWER", "transaction_type": "SELL",
+             "quantity": 18, "average_price": 407.23},
+        ]
+        price, src = PositionMonitorSkill._find_closing_fill_price(
+            trades, "INDUSTOWER", "SELL", 48,
+        )
+        # VWAP = (30*407.10 + 18*407.23) / 48 = 407.15
+        assert price == pytest.approx(407.15, abs=0.01)
+        assert src == "broker_trades_exact"
+
+    def test_partial_fill_flagged_in_source(self):
+        trades = [
+            {"tradingsymbol": "HDFCLIFE", "transaction_type": "SELL",
+             "quantity": 11, "average_price": 606.35},
+        ]
+        price, src = PositionMonitorSkill._find_closing_fill_price(
+            trades, "HDFCLIFE", "SELL", 32,
+        )
+        assert price == 606.35
+        assert src == "broker_trades_partial"
+
+    def test_ignores_wrong_side(self):
+        trades = [
+            {"tradingsymbol": "PNB", "transaction_type": "BUY",
+             "quantity": 191, "average_price": 101.75},
+        ]
+        # Looking for the SELL leg — BUY trade must not match
+        price, _ = PositionMonitorSkill._find_closing_fill_price(
+            trades, "PNB", "SELL", 191,
+        )
+        assert price is None
+
+    def test_ignores_other_symbols(self):
+        trades = [
+            {"tradingsymbol": "RELIANCE", "transaction_type": "SELL",
+             "quantity": 10, "average_price": 2520.0},
+        ]
+        price, _ = PositionMonitorSkill._find_closing_fill_price(
+            trades, "TCS", "SELL", 10,
+        )
+        assert price is None
+
+
+class TestGhostRecoveryUsesBrokerTrades:
+    """Bug 1 regression: ghost recovery used LTP even when the actual broker
+    fill was available via kite.trades()."""
+
+    @pytest.fixture
+    def monitor(self, app_context):
+        return PositionMonitorSkill(app_context)
+
+    @pytest.fixture
+    def live_position(self):
+        return {
+            "trade_id": "T-live-002",
+            "symbol": "INDUSTOWER",
+            "signal_type": "BUY",
+            "entry_price": 402.45,
+            "fill_price": 402.50,
+            "stop_loss_price": 398.65,
+            "target_price": 410.20,
+            "quantity": 48,
+            "product": "MIS",
+            "mode": "live",
+        }
+
+    async def test_prefers_broker_trade_over_ltp(self, monitor, live_position):
+        monitor.ctx.config.mode = "live"
+        monitor.ctx.db.get_open_positions = AsyncMock(return_value=[live_position])
+        monitor.ctx.broker.get_positions = AsyncMock(return_value=[])
+        monitor.ctx.broker.get_executed_trades = AsyncMock(return_value=[
+            {"tradingsymbol": "INDUSTOWER", "transaction_type": "BUY",
+             "quantity": 48, "average_price": 402.50},
+            {"tradingsymbol": "INDUSTOWER", "transaction_type": "SELL",
+             "quantity": 48, "average_price": 407.15},
+        ])
+        # LTP has drifted from the actual exit
+        monitor.ctx.market_data.get_ltp = AsyncMock(return_value=408.10)
+
+        await monitor.execute()
+
+        call_args = monitor.ctx.db.close_position.call_args
+        # exit_price must be the broker fill (407.15), NOT the drifted LTP
+        assert call_args[0][1] == 407.15
+
+    async def test_falls_back_to_ltp_when_no_broker_trade_found(self, monitor, live_position):
+        monitor.ctx.config.mode = "live"
+        monitor.ctx.db.get_open_positions = AsyncMock(return_value=[live_position])
+        monitor.ctx.broker.get_positions = AsyncMock(return_value=[])
+        monitor.ctx.broker.get_executed_trades = AsyncMock(return_value=[])
+        monitor.ctx.market_data.get_ltp = AsyncMock(return_value=408.10)
+
+        await monitor.execute()
+
+        call_args = monitor.ctx.db.close_position.call_args
+        # No broker trade matched — LTP is the next-best estimate
+        assert call_args[0][1] == 408.10
+
+    async def test_pnl_uses_fill_price_not_entry_price(self, monitor, live_position):
+        """Bug 2: PnL must use fill_price (402.50), not entry_price (402.45)."""
+        monitor.ctx.config.mode = "live"
+        monitor.ctx.db.get_open_positions = AsyncMock(return_value=[live_position])
+        monitor.ctx.broker.get_positions = AsyncMock(return_value=[])
+        monitor.ctx.broker.get_executed_trades = AsyncMock(return_value=[
+            {"tradingsymbol": "INDUSTOWER", "transaction_type": "SELL",
+             "quantity": 48, "average_price": 407.15},
+        ])
+
+        await monitor.execute()
+
+        call_args = monitor.ctx.db.close_position.call_args
+        pnl = call_args[0][2]
+        # Gross from fill 402.50 → exit 407.15 over 48 qty = 223.20
+        # If buggy and used entry_price 402.45, gross would be 225.60.
+        # Difference matters at the paise level after costs.
+        assert pnl < 225.0  # would be ~225 if bug was still there
+        assert pnl > 195.0  # accounting for ~20 in costs

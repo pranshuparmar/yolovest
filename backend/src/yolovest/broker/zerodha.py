@@ -664,6 +664,22 @@ class ZerodhaBroker(BrokerBase):
             return []
 
     # ------------------------------------------------------------------
+    # Executed trades (for ghost-position recovery)
+    # ------------------------------------------------------------------
+
+    async def get_executed_trades(self) -> list[dict[str, Any]]:
+        """Today's executed trades from Kite. Empty in paper or when offline."""
+        if self._mode == "paper" or self._kite is None:
+            return []
+        try:
+            async with self._rate_limiter:
+                trades = await asyncio.to_thread(self._kite.trades)
+            return list(trades or [])
+        except Exception as e:
+            logger.debug("kite.trades failed: %s", e)
+            return []
+
+    # ------------------------------------------------------------------
     # Charges (virtual contract note)
     # ------------------------------------------------------------------
 

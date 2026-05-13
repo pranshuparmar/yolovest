@@ -113,12 +113,13 @@ async def resolve_round_trip_costs(
     product: str,
     exchange: str = "NSE",
     cost_config: TransactionCostConfig | None = None,
-) -> tuple[float, str]:
-    """Return total round-trip costs and the source used ("broker" or "estimate").
+) -> tuple[float, str, dict[str, float]]:
+    """Return (total_costs, source, breakdown) for a round-trip trade.
 
-    Asks the broker for actual contract-note charges on both legs; falls back
-    to the config-based estimate on any failure (paper mode, not authenticated,
-    SDK error, malformed response).
+    `source` is "broker" (from contract-note API) or "estimate" (config-based).
+    `breakdown` carries `brokerage`, `stt`, `other_charges`, `total`, plus
+    `source` — same shape regardless of which path produced it, so it can be
+    stored verbatim alongside the trade.
     """
     entry_side = signal_type.upper()
     exit_side = "SELL" if entry_side == "BUY" else "BUY"
@@ -152,11 +153,22 @@ async def resolve_round_trip_costs(
             logger.debug("broker.compute_charges raised: %s", e)
             actual = None
         if actual and len(actual) == 2:
+            brokerage = round(actual[0]["brokerage"] + actual[1]["brokerage"], 2)
+            stt = round(actual[0]["stt"] + actual[1]["stt"], 2)
+            other = round(actual[0]["other_charges"] + actual[1]["other_charges"], 2)
             total = round(actual[0]["total"] + actual[1]["total"], 2)
-            return total, "broker"
+            breakdown = {
+                "brokerage": brokerage,
+                "stt": stt,
+                "other_charges": other,
+                "total": total,
+                "source": "broker",
+            }
+            return total, "broker", breakdown
 
-    fallback = compute_transaction_costs(
+    fallback = compute_transaction_cost_breakdown(
         entry_price, exit_price, quantity, product=product,
         cost_config=cost_config,
     )
-    return fallback, "estimate"
+    fallback["source"] = "estimate"
+    return fallback["total"], "estimate", fallback

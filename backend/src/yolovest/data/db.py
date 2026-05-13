@@ -1821,21 +1821,29 @@ class Database:
         )
 
     async def close_position(
-        self, position_id: int | str, exit_price: float, pnl: float
+        self,
+        position_id: int | str,
+        exit_price: float,
+        pnl: float,
+        realized_costs: dict[str, Any] | None = None,
     ) -> None:
-        """Close a position with exit price and realized PnL.
+        """Close a position with exit price, realized PnL, and an optional
+        breakdown of the actual charges applied (brokerage/stt/other/total
+        plus a `source` of "broker" or "estimate").
 
-        Uses a savepoint to ensure the trade update and audit log
-        are committed atomically — no half-closed positions.
+        Uses a savepoint to ensure the trade update and audit log are
+        committed atomically — no half-closed positions.
         """
         ts_now = now_utc().isoformat()
         pos_id = str(position_id)
+        costs_json = json.dumps(realized_costs) if realized_costs else None
         await self.conn.execute("SAVEPOINT close_position")
         try:
             await self.conn.execute(
-                "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, closed_at = ? "
+                "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, "
+                "closed_at = ?, realized_costs_json = COALESCE(?, realized_costs_json) "
                 "WHERE trade_id = ?",
-                (exit_price, pnl, ts_now, pos_id),
+                (exit_price, pnl, ts_now, costs_json, pos_id),
             )
             await self.conn.execute(
                 "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "

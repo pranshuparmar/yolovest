@@ -40,7 +40,7 @@ class TestResolveRoundTripCostsBrokerPath:
             {"brokerage": 20.0, "stt": 6.3, "other_charges": 0.8, "total": 27.1},
         ])
 
-        total, src = await resolve_round_trip_costs(
+        total, src, breakdown = await resolve_round_trip_costs(
             broker, symbol="RELIANCE", signal_type="BUY",
             entry_price=2500.0, exit_price=2510.0, quantity=10,
             product="MIS", cost_config=cost_config,
@@ -48,6 +48,11 @@ class TestResolveRoundTripCostsBrokerPath:
 
         assert src == "broker"
         assert total == pytest.approx(49.4)
+        assert breakdown["source"] == "broker"
+        assert breakdown["brokerage"] == 40.0
+        assert breakdown["stt"] == pytest.approx(7.8)
+        assert breakdown["other_charges"] == pytest.approx(1.6)
+        assert breakdown["total"] == pytest.approx(49.4)
 
         # Verify the legs sent to the broker
         broker.compute_charges.assert_awaited_once()
@@ -84,30 +89,33 @@ class TestResolveRoundTripCostsFallback:
         broker = AsyncMock()
         broker.compute_charges = AsyncMock(return_value=None)
 
-        total, src = await resolve_round_trip_costs(
+        total, src, breakdown = await resolve_round_trip_costs(
             broker, symbol="RELIANCE", signal_type="BUY",
             entry_price=2500.0, exit_price=2510.0, quantity=10,
             product="MIS", cost_config=cost_config,
         )
 
         assert src == "estimate"
+        assert breakdown["source"] == "estimate"
         expected = compute_transaction_costs(
             2500.0, 2510.0, 10, product="MIS", cost_config=cost_config,
         )
         assert total == expected
+        assert breakdown["total"] == expected
 
     @pytest.mark.asyncio
     async def test_falls_back_when_broker_raises(self, cost_config):
         broker = AsyncMock()
         broker.compute_charges = AsyncMock(side_effect=RuntimeError("kite down"))
 
-        total, src = await resolve_round_trip_costs(
+        total, src, breakdown = await resolve_round_trip_costs(
             broker, symbol="RELIANCE", signal_type="BUY",
             entry_price=2500.0, exit_price=2510.0, quantity=10,
             product="MIS", cost_config=cost_config,
         )
 
         assert src == "estimate"
+        assert breakdown["source"] == "estimate"
         assert total > 0
 
     @pytest.mark.asyncio
@@ -117,7 +125,7 @@ class TestResolveRoundTripCostsFallback:
             {"brokerage": 20.0, "stt": 1.0, "other_charges": 0.5, "total": 21.5},
         ])  # only one leg returned
 
-        total, src = await resolve_round_trip_costs(
+        total, src, _ = await resolve_round_trip_costs(
             broker, symbol="RELIANCE", signal_type="BUY",
             entry_price=2500.0, exit_price=2510.0, quantity=10,
             product="MIS", cost_config=cost_config,
@@ -127,7 +135,7 @@ class TestResolveRoundTripCostsFallback:
 
     @pytest.mark.asyncio
     async def test_no_broker_uses_estimate(self, cost_config):
-        total, src = await resolve_round_trip_costs(
+        total, src, _ = await resolve_round_trip_costs(
             None, symbol="RELIANCE", signal_type="BUY",
             entry_price=2500.0, exit_price=2510.0, quantity=10,
             product="MIS", cost_config=cost_config,

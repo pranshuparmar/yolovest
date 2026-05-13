@@ -88,7 +88,9 @@ class PositionMonitorSkill(SkillBase):
                 )
                 continue
 
-            entry = pos["entry_price"]
+            # PnL math uses the actual broker fill price, not the signal's
+            # entry_price — otherwise recorded slippage gets silently erased.
+            entry = float(pos.get("fill_price") or pos["entry_price"])
             sl = pos["stop_loss_price"]
             target = pos["target_price"]
             risk_per_share = abs(entry - sl)
@@ -133,7 +135,7 @@ class PositionMonitorSkill(SkillBase):
                 else:
                     gross_pnl = (entry - current_price) * qty
                 product = pos.get("product", "MIS")
-                costs, src = await resolve_round_trip_costs(
+                costs, src, breakdown = await resolve_round_trip_costs(
                     self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
                     entry_price=entry, exit_price=current_price, quantity=qty,
                     product=product, cost_config=self.ctx.config.transaction_costs,
@@ -145,7 +147,9 @@ class PositionMonitorSkill(SkillBase):
                         pos, current_price, pnl, "target_hit",
                     )
                 else:
-                    await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+                    await self.ctx.db.close_position(
+                        pos["trade_id"], current_price, pnl, realized_costs=breakdown,
+                    )
                 targets_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
                     "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f src=%s)",
@@ -163,7 +167,7 @@ class PositionMonitorSkill(SkillBase):
                 else:
                     gross_pnl = (entry - current_price) * qty
                 product = pos.get("product", "MIS")
-                costs, src = await resolve_round_trip_costs(
+                costs, src, breakdown = await resolve_round_trip_costs(
                     self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
                     entry_price=entry, exit_price=current_price, quantity=qty,
                     product=product, cost_config=self.ctx.config.transaction_costs,
@@ -175,7 +179,9 @@ class PositionMonitorSkill(SkillBase):
                         pos, current_price, pnl, "stop_loss_hit",
                     )
                 else:
-                    await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+                    await self.ctx.db.close_position(
+                        pos["trade_id"], current_price, pnl, realized_costs=breakdown,
+                    )
                 stops_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
                     "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f src=%s)",
@@ -390,6 +396,15 @@ class PositionMonitorSkill(SkillBase):
 
         recovered: list[str] = []
 
+        # Pull today's broker trades once so each ghost can recover its actual
+        # exit fill instead of falling back to LTP (which drifts after the
+        # close fires server-side or the user exits manually on Kite web).
+        try:
+            broker_trades = await self.ctx.broker.get_executed_trades()
+        except Exception as e:
+            logger.debug("get_executed_trades failed: %s", e)
+            broker_trades = []
+
         for pos in local_positions:
             if pos.get("mode") == "paper":
                 continue
@@ -404,18 +419,27 @@ class PositionMonitorSkill(SkillBase):
             if not is_ghost:
                 continue
 
-            # Determine exit price: use LTP as best estimate
-            exit_price = await self._get_ltp_with_retry(symbol)
+            # Resolve exit price in priority order:
+            #   1. average price of the closing fills from kite.trades()
+            #   2. live LTP (drifts but better than entry)
+            #   3. recorded stop-loss price (last-resort, when broker offline)
+            exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
+            exit_price, exit_source = self._find_closing_fill_price(
+                broker_trades, symbol, exit_side, pos.get("quantity", 0),
+            )
             if exit_price is None:
-                # Fallback: use stop-loss price (conservative estimate for
-                # broker-side SL triggers, which is the most common cause)
+                exit_price = await self._get_ltp_with_retry(symbol)
+                exit_source = "ltp"
+            if exit_price is None:
                 exit_price = pos["stop_loss_price"]
+                exit_source = "sl_price"
                 logger.warning(
-                    "Ghost position %s: LTP unavailable, using SL price %.2f as exit estimate",
+                    "Ghost position %s: broker trades + LTP unavailable, "
+                    "using SL price %.2f as exit estimate",
                     symbol, exit_price,
                 )
 
-            entry = pos["entry_price"]
+            entry = float(pos.get("fill_price") or pos["entry_price"])
             qty = pos.get("quantity", 0)
             if pos["signal_type"] == "BUY":
                 gross_pnl = (exit_price - entry) * qty
@@ -423,20 +447,22 @@ class PositionMonitorSkill(SkillBase):
                 gross_pnl = (entry - exit_price) * qty
 
             product = pos.get("product", "MIS")
-            costs, _src = await resolve_round_trip_costs(
+            costs, _src, breakdown = await resolve_round_trip_costs(
                 self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
                 entry_price=entry, exit_price=exit_price, quantity=qty,
                 product=product, cost_config=self.ctx.config.transaction_costs,
             )
             pnl = round(gross_pnl - costs, 2)
 
-            await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)
+            await self.ctx.db.close_position(
+                pos["trade_id"], exit_price, pnl, realized_costs=breakdown,
+            )
             recovered.append(symbol)
 
             logger.warning(
-                "GHOST POSITION RECOVERED: %s — closed in DB with exit=%.2f pnl=₹%.2f "
-                "(position was closed on broker but still open locally)",
-                symbol, exit_price, pnl,
+                "GHOST POSITION RECOVERED: %s — closed in DB with exit=%.2f "
+                "(source=%s) pnl=₹%.2f",
+                symbol, exit_price, exit_source, pnl,
             )
 
             await self.ctx.notify.send_exit_alert(
@@ -560,7 +586,7 @@ class PositionMonitorSkill(SkillBase):
         symbol = pos.get("symbol", "?")
         qty = pos.get("quantity", 0)
         product = pos.get("product", "CNC")
-        entry = pos.get("entry_price", 0)
+        entry = float(pos.get("fill_price") or pos.get("entry_price") or 0)
         exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
 
         existing = await self.ctx.db.get_pending_trade_by_symbol(symbol)
@@ -621,7 +647,7 @@ class PositionMonitorSkill(SkillBase):
         else:
             gross_pnl = (entry - current_price) * qty
         product = pos.get("product", "MIS")
-        costs, _src = await resolve_round_trip_costs(
+        costs, _src, breakdown = await resolve_round_trip_costs(
             self.ctx.broker, symbol=pos["symbol"], signal_type=pos["signal_type"],
             entry_price=entry, exit_price=current_price, quantity=qty,
             product=product, cost_config=self.ctx.config.transaction_costs,
@@ -631,8 +657,51 @@ class PositionMonitorSkill(SkillBase):
         if self.ctx.config.execution.transaction_mode == "manual":
             await self._queue_exit_for_approval(pos, current_price, pnl, "holding_expiry")
         else:
-            await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+            await self.ctx.db.close_position(
+                pos["trade_id"], current_price, pnl, realized_costs=breakdown,
+            )
         return pnl
+
+    @staticmethod
+    def _find_closing_fill_price(
+        broker_trades: list[dict[str, Any]],
+        symbol: str,
+        side: str,
+        quantity: int,
+    ) -> tuple[float | None, str]:
+        """Return the volume-weighted fill price of the side-matching trades
+        for `symbol`, or (None, "no_match") if nothing fits.
+
+        Matches all trades for the symbol whose transaction_type equals `side`
+        and sums them up. If the total filled quantity matches `quantity` we
+        return the VWAP and source "broker_trades_exact"; if it differs we
+        still return the VWAP but flag the source so logs can pick up partial
+        or extra fills.
+        """
+        matches: list[tuple[float, float]] = []  # (qty, avg_price)
+        for tr in broker_trades:
+            sym = tr.get("tradingsymbol") or tr.get("symbol", "")
+            ttype = (tr.get("transaction_type") or "").upper()
+            if sym != symbol or ttype != side.upper():
+                continue
+            try:
+                q = float(tr.get("quantity") or 0)
+                p = float(tr.get("average_price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if q > 0 and p > 0:
+                matches.append((q, p))
+        if not matches:
+            return None, "no_match"
+        total_qty = sum(q for q, _ in matches)
+        if total_qty <= 0:
+            return None, "no_match"
+        vwap = sum(q * p for q, p in matches) / total_qty
+        source = (
+            "broker_trades_exact" if int(total_qty) == int(quantity)
+            else "broker_trades_partial"
+        )
+        return round(vwap, 2), source
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:
         """Check if new SL is tighter (more protective) than current."""
@@ -663,7 +732,7 @@ class PositionMonitorSkill(SkillBase):
         if already_booked:
             return False
 
-        entry = pos["entry_price"]
+        entry = float(pos.get("fill_price") or pos["entry_price"])
         target = pos["target_price"]
         signal_type = pos["signal_type"]
 

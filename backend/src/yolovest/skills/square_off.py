@@ -225,29 +225,34 @@ class SquareOffSkill(SkillBase):
                 break
             await asyncio.sleep(0.5)
 
+        qty = pos["quantity"]
+        # PnL uses the actual broker fill price for entry (not the signal's
+        # entry_price) so recorded slippage is reflected.
+        entry = float(pos.get("fill_price") or pos["entry_price"])
+
         if not exit_price or exit_price <= 0:
-            # Fallback: use last known price for PnL estimate
+            # Fallback: no fill price came back from the broker — use the entry
+            # fill so PnL is zero rather than fabricated from the signal price.
             logger.warning(
-                "square-off: no fill price for %s exit order %s, using entry price",
+                "square-off: no fill price for %s exit order %s, using entry fill",
                 pos["symbol"], exit_order_id,
             )
-            exit_price = pos["entry_price"]
+            exit_price = entry
 
-        # Compute PnL with transaction costs
-        qty = pos["quantity"]
-        entry = pos["entry_price"]
         if pos["signal_type"] == "BUY":
             gross_pnl = (exit_price - entry) * qty
         else:
             gross_pnl = (entry - exit_price) * qty
 
         product = pos.get("product", "MIS")
-        costs, _src = await resolve_round_trip_costs(
+        costs, _src, breakdown = await resolve_round_trip_costs(
             self.ctx.broker, symbol=pos["symbol"], signal_type=pos["signal_type"],
             entry_price=entry, exit_price=exit_price, quantity=qty,
             product=product, cost_config=self.ctx.config.transaction_costs,
         )
         pnl = round(gross_pnl - costs, 2)
 
-        await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)
+        await self.ctx.db.close_position(
+            pos["trade_id"], exit_price, pnl, realized_costs=breakdown,
+        )
         return {"symbol": pos["symbol"], "pnl": pnl}

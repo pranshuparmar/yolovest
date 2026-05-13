@@ -137,6 +137,8 @@ def mock_broker() -> AsyncMock:
     broker.get_pending_orders = AsyncMock(return_value=[])
     broker.get_margins = AsyncMock(return_value={})
     broker.modify_sl_order = AsyncMock(return_value=True)
+    broker.get_executed_trades = AsyncMock(return_value=[])
+    broker.compute_charges = AsyncMock(return_value=None)
     return broker
 
 

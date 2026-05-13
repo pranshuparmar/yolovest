@@ -643,14 +643,16 @@ def create_app(ctx: AppContext) -> FastAPI:
             else (entry - exit_price) * qty
         )
         from yolovest.costs import resolve_round_trip_costs
-        costs, _src = await resolve_round_trip_costs(
+        costs, _src, breakdown = await resolve_round_trip_costs(
             ctx.broker, symbol=symbol, signal_type=trade["signal_type"],
             entry_price=entry, exit_price=float(exit_price), quantity=qty,
             product=product, cost_config=ctx.config.transaction_costs,
         )
         pnl = round(gross_pnl - costs, 2)
 
-        await ctx.db.close_position(trade_id, float(exit_price), pnl)
+        await ctx.db.close_position(
+            trade_id, float(exit_price), pnl, realized_costs=breakdown,
+        )
 
         try:
             await ctx.notify.send(
@@ -1082,22 +1084,35 @@ def create_app(ctx: AppContext) -> FastAPI:
         trade_id: str, user: str = Depends(verify_credentials)
     ) -> dict[str, Any]:
         """Full reasoning chain for a trade: signal → risk → LLM → execution → outcome."""
+        import json as _json
+
         from yolovest.costs import compute_transaction_cost_breakdown
 
         detail = await ctx.db.get_trade_detail(trade_id)
         if not detail:
             raise HTTPException(status_code=404, detail="Trade not found")
 
-        # Compute cost breakdown for display
-        fill = detail.get("fill_price") or detail.get("entry_price", 0)
-        exit_p = detail.get("exit_price") or detail.get("target_price") or fill
-        qty = detail.get("quantity") or 0
-        product = detail.get("product") or "MIS"
-        if fill and qty:
-            detail["cost_breakdown"] = compute_transaction_cost_breakdown(
-                fill, exit_p, qty, product=product,
-                cost_config=ctx.config.transaction_costs,
-            )
+        # Prefer the breakdown captured at close time (broker contract-note when
+        # available, config-based estimate otherwise); else compute a live
+        # estimate from fill/exit so open trades still see something useful.
+        stored = detail.get("realized_costs_json")
+        if stored:
+            try:
+                detail["cost_breakdown"] = _json.loads(stored)
+            except (ValueError, TypeError):
+                detail["cost_breakdown"] = None
+        if not detail.get("cost_breakdown"):
+            fill = detail.get("fill_price") or detail.get("entry_price", 0)
+            exit_p = detail.get("exit_price") or detail.get("target_price") or fill
+            qty = detail.get("quantity") or 0
+            product = detail.get("product") or "MIS"
+            if fill and qty:
+                bd = compute_transaction_cost_breakdown(
+                    fill, exit_p, qty, product=product,
+                    cost_config=ctx.config.transaction_costs,
+                )
+                bd["source"] = "estimate"
+                detail["cost_breakdown"] = bd
 
         return detail
 
