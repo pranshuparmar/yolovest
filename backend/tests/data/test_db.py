@@ -23,6 +23,21 @@ class TestMigrationSystem:
         version = await db.get_schema_version()
         assert version >= 1
 
+    def test_split_sql_ignores_semicolons_inside_line_comments(self, db):
+        """Regression: an SQL line comment containing a semicolon (e.g.
+        '-- GTT applies to CNC only; MIS rows skip') used to break the
+        splitter into a fragment starting with the post-semicolon prose."""
+        sql = (
+            "-- header with a semicolon; should not split here\n"
+            "-- second comment line\n"
+            "ALTER TABLE foo ADD COLUMN bar INTEGER;\n"
+            "CREATE INDEX idx_foo_bar ON foo(bar);\n"
+        )
+        stmts = db._split_sql(sql)
+        assert len(stmts) == 2
+        assert stmts[0].upper().startswith("ALTER TABLE")
+        assert stmts[1].upper().startswith("CREATE INDEX")
+
     async def test_migration_is_idempotent(self, db):
         """Running initialize() twice should not fail or re-apply migrations."""
         version_before = await db.get_schema_version()

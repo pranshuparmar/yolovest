@@ -203,8 +203,18 @@ class Database:
 
     @staticmethod
     def _split_sql(sql: str) -> list[str]:
-        """Split SQL text into individual statements, skipping empty ones."""
-        return [s.strip() for s in sql.split(";") if s.strip()]
+        """Split SQL text into individual statements, skipping empty ones.
+
+        Strips ``--`` line comments first so that semicolons inside
+        commented prose don't fragment the statement on the wrong
+        boundary.
+        """
+        lines = [
+            line for line in sql.splitlines()
+            if not line.lstrip().startswith("--")
+        ]
+        cleaned = "\n".join(lines)
+        return [s.strip() for s in cleaned.split(";") if s.strip()]
 
     async def get_schema_version(self) -> int:
         """Return the highest applied migration version, or 0 if none."""
