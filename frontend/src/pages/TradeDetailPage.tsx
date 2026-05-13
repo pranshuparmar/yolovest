@@ -232,31 +232,31 @@ export function TradeDetailPage() {
         })()}
       </Section>
 
-      {/* Order IDs — for cross-reference with Zerodha */}
-      {(data.order_id || data.sl_order_id || data.gtt_id) && (
-        <Section title="Broker Order IDs">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-            {data.order_id && (
-              <div>
-                <p className="text-xs text-gray-500">Entry Order</p>
-                <p className="font-mono text-xs break-all">{data.order_id}</p>
-              </div>
-            )}
-            {data.sl_order_id && (
-              <div>
-                <p className="text-xs text-gray-500">Stop-Loss Order</p>
-                <p className="font-mono text-xs break-all">{data.sl_order_id}</p>
-              </div>
-            )}
-            {data.gtt_id && (
-              <div>
-                <p className="text-xs text-gray-500">GTT (OCO)</p>
-                <p className="font-mono text-xs">{data.gtt_id}</p>
-              </div>
-            )}
+      {/* Order IDs — for cross-reference with Zerodha. Always rendered so
+          missing IDs (e.g. on rows inserted manually rather than by trade-
+          execute) are explicit rather than silently hidden. */}
+      <Section title="Broker Order IDs">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <div>
+            <p className="text-xs text-gray-500">Entry Order</p>
+            <p className="font-mono text-xs break-all">
+              {data.order_id || <span className="text-gray-600">—</span>}
+            </p>
           </div>
-        </Section>
-      )}
+          <div>
+            <p className="text-xs text-gray-500">Stop-Loss Order</p>
+            <p className="font-mono text-xs break-all">
+              {data.sl_order_id || <span className="text-gray-600">—</span>}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-gray-500">GTT (OCO)</p>
+            <p className="font-mono text-xs">
+              {data.gtt_id || <span className="text-gray-600">—</span>}
+            </p>
+          </div>
+        </div>
+      </Section>
 
       {/* Transaction Cost Breakdown */}
       {data.cost_breakdown && (() => {
