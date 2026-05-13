@@ -1,29 +1,45 @@
 import { useMemo } from "react";
 import clsx from "clsx";
 import type { PnlCalendarDay } from "../types/api";
+import { useTheme } from "../hooks/useTheme";
 
 function fmt(n: number) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 }
 
-/** Map PnL to a background colour. Inline rgba() rather than dynamic
- * Tailwind classes — Tailwind's JIT can only see fully-literal class
- * names at build time, so `bg-emerald-500/${alpha}` was silently
- * stripped, leaving cells with no background at all. */
-function pnlStyle(pnl: number, maxAbs: number): { backgroundColor: string } {
+// GitHub-style palette per theme. Dark uses brighter neons against
+// gray-900; light uses saturated greens/reds that read against the
+// near-white panel without the wash-out you'd get from neon alphas.
+// Inline rgba() rather than Tailwind classes because the JIT can only
+// see fully-literal class names — `bg-emerald-500/${alpha}` was being
+// stripped and cells rendered with no background.
+const PALETTE = {
+  dark: {
+    profit: "52, 211, 153",   // emerald-400
+    loss: "239, 68, 68",       // red-500
+    empty: "rgba(55, 65, 81, 0.5)",   // gray-700/50
+    todayRing: "ring-gray-300",
+  },
+  light: {
+    profit: "26, 127, 55",     // GitHub light green
+    loss: "207, 34, 46",       // GitHub light red
+    empty: "rgba(208, 215, 222, 0.6)",  // GitHub light border tint
+    todayRing: "ring-gray-700",
+  },
+} as const;
+
+function pnlStyle(pnl: number, maxAbs: number, isLight: boolean): { backgroundColor: string } {
+  const p = isLight ? PALETTE.light : PALETTE.dark;
   if (maxAbs === 0 || pnl === 0) {
-    return { backgroundColor: "rgba(75, 85, 99, 0.4)" };  // gray-600/40
+    return { backgroundColor: p.empty };
   }
-  // Floor at 0.35 so even small days are clearly visible against the
-  // dark background; scale up to 1.0 for the worst/best day.
-  const intensity = 0.35 + 0.65 * Math.min(Math.abs(pnl) / maxAbs, 1);
-  // emerald-400 (#34d399) for profit, rose-500 (#ef4444) for loss —
-  // both pop against gray-900 better than emerald-500 / red-500.
-  const rgb = pnl > 0 ? "52, 211, 153" : "239, 68, 68";
+  // Floor higher on light because pale tints over white wash out fast;
+  // dark needs less because the contrast against gray-900 is forgiving.
+  const minAlpha = isLight ? 0.18 : 0.35;
+  const intensity = minAlpha + (1 - minAlpha) * Math.min(Math.abs(pnl) / maxAbs, 1);
+  const rgb = pnl > 0 ? p.profit : p.loss;
   return { backgroundColor: `rgba(${rgb}, ${intensity})` };
 }
-
-const EMPTY_CELL_STYLE = { backgroundColor: "rgba(55, 65, 81, 0.5)" };  // gray-700/50
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -33,6 +49,10 @@ interface Props {
 }
 
 export function PnlCalendarHeatmap({ data, months = 3 }: Props) {
+  const { theme } = useTheme();
+  const isLight = theme === "light";
+  const palette = isLight ? PALETTE.light : PALETTE.dark;
+
   const { weeks, maxAbs, pnlMap } = useMemo(() => {
     // Build lookup
     const map = new Map<string, PnlCalendarDay>();
@@ -132,9 +152,13 @@ export function PnlCalendarHeatmap({ data, months = 3 }: Props) {
                   key={key}
                   className={clsx(
                     "w-3 h-3 rounded-[2px] cursor-default transition-colors",
-                    isToday && "ring-1 ring-gray-300"
+                    isToday && `ring-1 ${palette.todayRing}`
                   )}
-                  style={entry ? pnlStyle(entry.pnl, maxAbs) : EMPTY_CELL_STYLE}
+                  style={
+                    entry
+                      ? pnlStyle(entry.pnl, maxAbs, isLight)
+                      : { backgroundColor: palette.empty }
+                  }
                   title={
                     entry
                       ? `${key}: ₹${fmt(entry.pnl)} (${entry.wins}W/${entry.losses}L, ${entry.trade_count} trades)`
@@ -151,11 +175,11 @@ export function PnlCalendarHeatmap({ data, months = 3 }: Props) {
       <div className="flex items-center gap-3 mt-2 ml-8">
         <span className="text-[10px] text-gray-500">Loss</span>
         <div className="flex gap-0.5">
-          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: "rgba(239, 68, 68, 1.0)" }} />
-          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: "rgba(239, 68, 68, 0.55)" }} />
-          <div className="w-3 h-3 rounded-[2px]" style={EMPTY_CELL_STYLE} />
-          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: "rgba(52, 211, 153, 0.55)" }} />
-          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: "rgba(52, 211, 153, 1.0)" }} />
+          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: `rgba(${palette.loss}, 1.0)` }} />
+          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: `rgba(${palette.loss}, 0.55)` }} />
+          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: palette.empty }} />
+          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: `rgba(${palette.profit}, 0.55)` }} />
+          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: `rgba(${palette.profit}, 1.0)` }} />
         </div>
         <span className="text-[10px] text-gray-500">Profit</span>
         {maxAbs > 0 && (

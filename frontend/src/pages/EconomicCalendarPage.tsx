@@ -7,6 +7,7 @@ import {
   useRemoveHoliday,
   usePnlCalendar,
 } from "../hooks/queries";
+import { useTheme } from "../hooks/useTheme";
 import clsx from "clsx";
 
 // ---------------------------------------------------------------------------
@@ -90,13 +91,20 @@ function formatInr(n: number): string {
 }
 
 // PnL background color: green for profit, red for loss, scaled by magnitude
-function pnlBgColor(pnl: number, maxAbsPnl: number): string {
+function pnlBgColor(pnl: number, maxAbsPnl: number, isLight: boolean): string {
   if (pnl === 0 || maxAbsPnl === 0) return "";
   const intensity = Math.min(Math.abs(pnl) / maxAbsPnl, 1);
-  // Scale opacity from 5% to 25%
-  const opacity = Math.round(5 + intensity * 20);
-  if (pnl > 0) return `rgba(34, 197, 94, ${opacity / 100})`; // green
-  return `rgba(239, 68, 68, ${opacity / 100})`; // red
+  // Light theme has very low contrast with low alpha — bump the floor
+  // and use GitHub-light tones that read against #f6f8fa. Dark theme
+  // keeps the prior subtle range against gray-900.
+  if (isLight) {
+    const opacity = (0.15 + intensity * 0.45).toFixed(2);
+    if (pnl > 0) return `rgba(26, 127, 55, ${opacity})`;
+    return `rgba(207, 34, 46, ${opacity})`;
+  }
+  const opacity = Math.round(8 + intensity * 25);
+  if (pnl > 0) return `rgba(34, 197, 94, ${opacity / 100})`;
+  return `rgba(239, 68, 68, ${opacity / 100})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +246,7 @@ function DayCell({
   showPnl,
   isToday,
   isCurrentMonth,
+  isLight,
   onAddHoliday,
   onRemoveHoliday,
 }: {
@@ -248,6 +257,7 @@ function DayCell({
   showPnl: boolean;
   isToday: boolean;
   isCurrentMonth: boolean;
+  isLight: boolean;
   onAddHoliday: (dateStr: string) => void;
   onRemoveHoliday: (dateStr: string) => void;
 }) {
@@ -255,7 +265,7 @@ function DayCell({
   const hasHoliday = events.some((e) => e.type === "holiday");
   const weekend = isWeekend(date);
   const bgStyle = showPnl && pnl && pnl.pnl !== 0
-    ? { backgroundColor: pnlBgColor(pnl.pnl, maxAbsPnl) }
+    ? { backgroundColor: pnlBgColor(pnl.pnl, maxAbsPnl, isLight) }
     : undefined;
 
   return (
@@ -315,6 +325,7 @@ function WeekView({
   pnlMap,
   maxAbsPnl,
   showPnl,
+  isLight,
   onAddHoliday,
   onRemoveHoliday,
 }: {
@@ -323,6 +334,7 @@ function WeekView({
   pnlMap: Map<string, PnlDay>;
   maxAbsPnl: number;
   showPnl: boolean;
+  isLight: boolean;
   onAddHoliday: (dateStr: string) => void;
   onRemoveHoliday: (dateStr: string) => void;
 }) {
@@ -372,7 +384,7 @@ function WeekView({
           const weekend = isWeekend(d);
           const dayPnl = pnlMap.get(ds);
           const bgStyle = showPnl && dayPnl && dayPnl.pnl !== 0
-            ? { backgroundColor: pnlBgColor(dayPnl.pnl, maxAbsPnl) }
+            ? { backgroundColor: pnlBgColor(dayPnl.pnl, maxAbsPnl, isLight) }
             : undefined;
           return (
             <div
@@ -446,6 +458,7 @@ function MonthView({
   pnlMap,
   maxAbsPnl,
   showPnl,
+  isLight,
   onAddHoliday,
   onRemoveHoliday,
 }: {
@@ -454,6 +467,7 @@ function MonthView({
   pnlMap: Map<string, PnlDay>;
   maxAbsPnl: number;
   showPnl: boolean;
+  isLight: boolean;
   onAddHoliday: (dateStr: string) => void;
   onRemoveHoliday: (dateStr: string) => void;
 }) {
@@ -490,6 +504,7 @@ function MonthView({
                 showPnl={showPnl}
                 isToday={isSameDay(ds, todayStr)}
                 isCurrentMonth={d.getMonth() === currentDate.getMonth()}
+                isLight={isLight}
                 onAddHoliday={onAddHoliday}
                 onRemoveHoliday={onRemoveHoliday}
               />
@@ -510,6 +525,8 @@ export function EconomicCalendarPage() {
   const [currentDate, setCurrentDate] = useState(() => new Date());
   const [addHolidayDate, setAddHolidayDate] = useState<string | null>(null);
   const [showPnl, setShowPnl] = useState(true);
+  const { theme } = useTheme();
+  const isLight = theme === "light";
 
   const { data: events } = useEconomicCalendar({ days: 90 });
   const { data: earnings } = useEarnings({ days: 90 });
@@ -673,8 +690,18 @@ export function EconomicCalendarPage() {
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-gray-800/60 border border-gray-700" /> <span className="text-gray-500">Weekend</span></span>
         {showPnl && (
           <>
-            <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded" style={{ backgroundColor: "rgba(34, 197, 94, 0.2)" }} /> Profit</span>
-            <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded" style={{ backgroundColor: "rgba(239, 68, 68, 0.2)" }} /> Loss</span>
+            <span className="flex items-center gap-1.5">
+              <span
+                className="w-3 h-3 rounded"
+                style={{ backgroundColor: isLight ? "rgba(26, 127, 55, 0.45)" : "rgba(34, 197, 94, 0.3)" }}
+              /> Profit
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span
+                className="w-3 h-3 rounded"
+                style={{ backgroundColor: isLight ? "rgba(207, 34, 46, 0.45)" : "rgba(239, 68, 68, 0.3)" }}
+              /> Loss
+            </span>
           </>
         )}
       </div>
@@ -688,6 +715,7 @@ export function EconomicCalendarPage() {
             pnlMap={pnlMap}
             maxAbsPnl={maxAbsPnl}
             showPnl={showPnl}
+            isLight={isLight}
             onAddHoliday={setAddHolidayDate}
             onRemoveHoliday={handleRemoveHoliday}
           />
@@ -698,6 +726,7 @@ export function EconomicCalendarPage() {
             pnlMap={pnlMap}
             maxAbsPnl={maxAbsPnl}
             showPnl={showPnl}
+            isLight={isLight}
             onAddHoliday={setAddHolidayDate}
             onRemoveHoliday={handleRemoveHoliday}
           />
