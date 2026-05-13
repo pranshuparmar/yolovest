@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import clsx from "clsx";
 import type { Trade } from "../types/api";
+import { useClosePosition } from "../hooks/queries";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", {
@@ -10,9 +11,31 @@ function fmt(n: number, d = 2) {
 }
 
 export function PositionsTable({ positions }: { positions: Trade[] }) {
+  const close = useClosePosition();
+
   if (positions.length === 0) {
     return <p className="text-gray-500 text-sm py-4">No open positions</p>;
   }
+
+  const handleClose = (p: Trade) => {
+    if (
+      !window.confirm(
+        `Close ${p.signal_type} ${p.symbol} x${p.quantity} (${p.product}) at market?`,
+      )
+    )
+      return;
+    close.mutate(p.trade_id, {
+      onSuccess: (r) => {
+        window.alert(
+          `Closed ${p.symbol} at ₹${r.exit_price.toFixed(2)} — PnL ₹${r.pnl.toLocaleString("en-IN")}`,
+        );
+      },
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        window.alert(`Close failed: ${msg}`);
+      },
+    });
+  };
 
   return (
     <div className="overflow-x-auto">
@@ -28,7 +51,8 @@ export function PositionsTable({ positions }: { positions: Trade[] }) {
             <th className="pb-2 pr-4">Target</th>
             <th className="pb-2 pr-4">Product</th>
             <th className="pb-2 pr-4">Slippage</th>
-            <th className="pb-2">Status</th>
+            <th className="pb-2 pr-4">Status</th>
+            <th className="pb-2">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -59,7 +83,17 @@ export function PositionsTable({ positions }: { positions: Trade[] }) {
               <td className="py-2 pr-4 text-emerald-400">{fmt(p.target_price)}</td>
               <td className="py-2 pr-4 text-gray-400">{p.product}</td>
               <td className="py-2 pr-4 text-gray-400">{fmt(p.slippage)}</td>
-              <td className="py-2 text-xs text-gray-400">{p.status}</td>
+              <td className="py-2 pr-4 text-xs text-gray-400">{p.status}</td>
+              <td className="py-2">
+                <button
+                  onClick={() => handleClose(p)}
+                  disabled={close.isPending}
+                  className="px-2 py-1 rounded text-xs font-medium bg-red-700 hover:bg-red-600 text-white disabled:opacity-40 transition-colors"
+                  title="Exit this position at market"
+                >
+                  {close.isPending ? "..." : "Close"}
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>

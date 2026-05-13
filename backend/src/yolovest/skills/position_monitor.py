@@ -112,6 +112,17 @@ class PositionMonitorSkill(SkillBase):
                 )
                 continue
 
+            # If a broker-side GTT is attached, exit enforcement is at the
+            # broker. Skip client-side target/SL detection so we don't
+            # double-place an exit order. The ghost-position reconciler
+            # below still catches the case where the GTT fires and the
+            # broker position vanishes.
+            if pos.get("gtt_id"):
+                await self.ctx.db.update_unrealized_pnl(
+                    pos["trade_id"], current_price,
+                )
+                continue
+
             # Target hit?
             if (pos["signal_type"] == "BUY" and current_price >= target) or (
                 pos["signal_type"] == "SELL" and current_price <= target

@@ -552,6 +552,118 @@ class ZerodhaBroker(BrokerBase):
         return True
 
     # ------------------------------------------------------------------
+    # GTT (Good Till Triggered) orders
+    # ------------------------------------------------------------------
+    #
+    # GTT orders sit at the broker until a trigger price is hit, then
+    # place a real order. The two-leg "OCO" variant places a stoploss
+    # leg AND a target leg simultaneously; firing one cancels the other.
+    # Only CNC (delivery) is supported by Zerodha — MIS positions can't
+    # use GTT and continue to rely on client-side detection.
+
+    async def place_oco_gtt(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        stoploss_trigger: float,
+        stoploss_limit: float,
+        target_trigger: float,
+        target_limit: float,
+        last_price: float,
+    ) -> int:
+        """Place a two-leg OCO GTT for an existing position.
+
+        `side` is the EXIT side — "SELL" closes a long, "BUY" closes a short.
+
+        Returns the GTT trigger_id assigned by the broker (use this with
+        delete_gtt / modify_gtt).
+        """
+        if self._mode == "paper":
+            logger.info(
+                "[PAPER] place_oco_gtt %s %s qty=%d sl=%.2f→%.2f target=%.2f→%.2f",
+                side, symbol, quantity, stoploss_trigger, stoploss_limit,
+                target_trigger, target_limit,
+            )
+            return 0
+        if self._kite is None:
+            raise RuntimeError("Not authenticated")
+
+        kite_side = "BUY" if side == "BUY" else "SELL"
+        st_trig = self._tick_round(stoploss_trigger)
+        st_lim = self._tick_round(stoploss_limit)
+        tg_trig = self._tick_round(target_trigger)
+        tg_lim = self._tick_round(target_limit)
+
+        legs = [
+            {
+                "transaction_type": kite_side,
+                "quantity": quantity,
+                "order_type": "LIMIT",
+                "price": st_lim,
+                "product": "CNC",
+            },
+            {
+                "transaction_type": kite_side,
+                "quantity": quantity,
+                "order_type": "LIMIT",
+                "price": tg_lim,
+                "product": "CNC",
+            },
+        ]
+
+        def _place() -> dict[str, Any]:
+            return self._kite.place_gtt(
+                trigger_type=self._kite.GTT_TYPE_OCO,
+                tradingsymbol=symbol,
+                exchange="NSE",
+                trigger_values=[st_trig, tg_trig],
+                last_price=float(self._tick_round(last_price)),
+                orders=legs,
+            )
+
+        result = await self._retry_api_call(_place)
+        trigger_id = int(result.get("trigger_id") or 0)
+        logger.info(
+            "GTT placed: %s %s qty=%d trigger_id=%d (sl_trig=%.2f sl_lim=%.2f "
+            "tgt_trig=%.2f tgt_lim=%.2f)",
+            kite_side, symbol, quantity, trigger_id,
+            st_trig, st_lim, tg_trig, tg_lim,
+        )
+        return trigger_id
+
+    async def delete_gtt(self, gtt_id: int) -> bool:
+        """Delete a GTT by trigger_id. Idempotent — already-deleted /
+        already-fired GTTs return True silently."""
+        if self._mode == "paper":
+            logger.info("[PAPER] delete_gtt %s", gtt_id)
+            return True
+        if self._kite is None or not gtt_id:
+            return False
+
+        try:
+            async with self._rate_limiter:
+                await asyncio.to_thread(self._kite.delete_gtt, trigger_id=gtt_id)
+            return True
+        except Exception as e:
+            msg = str(e).lower()
+            if "not found" in msg or "already" in msg:
+                return True
+            logger.warning("delete_gtt failed for %s: %s", gtt_id, e)
+            return False
+
+    async def get_gtts(self) -> list[dict[str, Any]]:
+        """List active GTTs at the broker."""
+        if self._mode == "paper" or self._kite is None:
+            return []
+        try:
+            async with self._rate_limiter:
+                return list(await asyncio.to_thread(self._kite.get_gtts))
+        except Exception as e:
+            logger.debug("get_gtts failed: %s", e)
+            return []
+
+    # ------------------------------------------------------------------
     # Retry Helper
     # ------------------------------------------------------------------
 

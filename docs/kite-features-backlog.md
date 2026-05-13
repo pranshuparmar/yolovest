@@ -4,30 +4,34 @@ Identified during the Kite paid-plan integration. None block current
 operation; these are improvements on top of the already-integrated
 feature set.
 
-## P0 — Reliability
+## ~~P0 — GTT for CNC SL/target~~ (done in initial cut)
 
-### GTT (Good Till Triggered) orders for CNC SL/target
+Two-leg OCO GTTs are placed automatically after a CNC trade fills.
+The broker enforces target + stoploss without dependence on the app's
+heartbeat. Implementation:
 
-**What:** Kite's server-side conditional orders that persist until
-triggered. Two flavours: single-trigger (one limit order on price hit)
-and OCO ("two-leg", a stop-loss + target pair where firing one cancels
-the other). Persist for up to 1 year.
+- `ZerodhaBroker.place_oco_gtt`, `delete_gtt`, `get_gtts`
+- Migration 031 added `trades.gtt_id`
+- `trade-execute._attach_oco_gtt` runs after a successful CNC fill
+- `position-monitor` skips client-side target/SL detection on
+  positions that have a GTT attached (avoids double exit)
+- Manual close via `/api/positions/{trade_id}/close` deletes the
+  GTT before placing the exit order
 
-**Why:** SL/target enforcement is currently client-side via
-`position-monitor` running on the heartbeat cadence. While the
-application is down — deploy, restart, network hiccup, Kite session
-expiry — CNC positions sit unprotected. Each trail update also consumes
-Kite quota via `modify_order`. A two-leg GTT placed at entry survives
-all of that on the broker's side.
+**Known limitation: GTT applies to CNC only.** Zerodha doesn't allow
+GTT on MIS — intraday positions continue to rely on client-side
+detection in position-monitor and on the 15:15 auto-square-off.
 
-**Scope:**
-- New methods on `ZerodhaBroker`: `place_gtt`, `modify_gtt`,
-  `delete_gtt`, `get_gtts`.
-- Track GTT IDs in `trades` table (new column `gtt_id`).
-- `trade-execute`: after fill, place a two-leg GTT instead of (or in
-  addition to) the SL order.
-- `position-monitor`: modify GTT on trail instead of placing new SL.
-- Migration to add `gtt_id` column.
+**Still open under this theme:**
+
+- Modify GTT on trailing SL — currently trailing is disabled when
+  `gtt_id` is set. A proper implementation would call `kite.modify_gtt`
+  to raise the stoploss trigger as profit accrues. Skipped because
+  Kite's modify_gtt requires re-supplying both legs in full; needs a
+  clean API on the broker.
+- Postback handler verification + business logic (next P1 item) so a
+  GTT firing closes the trade row in real time instead of waiting for
+  position-monitor's next heartbeat to reconcile.
 
 ---
 

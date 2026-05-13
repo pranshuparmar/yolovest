@@ -514,6 +514,121 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Current open positions."""
         return await ctx.db.get_open_positions(mode=mode or ctx.config.mode)
 
+    @app.post("/api/positions/{trade_id}/close")
+    async def close_position(
+        trade_id: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Immediately exit a single open position at market.
+
+        Flow:
+          1. Cancel any attached SL order at broker.
+          2. Delete any attached GTT at broker (so it doesn't fire later).
+          3. Place a MARKET exit order in the opposite direction.
+          4. Close the trade row with realised PnL.
+
+        Live mode places a real order via the broker; paper mode simulates
+        the exit using current LTP. Bypasses the normal manual-approval
+        queue — the action is user-initiated and explicit.
+        """
+        trade = await ctx.db.get_trade(trade_id)
+        if not trade:
+            raise HTTPException(status_code=404, detail=f"No trade with id={trade_id}")
+        if trade.get("status") != "open":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trade {trade_id} status is {trade.get('status')!r}; nothing to close",
+            )
+
+        symbol = trade["symbol"]
+        qty = int(trade["quantity"])
+        exit_side = "SELL" if trade["signal_type"] == "BUY" else "BUY"
+        product = trade.get("product", "MIS")
+
+        # Cancel any open SL order so the exit isn't double-placed
+        sl_order_id = trade.get("sl_order_id")
+        if sl_order_id:
+            try:
+                await ctx.broker.cancel_order(sl_order_id)
+            except Exception:
+                logger.debug("close_position: SL cancel failed (already executed?)", exc_info=True)
+
+        # Delete attached GTT (CNC only — MIS has no GTT)
+        gtt_id = trade.get("gtt_id")
+        if gtt_id and hasattr(ctx.broker, "delete_gtt"):
+            try:
+                await ctx.broker.delete_gtt(int(gtt_id))
+                await ctx.db.set_trade_gtt(trade_id, None)
+            except Exception:
+                logger.warning("close_position: delete_gtt %s failed", gtt_id, exc_info=True)
+
+        # Place market exit
+        try:
+            exit_order_id = await ctx.broker.place_order(
+                symbol=symbol,
+                side=exit_side,
+                quantity=qty,
+                order_type="MARKET",
+                product=product,
+            )
+        except Exception as e:
+            logger.exception("close_position: place exit order failed for %s", trade_id)
+            raise HTTPException(status_code=502, detail=f"Broker rejected exit order: {e}")
+
+        # Wait briefly for fill, fall back to LTP-based estimate
+        exit_price = None
+        for _ in range(10):
+            try:
+                status = await ctx.broker.get_order_status(exit_order_id)
+                exit_price = status.get("average_price")
+                if exit_price and exit_price > 0:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+        if not exit_price or exit_price <= 0:
+            try:
+                exit_price = await ctx.market_data.get_ltp(symbol)
+            except Exception:
+                exit_price = float(trade.get("fill_price") or trade.get("entry_price") or 0)
+
+        entry = float(trade.get("fill_price") or trade["entry_price"])
+        gross_pnl = (
+            (exit_price - entry) * qty if trade["signal_type"] == "BUY"
+            else (entry - exit_price) * qty
+        )
+        from yolovest.costs import compute_transaction_costs
+        costs = compute_transaction_costs(
+            entry, exit_price, qty, product=product,
+            cost_config=ctx.config.transaction_costs,
+        )
+        pnl = round(gross_pnl - costs, 2)
+
+        await ctx.db.close_position(trade_id, float(exit_price), pnl)
+
+        try:
+            await ctx.notify.send(
+                f"Manual close: {symbol} x{qty} @ ₹{exit_price:.2f} "
+                f"(entry ₹{entry:.2f}) — PnL ₹{pnl:+,.2f}",
+                alert_type="trade_exit",
+            )
+        except Exception:
+            logger.debug("close_position: notify failed", exc_info=True)
+
+        logger.info(
+            "close_position: %s %s qty=%d exit=%.2f pnl=%.2f (order=%s)",
+            exit_side, symbol, qty, exit_price, pnl, exit_order_id,
+        )
+
+        return {
+            "status": "closed",
+            "trade_id": trade_id,
+            "exit_price": float(exit_price),
+            "pnl": pnl,
+            "exit_order_id": exit_order_id,
+        }
+
     # Track whether we've already sent a broker-expired Telegram alert this session
     # to avoid spamming on every page load / auto-refresh.
     _broker_expired_alerted = {"sent": False}

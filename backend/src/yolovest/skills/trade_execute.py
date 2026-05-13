@@ -510,6 +510,13 @@ class TradeExecuteSkill(SkillBase):
 
                 trade_id = await self.ctx.db.insert_trade(trade)
                 trade["trade_id"] = trade_id
+
+                # For CNC trades, attach a broker-side OCO GTT for target +
+                # stoploss. Kite only allows GTT on CNC — MIS positions
+                # continue to rely on client-side detection.
+                if product == "CNC":
+                    await self._attach_oco_gtt(trade)
+
                 await self.ctx.notify.send_trade_alert(trade)
                 await self.broadcast("trade_executed", {
                     "symbol": trade["symbol"],
@@ -679,6 +686,62 @@ class TradeExecuteSkill(SkillBase):
             skill_name=self.name,
             data={"trade": trade, "mode": "live", "reconciled": True},
         )
+
+    async def _attach_oco_gtt(self, trade: dict[str, Any]) -> None:
+        """Place a two-leg OCO GTT (stoploss + target) for a freshly-filled
+        CNC trade. Records the broker's trigger_id on the trade row.
+
+        GTT failure is non-fatal — the trade itself succeeded; position-
+        monitor's client-side detection still provides exit coverage.
+        """
+        broker = self.ctx.broker
+        if not hasattr(broker, "place_oco_gtt"):
+            return
+
+        symbol = trade["symbol"]
+        side = trade["signal_type"]
+        # Exit side is the opposite of the entry side
+        exit_side = "SELL" if side == "BUY" else "BUY"
+
+        sl_trig = float(trade["stop_loss_price"])
+        tgt_trig = float(trade["target_price"])
+        last_price = float(trade.get("fill_price") or trade["entry_price"])
+
+        # Limit price for each leg sits past the trigger so the resulting
+        # LIMIT order fills reliably once the trigger fires.
+        buffer = 0.005  # 0.5%
+        if exit_side == "SELL":  # closing a long
+            sl_limit = sl_trig * (1 - buffer)
+            tgt_limit = tgt_trig * (1 - buffer * 0.5)  # tighter on target side
+        else:  # closing a short
+            sl_limit = sl_trig * (1 + buffer)
+            tgt_limit = tgt_trig * (1 + buffer * 0.5)
+
+        try:
+            gtt_id = await broker.place_oco_gtt(
+                symbol=symbol,
+                side=exit_side,
+                quantity=int(trade["quantity"]),
+                stoploss_trigger=sl_trig,
+                stoploss_limit=sl_limit,
+                target_trigger=tgt_trig,
+                target_limit=tgt_limit,
+                last_price=last_price,
+            )
+        except Exception as e:
+            logger.warning(
+                "trade-execute: GTT attach failed for %s (entry succeeded; "
+                "client-side exit detection still active): %s",
+                trade.get("trade_id"), e,
+            )
+            return
+
+        if gtt_id:
+            trade["gtt_id"] = gtt_id
+            try:
+                await self.ctx.db.set_trade_gtt(trade["trade_id"], gtt_id)
+            except Exception:
+                logger.debug("Failed to persist gtt_id", exc_info=True)
 
     async def _verify_fill(self, order_id: str, timeout_sec: int = 5) -> str:
         """Poll order status until it reaches a terminal state.

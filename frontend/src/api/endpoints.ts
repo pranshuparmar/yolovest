@@ -58,6 +58,12 @@ export const api = {
 
   positions: () => apiFetch<Trade[]>("/api/positions"),
 
+  closePosition: (tradeId: string) =>
+    apiFetch<{ status: string; trade_id: string; exit_price: number; pnl: number; exit_order_id: string }>(
+      `/api/positions/${encodeURIComponent(tradeId)}/close`,
+      { method: "POST" },
+    ),
+
   tradesToday: () => apiFetch<Trade[]>("/api/trades/today"),
 
   holdings: () => apiFetch<HoldingsResponse>("/api/holdings"),

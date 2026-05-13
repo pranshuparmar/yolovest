@@ -2119,6 +2119,22 @@ class Database:
         rows = await cursor.fetchall()
         return {"items": [dict[str, Any](r) for r in rows], "total": total}
 
+    async def set_trade_gtt(self, trade_id: str, gtt_id: int | None) -> None:
+        """Attach (or clear) the broker GTT trigger id on an open trade."""
+        await self.conn.execute(
+            "UPDATE trades SET gtt_id = ? WHERE trade_id = ?",
+            (gtt_id, trade_id),
+        )
+        await self.conn.commit()
+
+    async def get_trade(self, trade_id: str) -> dict[str, Any] | None:
+        """Fetch a single trade row by id (any status)."""
+        cursor = await self.read_conn.execute(
+            "SELECT * FROM trades WHERE trade_id = ?", (trade_id,),
+        )
+        row = await cursor.fetchone()
+        return dict[str, Any](row) if row else None
+
     async def score_prediction(
         self,
         prediction_id: str,
