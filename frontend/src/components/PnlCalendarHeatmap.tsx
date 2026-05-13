@@ -6,21 +6,24 @@ function fmt(n: number) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 }
 
-/** Map PnL to a color intensity. Green for profit, red for loss. */
-function pnlColor(pnl: number, maxAbs: number): string {
-  if (maxAbs === 0) return "bg-gray-800";
-  const intensity = Math.min(Math.abs(pnl) / maxAbs, 1);
-  if (pnl > 0) {
-    // Green scale: 10% → faint, 100% → vivid
-    const alpha = Math.round(15 + intensity * 85);
-    return `bg-emerald-500/${alpha}`;
+/** Map PnL to a background colour. Inline rgba() rather than dynamic
+ * Tailwind classes — Tailwind's JIT can only see fully-literal class
+ * names at build time, so `bg-emerald-500/${alpha}` was silently
+ * stripped, leaving cells with no background at all. */
+function pnlStyle(pnl: number, maxAbs: number): { backgroundColor: string } {
+  if (maxAbs === 0 || pnl === 0) {
+    return { backgroundColor: "rgba(75, 85, 99, 0.4)" };  // gray-600/40
   }
-  if (pnl < 0) {
-    const alpha = Math.round(15 + intensity * 85);
-    return `bg-red-500/${alpha}`;
-  }
-  return "bg-gray-800";
+  // Floor at 0.35 so even small days are clearly visible against the
+  // dark background; scale up to 1.0 for the worst/best day.
+  const intensity = 0.35 + 0.65 * Math.min(Math.abs(pnl) / maxAbs, 1);
+  // emerald-400 (#34d399) for profit, rose-500 (#ef4444) for loss —
+  // both pop against gray-900 better than emerald-500 / red-500.
+  const rgb = pnl > 0 ? "52, 211, 153" : "239, 68, 68";
+  return { backgroundColor: `rgba(${rgb}, ${intensity})` };
 }
+
+const EMPTY_CELL_STYLE = { backgroundColor: "rgba(55, 65, 81, 0.5)" };  // gray-700/50
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -129,11 +132,9 @@ export function PnlCalendarHeatmap({ data, months = 3 }: Props) {
                   key={key}
                   className={clsx(
                     "w-3 h-3 rounded-[2px] cursor-default transition-colors",
-                    entry
-                      ? pnlColor(entry.pnl, maxAbs)
-                      : "bg-gray-800/40",
-                    isToday && "ring-1 ring-gray-500"
+                    isToday && "ring-1 ring-gray-300"
                   )}
+                  style={entry ? pnlStyle(entry.pnl, maxAbs) : EMPTY_CELL_STYLE}
                   title={
                     entry
                       ? `${key}: ₹${fmt(entry.pnl)} (${entry.wins}W/${entry.losses}L, ${entry.trade_count} trades)`
@@ -146,17 +147,17 @@ export function PnlCalendarHeatmap({ data, months = 3 }: Props) {
         ))}
       </div>
 
-      {/* Legend */}
+      {/* Legend — uses the same rgba scale as the cells so they actually match */}
       <div className="flex items-center gap-3 mt-2 ml-8">
-        <span className="text-[10px] text-gray-500">Less</span>
+        <span className="text-[10px] text-gray-500">Loss</span>
         <div className="flex gap-0.5">
-          <div className="w-3 h-3 rounded-[2px] bg-red-500/85" />
-          <div className="w-3 h-3 rounded-[2px] bg-red-500/40" />
-          <div className="w-3 h-3 rounded-[2px] bg-gray-800" />
-          <div className="w-3 h-3 rounded-[2px] bg-emerald-500/40" />
-          <div className="w-3 h-3 rounded-[2px] bg-emerald-500/85" />
+          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: "rgba(239, 68, 68, 1.0)" }} />
+          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: "rgba(239, 68, 68, 0.55)" }} />
+          <div className="w-3 h-3 rounded-[2px]" style={EMPTY_CELL_STYLE} />
+          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: "rgba(52, 211, 153, 0.55)" }} />
+          <div className="w-3 h-3 rounded-[2px]" style={{ backgroundColor: "rgba(52, 211, 153, 1.0)" }} />
         </div>
-        <span className="text-[10px] text-gray-500">More</span>
+        <span className="text-[10px] text-gray-500">Profit</span>
         {maxAbs > 0 && (
           <span className="text-[10px] text-gray-600 ml-2">
             Max: ₹{fmt(maxAbs)}
