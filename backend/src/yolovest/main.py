@@ -493,20 +493,27 @@ async def async_main(args: argparse.Namespace) -> None:
         # Sync Kite data provider with broker's access token
         _sync_kite_data_token(ctx)
 
-        # Sync capital from Zerodha if session was restored
+        # First-time bootstrap: if no baseline exists yet, seed it from the
+        # broker's current funds (cash + utilised). Subsequent restarts must
+        # not overwrite it — the baseline is what the user deposited, and
+        # total_capital = initial_capital + all_time_realized_pnl depends on
+        # it staying constant. Use /api/capital or /api/capital/sync to reset.
         if restored:
-            try:
-                margins = await ctx.broker.get_margins()
-                if margins:
-                    from yolovest.dashboard.app import _extract_broker_capital
-                    broker_capital = _extract_broker_capital(margins)
-                    if broker_capital > 0:
-                        await ctx.db.set_system_state("initial_capital", str(broker_capital))
-                        logger.info("Synced capital from Zerodha: %.2f", broker_capital)
-            except Exception as e:
-                logger.info("Could not sync capital from Zerodha: %s", e)
+            existing = await ctx.db.get_system_state("initial_capital")
+            if not existing:
+                try:
+                    margins = await ctx.broker.get_margins()
+                    if margins:
+                        from yolovest.dashboard.app import _extract_broker_capital
+                        broker_capital = _extract_broker_capital(margins)
+                        if broker_capital > 0:
+                            await ctx.db.set_system_state("initial_capital", str(broker_capital))
+                            logger.info("Seeded initial capital from Zerodha: %.2f", broker_capital)
+                except Exception as e:
+                    logger.info("Could not seed initial capital from Zerodha: %s", e)
 
-    # Sync initial capital from config → DB (so portfolio reads the configured value)
+    # Fallback bootstrap: if neither broker nor any prior run has set a
+    # baseline, take it from the config's capital.initial_amount.
     if isinstance(ctx.db, Database):
         existing = await ctx.db.get_system_state("initial_capital")
         if not existing:

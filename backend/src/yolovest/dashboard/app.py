@@ -503,13 +503,14 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         If broker is authenticated, syncs available funds from Zerodha.
         """
-        # Sync capital breakdown (cash + utilised + holdings) if authenticated
+        # Refresh live capital breakdown (cash + utilised + holdings) on every read.
+        # initial_capital is the deposited baseline — set once at bootstrap and via
+        # explicit /api/capital or /api/capital/sync; never overwritten here.
         try:
             if await ctx.broker.is_authenticated():
                 bd = await _compute_capital_breakdown(ctx.broker)
                 if bd["total"] > 0:
                     import json as _json
-                    await ctx.db.set_system_state("initial_capital", str(bd["total"]))
                     await ctx.db.set_system_state("capital_breakdown", _json.dumps(bd))
                     logger.info("Portfolio: synced broker capital ₹%.2f (cash=%.2f, used=%.2f, hold=%.2f)",
                                 bd["total"], bd["available_cash"], bd["utilised_margin"], bd["holdings_current"])
