@@ -351,6 +351,11 @@ class ZerodhaBroker(BrokerBase):
         logger.warning("All LTP sources failed for %s MARKET→LIMIT conversion", symbol)
         return 0.0
 
+    @staticmethod
+    def _tick_round(price: float, tick: float = 0.05) -> float:
+        """Snap a price to the instrument's tick grid (NSE equity default 0.05)."""
+        return round(round(price / tick) * tick, 2)
+
     async def _live_place_order(
         self,
         symbol: str,
@@ -376,18 +381,47 @@ class ZerodhaBroker(BrokerBase):
             ltp = await self._fetch_ltp_for_limit(symbol)
             if ltp and ltp > 0:
                 buffer = 0.005 if self._kite_data_enabled else 0.01
-                tick = 0.05
                 if side == "BUY":
                     raw = ltp * (1 + buffer)
-                    price = round(round(raw / tick) * tick, 2)
+                    price = self._tick_round(raw)
                 else:
                     raw = ltp * (1 - buffer)
-                    price = round(round(raw / tick) * tick, 2)
+                    price = self._tick_round(raw)
                 order_type = "LIMIT"
                 logger.info(
                     "MARKET→LIMIT conversion: %s %s LTP=%.2f → price=%.2f",
                     side, symbol, ltp, price,
                 )
+
+        # Convert SL-M → SL (Zerodha disabled SL-M for retail API; it errors
+        # with "Market orders without market protection are not allowed").
+        # SL is a stop-loss with a limit price: the order rests at the
+        # exchange and converts to a LIMIT order when trigger_price is hit.
+        # We set the limit slightly past the trigger so the order is highly
+        # likely to fill once triggered.
+        if order_type == "SL-M" and trigger_price is not None:
+            buffer = 0.005  # 0.5% past trigger for fill probability
+            if side == "SELL":
+                # SL on a long position — trigger fires when price drops; we
+                # want to sell on the way down, so limit price BELOW trigger.
+                price = trigger_price * (1 - buffer)
+            else:
+                # SL on a short position — trigger fires on the way up.
+                price = trigger_price * (1 + buffer)
+            order_type = "SL"
+            logger.info(
+                "SL-M→SL conversion: %s %s trigger=%.2f → limit=%.2f",
+                side, symbol, trigger_price, price,
+            )
+
+        # Final tick alignment — Kite rejects any price/trigger that isn't a
+        # multiple of the instrument's tick size. NSE equity is 0.05 by
+        # default; values computed from ATR, percentages, or model outputs
+        # rarely land on the tick grid.
+        if price is not None:
+            price = self._tick_round(price)
+        if trigger_price is not None:
+            trigger_price = self._tick_round(trigger_price)
 
         kite_side = "BUY" if side == "BUY" else "SELL"
         params: dict[str, Any] = {

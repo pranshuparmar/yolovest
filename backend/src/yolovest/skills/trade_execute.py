@@ -544,33 +544,20 @@ class TradeExecuteSkill(SkillBase):
                 )
                 # CRITICAL: Before retrying, check if the "failed" order actually
                 # went through on the broker. Zerodha sometimes returns errors
-                # AFTER placing the order, causing duplicate orders on retry.
-                if attempt < cfg.max_order_retries and self.ctx.config.mode == "live":
-                    try:
-                        recent_orders = await asyncio.to_thread(self.ctx.broker._kite.orders)
-                        symbol_orders = [
-                            o for o in (recent_orders or [])
-                            if o.get("tradingsymbol") == signal["symbol"]
-                            and o.get("status") in ("COMPLETE", "OPEN", "TRIGGER PENDING")
-                            and o.get("transaction_type") == ("BUY" if signal["signal_type"] == "BUY" else "SELL")
-                        ]
-                        # Check for orders placed in the last 2 minutes
-                        from datetime import datetime, timedelta
-                        cutoff = datetime.now() - timedelta(minutes=2)
-                        recent = [
-                            o for o in symbol_orders
-                            if o.get("order_timestamp") and o["order_timestamp"] > cutoff
-                        ]
-                        if recent:
-                            logger.error(
-                                "trade-execute: ABORT RETRY — found %d recent %s orders for %s on broker "
-                                "despite error. The 'failed' order likely executed. Not retrying.",
-                                len(recent), signal["signal_type"], signal["symbol"],
-                            )
-                            break
-                    except Exception:
-                        logger.debug("Could not check broker orders before retry", exc_info=True)
+                # AFTER placing the order — if we retry naively we'd create
+                # a duplicate. Worse, if the broker order succeeded and we
+                # simply skip retry, the calling code sees success=False and
+                # leaves the pending trade un-reconciled while the actual
+                # position exists on Kite. Reconcile instead: adopt the
+                # surviving order as our trade record.
+                if self.ctx.config.mode == "live":
+                    recovered = await self._find_recently_placed_order(signal)
+                    if recovered is not None:
+                        return await self._reconcile_recovered_order(
+                            signal, recovered, product, last_error,
+                        )
 
+                if attempt < cfg.max_order_retries and self.ctx.config.mode == "live":
                     delay = cfg.retry_base_delay_sec * (2**attempt)
                     await asyncio.sleep(delay)
 
@@ -584,6 +571,113 @@ class TradeExecuteSkill(SkillBase):
             success=False,
             skill_name=self.name,
             error=f"Order failed after {cfg.max_order_retries + 1} attempts: {last_error}",
+        )
+
+    async def _find_recently_placed_order(
+        self, signal: dict[str, Any], window_minutes: int = 2,
+    ) -> dict[str, Any] | None:
+        """Return the most recent matching broker order for this signal,
+        or None if no candidate exists.
+
+        Matches by tradingsymbol + transaction_type + recent timestamp.
+        Prefers COMPLETE > OPEN > TRIGGER PENDING.
+        """
+        try:
+            recent_orders = await asyncio.to_thread(self.ctx.broker._kite.orders)
+        except Exception:
+            logger.debug("Could not list broker orders for reconciliation", exc_info=True)
+            return None
+
+        want_side = "BUY" if signal["signal_type"] == "BUY" else "SELL"
+        from datetime import datetime, timedelta
+        cutoff = datetime.now() - timedelta(minutes=window_minutes)
+
+        candidates = []
+        for o in recent_orders or []:
+            if o.get("tradingsymbol") != signal["symbol"]:
+                continue
+            if o.get("transaction_type") != want_side:
+                continue
+            if o.get("status") not in ("COMPLETE", "OPEN", "TRIGGER PENDING"):
+                continue
+            ts = o.get("order_timestamp")
+            if ts and ts > cutoff:
+                candidates.append(o)
+
+        if not candidates:
+            return None
+
+        # Prefer COMPLETE, then most recent
+        status_rank = {"COMPLETE": 0, "OPEN": 1, "TRIGGER PENDING": 2}
+        candidates.sort(key=lambda o: (
+            status_rank.get(o.get("status"), 99),
+            -(o["order_timestamp"].timestamp() if o.get("order_timestamp") else 0),
+        ))
+        return candidates[0]
+
+    async def _reconcile_recovered_order(
+        self,
+        signal: dict[str, Any],
+        order: dict[str, Any],
+        product: str,
+        last_error: Exception | None,
+    ) -> SkillResult:
+        """Adopt a broker order that was placed despite our place_order call
+        raising — record it as a successful trade so the pending queue
+        doesn't get stuck and the position is tracked.
+
+        SL order is NOT auto-placed here even if the original SL-leg failed;
+        position-monitor will detect the unmanaged position and either set
+        SL via its trailing logic or surface it for manual intervention.
+        """
+        symbol = signal["symbol"]
+        order_id = str(order.get("order_id") or "")
+        fill_price = float(order.get("average_price") or signal["entry_price"] or 0)
+        actual_qty = int(order.get("filled_quantity") or signal["position_size"])
+        slippage = abs(fill_price - signal["entry_price"])
+
+        logger.warning(
+            "trade-execute: RECONCILED %s %s — broker order %s status=%s qty=%d fill=%.2f "
+            "(place_order raised %s, but order actually went through)",
+            signal["signal_type"], symbol, order_id, order.get("status"),
+            actual_qty, fill_price, type(last_error).__name__ if last_error else "n/a",
+        )
+
+        trade = {
+            "symbol": symbol,
+            "signal_type": signal["signal_type"],
+            "entry_price": signal["entry_price"],
+            "fill_price": fill_price,
+            "quantity": actual_qty,
+            "stop_loss_price": signal["stop_loss_price"],
+            "target_price": signal["target_price"],
+            "order_id": order_id,
+            "sl_order_id": None,  # SL leg not separately tracked on reconcile
+            "product": product,
+            "status": "open",
+            "mode": "live",
+            "slippage": slippage,
+            "origin": "system",
+        }
+        trade_id = await self.ctx.db.insert_trade(trade)
+        trade["trade_id"] = trade_id
+        try:
+            await self.ctx.notify.send_trade_alert(trade)
+        except Exception:
+            logger.debug("Failed to notify on reconciled trade", exc_info=True)
+        try:
+            await self.ctx.notify.send(
+                f"⚠️ Reconciled {signal['signal_type']} {symbol} — entry filled at "
+                f"₹{fill_price} but SL leg failed. position-monitor will manage SL.",
+                alert_type="errors",
+            )
+        except Exception:
+            logger.debug("Failed to send reconcile alert", exc_info=True)
+
+        return SkillResult(
+            success=True,
+            skill_name=self.name,
+            data={"trade": trade, "mode": "live", "reconciled": True},
         )
 
     async def _verify_fill(self, order_id: str, timeout_sec: int = 5) -> str:
