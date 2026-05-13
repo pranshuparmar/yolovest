@@ -935,15 +935,21 @@ class Database:
         disposition: str,
         reason: str | None = None,
     ) -> None:
-        """Update disposition for the most recent signal for a symbol today."""
-        today_start = now_ist().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ).astimezone(UTC).isoformat()
+        """Update disposition for the most recent signal for a symbol today.
+
+        Matches on the date-prefix substring (first 10 chars) of
+        created_at so the comparison works whether the row was stored
+        with SQLite's space-separator format (`2026-05-13 04:18:30`)
+        from `datetime('now')` or the ISO 'T' format from explicit
+        Python timestamps.
+        """
+        today_ist = now_ist().strftime("%Y-%m-%d")
         await self.conn.execute(
             "UPDATE signals SET disposition = ?, disposition_reason = ? "
-            "WHERE id = (SELECT id FROM signals WHERE symbol = ? AND created_at >= ? "
+            "WHERE id = (SELECT id FROM signals WHERE symbol = ? "
+            "AND substr(created_at, 1, 10) = ? "
             "ORDER BY created_at DESC LIMIT 1)",
-            (disposition, reason, symbol, today_start),
+            (disposition, reason, symbol, today_ist),
         )
         await self.conn.commit()
 
