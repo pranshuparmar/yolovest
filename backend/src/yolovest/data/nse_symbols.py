@@ -124,26 +124,29 @@ _UNIVERSE_ALIASES: dict[str, str] = {
 }
 
 
-def parse_constituent_csv(body: str) -> list[str]:
-    """Parse a niftyindices.com constituent CSV into a list of NSE symbols.
+def parse_constituent_csv(body: str) -> list[dict[str, str]]:
+    """Parse a niftyindices.com constituent CSV into a list of records.
 
-    Expected columns: 'Company Name', 'Industry', 'Symbol', 'Series',
-    'ISIN Code'. Filters to Series == 'EQ' (equity, excludes Z/BE/etc.)
-    when the Series column is present.
+    Returns a list of `{"symbol": ..., "industry": ...}` dicts (industry
+    may be an empty string when the CSV row has none). Expected columns:
+    'Company Name', 'Industry', 'Symbol', 'Series', 'ISIN Code'. Filters
+    to Series == 'EQ' (equity, excludes Z/BE/etc.) when the Series
+    column is present.
 
-    Also drops NSE-issued placeholder tickers — primarily ``DUMMY*``
-    symbols, which NSE introduces during corporate actions (demergers,
-    splits) as temporary entries. They don't resolve to a real
-    instrument_token on Kite and aren't tradable.
+    Drops NSE-issued placeholder tickers — primarily ``DUMMY*`` symbols,
+    which NSE introduces during corporate actions (demergers, splits)
+    as temporary entries. They don't resolve to a real instrument_token
+    on Kite and aren't tradable.
     """
     reader = csv.DictReader(io.StringIO(body))
-    symbols: list[str] = []
+    records: list[dict[str, str]] = []
     for row in reader:
         # niftyindices CSVs sometimes have stray whitespace or BOM in headers.
         # Build a case-insensitive lookup that strips whitespace.
         norm = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
         sym = norm.get("symbol")
         series = norm.get("series")
+        industry = norm.get("industry", "")
         if not sym:
             continue
         # If series is exposed, restrict to EQ; otherwise accept everything.
@@ -152,15 +155,20 @@ def parse_constituent_csv(body: str) -> list[str]:
         # Drop NSE placeholder tickers — these aren't tradable.
         if _is_placeholder_symbol(sym):
             continue
-        symbols.append(sym.upper())
+        records.append({"symbol": sym.upper(), "industry": industry})
     # Dedup while preserving order
     seen: set[str] = set()
-    deduped: list[str] = []
-    for s in symbols:
-        if s not in seen:
-            seen.add(s)
-            deduped.append(s)
+    deduped: list[dict[str, str]] = []
+    for r in records:
+        if r["symbol"] not in seen:
+            seen.add(r["symbol"])
+            deduped.append(r)
     return deduped
+
+
+def parse_constituent_csv_symbols(body: str) -> list[str]:
+    """Convenience wrapper for callers that only need the symbol list."""
+    return [r["symbol"] for r in parse_constituent_csv(body)]
 
 
 def _is_placeholder_symbol(symbol: str) -> bool:
@@ -172,15 +180,15 @@ def _is_placeholder_symbol(symbol: str) -> bool:
     return upper.startswith("DUMMY")
 
 
-async def fetch_live_constituents(
+async def fetch_live_constituent_details(
     universe: Literal["nifty50", "nifty100", "nifty200", "nifty500"],
     timeout_sec: float = 15.0,
-) -> list[str] | None:
-    """Fetch live index constituents from niftyindices.com.
+) -> list[dict[str, str]] | None:
+    """Fetch live index constituents (with industry) from niftyindices.com.
 
-    Returns the symbol list on success, or None on any failure (HTTP error,
-    parse failure, empty result). Caller should fall back to the bundled
-    list in that case.
+    Returns a list of `{"symbol", "industry"}` dicts on success, or None
+    on any failure (HTTP error, parse failure, empty result). Caller
+    should fall back to the bundled symbol list in that case.
     """
     resolved = _UNIVERSE_ALIASES.get(universe, universe)
     if resolved != universe:
@@ -203,16 +211,25 @@ async def fetch_live_constituents(
                     return None
                 body = await resp.text()
 
-        symbols = parse_constituent_csv(body)
-        if not symbols:
+        records = parse_constituent_csv(body)
+        if not records:
             logger.warning(
                 "Live constituent fetch for %s parsed 0 symbols", universe,
             )
             return None
         logger.info(
-            "Live constituent fetch: %s -> %d symbols", universe, len(symbols),
+            "Live constituent fetch: %s -> %d symbols", universe, len(records),
         )
-        return symbols
+        return records
     except Exception as e:
         logger.warning("Live constituent fetch failed for %s: %s", universe, e)
         return None
+
+
+async def fetch_live_constituents(
+    universe: Literal["nifty50", "nifty100", "nifty200", "nifty500"],
+    timeout_sec: float = 15.0,
+) -> list[str] | None:
+    """Backwards-compatible wrapper returning just the symbol list."""
+    records = await fetch_live_constituent_details(universe, timeout_sec)
+    return [r["symbol"] for r in records] if records is not None else None

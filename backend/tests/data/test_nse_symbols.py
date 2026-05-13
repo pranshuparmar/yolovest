@@ -4,20 +4,40 @@ from yolovest.data.nse_symbols import (
     NIFTY_500_SUBSET,
     get_universe_symbols,
     parse_constituent_csv,
+    parse_constituent_csv_symbols,
 )
 
 
 class TestParseConstituentCsv:
-    """Parse niftyindices.com-style CSV bodies."""
+    """Parse niftyindices.com-style CSV bodies into symbol+industry records."""
 
-    def test_extracts_symbol_column(self):
+    def test_extracts_symbol_and_industry(self):
         csv_body = (
             "Company Name,Industry,Symbol,Series,ISIN Code\n"
             "Reliance Industries Ltd.,Oil Gas & Consumable Fuels,RELIANCE,EQ,INE002A01018\n"
             "Tata Consultancy Services Ltd.,Information Technology,TCS,EQ,INE467B01029\n"
         )
-        symbols = parse_constituent_csv(csv_body)
-        assert symbols == ["RELIANCE", "TCS"]
+        records = parse_constituent_csv(csv_body)
+        assert records == [
+            {"symbol": "RELIANCE", "industry": "Oil Gas & Consumable Fuels"},
+            {"symbol": "TCS", "industry": "Information Technology"},
+        ]
+
+    def test_industry_missing_yields_empty_string(self):
+        csv_body = (
+            "Symbol,Series\n"
+            "RELIANCE,EQ\n"
+        )
+        records = parse_constituent_csv(csv_body)
+        assert records == [{"symbol": "RELIANCE", "industry": ""}]
+
+    def test_symbols_helper_returns_just_symbols(self):
+        csv_body = (
+            "Company Name,Industry,Symbol,Series,ISIN Code\n"
+            "Reliance,Energy,RELIANCE,EQ,INE002A01018\n"
+            "TCS,IT,TCS,EQ,INE467B01029\n"
+        )
+        assert parse_constituent_csv_symbols(csv_body) == ["RELIANCE", "TCS"]
 
     def test_filters_non_eq_series(self):
         csv_body = (
@@ -26,8 +46,7 @@ class TestParseConstituentCsv:
             "Test Corp,Misc,TESTSME,BE,XYZ\n"
             "Test Corp 2,Misc,TESTBZ,BZ,ABC\n"
         )
-        symbols = parse_constituent_csv(csv_body)
-        assert symbols == ["RELIANCE"]
+        assert parse_constituent_csv_symbols(csv_body) == ["RELIANCE"]
 
     def test_accepts_all_when_series_column_missing(self):
         csv_body = (
@@ -35,8 +54,7 @@ class TestParseConstituentCsv:
             "Reliance,Energy,RELIANCE,INE002A01018\n"
             "TCS,IT,TCS,INE467B01029\n"
         )
-        symbols = parse_constituent_csv(csv_body)
-        assert symbols == ["RELIANCE", "TCS"]
+        assert parse_constituent_csv_symbols(csv_body) == ["RELIANCE", "TCS"]
 
     def test_deduplicates_preserving_order(self):
         csv_body = (
@@ -46,8 +64,7 @@ class TestParseConstituentCsv:
             "RELIANCE,EQ\n"
             "INFY,EQ\n"
         )
-        symbols = parse_constituent_csv(csv_body)
-        assert symbols == ["RELIANCE", "TCS", "INFY"]
+        assert parse_constituent_csv_symbols(csv_body) == ["RELIANCE", "TCS", "INFY"]
 
     def test_tolerates_whitespace_and_case(self):
         csv_body = (
@@ -55,8 +72,7 @@ class TestParseConstituentCsv:
             "  reliance  ,  eq  \n"
             "  TCS  ,  EQ  \n"
         )
-        symbols = parse_constituent_csv(csv_body)
-        assert symbols == ["RELIANCE", "TCS"]
+        assert parse_constituent_csv_symbols(csv_body) == ["RELIANCE", "TCS"]
 
     def test_empty_csv_returns_empty_list(self):
         assert parse_constituent_csv("Symbol,Series\n") == []
@@ -71,8 +87,7 @@ class TestParseConstituentCsv:
             "Vedanta Dummy 2,Materials,DUMMYVEDL2,EQ,INE_DUMMY2\n"
             "TCS,IT,TCS,EQ,INE467B01029\n"
         )
-        symbols = parse_constituent_csv(csv_body)
-        assert symbols == ["RELIANCE", "TCS"]
+        assert parse_constituent_csv_symbols(csv_body) == ["RELIANCE", "TCS"]
 
     def test_dummy_filter_is_case_insensitive(self):
         csv_body = (
@@ -81,7 +96,7 @@ class TestParseConstituentCsv:
             "Dummy123,EQ\n"
             "RELIANCE,EQ\n"
         )
-        assert parse_constituent_csv(csv_body) == ["RELIANCE"]
+        assert parse_constituent_csv_symbols(csv_body) == ["RELIANCE"]
 
 
 class TestBundledFallback:

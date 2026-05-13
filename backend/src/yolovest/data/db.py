@@ -386,6 +386,43 @@ class Database:
         ]
 
     # ------------------------------------------------------------------
+    # Symbol sectors (canonical lookup populated from NSE constituents)
+    # ------------------------------------------------------------------
+
+    async def upsert_symbol_sectors(self, records: list[dict[str, str]]) -> int:
+        """Bulk-upsert sector / industry records keyed by symbol.
+
+        `records` is a list of `{"symbol", "industry"}` (and optionally
+        "sector"). We treat the CSV's Industry as the sector when no
+        explicit sector is provided — niftyindices.com only exposes
+        Industry but it's specific enough to drive sector-cap logic.
+
+        Returns the number of rows touched.
+        """
+        if not records:
+            return 0
+        ts = now_utc().isoformat()
+        touched = 0
+        for r in records:
+            sym = (r.get("symbol") or "").upper()
+            if not sym:
+                continue
+            sector = r.get("sector") or r.get("industry") or None
+            industry = r.get("industry") or None
+            await self.conn.execute(
+                "INSERT INTO symbol_sectors (symbol, sector, industry, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(symbol) DO UPDATE SET "
+                "  sector = COALESCE(excluded.sector, symbol_sectors.sector), "
+                "  industry = COALESCE(excluded.industry, symbol_sectors.industry), "
+                "  updated_at = excluded.updated_at",
+                (sym, sector, industry, ts),
+            )
+            touched += 1
+        await self.conn.commit()
+        return touched
+
+    # ------------------------------------------------------------------
     # Watchlist
     # ------------------------------------------------------------------
 
@@ -419,11 +456,20 @@ class Database:
             raise
 
     async def get_watchlist(self) -> list[dict[str, Any]]:
-        """Get current watchlist ordered by composite score."""
+        """Get current watchlist ordered by composite score.
+
+        Sector is resolved via COALESCE(symbol_sectors, watchlist) so
+        rows added before ingest-universe populated the canonical lookup
+        still show their sector once it's available.
+        """
         cursor = await self.read_conn.execute(
-            "SELECT symbol, composite_score, technical_score, volume_momentum_score, "
-            "news_sentiment_score, fundamental_score, sector, updated_at "
-            "FROM watchlist ORDER BY composite_score DESC"
+            "SELECT w.symbol, w.composite_score, w.technical_score, "
+            "w.volume_momentum_score, w.news_sentiment_score, "
+            "w.fundamental_score, COALESCE(ss.sector, w.sector) as sector, "
+            "w.updated_at "
+            "FROM watchlist w "
+            "LEFT JOIN symbol_sectors ss ON w.symbol = ss.symbol "
+            "ORDER BY w.composite_score DESC"
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
@@ -1099,17 +1145,21 @@ class Database:
         from datetime import timedelta
         sentiment_cutoff = (now_utc() - timedelta(hours=sentiment_ttl_hours)).isoformat()
 
+        # Prefer the canonical sector from symbol_sectors (populated by
+        # ingest-universe from the NSE Industry column). Fall back to
+        # watchlist.sector for symbols the user added manually.
         cursor = await self.read_conn.execute(
             "SELECT o.symbol, "
             "  AVG(o.volume) as avg_daily_volume, "
             "  CASE WHEN s.created_at >= ? THEN s.sentiment ELSE NULL END as sentiment, "
             "  CASE WHEN s.created_at >= ? THEN s.confidence ELSE NULL END as sentiment_confidence, "
             "  f.pe_ratio, f.debt_to_equity, f.promoter_holding_pct, "
-            "  w.sector "
+            "  COALESCE(ss.sector, w.sector) as sector "
             "FROM ohlcv o "
             "LEFT JOIN sentiment s ON o.symbol = s.symbol "
             "LEFT JOIN fundamentals f ON o.symbol = f.symbol "
             "LEFT JOIN watchlist w ON o.symbol = w.symbol "
+            "LEFT JOIN symbol_sectors ss ON o.symbol = ss.symbol "
             "WHERE o.interval = 'daily' "
             "AND o.symbol NOT IN ("
             "  SELECT symbol FROM quarantined_symbols WHERE quarantined_at IS NOT NULL"
@@ -1645,9 +1695,21 @@ class Database:
     # ------------------------------------------------------------------
 
     async def get_stock_sector(self, symbol: str) -> str | None:
-        """Get sector for a symbol from watchlist."""
+        """Get sector for a symbol.
+
+        Prefers the canonical `symbol_sectors` lookup (populated from the
+        NSE Industry column by ingest-universe). Falls back to watchlist
+        when not present — the user can manually set sector via the
+        user-watchlist endpoints, and that override should still apply.
+        """
         cursor = await self.conn.execute(
-            "SELECT sector FROM watchlist WHERE symbol = ?", (symbol,)
+            "SELECT sector FROM symbol_sectors WHERE symbol = ?", (symbol.upper(),),
+        )
+        row = await cursor.fetchone()
+        if row and row[0]:
+            return row[0]
+        cursor = await self.conn.execute(
+            "SELECT sector FROM watchlist WHERE symbol = ?", (symbol,),
         )
         row = await cursor.fetchone()
         return row[0] if row and row[0] else None
@@ -1681,10 +1743,18 @@ class Database:
     # ------------------------------------------------------------------
 
     async def get_sector_rotation(self) -> dict[str, Any]:
-        """Get sector rotation data from watchlist scores."""
+        """Get sector rotation data from watchlist scores.
+
+        Sector is resolved via COALESCE(symbol_sectors, watchlist) so it
+        works even when watchlist rows lack their own sector value (which
+        is the common case now that ingest-universe is the source of truth).
+        """
         cursor = await self.conn.execute(
-            "SELECT sector, AVG(composite_score) as avg_score, COUNT(*) as count "
-            "FROM watchlist WHERE sector IS NOT NULL "
+            "SELECT COALESCE(ss.sector, w.sector) as sector, "
+            "AVG(w.composite_score) as avg_score, COUNT(*) as count "
+            "FROM watchlist w "
+            "LEFT JOIN symbol_sectors ss ON w.symbol = ss.symbol "
+            "WHERE COALESCE(ss.sector, w.sector) IS NOT NULL "
             "GROUP BY sector ORDER BY avg_score DESC"
         )
         rows = await cursor.fetchall()

@@ -20,7 +20,10 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from yolovest.data.nse_symbols import fetch_live_constituents, get_universe_symbols
+from yolovest.data.nse_symbols import (
+    fetch_live_constituent_details,
+    get_universe_symbols,
+)
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 from yolovest.timezone import now_ist
 
@@ -132,9 +135,21 @@ class IngestUniverseSkill(SkillBase):
                 "Using cached %s constituents (%d symbols)", universe, len(raw),
             )
         else:
-            raw = await fetch_live_constituents(universe)  # type: ignore[arg-type]
-            if raw:
+            details = await fetch_live_constituent_details(universe)  # type: ignore[arg-type]
+            if details:
+                raw = [r["symbol"] for r in details]
                 await self._write_universe_cache(cache_key, raw)
+                # Persist sectors so risk-check / RiskExposureChart / sector
+                # rotation analytics actually have data — the Industry column
+                # in the CSV was previously discarded.
+                try:
+                    touched = await self.ctx.db.upsert_symbol_sectors(details)
+                    if touched:
+                        logger.info(
+                            "Populated symbol_sectors for %s (%d rows)", universe, touched,
+                        )
+                except Exception as e:
+                    logger.warning("Sector upsert failed for %s: %s", universe, e)
             else:
                 raw = get_universe_symbols(universe)  # type: ignore[arg-type]
                 logger.warning(
