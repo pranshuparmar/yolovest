@@ -1039,39 +1039,38 @@ class Database:
         """Get symbols that should be skipped from new signal generation today.
 
         Includes:
-        - Symbols with non-risk_rejected signals today (executed,
+        - Symbols with non-retryable signals today (executed,
           llm_rejected, awaiting_approval, or in-flight NULL).
-        - Symbols whose risk_rejected count has reached
-          risk_rejected_retry_cap — a guard against chronically-failing
-          setups generating a fresh row every heartbeat.
+        - Symbols whose retryable-disposition count (risk_rejected,
+          expired) has reached risk_rejected_retry_cap — guard against
+          chronically-failing setups generating a fresh row every
+          heartbeat.
         - Symbols with open SYSTEM-generated positions in the current
           mode (avoid double-trading).
 
-        Excludes (i.e. eligible for re-evaluation):
-        - Symbols whose only signals today are risk_rejected and the
-          count is below the retry cap. Most risk-check reasons
-          (exposure, drift, depth, correlation, cooldown) are transient
-          on a 15-min timescale — they can clear within the same day
-          and deserve a second chance.
-        - Adopted holdings — we still want ML signals for them so the
-          user can get exit/buy-more recommendations.
-        - Positions from the other mode (paper vs live shouldn't
-          interfere).
+        Retryable dispositions (re-evaluated when count < cap):
+        - risk_rejected: most risk-check reasons (exposure, drift,
+          depth, correlation, cooldown) clear within the same day.
+        - expired: the user didn't approve in time, but conditions may
+          still favour the setup — give it another shot. Hard "no"
+          should come via /reject, which routes through the separate
+          rejection_cooldown_hours mechanism.
         """
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).astimezone(UTC).isoformat()
 
-        # Symbols where dedup applies — either has at least one non-
-        # risk_rejected signal today (count_other > 0) or risk_rejected
-        # retry budget exhausted (count_risk >= cap).
+        # Symbols where dedup applies — either has at least one
+        # non-retryable signal today (count_other > 0) or the retryable
+        # budget is exhausted (count_retryable >= cap).
+        retryable = ('risk_rejected', 'expired')
         cursor = await self.read_conn.execute(
             "SELECT symbol FROM signals "
             "WHERE created_at >= ? "
             "GROUP BY symbol "
-            "HAVING SUM(CASE WHEN disposition = 'risk_rejected' THEN 0 ELSE 1 END) > 0 "
-            "   OR SUM(CASE WHEN disposition = 'risk_rejected' THEN 1 ELSE 0 END) >= ?",
-            (today_start, int(risk_rejected_retry_cap)),
+            "HAVING SUM(CASE WHEN disposition IN (?, ?) THEN 0 ELSE 1 END) > 0 "
+            "   OR SUM(CASE WHEN disposition IN (?, ?) THEN 1 ELSE 0 END) >= ?",
+            (today_start, *retryable, *retryable, int(risk_rejected_retry_cap)),
         )
         signaled = {row[0] for row in await cursor.fetchall()}
 

@@ -41,7 +41,13 @@ class PositionMonitorSkill(SkillBase):
         from yolovest.timezone import now_ist
 
         cfg = self.ctx.config.risk
-        local_positions = await self.ctx.db.get_open_positions()
+        # Scope to the current mode so paper rows never run through
+        # live-broker code paths (and vice versa). Without this filter
+        # _check_partial_profit_booking would happily call
+        # broker.place_order against a paper trade after a mode toggle.
+        local_positions = await self.ctx.db.get_open_positions(
+            mode=self.ctx.config.mode,
+        )
         broker_positions = await self.ctx.broker.get_positions()
 
         # KiteTicker subscription set: open positions + holdings +
