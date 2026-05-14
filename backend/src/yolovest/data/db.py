@@ -685,6 +685,34 @@ class Database:
         rows = await cursor.fetchall()
         return {row[0] for row in rows}
 
+    async def clear_rotation_cooldown(self, symbol: str | None = None) -> int:
+        """One-shot reset of the watchlist-rotation cooldown. When the
+        threshold/cooldown defaults were too aggressive, ~80% of a
+        nifty500 universe could end up benched within hours. This
+        clears the cooldown flag (and resets the streak counter) so
+        market-scan immediately reconsiders the affected symbols.
+        Pass a symbol to clear just that row; otherwise clears all.
+        Returns the number of rows affected.
+        """
+        if not await self._table_exists("watchlist_signal_stats"):
+            return 0
+        if symbol:
+            cursor = await self.conn.execute(
+                "UPDATE watchlist_signal_stats "
+                "SET no_signal_streak = 0, cooldown_until = NULL, "
+                "    updated_at = datetime('now') "
+                "WHERE symbol = ?",
+                (symbol.upper(),),
+            )
+        else:
+            cursor = await self.conn.execute(
+                "UPDATE watchlist_signal_stats "
+                "SET no_signal_streak = 0, cooldown_until = NULL, "
+                "    updated_at = datetime('now')",
+            )
+        await self.conn.commit()
+        return cursor.rowcount or 0
+
     # ------------------------------------------------------------------
     # Positions (read from trades table)
     # ------------------------------------------------------------------

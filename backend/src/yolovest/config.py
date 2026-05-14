@@ -136,11 +136,21 @@ class ScanningConfig(BaseModel):
     shortlist_size: int = 500
     min_avg_daily_volume: int = 500_000
     weights: ScanningWeights = Field(default_factory=ScanningWeights)
-    # Watchlist rotation: evict symbols that produce no actionable signal for N
-    # consecutive heartbeats, apply a cooldown so market-scan doesn't re-add them.
-    rotation_enabled: bool = True
-    rotation_no_signal_threshold: int = Field(default=8, ge=1, le=100)
-    rotation_cooldown_hours: int = Field(default=48, ge=1, le=72)
+    # Watchlist rotation: evict symbols that fail to produce an actionable
+    # signal for N consecutive *heartbeats with model evaluation*, then
+    # apply a cooldown so market-scan doesn't immediately re-add them.
+    # Default disabled — the threshold + cooldown defaults below are
+    # safe values for opt-in users, but the feature is fundamentally a
+    # foot-gun on broad universes: a 500-stock screener legitimately
+    # produces no signal for most symbols most heartbeats, so any
+    # aggressive cooldown ends up benching the whole universe within
+    # a few hours. Re-enable only if you understand the trade-off.
+    rotation_enabled: bool = False
+    # Days (not heartbeats) of consecutive no-signal before benching.
+    # 1 trading day ≈ 26 market-hours heartbeats — was 8, which is
+    # 2 hours, far too aggressive.
+    rotation_no_signal_threshold: int = Field(default=50, ge=1, le=500)
+    rotation_cooldown_hours: int = Field(default=12, ge=1, le=72)
 
 
 class IndicatorsConfig(BaseModel):

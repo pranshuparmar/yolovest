@@ -107,6 +107,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("unlock", self._cmd_unlock))
         self._app.add_handler(CommandHandler("mode", self._cmd_mode))
         self._app.add_handler(CommandHandler("symbol", self._cmd_symbol))
+        self._app.add_handler(CommandHandler("rotation", self._cmd_rotation))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
 
         logger.info("Telegram bot starting (polling)")
@@ -260,6 +261,11 @@ class TelegramBot:
 
             "<b>Symbol info</b>\n"
             "/symbol SYM — Price, recent trades, model attribution, bulk deals\n\n"
+
+            "<b>Rotation</b>\n"
+            "/rotation — Show count of cooldowned symbols + threshold\n"
+            "/rotation clear — Reset all cooldowns\n"
+            "/rotation clear SYM [SYM ...] — Reset specific symbols\n\n"
 
             "<b>Mode</b>\n"
             "/mode — Show transaction mode\n"
@@ -1461,4 +1467,55 @@ class TelegramBot:
                 )
 
         await update.message.reply_html("\n".join(lines))
+
+    async def _cmd_rotation(self, update: Any, context: Any) -> None:
+        """/rotation                — show count of symbols in rotation cooldown
+        /rotation clear              — clear cooldown for all symbols
+        /rotation clear SYM [SYM]    — clear cooldown for specific symbols
+
+        Rotation cooldown sometimes accumulates faster than intended
+        (especially after a universe expansion or with aggressive
+        thresholds) and can silently bench most of the universe. This
+        is the one-shot reset.
+        """
+        args = (context.args or [])
+        cfg = self._ctx.config.scanning
+        if not args:
+            try:
+                in_cooldown = await self._ctx.db.get_rotation_cooldown_symbols()
+            except Exception as e:
+                await update.message.reply_text(f"Failed: {e}")
+                return
+            await update.message.reply_html(
+                f"<b>Rotation cooldown</b> "
+                f"({'enabled' if cfg.rotation_enabled else 'disabled'})\n"
+                f"In cooldown: {len(in_cooldown)} symbols\n"
+                f"Threshold: {cfg.rotation_no_signal_threshold} consecutive "
+                f"no-signal heartbeats\n"
+                f"Cooldown: {cfg.rotation_cooldown_hours}h\n\n"
+                "Use /rotation clear to reset all, or "
+                "/rotation clear SYM [SYM ...] to reset specific symbols.",
+            )
+            return
+        if args[0].lower() != "clear":
+            await update.message.reply_text(
+                "Usage: /rotation | /rotation clear | /rotation clear SYM",
+            )
+            return
+        symbols = [s.strip().upper() for s in args[1:] if s.strip()]
+        try:
+            if symbols:
+                total = 0
+                for sym in symbols:
+                    total += await self._ctx.db.clear_rotation_cooldown(sym)
+                await update.message.reply_text(
+                    f"Cleared rotation cooldown for {total}/{len(symbols)} symbols",
+                )
+            else:
+                n = await self._ctx.db.clear_rotation_cooldown()
+                await update.message.reply_text(
+                    f"Cleared rotation cooldown for {n} symbols",
+                )
+        except Exception as e:
+            await update.message.reply_text(f"Failed: {e}")
 

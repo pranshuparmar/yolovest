@@ -153,11 +153,17 @@ class GenerateSignalsSkill(SkillBase):
 
         for stock in watchlist:
             symbol = stock["symbol"]
-            # Default: any rejection path that doesn't explicitly set
-            # outcome_tracker counts as "no actionable signal produced"
-            # so the rotation cooldown metric reflects reality. Success
-            # paths override to True before the loop ends.
-            outcome_tracker.setdefault(symbol, False)
+            # NOTE: We intentionally do NOT setdefault False here. Only
+            # paths where the ML model actually evaluated the symbol
+            # and produced no actionable signal (HOLD, low-conf,
+            # repeat-low-conf, SELL-on-holding) write to
+            # outcome_tracker. Skip-for-technical-reason paths
+            # (already_signaled, cooldown, locked, insufficient_bars,
+            # feature_computation_failed, intraday_cutoff, error)
+            # leave outcome_tracker untouched so they don't accumulate
+            # toward the rotation cooldown threshold. Previously
+            # everything skipped here counted as a miss, which
+            # benched ~80% of nifty500 within a day.
 
             if symbol in already_signaled:
                 filter_counts.setdefault("already_signaled", 0)
