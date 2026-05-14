@@ -21,7 +21,7 @@ const TABS: Tab[] = [
   {
     id: "strategy",
     label: "Strategy",
-    sections: ["scanning", "strategy"],
+    sections: ["_strategy_top", "strategy", "scanning"],
   },
   {
     id: "risk",
@@ -47,6 +47,16 @@ const TABS: Tab[] = [
 // Keys shown in the "General > Top" card (mode + capital)
 const GENERAL_TOP_KEYS = ["mode", "capital.initial_amount", "log.level", "log.file_level"];
 
+// Strategy tab top card — strategy.mode is the master control for the
+// whole tab so it sits first instead of buried inside the long strategy
+// section; scanning.universe is the other top-of-funnel choice.
+const STRATEGY_TOP_KEYS = [
+  "strategy.mode",
+  "scanning.universe",
+  "scanning.shortlist_size",
+  "scanning.min_avg_daily_volume",
+];
+
 // All cron/schedule-related keys, pulled from various sections into one card
 const CRON_KEYS = [
   "heartbeat.auth_broker_cron",
@@ -60,7 +70,11 @@ const CRON_KEYS = [
 ];
 
 // Keys to hide from their original sections (shown in virtual sections instead)
-const RELOCATED_KEYS = new Set([...GENERAL_TOP_KEYS, ...CRON_KEYS]);
+const RELOCATED_KEYS = new Set([
+  ...GENERAL_TOP_KEYS,
+  ...CRON_KEYS,
+  ...STRATEGY_TOP_KEYS,
+]);
 
 // ---------------------------------------------------------------------------
 // Enum options for select fields
@@ -127,6 +141,7 @@ const READ_ONLY_KEYS = new Set([
 
 const SECTION_LABELS: Record<string, string> = {
   _general_top: "General",
+  _strategy_top: "Strategy — Core",
   _cron_schedules: "Cron Schedules",
   capital: "Capital",
   llm: "LLM (Gemini)",
@@ -244,6 +259,42 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.symbol_cooldown_days": "Symbol Cooldown (days)",
   "risk.symbol_repeat_lookback_days": "Repeat Symbol Lookback (days)",
   "risk.symbol_repeat_min_confidence": "Repeat Symbol Min Confidence",
+  // Regime gate (new)
+  "risk.max_risk_rejected_retries_per_day": "Risk-Rejected Retry Cap / Day",
+  "risk.regime_gate.enabled": "Regime Gate",
+  "risk.regime_gate.min_breadth_for_buy": "Regime: Min Breadth for BUY",
+  "risk.regime_gate.max_breadth_for_sell": "Regime: Max Breadth for SELL",
+  "risk.regime_gate.bullish_breadth_threshold": "Regime: Bullish Threshold",
+  "risk.regime_gate.bearish_breadth_threshold": "Regime: Bearish Threshold",
+  "risk.regime_gate.bullish_size_multiplier": "Regime: Bullish Size Multiplier",
+  "risk.regime_gate.bearish_size_multiplier": "Regime: Bearish Size Multiplier",
+  // Liquidity gate (new)
+  "risk.liquidity_gate.enabled": "Liquidity Gate",
+  "risk.liquidity_gate.max_pct_of_top5": "Liquidity: Max % of Top-5 Depth",
+  // Depth gate (new)
+  "risk.depth_gate.enabled": "Depth Imbalance Gate",
+  "risk.depth_gate.min_imbalance_for_buy": "Depth: Min Imbalance for BUY",
+  "risk.depth_gate.max_imbalance_for_sell": "Depth: Max Imbalance for SELL",
+  // Institutional flow (new)
+  "risk.institutional_flow.enabled": "Institutional Flow Sizing",
+  "risk.institutional_flow.bulk_deal_lookback_days": "Inst. Flow: Bulk-Deal Lookback (days)",
+  "risk.institutional_flow.bulk_deal_size_multiplier": "Inst. Flow: Bulk-Deal Multiplier",
+  "risk.institutional_flow.fii_net_threshold_cr": "Inst. Flow: FII Net Threshold (₹ Cr)",
+  "risk.institutional_flow.fii_aligned_size_multiplier": "Inst. Flow: FII Aligned Multiplier",
+  // Exit tweaks (new)
+  "risk.exit_tweaks.time_stop_enabled": "Intraday Time-Stop",
+  "risk.exit_tweaks.intraday_stop_after_min": "Time-Stop: Trigger After (min)",
+  "risk.exit_tweaks.intraday_stop_progress_threshold": "Time-Stop: Progress Threshold",
+  "risk.exit_tweaks.volume_exit_enabled": "Volume-Exhaustion Exit",
+  "risk.exit_tweaks.volume_exit_lookback_bars": "Volume Exit: Lookback (5-min bars)",
+  "risk.exit_tweaks.volume_exit_min_ratio": "Volume Exit: Min Ratio",
+  "risk.exit_tweaks.tighten_trailing_enabled": "Trailing-SL Tighten Near Target",
+  "risk.exit_tweaks.tighten_start_at_target_pct": "Tighten: Start at Target Progress",
+  "risk.exit_tweaks.tighten_step_size": "Tighten: Step Size (target progress)",
+  "risk.exit_tweaks.tighten_step_decay": "Tighten: Decay Per Step",
+  "risk.exit_tweaks.tighten_min_multiplier": "Tighten: Min Multiplier (floor)",
+  // Execution
+  "execution.pending_expiry_minutes": "Pending Trade Auto-Expiry (min)",
   // Partial Profit Booking
   "risk.partial_profit.enabled": "Partial Profit Booking",
   "risk.partial_profit.first_target_pct": "First Target (%)",
@@ -416,6 +467,42 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "risk.symbol_cooldown_days": "Hard block on re-trading a symbol for this many days after last trade.",
   "risk.symbol_repeat_lookback_days": "Window during which repeat symbols need elevated confidence.",
   "risk.symbol_repeat_min_confidence": "Confidence required to re-trade a symbol within the lookback window — set higher than the per-direction BUY/SELL thresholds.",
+  "risk.max_risk_rejected_retries_per_day": "Cap how many times a symbol with retryable dispositions (risk_rejected, expired, trade_execute_failed, skill_error) can regenerate per day. Prevents log spam from chronically-failing setups; default 5.",
+  // Regime gate
+  "risk.regime_gate.enabled": "Refuse BUYs on broadly-red days and SELLs on broadly-green days. Computed once per heartbeat from today's cross-sectional breadth. Default off — calibrate against your universe first.",
+  "risk.regime_gate.min_breadth_for_buy": "Reject BUYs when universe breadth (fraction of symbols up) falls below this. 0.40 = at least 40% of universe must be up.",
+  "risk.regime_gate.max_breadth_for_sell": "Reject SELLs when universe breadth exceeds this. 0.60 = at least 60% of universe up = bad day to be short.",
+  "risk.regime_gate.bullish_breadth_threshold": "Above this breadth, multiply BUY position size by the bullish multiplier.",
+  "risk.regime_gate.bearish_breadth_threshold": "Below this breadth, multiply SELL position size by the bearish multiplier.",
+  "risk.regime_gate.bullish_size_multiplier": "Position size multiplier for BUYs on strongly-bullish days (capped by max_single_stock_pct).",
+  "risk.regime_gate.bearish_size_multiplier": "Position size multiplier for SELLs on strongly-bearish days (capped by max_single_stock_pct).",
+  // Liquidity gate
+  "risk.liquidity_gate.enabled": "Refuse orders whose size would consume more than max_pct_of_top5 of the relevant side of the Kite top-5 book. Stops you eating your own slippage on thin names. Requires Kite paid data.",
+  "risk.liquidity_gate.max_pct_of_top5": "Maximum fraction of the top-5 depth quantity your order may represent (0.10 = 10%).",
+  // Depth gate
+  "risk.depth_gate.enabled": "Refuse signals when (total_buy_qty − total_sell_qty) / (sum) strongly opposes the signal direction. Off by default; the book is noisy near market open. Requires Kite paid data.",
+  "risk.depth_gate.min_imbalance_for_buy": "Reject BUYs when imbalance falls below this (negative = more sell pressure). −0.30 = book is 65% sell.",
+  "risk.depth_gate.max_imbalance_for_sell": "Reject SELLs when imbalance exceeds this (positive = more buy pressure). +0.30 = book is 65% buy.",
+  // Institutional flow
+  "risk.institutional_flow.enabled": "Sizing multiplier based on (a) recent bulk/block deals on the symbol and (b) today's FII net flow. Aligning direction scales up; opposing scales down. Reads bulk_deals + fii_dii_daily tables populated by ingest-data.",
+  "risk.institutional_flow.bulk_deal_lookback_days": "How many days back to count BUY vs SELL bulk deals on the candidate symbol.",
+  "risk.institutional_flow.bulk_deal_size_multiplier": "Position size multiplier when bulk deals (in lookback) align with signal direction. Opposing direction divides by this.",
+  "risk.institutional_flow.fii_net_threshold_cr": "FII net flow (₹ crore) above which the day counts as 'buying'; below the negative of this, 'selling'.",
+  "risk.institutional_flow.fii_aligned_size_multiplier": "Position size multiplier when FII direction agrees with signal direction.",
+  // Exit tweaks
+  "risk.exit_tweaks.time_stop_enabled": "Intraday positions still open after intraday_stop_after_min with target-progress below threshold get market-exited. Catches the chop trade that neither works nor breaks. Applies to client-side-managed positions only.",
+  "risk.exit_tweaks.intraday_stop_after_min": "Minutes a stuck intraday position can stay open before time-stop considers it.",
+  "risk.exit_tweaks.intraday_stop_progress_threshold": "Target-progress fraction below which the time-stop fires. 0.30 = exit if we've covered less than 30% of entry-to-target distance.",
+  "risk.exit_tweaks.volume_exit_enabled": "Exit when the last 5-min bar volume drops below volume_exit_min_ratio × average of previous N bars AND the position is in 0.5R–2R profit. Trend-is-dying signal.",
+  "risk.exit_tweaks.volume_exit_lookback_bars": "Number of prior 5-minute bars to average for the volume comparison.",
+  "risk.exit_tweaks.volume_exit_min_ratio": "Latest 5-min volume vs lookback average — below this triggers the exit. 0.30 = below 30% of recent average.",
+  "risk.exit_tweaks.tighten_trailing_enabled": "Once profit covers tighten_start_at_target_pct of the entry-to-target distance, shrink the trailing-SL step in a step-up curve. Applies to client-side, GTT, and MIS-OCO trailing paths.",
+  "risk.exit_tweaks.tighten_start_at_target_pct": "First tightening fires at this fraction of target progress (0.50 = halfway to target).",
+  "risk.exit_tweaks.tighten_step_size": "Every additional target-progress bucket of this size applies another tightening step (0.10 = each 10% of progress).",
+  "risk.exit_tweaks.tighten_step_decay": "Trailing-SL step shrinks by this fraction per bucket (0.15 = 15% smaller step per 10% of progress).",
+  "risk.exit_tweaks.tighten_min_multiplier": "Floor on the trailing-SL step multiplier — never shrinks below this fraction of the original step.",
+  // Execution
+  "execution.pending_expiry_minutes": "Pending trades auto-expire after this many minutes; heartbeat sweeps them so abandoned approvals don't lock max_open_positions / max_trades_per_day / exposure budgets.",
   // Partial Profit
   "risk.partial_profit.enabled": "Close part of the position when an intermediate profit target is hit.",
   "risk.partial_profit.first_target_pct": "Book profits at this % of the way to target (0.5 = halfway).",
@@ -533,33 +620,54 @@ function formatHint(fullKey: string): string | null {
 // Field components
 // ---------------------------------------------------------------------------
 
-function InfoIcon({ description }: { description?: string }) {
+function InfoIcon({
+  description, fullKey,
+}: { description?: string; fullKey?: string }) {
   const [open, setOpen] = useState(false);
-  if (!description) return null;
+  const hasDescription = !!description;
+  // Always render the icon — every setting should have one so the user
+  // can at least see the canonical dotted key (useful for /run, docs,
+  // /symbol contexts) even when we haven't written a description yet.
+  const tooltip = hasDescription
+    ? description
+    : `Config key: ${fullKey}\nDescription not yet written — file an issue if unclear.`;
   return (
     <span className="relative inline-flex shrink-0">
       <button
         type="button"
-        className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-gray-800 border border-gray-600 text-gray-400 text-[9px] font-bold cursor-help shrink-0 hover:bg-gray-700 hover:text-gray-200"
+        className={clsx(
+          "inline-flex items-center justify-center w-4 h-4 rounded-full text-[9px] font-bold cursor-help shrink-0 transition-colors",
+          hasDescription
+            ? "bg-gray-800 border border-gray-600 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+            : "bg-gray-900 border border-dashed border-gray-700 text-gray-600 hover:text-gray-400 hover:border-gray-500",
+        )}
         onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
         onBlur={() => setOpen(false)}
       >
         i
       </button>
       {open && (
-        <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-50 w-56 px-2.5 py-1.5 rounded bg-gray-700 border border-gray-600 text-[11px] text-gray-200 leading-snug shadow-lg whitespace-normal">
-          {description}
+        <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-50 w-56 px-2.5 py-1.5 rounded bg-gray-700 border border-gray-600 text-[11px] text-gray-200 leading-snug shadow-lg whitespace-pre-line">
+          {tooltip}
         </span>
       )}
     </span>
   );
 }
 
-function FieldLabel({ label, description, hint, dimmed }: { label: string; description?: string; hint?: string | null; dimmed?: boolean }) {
+function FieldLabel({
+  label, description, hint, dimmed, fullKey,
+}: {
+  label: string;
+  description?: string;
+  hint?: string | null;
+  dimmed?: boolean;
+  fullKey?: string;
+}) {
   return (
     <div className="flex items-center gap-1.5">
       <span className={clsx("text-sm", dimmed ? "text-gray-500" : "text-gray-300")}>{label}</span>
-      <InfoIcon description={description} />
+      <InfoIcon description={description} fullKey={fullKey} />
       {hint && <span className="text-[10px] text-gray-600">({hint})</span>}
     </div>
   );
@@ -568,19 +676,21 @@ function FieldLabel({ label, description, hint, dimmed }: { label: string; descr
 function ToggleField({
   label,
   description,
+  fullKey,
   checked,
   onChange,
   disabled,
 }: {
   label: string;
   description?: string;
+  fullKey?: string;
   checked: boolean;
   onChange: (val: boolean) => void;
   disabled?: boolean;
 }) {
   return (
     <div className={clsx("flex items-center justify-between py-2.5 group", !disabled && "cursor-pointer")}>
-      <FieldLabel label={label} description={description} dimmed={disabled} />
+      <FieldLabel label={label} description={description} fullKey={fullKey} dimmed={disabled} />
       <button
         type="button"
         role="switch"
@@ -602,19 +712,21 @@ function ToggleField({
 function SelectField({
   label,
   description,
+  fullKey,
   value,
   options,
   onChange,
 }: {
   label: string;
   description?: string;
+  fullKey?: string;
   value: string;
   options: { value: string; label: string }[];
   onChange: (val: string) => void;
 }) {
   return (
     <div className="flex items-center justify-between py-2.5 gap-4">
-      <FieldLabel label={label} description={description} />
+      <FieldLabel label={label} description={description} fullKey={fullKey} />
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -631,15 +743,17 @@ function SelectField({
 function ReadOnlyField({
   label,
   description,
+  fullKey,
   value,
 }: {
   label: string;
   description?: string;
+  fullKey?: string;
   value: string;
 }) {
   return (
     <div className="flex items-center justify-between py-2.5 gap-4">
-      <FieldLabel label={label} description={description} dimmed />
+      <FieldLabel label={label} description={description} fullKey={fullKey} dimmed />
       <span className="text-sm text-gray-500 bg-gray-800/50 border border-gray-800 rounded px-2.5 py-1.5">{value}</span>
     </div>
   );
@@ -648,19 +762,21 @@ function ReadOnlyField({
 function NumberField({
   label,
   description,
+  fullKey,
   value,
   hint,
   onChange,
 }: {
   label: string;
   description?: string;
+  fullKey?: string;
   value: number;
   hint?: string | null;
   onChange: (val: number) => void;
 }) {
   return (
     <div className="flex items-center justify-between py-2.5 gap-4">
-      <FieldLabel label={label} description={description} hint={hint} />
+      <FieldLabel label={label} description={description} fullKey={fullKey} hint={hint} />
       <input
         type="number"
         step={value % 1 !== 0 ? 0.001 : 1}
@@ -678,19 +794,21 @@ function NumberField({
 function TextField({
   label,
   description,
+  fullKey,
   value,
   hint,
   onChange,
 }: {
   label: string;
   description?: string;
+  fullKey?: string;
   value: string;
   hint?: string | null;
   onChange: (val: string) => void;
 }) {
   return (
     <div className="flex items-center justify-between py-2.5 gap-4">
-      <FieldLabel label={label} description={description} hint={hint} />
+      <FieldLabel label={label} description={description} fullKey={fullKey} hint={hint} />
       <input
         type="text"
         value={value}
@@ -704,17 +822,19 @@ function TextField({
 function JsonField({
   label,
   description,
+  fullKey,
   value,
   onChange,
 }: {
   label: string;
   description?: string;
+  fullKey?: string;
   value: unknown;
   onChange: (val: unknown) => void;
 }) {
   return (
     <div className="py-2.5 space-y-1">
-      <FieldLabel label={label} description={description} />
+      <FieldLabel label={label} description={description} fullKey={fullKey} />
       <textarea
         value={JSON.stringify(value, null, 2)}
         onChange={(e) => { try { onChange(JSON.parse(e.target.value)); } catch { /* typing */ } }}
@@ -739,21 +859,21 @@ function ConfigField({
   const description = getKeyDescription(fullKey);
 
   if (READ_ONLY_KEYS.has(fullKey)) {
-    return <ReadOnlyField label={label} description={description} value={String(value)} />;
+    return <ReadOnlyField label={label} description={description} fullKey={fullKey} value={String(value)} />;
   }
   if (SELECT_OPTIONS[fullKey] && typeof value === "string") {
-    return <SelectField label={label} description={description} value={value} options={SELECT_OPTIONS[fullKey]} onChange={(v) => onChange(fullKey, v)} />;
+    return <SelectField label={label} description={description} fullKey={fullKey} value={value} options={SELECT_OPTIONS[fullKey]} onChange={(v) => onChange(fullKey, v)} />;
   }
   if (typeof value === "boolean") {
-    return <ToggleField label={label} description={description} checked={value} onChange={(v) => onChange(fullKey, v)} />;
+    return <ToggleField label={label} description={description} fullKey={fullKey} checked={value} onChange={(v) => onChange(fullKey, v)} />;
   }
   if (typeof value === "number") {
-    return <NumberField label={label} description={description} value={value} hint={hint} onChange={(v) => onChange(fullKey, v)} />;
+    return <NumberField label={label} description={description} fullKey={fullKey} value={value} hint={hint} onChange={(v) => onChange(fullKey, v)} />;
   }
   if (typeof value === "string") {
-    return <TextField label={label} description={description} value={value} hint={hint} onChange={(v) => onChange(fullKey, v)} />;
+    return <TextField label={label} description={description} fullKey={fullKey} value={value} hint={hint} onChange={(v) => onChange(fullKey, v)} />;
   }
-  return <JsonField label={label} description={description} value={value} onChange={(v) => onChange(fullKey, v)} />;
+  return <JsonField label={label} description={description} fullKey={fullKey} value={value} onChange={(v) => onChange(fullKey, v)} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +975,9 @@ export default function SettingsPage() {
   const getEntries = useCallback((sectionKey: string): [string, unknown][] => {
     if (sectionKey === "_general_top") {
       return GENERAL_TOP_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
+    if (sectionKey === "_strategy_top") {
+      return STRATEGY_TOP_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
     }
     if (sectionKey === "_cron_schedules") {
       return CRON_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
