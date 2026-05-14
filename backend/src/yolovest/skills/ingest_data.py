@@ -347,21 +347,34 @@ class IngestDataSkill(SkillBase):
         result: dict[str, Any] = {}
 
         try:
-            # Bulk/block deals
+            # Bulk/block deals — persist so risk-check + ML features can
+            # see institutional accumulation/distribution signals.
             try:
                 deals = await nse.fetch_bulk_deals()
                 if deals:
                     result["bulk_deals"] = deals
-                    logger.info("NSE: fetched %d bulk/block deals", len(deals))
+                    inserted = await self.ctx.db.upsert_bulk_deals(deals)
+                    logger.info(
+                        "NSE: fetched %d bulk/block deals (%d new)",
+                        len(deals), inserted,
+                    )
             except Exception as e:
                 logger.warning("NSE bulk deals fetch failed: %s", e)
 
-            # FII/DII activity
+            # FII/DII activity — persist so risk-check can gate on
+            # foreign net selling days.
             try:
                 fii_dii = await nse.fetch_fii_dii()
                 if fii_dii:
                     result["fii_dii"] = fii_dii
-                    logger.info("NSE: fetched FII/DII data")
+                    wrote = await self.ctx.db.upsert_fii_dii(fii_dii)
+                    if wrote:
+                        logger.info(
+                            "NSE: persisted FII/DII for %s (fii_net=%.1f, dii_net=%.1f)",
+                            fii_dii.get("date"),
+                            (fii_dii.get("fii") or {}).get("net_value", 0.0),
+                            (fii_dii.get("dii") or {}).get("net_value", 0.0),
+                        )
             except Exception as e:
                 logger.warning("NSE FII/DII fetch failed: %s", e)
 
@@ -382,6 +395,9 @@ class IngestDataSkill(SkillBase):
                     delivery = await nse.fetch_delivery_data(symbol)
                     if delivery is not None:
                         result.setdefault("delivery_data", {})[symbol] = delivery
+                        # Persist on today's daily bar so risk-check and
+                        # ML features can read recent delivery quality.
+                        await self.ctx.db.update_delivery_pct(symbol, delivery)
                 except Exception as e:
                     logger.debug("NSE delivery data for %s failed: %s", symbol, e)
         finally:

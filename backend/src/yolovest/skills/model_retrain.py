@@ -67,6 +67,26 @@ class ModelRetrainSkill(SkillBase):
             logger.warning("Failed to load sector map; sector features will be neutral", exc_info=True)
             sector_map = {}
 
+        # Bulk-deal lookup for ML features. We pre-build once because
+        # _prepare_training_data is sync and one DB query per sample
+        # would be prohibitively slow on a year of training data.
+        bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] = {}
+        try:
+            deals_timeline = await self.ctx.db.get_bulk_deals_timeline()
+            for d in deals_timeline:
+                key = (d["symbol"], d["deal_date"])
+                counts = bulk_deal_lookup.setdefault(key, {"buy": 0, "sell": 0})
+                bs = str(d.get("buy_sell", "")).upper()
+                if bs == "BUY":
+                    counts["buy"] += 1
+                elif bs == "SELL":
+                    counts["sell"] += 1
+        except Exception:
+            logger.warning(
+                "Failed to load bulk-deals timeline; bulk-deal features will be 0",
+                exc_info=True,
+            )
+
         # Load feedback data for the ML feedback loop
         feedback_cfg = self.ctx.config.strategy.feedback
         feedback_data: dict[str, dict[str, float]] | None = None
@@ -120,6 +140,7 @@ class ModelRetrainSkill(SkillBase):
                 training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
                 target_atr_mult=target_mult, sl_atr_mult=sl_mult,
                 sector_map=sector_map,
+                bulk_deal_lookup=bulk_deal_lookup,
             )
             if len(y) < min_samples:
                 logger.warning(
@@ -209,6 +230,7 @@ class ModelRetrainSkill(SkillBase):
         target_atr_mult: float = 1.5,
         sl_atr_mult: float = 0.75,
         sector_map: dict[str, str] | None = None,
+        bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
     ) -> tuple[
         list[list[float]], list[int], list[str], list[float],
         list[dict[str, Any]],
@@ -281,6 +303,17 @@ class ModelRetrainSkill(SkillBase):
             by_symbol, sector_map,
         )
 
+        # Bulk-deal lookup: (symbol, deal_date) -> {"buy", "sell"} counts.
+        # Pre-built in execute() (async) and passed in via bulk_deal_lookup
+        # so we only need one DB scan instead of one query per sample.
+        bulk_deal_lookup = bulk_deal_lookup or {}
+        # Per-symbol sorted deal-date list for fast 5-day window lookups.
+        bulk_dates_by_sym: dict[str, list[str]] = {}
+        for (sym_key, date_key) in bulk_deal_lookup.keys():
+            bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
+        for v in bulk_dates_by_sym.values():
+            v.sort()
+
         for sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
                 continue
@@ -352,6 +385,47 @@ class ModelRetrainSkill(SkillBase):
                     features["sector_breadth"] = 0.5
                     features["sector_avg_return"] = 0.0
                     features["relative_momentum"] = 0.0
+
+                # Institutional flow features: bulk-deal net count and
+                # average delivery % over the prior 5 bars. Both default
+                # to 0 when no data is available (older training rows
+                # predate the data sources). Compounds with the
+                # institutional_flow risk-check multiplier so the model
+                # learns to score these signals natively at inference.
+                _sample_date = bars[i].timestamp[:10]
+                _bulk_window_start = bars[max(0, i - 5)].timestamp[:10]
+                _bd_dates = bulk_dates_by_sym.get(sym, [])
+                _bd_buy = _bd_sell = 0
+                for d in _bd_dates:
+                    if d > _sample_date:
+                        break
+                    if d >= _bulk_window_start:
+                        counts = bulk_deal_lookup.get((sym, d), {})
+                        _bd_buy += counts.get("buy", 0)
+                        _bd_sell += counts.get("sell", 0)
+                features["bulk_deal_buy_5d"] = float(_bd_buy)
+                features["bulk_deal_sell_5d"] = float(_bd_sell)
+                features["bulk_deal_net_5d"] = float(_bd_buy - _bd_sell)
+
+                # delivery_pct rolling-5 average. bars[i] is the current
+                # sample's bar; look back 5 bars including it. Rows
+                # ingested before migration 038 have NULL → treated as 0.
+                _delivery_values: list[float] = []
+                for k in range(max(0, i - 4), i + 1):
+                    dp = getattr(bars[k], "delivery_pct", None)
+                    if dp is None and isinstance(rows[k], dict):
+                        dp = rows[k].get("delivery_pct")
+                    if dp is not None:
+                        try:
+                            _delivery_values.append(float(dp))
+                        except (TypeError, ValueError):
+                            pass
+                if _delivery_values:
+                    features["delivery_pct_avg_5d"] = (
+                        sum(_delivery_values) / len(_delivery_values)
+                    )
+                else:
+                    features["delivery_pct_avg_5d"] = 0.0
 
                 # Path-aware label: BUY iff target hits before SL when
                 # walking forward bar-by-bar, using the same ATR-based

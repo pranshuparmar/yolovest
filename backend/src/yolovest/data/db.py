@@ -364,6 +364,45 @@ class Database:
         await self.conn.commit()
         return len(rows)
 
+    async def update_delivery_pct(
+        self, symbol: str, delivery_pct: float, date_str: str | None = None,
+    ) -> bool:
+        """Stamp `delivery_pct` on the daily bar for `symbol` on
+        `date_str` (defaults to today IST). Used as both a live
+        institutional-conviction signal and a future ML feature.
+        Returns True when a row was updated.
+        """
+        ts = date_str or now_ist().strftime("%Y-%m-%d")
+        cursor = await self.conn.execute(
+            "UPDATE ohlcv SET delivery_pct = ? "
+            "WHERE symbol = ? AND interval = 'daily' "
+            "  AND substr(timestamp, 1, 10) = ?",
+            (float(delivery_pct), symbol, ts),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def get_recent_delivery_pct(
+        self, symbol: str, lookback_days: int = 5,
+    ) -> float | None:
+        """Average delivery % over the last N daily bars for a symbol,
+        or None when no data is available. Used by both risk_check
+        (live conviction signal) and model_retrain (ML feature).
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT AVG(delivery_pct) FROM ("
+            "  SELECT delivery_pct FROM ohlcv "
+            "  WHERE symbol = ? AND interval = 'daily' "
+            "    AND delivery_pct IS NOT NULL "
+            "  ORDER BY timestamp DESC LIMIT ?"
+            ")",
+            (symbol, int(lookback_days)),
+        )
+        row = await cursor.fetchone()
+        if not row or row[0] is None:
+            return None
+        return float(row[0])
+
     async def get_ohlcv(
         self, symbol: str, interval: str, days: int = 30
     ) -> list[OHLCVBar]:
@@ -1376,13 +1415,30 @@ class Database:
     # ------------------------------------------------------------------
 
     async def get_training_dataset(self) -> dict[str, Any]:
-        """Load OHLCV data for model training."""
+        """Load OHLCV data for model training. delivery_pct is included
+        as an optional per-bar column; falls back to None for older
+        rows imported before migration 038.
+        """
         cursor = await self.conn.execute(
-            "SELECT symbol, timestamp, open, high, low, close, volume "
+            "SELECT symbol, timestamp, open, high, low, close, volume, delivery_pct "
             "FROM ohlcv WHERE interval = 'daily' ORDER BY symbol, timestamp"
         )
         rows = await cursor.fetchall()
         return {"bars": [dict[str, Any](row) for row in rows]}
+
+    async def get_bulk_deals_timeline(self) -> list[dict[str, Any]]:
+        """Return all bulk/block deals across history, ordered by date.
+        Used by model_retrain to build a (symbol, date) → net-count
+        index for per-sample feature lookup.
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT symbol, deal_date, buy_sell FROM bulk_deals "
+            "ORDER BY deal_date"
+        )
+        return [
+            {"symbol": r[0], "deal_date": r[1], "buy_sell": r[2]}
+            for r in await cursor.fetchall()
+        ]
 
     async def get_prediction_outcomes(self) -> list[dict[str, Any]]:
         """Load predictions with actual outcomes for retraining analysis."""
@@ -1575,6 +1631,113 @@ class Database:
         return {
             "model_versions": model_versions,
             "warning": "; ".join(warnings) if warnings else None,
+        }
+
+    async def upsert_bulk_deals(
+        self, deals: list[dict[str, Any]], deal_date: str | None = None,
+    ) -> int:
+        """Persist bulk/block deals. `deal_date` defaults to today (IST).
+        Returns the number of new rows inserted (duplicates ignored via
+        unique constraint).
+        """
+        if not deals:
+            return 0
+        ts = deal_date or now_ist().strftime("%Y-%m-%d")
+        before = (await (await self.conn.execute(
+            "SELECT COUNT(*) FROM bulk_deals WHERE deal_date = ?", (ts,),
+        )).fetchone())[0]
+        for d in deals:
+            sym = str(d.get("symbol") or "").strip()
+            if not sym:
+                continue
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO bulk_deals "
+                "(deal_date, symbol, deal_type, client_name, buy_sell, "
+                " quantity, trade_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ts, sym,
+                    str(d.get("deal_type") or "bulk"),
+                    str(d.get("client_name") or ""),
+                    str(d.get("buy_sell") or ""),
+                    int(d.get("quantity") or 0) or None,
+                    float(d.get("trade_price") or 0.0) or None,
+                ),
+            )
+        await self.conn.commit()
+        after = (await (await self.conn.execute(
+            "SELECT COUNT(*) FROM bulk_deals WHERE deal_date = ?", (ts,),
+        )).fetchone())[0]
+        return after - before
+
+    async def upsert_fii_dii(self, data: dict[str, Any]) -> bool:
+        """Persist FII/DII net flows for the day. `data` shape matches
+        NSEOfficialSource.fetch_fii_dii output: {date, fii: {...}, dii: {...}}.
+        Returns True when a row was written.
+        """
+        if not data or not data.get("date"):
+            return False
+        fii = data.get("fii") or {}
+        dii = data.get("dii") or {}
+        # Default missing values to 0.0 — INSERT OR REPLACE so the latest
+        # snapshot of the day wins (NSE refreshes mid-day).
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO fii_dii_daily "
+            "(date, fii_buy, fii_sell, fii_net, dii_buy, dii_sell, dii_net) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(data["date"]),
+                float(fii.get("buy_value") or 0.0),
+                float(fii.get("sell_value") or 0.0),
+                float(fii.get("net_value") or 0.0),
+                float(dii.get("buy_value") or 0.0),
+                float(dii.get("sell_value") or 0.0),
+                float(dii.get("net_value") or 0.0),
+            ),
+        )
+        await self.conn.commit()
+        return True
+
+    async def count_recent_bulk_deals(
+        self, symbol: str, lookback_days: int = 5,
+    ) -> dict[str, int]:
+        """Return {buy_count, sell_count} of bulk/block deal entries on
+        `symbol` within the last `lookback_days` calendar days. Used as
+        a live risk-check signal and as an ML feature.
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT buy_sell, COUNT(*) FROM bulk_deals "
+            "WHERE symbol = ? AND deal_date >= date('now', ?) "
+            "GROUP BY buy_sell",
+            (symbol, f"-{int(lookback_days)} day"),
+        )
+        out = {"buy_count": 0, "sell_count": 0}
+        for buy_sell, cnt in await cursor.fetchall():
+            if str(buy_sell).upper() == "BUY":
+                out["buy_count"] = int(cnt)
+            elif str(buy_sell).upper() == "SELL":
+                out["sell_count"] = int(cnt)
+        return out
+
+    async def get_latest_fii_dii(self) -> dict[str, float] | None:
+        """Return the most recent FII/DII row, or None if the table is
+        empty. Used by risk_check to gate signals when foreigners are
+        net sellers.
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT date, fii_buy, fii_sell, fii_net, dii_buy, dii_sell, dii_net "
+            "FROM fii_dii_daily ORDER BY date DESC LIMIT 1",
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "date": row[0],
+            "fii_buy": float(row[1] or 0),
+            "fii_sell": float(row[2] or 0),
+            "fii_net": float(row[3] or 0),
+            "dii_buy": float(row[4] or 0),
+            "dii_sell": float(row[5] or 0),
+            "dii_net": float(row[6] or 0),
         }
 
     async def get_symbol_sectors_map(

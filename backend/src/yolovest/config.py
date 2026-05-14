@@ -377,6 +377,39 @@ class ExitTweaksConfig(BaseModel):
     tighten_min_multiplier: float = Field(default=0.20, gt=0, le=1.0)
 
 
+class InstitutionalFlowConfig(BaseModel):
+    """Conviction-sizing tweak based on NSE institutional flow data.
+
+    Reads two free-of-cost data points the system was already
+    fetching but discarding:
+
+    - Bulk/block deals: institutional accumulation (BUY > SELL) or
+      distribution (SELL > BUY) on the candidate symbol in the last
+      `bulk_deal_lookback_days`.
+    - FII net flow: today's foreign institutional buy minus sell.
+      Positive = foreigners net buying, negative = net selling.
+
+    When the signal direction agrees with the flow direction, the
+    position size is scaled up by `bulk_deal_size_multiplier` (or
+    `fii_aligned_size_multiplier` respectively). When it strongly
+    opposes, size is scaled down by 1/multiplier. Both checks are
+    independent and multiplicative.
+
+    Off by default. Enable when you've watched a few sessions of
+    institutional-flow logs and are happy with the calibration.
+    """
+
+    enabled: bool = False
+    bulk_deal_lookback_days: int = Field(default=5, ge=1, le=30)
+    # Multiplier applied when bulk deals strongly agree with signal
+    # direction (e.g. BUY signal + at least 2 net BUY bulk deals).
+    bulk_deal_size_multiplier: float = Field(default=1.20, ge=1.0, le=2.0)
+    # FII regime threshold (₹ crore). Above + reads as buying-day
+    # supporting BUYs; below − reads as selling-day supporting SELLs.
+    fii_net_threshold_cr: float = Field(default=500.0, ge=0)
+    fii_aligned_size_multiplier: float = Field(default=1.15, ge=1.0, le=2.0)
+
+
 class RegimeGateConfig(BaseModel):
     """Cross-sectional market-regime gate.
 
@@ -483,6 +516,7 @@ class RiskConfig(BaseModel):
     depth_gate: DepthGateConfig = Field(default_factory=DepthGateConfig)
     liquidity_gate: LiquidityGateConfig = Field(default_factory=LiquidityGateConfig)
     regime_gate: RegimeGateConfig = Field(default_factory=RegimeGateConfig)
+    institutional_flow: InstitutionalFlowConfig = Field(default_factory=InstitutionalFlowConfig)
     exit_tweaks: ExitTweaksConfig = Field(default_factory=ExitTweaksConfig)
     reentry: ReentryConfig = Field(default_factory=ReentryConfig)
 

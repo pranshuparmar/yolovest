@@ -369,6 +369,23 @@ class RiskCheckSkill(SkillBase):
                 regime_size_multiplier, signal["symbol"], position_size,
             )
 
+        # Institutional-flow conviction multiplier — uses NSE
+        # bulk/block deals (per-symbol) and FII net flow (market-wide)
+        # which we now persist on every ingest-data cycle. Read at
+        # signal-evaluation time so changes show up immediately, no
+        # retrain required.
+        if cfg.institutional_flow.enabled and position_size > 0:
+            inst_mult = await self._compute_institutional_flow_multiplier(
+                signal, cfg.institutional_flow,
+            )
+            if inst_mult != 1.0:
+                scaled = int(position_size * inst_mult)
+                position_size = max(1, min(scaled, max_by_exposure))
+                logger.info(
+                    "risk-check: institutional-flow multiplier %.2f for %s -> %d",
+                    inst_mult, signal["symbol"], position_size,
+                )
+
         # Liquidity gate — refuse to be more than max_pct_of_top5 of
         # the order book's near-the-touch side. Stops you eating your
         # own slippage on thinly traded names.
@@ -466,6 +483,68 @@ class RiskCheckSkill(SkillBase):
             cfg.confidence_ceiling - cfg.confidence_floor
         )
         return cfg.min_multiplier + ratio * (cfg.max_multiplier - cfg.min_multiplier)
+
+    async def _compute_institutional_flow_multiplier(
+        self,
+        signal: dict[str, Any],
+        cfg: Any,
+    ) -> float:
+        """Return a sizing multiplier in [1/M, M] based on:
+
+        - Recent bulk/block deals on the symbol (last N days): if
+          net-buy bulk count >= 2 and signal is BUY, scale up by
+          `bulk_deal_size_multiplier`. Mirror for SELL with net-sell
+          deals. Opposite alignment scales down by 1/multiplier.
+        - Today's FII net flow (₹ crore): when |fii_net| crosses
+          `fii_net_threshold_cr`, agreeing signal direction gets a
+          multiplicative bonus, opposing gets a discount.
+
+        Both factors compose multiplicatively. Returns 1.0 when no
+        data is available (graceful degradation).
+        """
+        symbol = signal["symbol"]
+        signal_type = signal.get("signal_type", "BUY")
+        multiplier = 1.0
+
+        # Bulk-deal alignment.
+        try:
+            counts = await self.ctx.db.count_recent_bulk_deals(
+                symbol, lookback_days=cfg.bulk_deal_lookback_days,
+            )
+        except Exception:
+            logger.debug("count_recent_bulk_deals failed for %s", symbol, exc_info=True)
+            counts = {"buy_count": 0, "sell_count": 0}
+        net = counts["buy_count"] - counts["sell_count"]
+        if signal_type == "BUY":
+            if net >= 2:
+                multiplier *= cfg.bulk_deal_size_multiplier
+            elif net <= -2:
+                multiplier /= cfg.bulk_deal_size_multiplier
+        else:  # SELL
+            if net <= -2:
+                multiplier *= cfg.bulk_deal_size_multiplier
+            elif net >= 2:
+                multiplier /= cfg.bulk_deal_size_multiplier
+
+        # FII regime alignment.
+        try:
+            fii = await self.ctx.db.get_latest_fii_dii()
+        except Exception:
+            logger.debug("get_latest_fii_dii failed", exc_info=True)
+            fii = None
+        if fii:
+            fii_net = fii.get("fii_net", 0.0)
+            if fii_net >= cfg.fii_net_threshold_cr:
+                if signal_type == "BUY":
+                    multiplier *= cfg.fii_aligned_size_multiplier
+                else:
+                    multiplier /= cfg.fii_aligned_size_multiplier
+            elif fii_net <= -cfg.fii_net_threshold_cr:
+                if signal_type == "SELL":
+                    multiplier *= cfg.fii_aligned_size_multiplier
+                else:
+                    multiplier /= cfg.fii_aligned_size_multiplier
+        return multiplier
 
     def _apply_regime_gate(
         self,
