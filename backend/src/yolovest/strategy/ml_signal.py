@@ -510,7 +510,17 @@ class XGBoostSignalModel(MLBase):
                     "Install with: pip install scikit-learn"
                 ) from e
 
-            X_arr = np.asarray(X)  # noqa: N806
+            # float32 halves the feature-matrix memory vs the default
+            # float64 (~440 MB → ~220 MB on a 911K × 60 matrix). XGBoost
+            # tree-method=hist works natively in float32 and the
+            # accuracy difference is negligible at this scale. Help the
+            # GC drop the Python list-of-lists as soon as the array is
+            # built — list-of-lists has higher per-cell overhead than
+            # the ndarray on top of the data it holds.
+            X_arr = np.asarray(X, dtype=np.float32)  # noqa: N806
+            X.clear()
+            import gc as _gc
+            _gc.collect()
             y_arr = np.asarray(y)
 
             # Walk-forward split via TimeSeriesSplit
@@ -591,6 +601,12 @@ class XGBoostSignalModel(MLBase):
                             ret = 0.0
                         synthetic_returns.append(ret)
 
+            # Free per-fold scratch before the final fit allocates its
+            # own DMatrix copy — XGBoost's hist tree-method copies the
+            # data into its own bin-quantized representation, briefly
+            # doubling memory. On a 2 GB host this can OOM without the
+            # collect.
+            _gc.collect()
             # Final model trained on all data (with sample weights if available)
             model.fit(X_arr, y_arr, sample_weight=weights_arr, verbose=False)
 

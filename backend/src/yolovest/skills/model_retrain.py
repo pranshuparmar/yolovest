@@ -50,8 +50,12 @@ class ModelRetrainSkill(SkillBase):
         cfg = self.ctx.config.retraining
         min_samples = self.ctx.config.strategy.min_training_samples
 
-        # Step 1-2: Load training data and feedback
-        training_data = await self.ctx.db.get_training_dataset()
+        # Step 1-2: Load training data and feedback. max_training_days
+        # caps history so the feature matrix fits in RAM on small
+        # hosts (a 2 GB EC2 instance OOMs on 5 years × ~500 symbols).
+        training_data = await self.ctx.db.get_training_dataset(
+            max_days=cfg.max_training_days,
+        )
         predictions_vs_actual = await self.ctx.db.get_prediction_outcomes()
 
         # Sector map for sector-relative momentum features. A stock
@@ -198,6 +202,20 @@ class ModelRetrainSkill(SkillBase):
             except Exception as e:
                 logger.warning("Retrain failed for %s: %s", model_type, e)
                 results[model_type] = {"error": str(e)}
+            # Free per-model scratch (feature matrix + bars_meta) before
+            # the next model's _prepare_training_data allocates its
+            # own copy. Without this the intraday and swing matrices
+            # would briefly coexist and OOM the process on a 2 GB host.
+            X = y = feat_names = sample_weights = bars_meta = None  # type: ignore[assignment]
+            import gc as _gc
+            _gc.collect()
+
+        # Free training_data eagerly — _check_shadow_promotions doesn't
+        # need it and it's the largest single resident structure
+        # (~365K rows × 8 fields at the default 730-day cap, much more
+        # if the user raised retraining.max_training_days).
+        training_data = None  # type: ignore[assignment]
+        _gc.collect()
 
         # Step 7: Check shadow promotions
         promotions = await self._check_shadow_promotions()

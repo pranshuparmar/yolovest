@@ -1442,15 +1442,31 @@ class Database:
     # Training Data
     # ------------------------------------------------------------------
 
-    async def get_training_dataset(self) -> dict[str, Any]:
+    async def get_training_dataset(
+        self, max_days: int | None = None,
+    ) -> dict[str, Any]:
         """Load OHLCV data for model training. delivery_pct is included
         as an optional per-bar column; falls back to None for older
         rows imported before migration 038.
+
+        `max_days` caps history to fit RAM-constrained hosts. On a 2 GB
+        instance the full ohlcv table (~5 years × universe) OOM-kills
+        the feature-matrix builder; the default in
+        retraining.max_training_days (730) keeps peak under 1 GB.
         """
-        cursor = await self.conn.execute(
-            "SELECT symbol, timestamp, open, high, low, close, volume, delivery_pct "
-            "FROM ohlcv WHERE interval = 'daily' ORDER BY symbol, timestamp"
-        )
+        if max_days is not None and max_days > 0:
+            cursor = await self.conn.execute(
+                "SELECT symbol, timestamp, open, high, low, close, volume, delivery_pct "
+                "FROM ohlcv WHERE interval = 'daily' "
+                "  AND timestamp >= date('now', ?) "
+                "ORDER BY symbol, timestamp",
+                (f"-{int(max_days)} day",),
+            )
+        else:
+            cursor = await self.conn.execute(
+                "SELECT symbol, timestamp, open, high, low, close, volume, delivery_pct "
+                "FROM ohlcv WHERE interval = 'daily' ORDER BY symbol, timestamp"
+            )
         rows = await cursor.fetchall()
         return {"bars": [dict[str, Any](row) for row in rows]}
 

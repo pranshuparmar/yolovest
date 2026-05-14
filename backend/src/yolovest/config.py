@@ -615,6 +615,12 @@ class RetrainingConfig(BaseModel):
     shadow_mode_days: int = 7
     shadow_min_predictions: int = 10
     retired_model_cleanup_days: int = 30
+    # Cap training history to fit in available RAM. On a 2 GB instance,
+    # 5 years × ~500 symbols ≈ 911K bars OOM-kills the process during
+    # feature-matrix construction. 730 days × 500 symbols ≈ 365K bars
+    # fits comfortably under 2 GB. Raise on hosts with more memory if
+    # you want the model to see deeper history.
+    max_training_days: int = Field(default=730, ge=90, le=3650)
 
 
 class ReportsConfig(BaseModel):
