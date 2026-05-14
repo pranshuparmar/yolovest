@@ -519,6 +519,40 @@ export interface ModelDrift {
   warning: string | null;
 }
 
+export interface FiiDiiDayPoint {
+  date: string;
+  fii_buy: number;
+  fii_sell: number;
+  fii_net: number;
+  dii_buy: number;
+  dii_sell: number;
+  dii_net: number;
+}
+
+export interface FiiDiiSummary {
+  days_covered: number;
+  fii_net_total: number;
+  dii_net_total: number;
+  fii_net_today: number | null;
+  dii_net_today: number | null;
+}
+
+export interface BulkDealRow {
+  deal_date: string;
+  symbol: string;
+  deal_type: string;
+  client_name: string | null;
+  buy_sell: string | null;
+  quantity: number | null;
+  trade_price: number | null;
+}
+
+export interface InstitutionalFlows {
+  fii_dii_timeline: FiiDiiDayPoint[];
+  fii_dii_summary: FiiDiiSummary;
+  bulk_deals: BulkDealRow[];
+}
+
 export interface ExecutionQuality {
   total_orders: number;
   filled_orders: number;

@@ -1633,6 +1633,88 @@ class Database:
             "warning": "; ".join(warnings) if warnings else None,
         }
 
+    async def get_fii_dii_timeline(self, days: int = 30) -> list[dict[str, Any]]:
+        """Return the last `days` rows of FII/DII flows ordered by
+        date ascending (so the dashboard line chart can plot directly).
+        Values are in ₹ crore as published by NSE.
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT date, fii_buy, fii_sell, fii_net, dii_buy, dii_sell, dii_net "
+            "FROM fii_dii_daily "
+            "WHERE date >= date('now', ?) "
+            "ORDER BY date",
+            (f"-{int(days)} day",),
+        )
+        return [
+            {
+                "date": r[0],
+                "fii_buy": float(r[1] or 0),
+                "fii_sell": float(r[2] or 0),
+                "fii_net": float(r[3] or 0),
+                "dii_buy": float(r[4] or 0),
+                "dii_sell": float(r[5] or 0),
+                "dii_net": float(r[6] or 0),
+            }
+            for r in await cursor.fetchall()
+        ]
+
+    async def get_bulk_deals_list(
+        self, days: int = 30, symbol: str | None = None, limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Recent bulk/block deals for the dashboard table. Filtered
+        to the last `days` calendar days and optionally to a single
+        symbol. Ordered most-recent-first.
+        """
+        params: list[Any] = [f"-{int(days)} day"]
+        sym_clause = ""
+        if symbol:
+            sym_clause = " AND symbol = ?"
+            params.append(symbol)
+        params.append(int(limit))
+        cursor = await self.read_conn.execute(
+            "SELECT deal_date, symbol, deal_type, client_name, buy_sell, "
+            "       quantity, trade_price "
+            "FROM bulk_deals "
+            "WHERE deal_date >= date('now', ?)" + sym_clause +
+            " ORDER BY deal_date DESC, symbol "
+            "LIMIT ?",
+            params,
+        )
+        return [
+            {
+                "deal_date": r[0],
+                "symbol": r[1],
+                "deal_type": r[2],
+                "client_name": r[3],
+                "buy_sell": r[4],
+                "quantity": r[5],
+                "trade_price": r[6],
+            }
+            for r in await cursor.fetchall()
+        ]
+
+    async def get_fii_dii_timeline_summary(
+        self, days: int = 30,
+    ) -> dict[str, Any]:
+        """Quick aggregates for the dashboard header pills."""
+        timeline = await self.get_fii_dii_timeline(days)
+        if not timeline:
+            return {
+                "days_covered": 0,
+                "fii_net_total": 0.0,
+                "dii_net_total": 0.0,
+                "fii_net_today": None,
+                "dii_net_today": None,
+            }
+        last = timeline[-1]
+        return {
+            "days_covered": len(timeline),
+            "fii_net_total": round(sum(r["fii_net"] for r in timeline), 2),
+            "dii_net_total": round(sum(r["dii_net"] for r in timeline), 2),
+            "fii_net_today": last["fii_net"],
+            "dii_net_today": last["dii_net"],
+        }
+
     async def upsert_bulk_deals(
         self, deals: list[dict[str, Any]], deal_date: str | None = None,
     ) -> int:

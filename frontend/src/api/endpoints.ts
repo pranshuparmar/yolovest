@@ -34,6 +34,7 @@ import type {
   StrategyPerformance,
   ExecutionQuality,
   ModelDrift,
+  InstitutionalFlows,
   CorrelationData,
   PriceAlert,
   RiskSimParams,
@@ -321,6 +322,19 @@ export const api = {
 
   modelDrift: (days = 30) =>
     apiFetch<ModelDrift>(`/api/model-drift?days=${days}`),
+
+  institutionalFlows: (params?: {
+    days?: number; bulk_limit?: number; symbol?: string;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.days) q.set("days", String(params.days));
+    if (params?.bulk_limit) q.set("bulk_limit", String(params.bulk_limit));
+    if (params?.symbol) q.set("symbol", params.symbol);
+    const qs = q.toString();
+    return apiFetch<InstitutionalFlows>(
+      `/api/institutional-flows${qs ? "?" + qs : ""}`,
+    );
+  },
 
   // Feature #7
   correlations: (days = 60) =>

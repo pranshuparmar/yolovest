@@ -1501,6 +1501,30 @@ def create_app(ctx: AppContext) -> FastAPI:
         """
         return await ctx.db.get_model_drift_stats(days=days, mode=ctx.config.mode)
 
+    @app.get("/api/institutional-flows")
+    async def get_institutional_flows(
+        days: int = Query(30, ge=1, le=180),
+        bulk_limit: int = Query(200, ge=1, le=2000),
+        symbol: str | None = Query(None),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Combined FII/DII timeline + recent bulk/block deals.
+
+        FII/DII values are in ₹ crore. Bulk-deal rows are NSE
+        verbatim — same data the institutional-flow risk-check
+        multiplier reads at signal-evaluation time.
+        """
+        timeline = await ctx.db.get_fii_dii_timeline(days)
+        summary = await ctx.db.get_fii_dii_timeline_summary(days)
+        deals = await ctx.db.get_bulk_deals_list(
+            days=days, symbol=symbol, limit=bulk_limit,
+        )
+        return {
+            "fii_dii_timeline": timeline,
+            "fii_dii_summary": summary,
+            "bulk_deals": deals,
+        }
+
     @app.get("/api/audit")
     async def get_audit_log(
         limit: int = Query(50, ge=1, le=500),

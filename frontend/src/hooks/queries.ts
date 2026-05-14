@@ -565,6 +565,16 @@ export function useModelDrift(days = 30) {
   });
 }
 
+export function useInstitutionalFlows(params?: {
+  days?: number; bulk_limit?: number; symbol?: string;
+}) {
+  return useQuery({
+    queryKey: ["institutional-flows", params],
+    queryFn: () => api.institutionalFlows(params),
+    staleTime: 60_000,
+  });
+}
+
 // Feature #7
 export function useCorrelations(days = 60) {
   return useQuery({
