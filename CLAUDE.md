@@ -104,10 +104,12 @@ Skills are registered in `SKILL_REGISTRY` dict in `skills/__init__.py`.
 ### Heartbeat Pipeline (market hours, every 15min)
 
 ```
-health-check → ingest-data → market-scan → generate-signals
+expire-pending → health-check → ingest-data → market-scan → generate-signals
   → [per signal]: risk-check → llm-review → [manual: queue pending] OR [auto: trade-execute] → predict-track
   → position-monitor (always runs)
 ```
+
+`expire-pending` runs first every cycle (`HeartbeatOrchestrator._execute_pipeline`) so abandoned pending trades free their `max_open_positions` / `max_trades_per_day` / `max_portfolio_exposure_pct` budgets before risk-check evaluates the day's signals. `execution.pending_expiry_minutes` (default 30) governs the timeout.
 
 Error propagation:
 - `health-check` fail → abort entire heartbeat.
@@ -146,9 +148,15 @@ When `execution.transaction_mode == "manual"`:
 3. Dashboard: `PendingTradesBanner` shows pending count + total investment + per-row approve/edit/reject.
 4. On approval: executes immediately via `trade_execute`.
 5. On execution failure (non-reconciled): pending trade reverts to `status='pending'` for retry.
-6. Pending trades auto-expire after 30 minutes.
+6. Pending trades auto-expire after `execution.pending_expiry_minutes` (default 30). The heartbeat sweeps every cycle (`db.expire_pending_trades`); the dashboard endpoint defends the same way as a backstop.
 
-Risk-check includes pending-trade notional in the `max_portfolio_exposure_pct` check, so the queue can't accumulate past the cap.
+Risk-check includes pending-trade notional in the `max_portfolio_exposure_pct` check, so the queue can't accumulate past the cap. Square-off (EOD CRON) **ignores** manual mode and force-closes MIS positions — the broker auto-square at 15:30 is the binding deadline, asking for approval there buys nothing.
+
+### Signal-Disposition Retry Caps
+
+`db.get_todays_signaled_symbols` dedups today's signals so a symbol doesn't re-fire repeatedly, but distinguishes terminal from transient dispositions. A symbol with one of the **retryable** dispositions (`risk_rejected`, `expired`, `trade_execute_failed`, `skill_error`) is re-evaluated each heartbeat **until** its count of retryable signals today reaches `risk.max_risk_rejected_retries_per_day` (default 5). After that, the cap engages and the symbol is dedup-blocked for the rest of the day. Any **non-retryable** disposition (`executed`, `llm_rejected`, `awaiting_approval`, in-flight NULL) blocks immediately. Mode-scoped so paper and live retry budgets stay independent.
+
+This closes the failure mode where 12 transient risk-rejections (broad-market chop / depth / correlation with pending / exposure cap) at 9:30 would have permanently blocked those symbols for the rest of the day, leaving `max_trades_per_day` unused.
 
 ### Position Adoption & Exit
 
@@ -160,11 +168,34 @@ Risk-check includes pending-trade notional in the `max_portfolio_exposure_pct` c
 
 Exit paths:
 - **Broker-side GTT** (CNC only) — placed by `trade-execute._attach_oco_gtt` after entry fill. Pre-flight validation rejects nonsense SL/target combos; if the broker already has ≥45 active GTTs (cap is 50) we skip placement and fall back to client-side. `position-monitor` skips client-side target/SL checks when `gtt_id` is set; ghost-position reconciliation closes the DB row when the GTT fires and the broker position vanishes. Each cycle, `_reconcile_gtts` cross-checks `trades.gtt_id` against `broker.get_gtts()` — GTTs that have been cancelled, rejected, expired, or vanished get their `gtt_id` wiped so client-side detection resumes. Latest GTT status is cached in `trades.gtt_status` and rendered as a badge on the trade detail page. `_maybe_trail_gtt_sl` raises the SL leg in place via `broker.modify_gtt` once trailing-SL triggers, and partial-profit booking resizes the GTT to the remaining quantity so later fires aren't rejected.
-- **Broker-side MIS OCO** — Kite doesn't allow GTT on MIS, so `trade-execute._attach_mis_target_limit` places a resting LIMIT order at the target alongside the SL after entry fills. `position-monitor._enforce_mis_oco` watches both order statuses each cycle and cancels the surviving leg when one fills. Ghost-position reconciliation closes the DB row.
+- **Broker-side MIS OCO** — Kite doesn't allow GTT on MIS, so `trade-execute._attach_mis_target_limit` places a resting LIMIT order at the target alongside the SL after entry fills. `position-monitor._enforce_mis_oco` watches both order statuses each cycle and cancels the surviving leg when one fills. `position-monitor._maybe_trail_mis_sl` lifts the broker-side SL trigger in place via `kite.modify_order` once trailing-SL triggers (mirror of `_maybe_trail_gtt_sl` for CNC), so MIS positions ratchet their breakeven floor the same way GTT-managed CNC trades do. Ghost-position reconciliation closes the DB row.
 - **Client-side detection** — fallback for trades that have neither `gtt_id` nor both `target_order_id`+`sl_order_id` (older rows, or LIMIT placement failed). `position-monitor` exits when LTP crosses target (with `risk.target_early_exit_pct` buffer) or SL.
 - **Manual close** — `POST /api/positions/{trade_id}/close` (UI: red Close button per row) cancels SL and target orders, deletes GTT, places market exit at the broker, computes realised PnL with costs, closes the row.
 - **Zerodha postback** (`POST /api/auth/zerodha/postback`) — verifies `SHA-256(order_id + order_timestamp + api_secret)` against the body's `checksum` (rejects 401 on mismatch). Looks up the trade via `db.find_trade_by_order_id` and reacts to terminal statuses: entry REJECTED → trade marked failed + alert; entry COMPLETE → backfills fill_price / slippage; SL COMPLETE → cancels the resting target LIMIT (ghost-recovery closes the row next cycle); SL REJECTED → loud alert (position unprotected); target LIMIT COMPLETE → cancels the SL leg. Polling still authoritative — postback is a latency optimisation.
-- **Square-off** — CRON skill at `market_hours.square_off` (default 15:15) cancels SL + target orders then market-exits open MIS positions. `/kill` runs it with `force=True`.
+- **Square-off** — CRON skill at `market_hours.square_off` (default 15:15) cancels SL + target orders then market-exits open MIS positions. Ignores `transaction_mode` (manual mode does NOT block EOD square-off — Zerodha auto-squares at 15:30 with penalty regardless). `/kill` runs it with `force=True` for everything including CNC.
+
+### Optional Risk Gates (default off)
+
+All under `risk.*`, opt-in. Watch one or two paper sessions to calibrate before enabling:
+
+- **`regime_gate`** — refuses BUYs when cross-sectional `universe_breadth < min_breadth_for_buy` (0.40), SELLs when breadth > max threshold (0.60). Sizes up to `bullish_size_multiplier` × in strongly-favourable regimes. Live breadth computed once per heartbeat via `db.compute_live_regime` from today's daily-bar returns; cached on the skill instance.
+- **`liquidity_gate`** — refuses positions whose size > `max_pct_of_top5` (10%) of the relevant side of the Kite top-5 book. Requires `market_data.kite_data_enabled`.
+- **`depth_gate`** — refuses when `(total_buy_qty − total_sell_qty) / (total_buy_qty + total_sell_qty)` opposes the signal direction past threshold. Same data source as liquidity_gate.
+- **`institutional_flow`** — conviction multiplier on position size based on (a) recent bulk/block deals on the symbol (last N days, BUY count − SELL count) and (b) today's FII net flow vs `fii_net_threshold_cr`. Aligning direction scales up; opposing scales down by 1/multiplier. Reads `bulk_deals` and `fii_dii_daily` tables populated by ingest-data.
+- **`max_risk_rejected_retries_per_day`** — caps daily retries of risk_rejected / expired / trade_execute_failed / skill_error dispositions (default 5).
+
+### Exit Tweaks (`risk.exit_tweaks`)
+
+Applied to client-side-managed positions (no GTT, no MIS OCO):
+- **`time_stop_enabled`** — exit intraday positions still open after `intraday_stop_after_min` (180) min with target-progress below `intraday_stop_progress_threshold` (30%). Catches the chop trade that never works nor breaks.
+- **`volume_exit_enabled`** — exit when the last 5-min bar volume drops below `volume_exit_min_ratio` (30%) of the previous N bars' average AND the position is in 0.5R-2R profit. "Trend is dying."
+
+Applied to all three trailing-SL paths (client-side + GTT + MIS OCO), default-on:
+- **`tighten_trailing_enabled`** — step-up curve. Once target progress crosses `tighten_start_at_target_pct` (0.50), trailing-SL step shrinks by `tighten_step_decay` (0.15) per bucket of `tighten_step_size` (0.10), floored at `tighten_min_multiplier` (0.20). Defaults give 1.00 → 0.85 → 0.70 → 0.55 → 0.40 → 0.25 → 0.20 across 50% → 100% target progress. Centralised in `_trailing_step_multiplier` so the three paths can't drift.
+
+### Margin Enforcement
+
+`risk.margin_usage_enabled` defaults `True`. Before placing, risk-check calls `kite.order_margins` per signal so insufficient-funds / special-margin rejections are caught at signal time rather than at place-order time. When the broker says no, the position is sized down proportionally to whatever fits.
 
 ### AppContext
 
@@ -183,14 +214,16 @@ SQLite with WAL mode. Schema versioned via numbered migration scripts in `backen
 | Table | Purpose |
 |-------|---------|
 | `trades` | Trade records. Key columns: `mode`, `status`, `origin` (`system` / `adopted`), `gtt_id` (broker OCO GTT id when active). |
-| `signals` | Generated signals with `mode` column (for dedup via `get_todays_signaled_symbols` + mode-scoped bulk delete). |
+| `signals` | Generated signals with `mode`, `disposition`, `attribution_json` (top-N TreeSHAP contributions stored per signal). Dedup via `get_todays_signaled_symbols` is mode-scoped and respects the retryable-disposition cap. |
 | `predictions` | ML predictions with `mode`, `is_shadow`, `model_version`, `scored_at` columns. |
 | `pending_trades` | Manual approval queue with `mode` column. Python ISO timestamps for correct expiry comparison. |
-| `quarantined_symbols` | Auto-blocked after 3 fetch failures. `replacement_symbol` lets the user substitute (e.g. ZOMATO → ETERNAL). |
+| `quarantined_symbols` | Auto-blocked after 3 fetch failures (transient errors don't count — see Conventions). `replacement_symbol` lets the user substitute (e.g. ZOMATO → ETERNAL). |
 | `locked_holdings` | User-protected holdings — never auto-sold or auto-adopted. |
 | `config` | Key-value store for UI-editable settings (dot-notation keys). |
-| `system_state` | Long-lived key-value: `kite_access_token`, `kill_switch`, `initial_capital`, `universe_constituents:<universe>`, etc. |
-| `ohlcv` | OHLCV bars. Unique on (symbol, interval, timestamp). |
+| `system_state` | Long-lived key-value: `kite_access_token`, `kill_switch`, `initial_capital`, `universe_constituents:<universe>`, etc. `partial_booked_{trade_id}` sentinels are auto-cleaned on `close_position`. |
+| `ohlcv` | OHLCV bars. Unique on (symbol, interval, timestamp). `delivery_pct` column stamped by ingest-data when NSE returns it. |
+| `bulk_deals` | NSE bulk/block deals — per-symbol institutional accumulation/distribution events. Powers the `institutional_flow` risk multiplier + `bulk_deal_*` ML features. Unique on (deal_date, symbol, client, side, qty, price). |
+| `fii_dii_daily` | One row per date with FII + DII buy/sell/net values in ₹ crore. Powers FII regime side of the `institutional_flow` multiplier. |
 | `watchlist` | Auto-generated by market-scan. Adopted symbols auto-added. |
 | `user_watchlist` | User-managed, persists across market-scan refreshes. |
 | `dry_run_results` | Signal preview with next-day scoring. |
@@ -238,6 +271,11 @@ The legacy alias `"all"` resolves to `"nifty500"` at fetch time for backwards-co
 | `/resume` | Resume trading |
 | `/auth TOKEN` | Daily Kite re-auth (also syncs to `KiteDataProvider`) |
 | `/holiday [add\|rm DATE]` | Manage market holidays |
+| `/watch [add\|rm SYM ...]` | List or mutate `user_watchlist` |
+| `/quarantine [unblock\|replace SYM ...]` | List quarantined symbols / clear / route to replacement |
+| `/lock SYM [SYM ...]` / `/unlock SYM` | Protect / unprotect holdings from auto-management |
+| `/mode [auto\|manual]` | Show or hot-flip `execution.transaction_mode` (uses same `apply_db_config` path as the dashboard) |
+| `/symbol SYM` | One-stop snapshot: price + day-change, quarantine, 5d avg delivery %, latest signal + top-5 attribution, last 5 trades, last 5 bulk deals |
 
 ## Configuration
 
@@ -261,9 +299,11 @@ Secrets, filesystem paths, and server binding:
 | `mode` | `"paper"` or `"live"` |
 | `strategy.mode` | `"balanced"` / `"intraday"` / `"short_term"` / `"long_term"` |
 | `strategy.holding_periods.{intraday,short_swing,week,long}.{target,stop_loss}` | ATR multipliers per holding bucket |
-| `risk` | `max_risk_per_trade_pct`, `max_open_positions`, `max_single_stock_pct`, `max_portfolio_exposure_pct` (counts pending notional), `daily_loss_limit_pct`, `weekly_loss_limit_pct`, `max_same_sector_positions`, `target_early_exit_pct` (exits when LTP within this % of target — 0.0015 default) |
+| `risk` | `max_risk_per_trade_pct`, `max_open_positions`, `max_single_stock_pct`, `max_portfolio_exposure_pct` (counts pending notional), `daily_loss_limit_pct`, `weekly_loss_limit_pct`, `max_same_sector_positions`, `target_early_exit_pct` (default 0.0015), `loss_cooldown_minutes` (portfolio + per-symbol), `max_risk_rejected_retries_per_day` (default 5), `margin_usage_enabled` (default `true`) |
+| `risk.regime_gate` / `risk.liquidity_gate` / `risk.depth_gate` / `risk.institutional_flow` | All default-disabled. See `### Optional Risk Gates` for what each does. |
+| `risk.exit_tweaks` | Time-stop / volume-exhaustion (default off), trailing-SL tighten step-up curve (default on). |
 | `market_hours` | `open`, `close`, `square_off`, `intraday_cutoff` |
-| `execution` | `transaction_mode` (`auto`/`manual`), `max_order_retries`, `price_drift_max_pct` |
+| `execution` | `transaction_mode` (`auto`/`manual`), `max_order_retries`, `price_drift_max_pct`, `pending_expiry_minutes` (default 30) |
 | `scanning` | `universe`, `shortlist_size`, `min_avg_daily_volume`, `seed_symbols` (cold-start fallback only) |
 | `market_data` | `kite_data_enabled`, `news_enabled`, `scrapers_enabled`, `backfill_days` (daily, used by both ingest-universe and backfill-data), `intraday_backfill_days` (5-minute) |
 
@@ -336,30 +376,43 @@ The frontend nginx config (`frontend/nginx.conf`) uses Docker's embedded DNS (`r
 - **`data/kite_data.py`** — Optional Kite data provider. Pagination for intraday windows beyond Kite's per-call limit; pre-warmed instrument cache; historical-specific throttle; quote includes circuit limits and depth.
 - **`data/ingester.py`** — Fallback chain. Quality + staleness validation.
 - **`data/nse_symbols.py`** — Universe constituent live fetch + bundled fallback. `parse_constituent_csv` filters `Series=EQ` and `DUMMY*` placeholders.
-- **`data/db.py`** — SQLite layer. `resolve_symbols_with_replacements`, mode-scoped queries, `set_trade_gtt`, `bulk_delete` (paper/live correctly mode-filtered including signals & pending_trades).
+- **`data/db.py`** — SQLite layer. `resolve_symbols_with_replacements`, mode-scoped queries, `set_trade_gtt`, `bulk_delete` (paper/live correctly mode-filtered including signals & pending_trades). `get_storage_stats` is 60s-TTL cached and invalidated by destructive endpoints (cleanup_table / bulk_delete / reset_all / restore_backup). `compute_live_regime` (cross-sectional breadth scan), `compute_recent_delivery_pct`, `count_recent_bulk_deals`, `get_latest_fii_dii` — all wired into risk-check at signal time. `record_fetch_failure` skips the counter on transient errors (rate limit / timeout / 5xx / SSL / unreachable).
 - **`skills/ingest_universe.py`** — Cached → live → bundled resolver. Calls `record_fetch_failure` on per-symbol errors so quarantine cascades.
 - **`skills/ingest_data.py`** — Deep ingest (news + sentiment + fundamentals). Per-symbol NSE corp-actions limited to open positions + top watchlist (no longer hardcoded `seed_symbols`).
 - **`skills/generate_signals.py`** — Balanced dual-model, intraday cutoff, SELL → MIS for non-holdings, intraday session caps via `apply_session_caps`.
-- **`skills/risk_check.py`** — Pending trades count toward both `max_open_positions` AND `max_portfolio_exposure_pct` (notional-weighted).
+- **`skills/risk_check.py`** — Pending trades count toward both `max_open_positions` AND `max_portfolio_exposure_pct` (notional-weighted). Per-symbol cooldown on top of portfolio-wide (`minutes_since_last_loss_for_symbol`). Correlation gate includes same-direction pending trades in its comparison set (catches "3 correlated BUYs in one batch"). Opt-in regime / liquidity / depth / institutional-flow gates compose multiplicatively with the existing conviction multiplier, all capped by `max_single_stock_pct`.
 - **`skills/trade_execute.py`** — Mode-mismatch safety check; reconciliation when `place_order` raises but the order actually placed; `_attach_oco_gtt` after CNC fill.
-- **`skills/position_monitor.py`** — Client-side target/SL detection (skipped when `gtt_id` present), trailing SL with try-except, position adoption from holdings.
+- **`skills/position_monitor.py`** — Mode-scoped (`get_open_positions(mode=...)`). Three trailing-SL paths use the same `_trailing_step_multiplier` step-up curve: client-side (`modify_sl_order`), GTT (`_maybe_trail_gtt_sl` → `modify_gtt`), MIS broker-OCO (`_maybe_trail_mis_sl` → `modify_sl_order`). `_check_auxiliary_exits` runs before target/SL for client-side positions and handles time-stop + volume-exhaustion. Position adoption from holdings remains.
 - **`skills/backfill_data.py`** / **`backfill_intraday.py`** — Default symbol set = watchlist + user_watchlist + regime index (not `seed_symbols`). Per-symbol delay configurable; daily and intraday share the same backbone with different defaults.
-- **`skills/model_retrain.py`** — `_prepare_training_data` maintains a stable feature_names list across all samples (backfills 0.0 for late-appearing keys) so `np.array(X)` always succeeds. Labels are **path-aware** (`_path_aware_label`): walks the future window bar-by-bar and labels BUY only when high reaches `entry × (1 + target_atr_mult × ATR%)` before low reaches `entry × (1 - sl_atr_mult × ATR%)`, mirroring the live target/SL geometry. Each model trains against its own multipliers — intraday uses `holding_periods.intraday` (0.6 / 0.3), swing uses `holding_periods.short_swing` (1.5 / 0.75). Cross-sectional **regime features** (`universe_breadth`, `universe_avg_return`) are computed once via `_compute_regime_index` and merged into every sample — proxy for "is today broadly trending or chopping" without needing a separate NIFTY ingest.
+- **`skills/model_retrain.py`** — `_prepare_training_data` maintains a stable feature_names list across all samples (backfills 0.0 for late-appearing keys) so `np.array(X)` always succeeds. Labels are **path-aware** (`_path_aware_label`): walks the future window bar-by-bar and labels BUY only when high reaches `entry × (1 + target_atr_mult × ATR%)` before low reaches `entry × (1 - sl_atr_mult × ATR%)`, mirroring the live target/SL geometry. Each model trains against its own multipliers — intraday uses `holding_periods.intraday` (0.6 / 0.3), swing uses `holding_periods.short_swing` (1.5 / 0.75). Per-sample feature merges:
+  - **Universe regime** (`universe_breadth`, `universe_avg_return`) via `_compute_regime_index` — cross-sectional breadth proxy.
+  - **Sector-relative** (`sector_breadth`, `sector_avg_return`, `relative_momentum`) via `_compute_sector_index` over `symbol_sectors` join — stock vs its industry cohort.
+  - **Institutional flow** (`bulk_deal_buy_5d`, `bulk_deal_sell_5d`, `bulk_deal_net_5d`, `delivery_pct_avg_5d`) — pre-built lookup from `bulk_deals` + per-bar `ohlcv.delivery_pct`.
+  - **Time-of-day** (`minutes_since_open`, `day_phase`) via `data/features.py::_minutes_since_open`.
+  - **Feedback** (`fb_*`) including `fb_recent_loss_count` from `get_feedback_data`.
+- **`skills/drift_watch.py`** — CRON 16:30 IST, calls `db.get_model_drift_stats(days=14)` and pushes the existing drift `warning` field to Telegram via `notify.send(alert_type="errors")`. Replaces the LLM-review safety net for autonomous mode; flag when realised win-rate drops > 15 pp over last 7d vs prior 7d.
 - **`skills/report_generate.py`** — Daily (16:00) and weekly (Friday).
 - **`strategy/ml_signal.py`** — XGBoost training. `tree_method='hist'` for memory-efficient training over multi-year history. When `bars_meta` is threaded through from `model_retrain._prepare_training_data`, fold-test predictions are scored via `strategy/walk_forward_backtest.run_walk_forward_backtest` (real PnL: simulated one-bar trades through `compute_transaction_costs`, sized by `risk_per_trade_pct × capital`, with configurable entry slippage). Falls back to the legacy `+1%/-0.5%` synthetic payoff when bars_meta isn't supplied (older tests). `metrics["backtest_source"]` is `walk_forward_real_pnl` or `synthetic_legacy`.
-- **`strategy/walk_forward_backtest.py`** — `BarMeta`, `BacktestConfig`, `run_walk_forward_backtest`. Each prediction → real trade through entry slippage → exit-bar close → transaction costs → capital update. Returns `BacktestResult` with sharpe / max_drawdown_pct / win_rate / profit_factor / net_pnl / final_capital from the realised PnL series.
+- **`strategy/walk_forward_backtest.py`** — `BarMeta`, `BacktestConfig`, `run_walk_forward_backtest`. Each prediction → real trade through entry slippage → walks the future window bar-by-bar via `_path_aware_exit` (target / SL / fallback to exit_close) → transaction costs → capital update. Tie-break when both barriers touched in the same bar = SL (keeps the Sharpe number hard to game). Returns `BacktestResult` with sharpe / max_drawdown_pct / win_rate / profit_factor / net_pnl / final_capital from the realised PnL series.
 - **`strategy/holding_period.py`** — ATR multiplier interpolation, `apply_session_caps`, `adjust_sell_for_holdings`.
-- **`telegram_bot.py`** — `/review` works for any NSE symbol. `/approve` uses symbol name. Token sync on `/auth` propagates to `KiteDataProvider`.
-- **`dashboard/app.py`** — Mode passed to all trade/position/prediction queries. `POST /api/positions/{trade_id}/close` for per-position exit. `POST /api/review` for ML review of any symbol.
+- **`telegram_bot.py`** — `/review` works for any NSE symbol. `/approve` uses symbol name. Token sync on `/auth` propagates to `KiteDataProvider`. State-mutation surface for Telegram-only operation: `/watch`, `/quarantine`, `/lock`/`/unlock`, `/mode` (hot-applies through the same `apply_db_config` path the dashboard PUT uses). `/symbol SYM` is the unified read snapshot (price + attribution + bulk deals + recent trades).
+- **`dashboard/app.py`** — Mode passed to all trade/position/prediction queries. `POST /api/positions/{trade_id}/close` for per-position exit. `POST /api/review` for ML review of any symbol. New read endpoints surfaced this iteration: `GET /api/model-drift`, `GET /api/institutional-flows`, `GET /api/symbol/{symbol}/context`. `GET /api/symbol/{symbol}/ohlcv` normalises `1d` / `1day` / `day` → `daily` and returns `delivery_pct` per bar. `DELETE /api/backups/{filename}` with path-traversal protection. Postback handler cancels orphan SL / target legs on late entry-REJECTED to prevent unintended short positions.
 
 ### Frontend
 
 - **`pages/PositionsPage.tsx`** — Position list with price-level visualisation. Close button per row → `useClosePosition` mutation.
 - **`pages/HoldingsPage.tsx`** — Multi-select checkboxes, bulk lock/unlock, ML review panel.
-- **`pages/WatchlistPage.tsx`** — Quick ML Review input for any symbol.
+- **`pages/WatchlistPage.tsx`** — Quick ML Review input for any symbol. Paginated user + algo tabs.
+- **`pages/SymbolPage.tsx`** — Symbol detail: price chart with SMA 9/21/50 overlays, volume bars coloured by close-vs-open, delivery-% chart, quarantine banner, recent bulk-deals table, trade markers + linked trade history. New `/api/symbol/{symbol}/context` composes the extras in one round-trip.
+- **`pages/TradeDetailPage.tsx`** — Reasoning timeline + "Why this signal?" panel rendering top-5 TreeSHAP feature attribution from `signals.attribution_json`.
+- **`pages/ModelDriftPage.tsx`** — Predicted vs realised win-rate by day + calibration buckets per model version. Warning banner on > 15 pp 7d drop.
+- **`pages/InstitutionalFlowsPage.tsx`** — FII / DII bar chart + paginated bulk/block deals table. Symbol filter.
 - **`pages/IntegrationsPage.tsx`** — Per-service "Mark Inactive" toggles for Gemini and Telegram (flips `llm.enabled` / `notifications.telegram.enabled`). Status pills + test buttons.
-- **`pages/DataManagementPage.tsx`** — Mode-scoped bulk delete buttons (paper/live now correctly include signals & pending_trades; standalone all-modes groups for global wipes).
+- **`pages/DataManagementPage.tsx`** — Mode-scoped bulk delete buttons (paper/live now correctly include signals & pending_trades; standalone all-modes groups for global wipes). Page-shell decouples from slow storage-stats — backups + quarantine + bulk-delete render immediately. Per-backup Delete button.
 - **`pages/SettingsPage.tsx`** — Click-to-toggle info tooltips. Universe dropdown: Nifty 50 / 100 / 200 / 500.
+- **`pages/AuditPage.tsx`** — Audit log + server logs tabs, paginated.
+- **`components/SymbolLink.tsx`** — Single source of truth for "click symbol → detail page". Used everywhere a symbol is rendered; preserves caller colour, stops propagation so row-level clicks still work.
+- **`components/Pagination.tsx`** — Shared Prev / N of M / Next widget used by trades / predictions / audit / watchlist tabs / institutional-flows / etc.
 - **`components/PendingTradesBanner.tsx`** — Approval UI with header showing trade count + total qty + total investment. Per-row Investment column. Override editor.
 - **`components/PositionsTable.tsx`** — Close button per row.
 - **`components/StatusBadge.tsx`** — Header pills: Healthy/Degraded, mode (live/paper), KILL SWITCH (when active).
