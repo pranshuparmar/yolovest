@@ -305,6 +305,47 @@ class DepthGateConfig(BaseModel):
     max_imbalance_for_sell: float = Field(default=0.30, ge=0.0, le=1.0)
 
 
+class LiquidityGateConfig(BaseModel):
+    """Pre-trade liquidity gate using Kite top-5 depth.
+
+    Refuses orders whose size would consume more than `max_pct_of_top5`
+    of the relevant side of the book. Protects against being your own
+    slippage on thinly-traded names — the broker would happily fill
+    you, but at the cost of walking through multiple price levels.
+    Requires market_data.kite_data_enabled (non-Kite providers don't
+    return per-level depth quantities).
+    """
+
+    enabled: bool = False
+    max_pct_of_top5: float = Field(default=0.10, gt=0, le=1.0)
+
+
+class RegimeGateConfig(BaseModel):
+    """Cross-sectional market-regime gate.
+
+    Computes universe breadth (fraction of symbols up on the day) live
+    and refuses new positions when the regime opposes the signal
+    direction. BUY signals are blocked when breadth is below
+    `min_breadth_for_buy` (broad market is red), SELL signals are
+    blocked when breadth is above `max_breadth_for_sell` (broad market
+    is green). When breadth is strongly bullish (above
+    `bullish_breadth_threshold`), BUY position size is scaled by
+    `bullish_size_multiplier`. Mirror for strong bearish on SELL.
+
+    Most "bad days" share one thing: the broad market is moving
+    against the trade. This is the cheap, cross-sectional signal that
+    catches it without needing a NIFTY ingest.
+    """
+
+    enabled: bool = False
+    min_breadth_for_buy: float = Field(default=0.40, ge=0.0, le=1.0)
+    max_breadth_for_sell: float = Field(default=0.60, ge=0.0, le=1.0)
+    bullish_breadth_threshold: float = Field(default=0.65, ge=0.5, le=1.0)
+    bearish_breadth_threshold: float = Field(default=0.35, ge=0.0, le=0.5)
+    bullish_size_multiplier: float = Field(default=1.20, ge=1.0, le=2.0)
+    bearish_size_multiplier: float = Field(default=1.20, ge=1.0, le=2.0)
+
+
 class ReentryConfig(BaseModel):
     """Smart re-entry — allow re-entering after SL hit if conditions improve."""
 
@@ -371,13 +412,20 @@ class RiskConfig(BaseModel):
     symbol_cooldown_days: int = Field(default=1, ge=0)
     symbol_repeat_lookback_days: int = Field(default=5, ge=0)
     symbol_repeat_min_confidence: float = Field(default=0.80, ge=0, le=1)
-    margin_usage_enabled: bool = False  # when False, position value capped by available cash (no leverage)
+    # When True, ask the broker for the real margin requirement via
+    # kite.order_margins per signal — catches insufficient-funds /
+    # special-margin failures that notional-only sizing misses. Default
+    # True for live autonomous safety; flip off if the broker calls
+    # are too slow or the test stack doesn't support estimate_margin.
+    margin_usage_enabled: bool = True
     weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
     holding_expiry: HoldingExpiryConfig = Field(default_factory=HoldingExpiryConfig)
     partial_profit: PartialProfitConfig = Field(default_factory=PartialProfitConfig)
     conviction_sizing: ConvictionSizingConfig = Field(default_factory=ConvictionSizingConfig)
     correlation_limit: CorrelationLimitConfig = Field(default_factory=CorrelationLimitConfig)
     depth_gate: DepthGateConfig = Field(default_factory=DepthGateConfig)
+    liquidity_gate: LiquidityGateConfig = Field(default_factory=LiquidityGateConfig)
+    regime_gate: RegimeGateConfig = Field(default_factory=RegimeGateConfig)
     reentry: ReentryConfig = Field(default_factory=ReentryConfig)
 
 

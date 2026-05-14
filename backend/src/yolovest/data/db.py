@@ -1392,6 +1392,51 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
+    async def compute_live_regime(self) -> dict[str, float]:
+        """Cross-sectional regime stats over the latest two daily closes
+        of every tracked symbol. Cheap proxy for "is the broad market
+        trending or chopping right now". Heartbeats during market
+        hours have today's developing daily bar (Kite returns close =
+        current LTP), so the comparison is "today vs yesterday".
+
+        Returns: {"breadth": 0..1, "avg_return": float, "sample_size": int}.
+        breadth = fraction of symbols up vs yesterday. avg_return =
+        mean per-symbol % change. sample_size = number of symbols
+        that had two consecutive daily bars available.
+
+        Empty / single-symbol result: returns neutral {0.5, 0.0, 0}.
+        """
+        cursor = await self.read_conn.execute(
+            """
+            WITH ranked AS (
+                SELECT symbol, close,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY symbol ORDER BY timestamp DESC
+                       ) AS rn
+                FROM ohlcv
+                WHERE interval = 'daily'
+                  AND timestamp >= date('now', '-10 day')
+            )
+            SELECT
+                MAX(CASE WHEN rn = 1 THEN close END) AS latest,
+                MAX(CASE WHEN rn = 2 THEN close END) AS prev
+            FROM ranked
+            WHERE rn <= 2
+            GROUP BY symbol
+            HAVING latest > 0 AND prev > 0
+            """
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return {"breadth": 0.5, "avg_return": 0.0, "sample_size": 0}
+        returns = [(float(r[0]) - float(r[1])) / float(r[1]) for r in rows]
+        up = sum(1 for x in returns if x > 0)
+        return {
+            "breadth": up / len(returns),
+            "avg_return": sum(returns) / len(returns),
+            "sample_size": len(returns),
+        }
+
     async def minutes_since_last_loss_for_symbol(
         self, symbol: str, mode: str | None = None,
     ) -> float:

@@ -38,8 +38,34 @@ class RiskCheckSkill(SkillBase):
     trigger = SkillTrigger.EVENT
     schedule = None
 
+    # Cache live-regime per heartbeat — recomputing it for each
+    # candidate signal would do the same cross-sectional scan
+    # multiple times. 5-min TTL is fine (heartbeats are 15-min).
+    _regime_ttl_sec: float = 300.0
+
+    def __init__(self, context: Any) -> None:
+        super().__init__(context)
+        self._regime: dict[str, float] | None = None
+        self._regime_at: float = 0.0
+
     def should_run(self) -> bool:
         return True  # Always available — gating is per-signal
+
+    async def _get_live_regime(self) -> dict[str, float]:
+        import time as _time
+        now = _time.monotonic()
+        if (
+            self._regime is not None
+            and (now - self._regime_at) < self._regime_ttl_sec
+        ):
+            return self._regime
+        try:
+            self._regime = await self.ctx.db.compute_live_regime()
+        except Exception:
+            logger.debug("compute_live_regime failed", exc_info=True)
+            self._regime = {"breadth": 0.5, "avg_return": 0.0, "sample_size": 0}
+        self._regime_at = now
+        return self._regime
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         signal = kwargs["signal"]
@@ -190,6 +216,24 @@ class RiskCheckSkill(SkillBase):
             if depth_rejection:
                 return self._reject(signal, depth_rejection)
 
+        # Regime gate — refuse BUYs on broadly-red days, SELLs on
+        # broadly-green days. Computed once per heartbeat via a
+        # cross-sectional scan of today's vs yesterday's daily closes.
+        regime_size_multiplier = 1.0
+        if cfg.regime_gate.enabled:
+            regime = await self._get_live_regime()
+            regime_size_multiplier = self._apply_regime_gate(
+                signal, regime, cfg.regime_gate,
+            )
+            if regime_size_multiplier == 0.0:
+                return self._reject(
+                    signal,
+                    f"Regime gate: breadth={regime['breadth']:.2f} opposes "
+                    f"{signal.get('signal_type', 'BUY')} "
+                    f"(thresholds: BUY≥{cfg.regime_gate.min_breadth_for_buy}, "
+                    f"SELL≤{cfg.regime_gate.max_breadth_for_sell})",
+                )
+
         # Mandatory stop-loss
         if cfg.mandatory_stop_loss and not signal.get("stop_loss_price"):
             return self._reject(signal, "No stop-loss set (mandatory)")
@@ -315,6 +359,30 @@ class RiskCheckSkill(SkillBase):
                 multiplier,
             )
 
+        # Regime-aware up-sizing in strongly-favourable regimes.
+        # Applied after conviction sizing, capped by max_single_stock_pct.
+        if cfg.regime_gate.enabled and regime_size_multiplier != 1.0:
+            scaled = int(position_size * regime_size_multiplier)
+            position_size = min(scaled, max_by_exposure)
+            logger.info(
+                "risk-check: regime size multiplier %.2f for %s -> %d",
+                regime_size_multiplier, signal["symbol"], position_size,
+            )
+
+        # Liquidity gate — refuse to be more than max_pct_of_top5 of
+        # the order book's near-the-touch side. Stops you eating your
+        # own slippage on thinly traded names.
+        if (
+            cfg.liquidity_gate.enabled
+            and self.ctx.config.market_data.kite_data_enabled
+            and position_size > 0
+        ):
+            liq_rejection = await self._check_liquidity_gate(
+                signal, position_size, cfg.liquidity_gate,
+            )
+            if liq_rejection:
+                return self._reject(signal, liq_rejection)
+
         if position_size <= 0:
             return self._reject(signal, "Computed position size is 0")
 
@@ -398,6 +466,71 @@ class RiskCheckSkill(SkillBase):
             cfg.confidence_ceiling - cfg.confidence_floor
         )
         return cfg.min_multiplier + ratio * (cfg.max_multiplier - cfg.min_multiplier)
+
+    def _apply_regime_gate(
+        self,
+        signal: dict[str, Any],
+        regime: dict[str, float],
+        cfg: Any,
+    ) -> float:
+        """Return position-size multiplier to apply, or 0.0 to reject.
+
+        - Reject (return 0.0) when regime opposes direction.
+        - Return >1.0 when regime strongly favours direction (size up).
+        - Else return 1.0 (no change).
+
+        Small sample sizes (<10 symbols with two consecutive daily
+        bars) fall back to neutral — we don't have a reliable signal.
+        """
+        if regime.get("sample_size", 0) < 10:
+            return 1.0
+        breadth = regime["breadth"]
+        signal_type = signal.get("signal_type", "BUY")
+        if signal_type == "BUY":
+            if breadth < cfg.min_breadth_for_buy:
+                return 0.0
+            if breadth >= cfg.bullish_breadth_threshold:
+                return cfg.bullish_size_multiplier
+            return 1.0
+        if signal_type == "SELL":
+            if breadth > cfg.max_breadth_for_sell:
+                return 0.0
+            if breadth <= cfg.bearish_breadth_threshold:
+                return cfg.bearish_size_multiplier
+            return 1.0
+        return 1.0
+
+    async def _check_liquidity_gate(
+        self,
+        signal: dict[str, Any],
+        position_size: int,
+        cfg: Any,
+    ) -> str | None:
+        """Reject when position_size would consume more than
+        max_pct_of_top5 of the relevant side of the order book.
+        Quote fetch failure is non-blocking (returns None).
+        """
+        try:
+            quote = await self.ctx.market_data.get_quote(signal["symbol"])
+        except Exception:
+            logger.debug(
+                "risk-check: liquidity-gate quote fetch failed for %s",
+                signal["symbol"], exc_info=True,
+            )
+            return None
+        signal_type = signal.get("signal_type", "BUY")
+        # BUY consumes the ask (top-5 sell), SELL consumes the bid.
+        side_qty_key = "top5_sell_qty" if signal_type == "BUY" else "top5_buy_qty"
+        side_qty = int(quote.get(side_qty_key) or 0)
+        if side_qty <= 0:
+            return None  # No depth available — let it through.
+        if position_size > side_qty * cfg.max_pct_of_top5:
+            return (
+                f"Liquidity gate: size {position_size} > "
+                f"{cfg.max_pct_of_top5:.0%} of top-5 {signal_type} depth "
+                f"({side_qty})"
+            )
+        return None
 
     async def _check_depth_gate(
         self,
