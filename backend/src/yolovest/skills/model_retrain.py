@@ -500,6 +500,11 @@ class ModelRetrainSkill(SkillBase):
                     "path_lows": path_lows,
                     "target_pct": float(atr_pct * target_atr_mult),
                     "sl_pct": float(atr_pct * sl_atr_mult),
+                    # YYYY-MM-DD — walk_forward_backtest aggregates by
+                    # this to compute daily-equity-curve Sharpe instead
+                    # of the per-trade approximation. Several trades on
+                    # the same day get netted before the Sharpe stdev.
+                    "entry_date": _sample_date,
                 })
 
         return X, y, feature_names, sample_weights, bars_meta

@@ -586,6 +586,7 @@ class XGBoostSignalModel(MLBase):
                             path_lows=list(meta.get("path_lows") or []),
                             target_pct=float(meta.get("target_pct") or 0.0),
                             sl_pct=float(meta.get("sl_pct") or 0.0),
+                            entry_date=str(meta.get("entry_date") or ""),
                         ))
                 else:
                     # Legacy synthetic payoff — kept for backwards compat

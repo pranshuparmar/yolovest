@@ -59,6 +59,11 @@ class BarMeta:
     first SL or target hit (path-aware), matching the geometry the
     path-aware label uses. Without them, the simulator falls back to
     close-to-close exit at exit_close.
+
+    entry_date (YYYY-MM-DD) enables daily-aggregated Sharpe — without
+    it, per-trade Sharpe massively over-inflates on high-frequency
+    strategies because each trade is annualised as if it were a
+    full day's return.
     """
     symbol: str
     entry_close: float
@@ -67,6 +72,7 @@ class BarMeta:
     path_lows: list[float] = field(default_factory=list)
     target_pct: float = 0.0
     sl_pct: float = 0.0
+    entry_date: str = ""
 
 
 @dataclass
@@ -200,6 +206,14 @@ def run_walk_forward_backtest(
     peak = capital
     max_dd = 0.0
     returns: list[float] = []
+    # Daily aggregation for honest Sharpe. Per-trade Sharpe with
+    # annualization_factor=252 inflates massively on high-frequency
+    # strategies (5 intraday trades/day × 252 days → annualization
+    # factor should be sqrt(5×252) not sqrt(252), but the standard
+    # quant convention is to compute returns on a DAILY equity curve
+    # and annualise by sqrt(252)). When entry_date is available on
+    # the bars_meta we use that.
+    daily_pnl: dict[str, float] = {}
     wins = 0
     losses = 0
     gross_profit = 0.0
@@ -258,9 +272,19 @@ def run_walk_forward_backtest(
             capital = peak
             break
         peak = max(peak, capital)
-        dd = (peak - capital) / peak if peak > 0 else 0.0
+        # Drawdown normalised by INITIAL capital, not peak. With a
+        # high-win-rate model + fixed-base sizing the peak inflates
+        # over thousands of trades, making per-loss drawdowns
+        # microscopic as a fraction of peak. Normalising by initial
+        # capital reports the actual % of starting capital at risk
+        # in the worst drawdown — the number you'd feel in live
+        # trading even after months of cumulative gains.
+        dd = (peak - capital) / cfg.initial_capital
         if dd > max_dd:
             max_dd = dd
+
+        if meta.entry_date:
+            daily_pnl[meta.entry_date] = daily_pnl.get(meta.entry_date, 0.0) + net
 
         if net > 0:
             wins += 1
@@ -276,7 +300,17 @@ def run_walk_forward_backtest(
         else (math.inf if gross_profit > 0 else 0.0)
     )
 
-    if len(returns) > 1:
+    # Sharpe: prefer the daily-aggregated equity-curve series (standard
+    # quant convention; annualises cleanly via sqrt(252)). Fall back to
+    # per-trade returns × sqrt(annualization_factor) when entry_date
+    # isn't available on the metadata (older callers / unit tests).
+    if len(daily_pnl) > 1:
+        daily_rets = [n / cfg.initial_capital for n in daily_pnl.values()]
+        mean = sum(daily_rets) / len(daily_rets)
+        var = sum((r - mean) ** 2 for r in daily_rets) / (len(daily_rets) - 1)
+        stdev = math.sqrt(var) if var > 0 else 0.0
+        sharpe = (mean / stdev) * math.sqrt(252) if stdev > 0 else 0.0
+    elif len(returns) > 1:
         mean = sum(returns) / len(returns)
         var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
         stdev = math.sqrt(var) if var > 0 else 0.0
