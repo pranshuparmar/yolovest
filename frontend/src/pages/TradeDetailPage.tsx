@@ -251,9 +251,31 @@ export function TradeDetailPage() {
           </div>
           <div>
             <p className="text-xs text-gray-500">GTT (OCO)</p>
-            <p className="font-mono text-xs">
-              {data.gtt_id || <span className="text-gray-600">—</span>}
-            </p>
+            {data.gtt_id ? (
+              <div className="flex items-center gap-2">
+                <p className="font-mono text-xs">{data.gtt_id}</p>
+                {(() => {
+                  const s = (data.gtt_status || "").toLowerCase();
+                  const cls =
+                    s === "active" || s === "scheduled"
+                      ? "bg-emerald-900/40 text-emerald-400"
+                      : s === "triggered"
+                        ? "bg-blue-900/40 text-blue-400"
+                        : s === "rejected" || s === "missing"
+                          ? "bg-red-900/40 text-red-400"
+                          : s === "cancelled" || s === "expired" || s === "deleted" || s === "disabled"
+                            ? "bg-amber-900/40 text-amber-400"
+                            : "bg-gray-700/50 text-gray-400";
+                  return (
+                    <span className={clsx("text-[10px] px-1.5 py-0.5 rounded font-medium", cls)}>
+                      {s || "unknown"}
+                    </span>
+                  );
+                })()}
+              </div>
+            ) : (
+              <p className="font-mono text-xs"><span className="text-gray-600">—</span></p>
+            )}
           </div>
         </div>
       </Section>

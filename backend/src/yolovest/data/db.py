@@ -2257,6 +2257,22 @@ class Database:
         )
         await self.conn.commit()
 
+    async def set_trade_gtt_status(
+        self, trade_id: str, status: str | None,
+    ) -> None:
+        """Update the cached GTT lifecycle status (active / triggered /
+        cancelled / rejected / expired / disabled / deleted).
+
+        Used by position-monitor's reconciler to detect GTTs that no
+        longer protect the position so client-side detection can take
+        over.
+        """
+        await self.conn.execute(
+            "UPDATE trades SET gtt_status = ? WHERE trade_id = ?",
+            (status, trade_id),
+        )
+        await self.conn.commit()
+
     async def set_trade_target_order_id(
         self, trade_id: str, target_order_id: str | None,
     ) -> None:

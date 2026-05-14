@@ -44,6 +44,14 @@ class PositionMonitorSkill(SkillBase):
         local_positions = await self.ctx.db.get_open_positions()
         broker_positions = await self.ctx.broker.get_positions()
 
+        # Reconcile gtt_id / gtt_status against the broker's GTT list.
+        # Cleared GTTs (user-cancelled on Kite web, rejected at trigger
+        # time, expired, etc.) get their gtt_id wiped from the local row
+        # so the downstream loop falls back to client-side detection
+        # rather than assuming the broker is still protecting the
+        # position. Mutates local_positions in place.
+        await self._reconcile_gtts(local_positions)
+
         discrepancies = self._reconcile(local_positions, broker_positions)
 
         # Recover ghost positions: local DB says open, broker says closed.
@@ -721,6 +729,74 @@ class PositionMonitorSkill(SkillBase):
             else "broker_trades_partial"
         )
         return round(vwap, 2), source
+
+    # Kite GTT lifecycle states that mean "still protecting the position":
+    _GTT_LIVE_STATES = {"active", "scheduled"}
+    # States that mean "no longer protecting — fall back to client side":
+    _GTT_DEAD_STATES = {
+        "triggered", "cancelled", "rejected", "expired", "disabled", "deleted",
+    }
+
+    async def _reconcile_gtts(self, positions: list[dict[str, Any]]) -> None:
+        """For each open position with a `gtt_id`, look up the GTT at the
+        broker and update `gtt_status`. Wipe `gtt_id` when the GTT is no
+        longer in a state that protects the position so the rest of the
+        monitor loop falls back to client-side detection.
+
+        Mutates `positions` in place so downstream checks see the
+        post-reconcile state without another DB read.
+        """
+        attached = [p for p in positions if p.get("gtt_id")]
+        if not attached:
+            return
+        try:
+            gtts = await self.ctx.broker.get_gtts()
+        except Exception as e:
+            logger.debug("GTT reconcile: get_gtts failed: %s", e)
+            return
+
+        # Index by trigger_id for O(1) lookup
+        by_id: dict[int, dict[str, Any]] = {}
+        for g in gtts or []:
+            try:
+                by_id[int(g.get("id") or g.get("trigger_id") or 0)] = g
+            except (TypeError, ValueError):
+                continue
+
+        for pos in attached:
+            try:
+                gid = int(pos["gtt_id"])
+            except (TypeError, ValueError):
+                continue
+            g = by_id.get(gid)
+            if g is None:
+                # GTT vanished entirely — broker forgot it or it was deleted
+                # outside our system. Clear locally so client-side takes over.
+                status = "missing"
+                clear_id = True
+            else:
+                status = (g.get("status") or "").lower() or "unknown"
+                clear_id = status in self._GTT_DEAD_STATES
+
+            # Always cache the latest status so the UI badge stays fresh
+            if pos.get("gtt_status") != status:
+                try:
+                    await self.ctx.db.set_trade_gtt_status(pos["trade_id"], status)
+                except Exception:
+                    logger.debug("set_trade_gtt_status failed", exc_info=True)
+                pos["gtt_status"] = status
+
+            if clear_id:
+                logger.warning(
+                    "GTT reconcile: trade %s GTT %d now '%s' — clearing "
+                    "gtt_id so client-side exit detection resumes",
+                    pos["trade_id"], gid, status,
+                )
+                try:
+                    await self.ctx.db.set_trade_gtt(pos["trade_id"], None)
+                except Exception:
+                    logger.debug("set_trade_gtt(None) failed", exc_info=True)
+                pos["gtt_id"] = None
 
     async def _enforce_mis_oco(self, pos: dict[str, Any]) -> None:
         """Keep MIS OCO honest: when one of the two broker-side exit orders

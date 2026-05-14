@@ -51,6 +51,7 @@ export interface Trade {
   order_id: string | null;
   sl_order_id: string | null;
   gtt_id: number | null;
+  gtt_status: string | null;
   origin: "system" | "adopted" | null;
   product: "MIS" | "CNC";
   mode: "paper" | "live";

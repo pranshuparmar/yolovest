@@ -98,6 +98,117 @@ class TestPositionMonitoring:
         assert "RELIANCE" not in result.data["targets_hit"]
 
 
+class TestGttReconciler:
+    """When a CNC trade has an attached GTT, position-monitor must wipe
+    `gtt_id` if the GTT is no longer protecting the position (cancelled
+    on Kite web, rejected at trigger, expired, or vanished entirely).
+    Otherwise client-side detection stays disabled and the position is
+    unprotected."""
+
+    @pytest.fixture
+    def cnc_with_gtt(self):
+        return {
+            "id": 1,
+            "trade_id": "T-cnc-001",
+            "symbol": "RELIANCE",
+            "signal_type": "BUY",
+            "entry_price": 2500.0,
+            "fill_price": 2500.0,
+            "stop_loss_price": 2450.0,
+            "target_price": 2600.0,
+            "quantity": 10,
+            "product": "CNC",
+            "gtt_id": 42,
+            "gtt_status": "active",
+            "mode": "live",
+        }
+
+    async def test_active_gtt_keeps_gtt_id(self, monitor_skill, cnc_with_gtt):
+        monitor_skill.ctx.broker.get_gtts = AsyncMock(return_value=[
+            {"id": 42, "status": "active"},
+        ])
+        await monitor_skill._reconcile_gtts([cnc_with_gtt])
+        assert cnc_with_gtt["gtt_id"] == 42
+        assert cnc_with_gtt["gtt_status"] == "active"
+
+    async def test_cancelled_gtt_clears_gtt_id(self, monitor_skill, cnc_with_gtt):
+        monitor_skill.ctx.broker.get_gtts = AsyncMock(return_value=[
+            {"id": 42, "status": "cancelled"},
+        ])
+        await monitor_skill._reconcile_gtts([cnc_with_gtt])
+        assert cnc_with_gtt["gtt_id"] is None
+        assert cnc_with_gtt["gtt_status"] == "cancelled"
+        monitor_skill.ctx.db.set_trade_gtt.assert_awaited_with("T-cnc-001", None)
+
+    async def test_missing_gtt_clears_gtt_id(self, monitor_skill, cnc_with_gtt):
+        """GTT vanished from broker entirely → fall back to client side."""
+        monitor_skill.ctx.broker.get_gtts = AsyncMock(return_value=[])
+        await monitor_skill._reconcile_gtts([cnc_with_gtt])
+        assert cnc_with_gtt["gtt_id"] is None
+        assert cnc_with_gtt["gtt_status"] == "missing"
+
+    async def test_triggered_gtt_clears_gtt_id(self, monitor_skill, cnc_with_gtt):
+        """GTT fired (and presumably filled) — local row will be reconciled
+        by ghost recovery, but gtt_id must clear so the OCO check below
+        doesn't try to protect a closed position."""
+        monitor_skill.ctx.broker.get_gtts = AsyncMock(return_value=[
+            {"id": 42, "status": "triggered"},
+        ])
+        await monitor_skill._reconcile_gtts([cnc_with_gtt])
+        assert cnc_with_gtt["gtt_id"] is None
+
+    async def test_broker_error_keeps_state_unchanged(self, monitor_skill, cnc_with_gtt):
+        """Network blip — don't pessimistically wipe gtt_id."""
+        monitor_skill.ctx.broker.get_gtts = AsyncMock(side_effect=RuntimeError("kite down"))
+        await monitor_skill._reconcile_gtts([cnc_with_gtt])
+        assert cnc_with_gtt["gtt_id"] == 42
+        assert cnc_with_gtt["gtt_status"] == "active"
+
+
+class TestGttValidation:
+    """Pre-flight checks on GTT params catch bugs before we waste API calls."""
+
+    def test_long_exit_sl_above_ltp_rejected(self):
+        from yolovest.skills.trade_execute import TradeExecuteSkill
+        err = TradeExecuteSkill._validate_gtt_params(
+            exit_side="SELL", sl_trig=2510.0, tgt_trig=2600.0,
+            last_price=2500.0, quantity=10,
+        )
+        assert err is not None and "SL trigger" in err
+
+    def test_long_exit_target_below_ltp_rejected(self):
+        from yolovest.skills.trade_execute import TradeExecuteSkill
+        err = TradeExecuteSkill._validate_gtt_params(
+            exit_side="SELL", sl_trig=2450.0, tgt_trig=2490.0,
+            last_price=2500.0, quantity=10,
+        )
+        assert err is not None and "target trigger" in err
+
+    def test_valid_long_exit_passes(self):
+        from yolovest.skills.trade_execute import TradeExecuteSkill
+        err = TradeExecuteSkill._validate_gtt_params(
+            exit_side="SELL", sl_trig=2450.0, tgt_trig=2600.0,
+            last_price=2500.0, quantity=10,
+        )
+        assert err is None
+
+    def test_zero_quantity_rejected(self):
+        from yolovest.skills.trade_execute import TradeExecuteSkill
+        err = TradeExecuteSkill._validate_gtt_params(
+            exit_side="SELL", sl_trig=2450.0, tgt_trig=2600.0,
+            last_price=2500.0, quantity=0,
+        )
+        assert err is not None and "quantity" in err
+
+    def test_crossed_legs_rejected(self):
+        from yolovest.skills.trade_execute import TradeExecuteSkill
+        err = TradeExecuteSkill._validate_gtt_params(
+            exit_side="SELL", sl_trig=2500.0, tgt_trig=2500.0,
+            last_price=2500.0, quantity=10,
+        )
+        assert err is not None
+
+
 class TestMisOcoEnforcement:
     """When a MIS trade has both a target LIMIT and an SL at the broker,
     position-monitor should let the broker enforce exits and only cancel

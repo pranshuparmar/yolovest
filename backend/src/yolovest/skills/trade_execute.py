@@ -690,6 +690,42 @@ class TradeExecuteSkill(SkillBase):
             data={"trade": trade, "mode": "live", "reconciled": True},
         )
 
+    # Zerodha caps active GTTs at 50 per account. When we're within
+    # this margin, skip new GTT placement and fall back to client-side
+    # detection so the position still gets exit coverage.
+    _GTT_SLOT_WARN_THRESHOLD = 45
+
+    @staticmethod
+    def _validate_gtt_params(
+        exit_side: str,
+        sl_trig: float,
+        tgt_trig: float,
+        last_price: float,
+        quantity: int,
+    ) -> str | None:
+        """Pre-flight validation for an OCO GTT. Returns an error message
+        if the parameters are nonsense, None if they're OK. Catches the
+        common bugs (SL on wrong side, target on wrong side, crossed
+        legs, zero qty) before we waste an API call on something Kite
+        will reject anyway."""
+        if quantity <= 0:
+            return "quantity must be positive"
+        if sl_trig <= 0 or tgt_trig <= 0 or last_price <= 0:
+            return "prices must be positive"
+        if exit_side == "SELL":  # closing a long
+            if sl_trig >= last_price:
+                return f"long-exit SL trigger {sl_trig:.2f} must be < LTP {last_price:.2f}"
+            if tgt_trig <= last_price:
+                return f"long-exit target trigger {tgt_trig:.2f} must be > LTP {last_price:.2f}"
+        else:  # closing a short
+            if sl_trig <= last_price:
+                return f"short-exit SL trigger {sl_trig:.2f} must be > LTP {last_price:.2f}"
+            if tgt_trig >= last_price:
+                return f"short-exit target trigger {tgt_trig:.2f} must be < LTP {last_price:.2f}"
+        if sl_trig == tgt_trig:
+            return "SL and target triggers cannot be equal"
+        return None
+
     async def _attach_oco_gtt(self, trade: dict[str, Any]) -> None:
         """Place a two-leg OCO GTT (stoploss + target) for a freshly-filled
         CNC trade. Records the broker's trigger_id on the trade row.
@@ -709,13 +745,45 @@ class TradeExecuteSkill(SkillBase):
         sl_trig = float(trade["stop_loss_price"])
         tgt_trig = float(trade["target_price"])
         last_price = float(trade.get("fill_price") or trade["entry_price"])
+        qty = int(trade["quantity"])
+
+        # Pre-flight validation — fail fast on obvious nonsense rather
+        # than firing an API call we know Kite will reject.
+        err = self._validate_gtt_params(exit_side, sl_trig, tgt_trig, last_price, qty)
+        if err:
+            logger.warning(
+                "trade-execute: GTT params invalid for %s: %s — "
+                "skipping GTT, client-side detection active",
+                trade.get("trade_id"), err,
+            )
+            return
+
+        # Slot-cap check — Zerodha allows ≤50 active GTTs per account.
+        # When near the cap, skip placement (client-side exit takes over)
+        # and notify so the user can clean up stale GTTs.
+        if hasattr(broker, "get_gtts"):
+            try:
+                gtts = await broker.get_gtts()
+                active = sum(
+                    1 for g in (gtts or [])
+                    if (g.get("status") or "").lower() == "active"
+                )
+                if active >= self._GTT_SLOT_WARN_THRESHOLD:
+                    logger.warning(
+                        "trade-execute: %d active GTTs at broker (cap 50) — "
+                        "skipping new GTT for %s; client-side exit detection active",
+                        active, trade.get("trade_id"),
+                    )
+                    return
+            except Exception:
+                logger.debug("Slot-cap probe failed; proceeding with GTT", exc_info=True)
 
         # Limit price for each leg sits past the trigger so the resulting
         # LIMIT order fills reliably once the trigger fires.
         buffer = 0.005  # 0.5%
         if exit_side == "SELL":  # closing a long
             sl_limit = sl_trig * (1 - buffer)
-            tgt_limit = tgt_trig * (1 - buffer * 0.5)  # tighter on target side
+            tgt_limit = tgt_trig * (1 - buffer * 0.5)
         else:  # closing a short
             sl_limit = sl_trig * (1 + buffer)
             tgt_limit = tgt_trig * (1 + buffer * 0.5)
@@ -724,7 +792,7 @@ class TradeExecuteSkill(SkillBase):
             gtt_id = await broker.place_oco_gtt(
                 symbol=symbol,
                 side=exit_side,
-                quantity=int(trade["quantity"]),
+                quantity=qty,
                 stoploss_trigger=sl_trig,
                 stoploss_limit=sl_limit,
                 target_trigger=tgt_trig,
