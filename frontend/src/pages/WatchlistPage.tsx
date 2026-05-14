@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { SectorMap } from "../components/SectorMap";
+import { Pagination } from "../components/Pagination";
 import clsx from "clsx";
 import {
   useWatchlist,
@@ -32,6 +33,16 @@ export function WatchlistPage() {
   const [newNotes, setNewNotes] = useState("");
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"user" | "algo">("user");
+  const [userPage, setUserPage] = useState(0);
+  const [algoPage, setAlgoPage] = useState(0);
+  const pageSize = 20;
+  const pagedUser = (userWatchlist ?? []).slice(
+    userPage * pageSize, (userPage + 1) * pageSize,
+  );
+  const pagedAlgo = (algoWatchlist ?? []).slice(
+    algoPage * pageSize, (algoPage + 1) * pageSize,
+  );
+  const algoOffset = algoPage * pageSize;
 
   const handleAdd = () => {
     const sym = newSymbol.trim().toUpperCase();
@@ -267,7 +278,7 @@ export function WatchlistPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {userWatchlist.map((item) => (
+                  {pagedUser.map((item) => (
                     <tr
                       key={item.symbol}
                       className="border-b border-gray-800/50 hover:bg-gray-800/30"
@@ -317,6 +328,12 @@ export function WatchlistPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination
+                total={userWatchlist.length}
+                page={userPage}
+                pageSize={pageSize}
+                onPageChange={setUserPage}
+              />
             </div>
           )}
         </div>
@@ -358,7 +375,7 @@ export function WatchlistPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {algoWatchlist.map((item, idx) => {
+                  {pagedAlgo.map((item, idx) => {
                     const inUser = (userWatchlist ?? []).some((u) => u.symbol === item.symbol);
                     return (
                       <tr
@@ -369,7 +386,7 @@ export function WatchlistPage() {
                         )}
                       >
                         <td className="py-2 pr-3 text-gray-600 text-xs">
-                          {idx + 1}
+                          {algoOffset + idx + 1}
                         </td>
                         <td className="py-2 pr-3 font-medium">
                           <span className="text-blue-400">{item.symbol}</span>
@@ -407,6 +424,12 @@ export function WatchlistPage() {
                   })}
                 </tbody>
               </table>
+              <Pagination
+                total={algoWatchlist.length}
+                page={algoPage}
+                pageSize={pageSize}
+                onPageChange={setAlgoPage}
+              />
             </div>
           )}
         </div>

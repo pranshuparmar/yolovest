@@ -8,6 +8,7 @@ import {
   useRunSkill,
 } from "../hooks/queries";
 import { ScoreboardTable } from "../components/ScoreboardTable";
+import { Pagination } from "../components/Pagination";
 import clsx from "clsx";
 import type { PredictionDetail } from "../types/api";
 
@@ -128,44 +129,6 @@ function PredictionRow({ p }: { p: PredictionDetail }) {
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function Pagination({
-  total,
-  page,
-  pageSize,
-  onPageChange,
-}: {
-  total: number;
-  page: number;
-  pageSize: number;
-  onPageChange: (p: number) => void;
-}) {
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  if (totalPages <= 1) return null;
-  return (
-    <div className="flex items-center justify-between pt-3 border-t border-gray-800">
-      <span className="text-xs text-gray-500">
-        {total} prediction{total !== 1 ? "s" : ""} | Page {page + 1} of {totalPages}
-      </span>
-      <div className="flex gap-1">
-        <button
-          onClick={() => onPageChange(page - 1)}
-          disabled={page === 0}
-          className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-300 disabled:opacity-30 hover:bg-gray-700 transition-colors"
-        >
-          Prev
-        </button>
-        <button
-          onClick={() => onPageChange(page + 1)}
-          disabled={page >= totalPages - 1}
-          className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-300 disabled:opacity-30 hover:bg-gray-700 transition-colors"
-        >
-          Next
-        </button>
-      </div>
     </div>
   );
 }

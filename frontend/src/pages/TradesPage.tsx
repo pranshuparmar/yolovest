@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { TradesTable } from "../components/TradesTable";
 import { CSVExportButton } from "../components/CSVExportButton";
+import { Pagination } from "../components/Pagination";
 import { useTrades } from "../hooks/queries";
 
 export function TradesPage() {
@@ -20,7 +21,6 @@ export function TradesPage() {
   // Client-side pagination (server returns up to `limit` rows)
   const totalRows = data?.length ?? 0;
   const pageSize = 20;
-  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
   const paged = data?.slice(page * pageSize, (page + 1) * pageSize) ?? [];
 
   // Reset page when filters change
@@ -87,33 +87,12 @@ export function TradesPage() {
           <TradesTable trades={paged} />
         )}
 
-        {/* Pagination */}
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-800">
-            <span className="text-xs text-gray-500">
-              Showing {page * pageSize + 1}–{Math.min((page + 1) * pageSize, totalRows)} of {totalRows}
-            </span>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setPage(Math.max(0, page - 1))}
-                disabled={page === 0}
-                className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                Prev
-              </button>
-              <span className="text-xs text-gray-400">
-                {page + 1} / {totalPages}
-              </span>
-              <button
-                onClick={() => setPage(Math.min(totalPages - 1, page + 1))}
-                disabled={page >= totalPages - 1}
-                className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                Next
-              </button>
-            </div>
-          </div>
-        )}
+        <Pagination
+          total={totalRows}
+          page={page}
+          pageSize={pageSize}
+          onPageChange={setPage}
+        />
       </div>
     </div>
   );
