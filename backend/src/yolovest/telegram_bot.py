@@ -806,6 +806,15 @@ class TelegramBot:
         if result.success:
             trade = result.data.get("trade", {}) if result.data else {}
             exec_mode = result.data.get("mode", mode) if result.data else mode
+            # Mark the originating signal as executed so Today's
+            # Recommendations stops showing it as AWAITING APPROVAL.
+            try:
+                await self._ctx.db.update_signal_disposition(
+                    signal.get("symbol", ""), "executed",
+                    f"trade_id={trade.get('trade_id') or trade.get('order_id')}",
+                )
+            except Exception:
+                logger.debug("Failed to mark signal executed", exc_info=True)
             msg = (
                 f"<b>Executed ({exec_mode.upper()})</b>: "
                 f"{trade.get('signal_type')} <b>{trade.get('symbol')}</b> "

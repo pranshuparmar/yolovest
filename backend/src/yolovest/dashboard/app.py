@@ -3064,6 +3064,17 @@ def create_app(ctx: AppContext) -> FastAPI:
                 trade_id, trade.get("signal_type"), trade.get("symbol"),
                 exec_mode, trade.get("order_id", "N/A"), trade.get("trade_id", "N/A"),
             )
+            # Mark the originating signal as executed so Today's
+            # Recommendations stops showing it as AWAITING APPROVAL.
+            # Auto-mode path does this in orchestrator._run_signal; the
+            # manual approve flow has to do it here.
+            try:
+                await ctx.db.update_signal_disposition(
+                    signal.get("symbol", ""), "executed",
+                    f"trade_id={trade.get('trade_id') or trade.get('order_id')}",
+                )
+            except Exception:
+                logger.debug("Failed to mark signal executed", exc_info=True)
             return {"success": True, "trade": trade, "mode": exec_mode}
         logger.error(
             "Trade #%d execution failed: %s", trade_id, result.error,
