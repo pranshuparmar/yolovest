@@ -77,6 +77,16 @@ class SquareOffSkill(SkillBase):
         force = kwargs.get("force", False)  # True when called from kill-switch
         positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
 
+        # On kill-switch (force=True), also delete any orphan GTTs at the
+        # broker — GTTs that don't reference any currently-open local
+        # trade. These can leak when a position was closed outside the
+        # system (e.g. manual exit on Kite web) and the GTT was never
+        # cleaned up. Letting them survive a kill switch defeats the
+        # point — the broker would still fire the order on a price hit.
+        orphan_gtts_deleted: list[int] = []
+        if force:
+            orphan_gtts_deleted = await self._delete_orphan_gtts(positions)
+
         # Filter to MIS (intraday) only, unless force=True (kill switch closes everything)
         if not force:
             positions = [p for p in positions if p["product"] == "MIS"]
@@ -187,12 +197,65 @@ class SquareOffSkill(SkillBase):
                 "failures": all_failures,
                 "force": force,
                 "attempts": attempt,
+                "orphan_gtts_deleted": orphan_gtts_deleted,
             },
             error=(
                 f"{len(all_failures)} positions failed to close after {attempt} attempts"
                 if all_failures else None
             ),
         )
+
+    async def _delete_orphan_gtts(
+        self, open_positions: list[dict[str, Any]],
+    ) -> list[int]:
+        """Delete any broker-side GTTs that aren't bound to a currently-
+        open local trade. Used by kill-switch (`force=True`) so a price
+        hit doesn't fire a stale GTT after we've market-exited everything.
+
+        Returns the list of deleted trigger_ids (purely for the result
+        payload / notify summary).
+        """
+        broker = self.ctx.broker
+        if not (hasattr(broker, "get_gtts") and hasattr(broker, "delete_gtt")):
+            return []
+
+        try:
+            gtts = await broker.get_gtts()
+        except Exception as e:
+            logger.warning("orphan-GTT sweep: get_gtts failed: %s", e)
+            return []
+
+        live_gtt_ids = {
+            int(p["gtt_id"]) for p in open_positions
+            if p.get("gtt_id")
+        }
+
+        deleted: list[int] = []
+        for g in gtts or []:
+            try:
+                gid = int(g.get("id") or g.get("trigger_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not gid or gid in live_gtt_ids:
+                continue
+            status = (g.get("status") or "").lower()
+            # Only delete things that are still live at the broker; let
+            # already-triggered / cancelled / expired entries age out
+            # naturally.
+            if status not in {"active", "scheduled"}:
+                continue
+            try:
+                await broker.delete_gtt(gid)
+                deleted.append(gid)
+                logger.info(
+                    "orphan-GTT sweep: deleted GTT %d (not bound to an open trade)",
+                    gid,
+                )
+            except Exception as e:
+                logger.warning("orphan-GTT sweep: delete %d failed: %s", gid, e)
+        if deleted:
+            logger.info("orphan-GTT sweep: removed %d stale GTTs", len(deleted))
+        return deleted
 
     async def _close_single_position(self, pos: dict[str, Any]) -> dict[str, Any]:
         """Close a single position. Raises on failure."""
@@ -208,6 +271,19 @@ class SquareOffSkill(SkillBase):
                 logger.warning(
                     "square-off: failed to cancel %s order for %s: %s",
                     label, pos["symbol"], e,
+                )
+
+        # Delete any attached GTT (CNC only — MIS positions never have one).
+        # If left alive, a GTT can fire after we've market-exited and try
+        # to sell shares we no longer own.
+        gtt_id = pos.get("gtt_id")
+        if gtt_id and hasattr(self.ctx.broker, "delete_gtt"):
+            try:
+                await self.ctx.broker.delete_gtt(int(gtt_id))
+            except Exception as e:
+                logger.warning(
+                    "square-off: failed to delete GTT %s for %s: %s",
+                    gtt_id, pos["symbol"], e,
                 )
 
         # Place market exit order
