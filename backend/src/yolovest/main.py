@@ -512,14 +512,44 @@ async def async_main(args: argparse.Namespace) -> None:
                             kite_provider = p
                             break
                 if kite_provider is not None:
+                    # Bridge KiteTicker's on_order_update frames into the
+                    # same business logic the HTTP postback handler runs.
+                    # WebSocket is the primary push channel — more reliable
+                    # than HTTP postbacks (which Kite docs explicitly say
+                    # are best-effort with no retry). Postback handler
+                    # stays wired as a backup; ghost recovery is the
+                    # last-resort 15-min reconciler. Idempotent: if both
+                    # channels deliver the same event, the second hit is
+                    # a no-op (broker treats already-cancelled orders as
+                    # no-op, and the DB updates are themselves idempotent).
+                    from yolovest.dashboard.app import _apply_order_postback
+
+                    async def _ticker_order_update(order: dict) -> None:
+                        order_id = str(order.get("order_id") or "")
+                        status = (order.get("status") or "").upper()
+                        if not order_id or status not in (
+                            "COMPLETE", "CANCELLED", "REJECTED",
+                        ):
+                            return
+                        try:
+                            await _apply_order_postback(ctx, order_id, status, order)
+                        except Exception:
+                            logger.exception(
+                                "ticker order_update handler failed for %s",
+                                order_id,
+                            )
+
                     ticker = KiteTickerClient(
                         api_key=ctx.config.broker.api_key.get_secret_value(),
                         access_token=ctx.broker._access_token,  # noqa: SLF001
                         kite_data_provider=kite_provider,
+                        order_update_callback=_ticker_order_update,
                     )
                     await ticker.start()
                     ctx.ticker = ticker
-                    logger.info("KiteTicker started — sub-second LTP cache active")
+                    logger.info(
+                        "KiteTicker started — sub-second LTP cache + real-time order updates active",
+                    )
                 else:
                     logger.warning(
                         "kite_websocket_enabled but no KiteDataProvider in ingester chain",

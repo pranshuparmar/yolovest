@@ -76,7 +76,9 @@ YoloVest is an AI-driven Indian stock trading platform. It uses Google Gemini fo
 
 ### KiteTicker WebSocket
 
-Optional sub-second LTP feed (opt-in via `market_data.kite_websocket_enabled`). When enabled and the broker is authenticated, `main.async_main` instantiates `broker.kite_ticker.KiteTickerClient` and attaches it to `ctx.ticker`. Position-monitor subscribes to every open-position symbol each cycle (idempotent), and `_get_ltp_with_retry` reads from the cache first (max 5s freshness) before falling back to REST. Mode is `MODE_LTP` — the 8-byte payload is enough for target/SL; richer modes (`MODE_QUOTE` / `MODE_FULL`) are available on the wrapper but not consumed yet. Order-update text frames are *not* bridged — HTTP postbacks with checksum verification already cover that path.
+Optional sub-second LTP feed (opt-in via `market_data.kite_websocket_enabled`). When enabled and the broker is authenticated, `main.async_main` instantiates `broker.kite_ticker.KiteTickerClient` and attaches it to `ctx.ticker`. Position-monitor subscribes to every open-position symbol each cycle (idempotent), and `_get_ltp_with_retry` reads from the cache first (max 5s freshness) before falling back to REST. Mode is `MODE_LTP` — the 8-byte payload is enough for target/SL; richer modes (`MODE_QUOTE` / `MODE_FULL`) are available on the wrapper but not consumed yet.
+
+The ticker also bridges `on_order_update` text frames into `dashboard.app._apply_order_postback` — the same business logic the HTTP postback handler runs. WebSocket is the primary push channel because Kite postbacks are explicitly best-effort with no retry; the HTTP handler stays as a backup, and the heartbeat ghost-recovery (which cancels dangling exit orders) is the last-resort reconciler. The three layers are idempotent — if the same event arrives via multiple channels, later hits are no-ops.
 
 ### Kite Rate Limiter
 
