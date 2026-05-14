@@ -1489,6 +1489,18 @@ def create_app(ctx: AppContext) -> FastAPI:
         """LLM review accuracy vs actual trade outcomes."""
         return await ctx.db.get_llm_review_accuracy(days=days, mode=ctx.config.mode)
 
+    @app.get("/api/model-drift")
+    async def get_model_drift(
+        days: int = Query(30, ge=1, le=365),
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Model drift dashboard: predicted vs realised win rate per model.
+
+        Detects when the ML model's calibration is decaying so retraining
+        can be triggered before live performance silently degrades.
+        """
+        return await ctx.db.get_model_drift_stats(days=days, mode=ctx.config.mode)
+
     @app.get("/api/audit")
     async def get_audit_log(
         limit: int = Query(50, ge=1, le=500),

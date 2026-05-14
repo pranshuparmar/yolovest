@@ -1392,6 +1392,185 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
+    async def get_model_drift_stats(
+        self, days: int = 30, mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Compare predicted vs realised win rate to detect model drift.
+
+        For every model_version that has scored predictions in the window,
+        groups by parent model_type (joined from model_versions) and emits:
+          - by_day: predicted_win_rate (mean confidence_score) vs
+            realised_win_rate (sum direction_correct / count) for each
+            scored_at day
+          - calibration_buckets: confidence buckets [0.5-0.6, 0.6-0.7, ...]
+            with predicted_mean vs realised_rate + sample size
+
+        A top-level warning string flags a realised win-rate drop of more
+        than 15 percentage points in the last 7 days vs the prior 7 days
+        (per model_type).
+        """
+        cutoff = (now_utc() - timedelta(days=days)).isoformat()
+        mc = " AND p.mode = ?" if mode else ""
+        mp: list[Any] = [mode] if mode else []
+
+        # Pull all scored predictions in the window joined with the model
+        # registry to get model_type. predictions.model_version may be on
+        # either the predictions row or the signals row depending on age;
+        # COALESCE picks whichever is set.
+        cursor = await self.read_conn.execute(
+            f"SELECT COALESCE(p.model_version, s.model_version) AS version, "
+            f"  mv.model_type AS model_type, "
+            f"  mv.status AS model_status, "
+            f"  substr(p.scored_at, 1, 10) AS day, "
+            f"  s.confidence_score AS confidence, "
+            f"  p.direction_correct AS correct "
+            f"FROM predictions p "
+            f"LEFT JOIN signals s ON p.signal_id = s.id "
+            f"LEFT JOIN model_versions mv "
+            f"  ON mv.version = COALESCE(p.model_version, s.model_version) "
+            f"WHERE p.actual_price IS NOT NULL "
+            f"  AND p.scored_at IS NOT NULL "
+            f"  AND p.scored_at >= ? "
+            f"  AND p.direction_correct IS NOT NULL{mc}",
+            [cutoff, *mp],
+        )
+        rows = await cursor.fetchall()
+
+        # Group by model_type → version → (day_rows, all_rows)
+        by_type: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            mt = r["model_type"]
+            if not mt:
+                # Unmapped version (e.g. retired model purged from
+                # model_versions). Skip — we can't classify it.
+                continue
+            entry = by_type.setdefault(mt, {
+                "model_type": mt,
+                "version": r["version"],
+                "is_production": (r["model_status"] == "production"),
+                "_days": {},
+                "_all": [],
+            })
+            # Always keep the most recent production version as the
+            # representative version for the model_type.
+            if r["model_status"] == "production":
+                entry["version"] = r["version"]
+                entry["is_production"] = True
+            day = r["day"]
+            if not day:
+                continue
+            day_bucket = entry["_days"].setdefault(
+                day, {"conf_sum": 0.0, "conf_n": 0, "correct": 0, "n": 0},
+            )
+            conf = r["confidence"]
+            if conf is not None:
+                day_bucket["conf_sum"] += float(conf)
+                day_bucket["conf_n"] += 1
+            day_bucket["correct"] += int(r["correct"] or 0)
+            day_bucket["n"] += 1
+            entry["_all"].append({
+                "confidence": float(conf) if conf is not None else None,
+                "correct": int(r["correct"] or 0),
+                "day": day,
+            })
+
+        bucket_edges = [
+            (0.5, 0.6, "0.50-0.60"),
+            (0.6, 0.7, "0.60-0.70"),
+            (0.7, 0.8, "0.70-0.80"),
+            (0.8, 0.9, "0.80-0.90"),
+            (0.9, 1.0001, "0.90-1.00"),
+        ]
+
+        warnings: list[str] = []
+        model_versions: list[dict[str, Any]] = []
+        for mt, entry in by_type.items():
+            # Build by_day list sorted ascending.
+            by_day = []
+            for day in sorted(entry["_days"].keys()):
+                d = entry["_days"][day]
+                predicted = (
+                    d["conf_sum"] / d["conf_n"] if d["conf_n"] > 0 else None
+                )
+                realised = d["correct"] / d["n"] if d["n"] > 0 else 0.0
+                by_day.append({
+                    "date": day,
+                    "predicted_win_rate": (
+                        round(predicted, 4) if predicted is not None else None
+                    ),
+                    "realised_win_rate": round(realised, 4),
+                    "sample_size": d["n"],
+                })
+
+            # Calibration buckets over the full window.
+            calibration_buckets = []
+            for lo, hi, label in bucket_edges:
+                items = [
+                    a for a in entry["_all"]
+                    if a["confidence"] is not None
+                    and lo <= a["confidence"] < hi
+                ]
+                if not items:
+                    calibration_buckets.append({
+                        "bucket": label,
+                        "predicted_mean": None,
+                        "realised_rate": None,
+                        "samples": 0,
+                    })
+                    continue
+                pred_mean = sum(i["confidence"] for i in items) / len(items)
+                real_rate = sum(i["correct"] for i in items) / len(items)
+                calibration_buckets.append({
+                    "bucket": label,
+                    "predicted_mean": round(pred_mean, 4),
+                    "realised_rate": round(real_rate, 4),
+                    "samples": len(items),
+                })
+
+            # Drift detection: realised win-rate last 7d vs prior 7d.
+            now_d = now_utc().date()
+            recent_correct = recent_n = prior_correct = prior_n = 0
+            for a in entry["_all"]:
+                try:
+                    d = datetime.fromisoformat(a["day"]).date()
+                except (TypeError, ValueError):
+                    continue
+                age = (now_d - d).days
+                if 0 <= age < 7:
+                    recent_correct += a["correct"]
+                    recent_n += 1
+                elif 7 <= age < 14:
+                    prior_correct += a["correct"]
+                    prior_n += 1
+            if recent_n >= 5 and prior_n >= 5:
+                recent_rate = recent_correct / recent_n
+                prior_rate = prior_correct / prior_n
+                drop = prior_rate - recent_rate
+                if drop > 0.15:
+                    warnings.append(
+                        f"{mt} model realised win-rate dropped "
+                        f"{int(round(drop * 100))}% in last 7 days "
+                        f"({int(round(prior_rate * 100))}% -> "
+                        f"{int(round(recent_rate * 100))}%)"
+                    )
+
+            model_versions.append({
+                "model_type": mt,
+                "version": entry["version"],
+                "is_production": entry["is_production"],
+                "by_day": by_day,
+                "calibration_buckets": calibration_buckets,
+            })
+
+        # Stable ordering: intraday first, then swing, then anything else.
+        order = {"intraday": 0, "swing": 1}
+        model_versions.sort(key=lambda m: (order.get(m["model_type"], 99), m["model_type"]))
+
+        return {
+            "model_versions": model_versions,
+            "warning": "; ".join(warnings) if warnings else None,
+        }
+
     async def compute_live_regime(self) -> dict[str, float]:
         """Cross-sectional regime stats over the latest two daily closes
         of every tracked symbol. Cheap proxy for "is the broad market
