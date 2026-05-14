@@ -97,6 +97,97 @@ class TestPositionMonitoring:
         assert result.success
         assert "RELIANCE" not in result.data["targets_hit"]
 
+
+class TestMisOcoEnforcement:
+    """When a MIS trade has both a target LIMIT and an SL at the broker,
+    position-monitor should let the broker enforce exits and only cancel
+    the surviving leg when one fills."""
+
+    @pytest.fixture
+    def mis_position_with_oco(self):
+        return {
+            "id": 1,
+            "trade_id": "T-mis-001",
+            "symbol": "INDUSTOWER",
+            "signal_type": "BUY",
+            "entry_price": 402.45,
+            "fill_price": 402.50,
+            "stop_loss_price": 398.65,
+            "target_price": 410.20,
+            "quantity": 48,
+            "product": "MIS",
+            "sl_order_id": "SL-XYZ",
+            "target_order_id": "TGT-XYZ",
+            "mode": "live",
+        }
+
+    async def test_skips_client_side_target_when_oco_active(
+        self, monitor_skill, mis_position_with_oco,
+    ):
+        """LTP at target shouldn't trigger client-side close — broker
+        LIMIT is on the book and will fill itself."""
+        monitor_skill.ctx.market_hours.is_market_hours = lambda: True
+        monitor_skill.ctx.db.get_open_positions = AsyncMock(return_value=[mis_position_with_oco])
+        monitor_skill.ctx.broker.get_positions = AsyncMock(return_value=[
+            {"tradingsymbol": "INDUSTOWER", "quantity": 48},
+        ])
+        monitor_skill.ctx.market_data.get_ltp = AsyncMock(return_value=410.25)
+        # Both broker orders still open
+        monitor_skill.ctx.broker.get_order_status = AsyncMock(return_value={"status": "OPEN"})
+
+        result = await monitor_skill.execute()
+
+        assert result.success
+        assert "INDUSTOWER" not in result.data["targets_hit"]
+        monitor_skill.ctx.db.close_position.assert_not_awaited()
+
+    async def test_cancels_sl_when_target_fills(
+        self, monitor_skill, mis_position_with_oco,
+    ):
+        monitor_skill.ctx.market_hours.is_market_hours = lambda: True
+        monitor_skill.ctx.db.get_open_positions = AsyncMock(return_value=[mis_position_with_oco])
+        monitor_skill.ctx.broker.get_positions = AsyncMock(return_value=[
+            {"tradingsymbol": "INDUSTOWER", "quantity": 48},
+        ])
+        monitor_skill.ctx.market_data.get_ltp = AsyncMock(return_value=410.25)
+        # Target filled, SL still open
+        async def status(oid):
+            if oid == "TGT-XYZ":
+                return {"status": "COMPLETE"}
+            return {"status": "TRIGGER PENDING"}
+        monitor_skill.ctx.broker.get_order_status = AsyncMock(side_effect=status)
+        monitor_skill.ctx.broker.cancel_order = AsyncMock(return_value=True)
+
+        await monitor_skill.execute()
+
+        monitor_skill.ctx.broker.cancel_order.assert_awaited_once_with("SL-XYZ")
+        monitor_skill.ctx.db.set_trade_sl_order_id.assert_awaited_once_with(
+            "T-mis-001", None,
+        )
+
+    async def test_cancels_target_when_sl_fills(
+        self, monitor_skill, mis_position_with_oco,
+    ):
+        monitor_skill.ctx.market_hours.is_market_hours = lambda: True
+        monitor_skill.ctx.db.get_open_positions = AsyncMock(return_value=[mis_position_with_oco])
+        monitor_skill.ctx.broker.get_positions = AsyncMock(return_value=[
+            {"tradingsymbol": "INDUSTOWER", "quantity": 48},
+        ])
+        monitor_skill.ctx.market_data.get_ltp = AsyncMock(return_value=398.50)
+        async def status(oid):
+            if oid == "SL-XYZ":
+                return {"status": "COMPLETE"}
+            return {"status": "OPEN"}
+        monitor_skill.ctx.broker.get_order_status = AsyncMock(side_effect=status)
+        monitor_skill.ctx.broker.cancel_order = AsyncMock(return_value=True)
+
+        await monitor_skill.execute()
+
+        monitor_skill.ctx.broker.cancel_order.assert_awaited_once_with("TGT-XYZ")
+        monitor_skill.ctx.db.set_trade_target_order_id.assert_awaited_once_with(
+            "T-mis-001", None,
+        )
+
     async def test_stop_loss_hit_detected(self, monitor_skill, open_position):
         monitor_skill.ctx.market_hours.is_market_hours = lambda: True
         monitor_skill.ctx.db.get_open_positions = AsyncMock(return_value=[open_position])

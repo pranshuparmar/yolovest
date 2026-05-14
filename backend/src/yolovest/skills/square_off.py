@@ -196,14 +196,18 @@ class SquareOffSkill(SkillBase):
 
     async def _close_single_position(self, pos: dict[str, Any]) -> dict[str, Any]:
         """Close a single position. Raises on failure."""
-        # Cancel pending SL/target orders
-        if pos.get("sl_order_id"):
+        # Cancel pending SL and target (LIMIT) orders so they don't fire
+        # against the market exit that follows.
+        for oid_key, label in (("sl_order_id", "SL"), ("target_order_id", "target")):
+            oid = pos.get(oid_key)
+            if not oid:
+                continue
             try:
-                await self.ctx.broker.cancel_order(pos["sl_order_id"])
+                await self.ctx.broker.cancel_order(oid)
             except Exception as e:
                 logger.warning(
-                    "square-off: failed to cancel SL order for %s: %s",
-                    pos["symbol"], e,
+                    "square-off: failed to cancel %s order for %s: %s",
+                    label, pos["symbol"], e,
                 )
 
         # Place market exit order

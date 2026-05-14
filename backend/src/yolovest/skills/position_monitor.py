@@ -125,6 +125,19 @@ class PositionMonitorSkill(SkillBase):
                 )
                 continue
 
+            # For MIS trades with broker-side OCO orders (resting target
+            # LIMIT + SL), broker is in charge of the exit. We just keep
+            # OCO honest — cancel the surviving leg when one fills — and
+            # skip client-side target/SL detection. Client-side only fires
+            # for trades where the broker LIMIT never got placed (e.g.
+            # historical rows, or LIMIT placement failed at entry time).
+            if pos.get("target_order_id") and pos.get("sl_order_id"):
+                await self._enforce_mis_oco(pos)
+                await self.ctx.db.update_unrealized_pnl(
+                    pos["trade_id"], current_price,
+                )
+                continue
+
             # Target hit (with early-exit buffer). Heartbeats are 15 min
             # apart; a price that's within `target_early_exit_pct` of target
             # but never quite touches it would otherwise wait a full cycle
@@ -708,6 +721,52 @@ class PositionMonitorSkill(SkillBase):
             else "broker_trades_partial"
         )
         return round(vwap, 2), source
+
+    async def _enforce_mis_oco(self, pos: dict[str, Any]) -> None:
+        """Keep MIS OCO honest: when one of the two broker-side exit orders
+        (target LIMIT or SL) fills, cancel the other.
+
+        DB-side close happens via ghost-position reconciliation on the
+        next cycle — once the broker position vanishes, that path picks
+        the actual fill price from `kite.trades()` and closes the row.
+        """
+        target_oid = pos.get("target_order_id")
+        sl_oid = pos.get("sl_order_id")
+        try:
+            target_status = await self.ctx.broker.get_order_status(target_oid)
+            sl_status = await self.ctx.broker.get_order_status(sl_oid)
+        except Exception as e:
+            logger.debug("OCO status fetch failed for %s: %s", pos.get("symbol"), e)
+            return
+
+        def is_filled(s: dict[str, Any]) -> bool:
+            return (s.get("status") or "").upper() in {"COMPLETE", "FILLED"}
+
+        target_filled = is_filled(target_status)
+        sl_filled = is_filled(sl_status)
+
+        if target_filled and not sl_filled:
+            try:
+                await self.ctx.broker.cancel_order(sl_oid)
+            except Exception as e:
+                logger.warning("OCO: failed to cancel SL %s: %s", sl_oid, e)
+            await self.ctx.db.set_trade_sl_order_id(pos["trade_id"], None)
+            logger.info(
+                "OCO: target filled for %s — cancelled SL %s",
+                pos.get("symbol"), sl_oid,
+            )
+            return
+
+        if sl_filled and not target_filled:
+            try:
+                await self.ctx.broker.cancel_order(target_oid)
+            except Exception as e:
+                logger.warning("OCO: failed to cancel target %s: %s", target_oid, e)
+            await self.ctx.db.set_trade_target_order_id(pos["trade_id"], None)
+            logger.info(
+                "OCO: SL filled for %s — cancelled target LIMIT %s",
+                pos.get("symbol"), target_oid,
+            )
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:
         """Check if new SL is tighter (more protective) than current."""

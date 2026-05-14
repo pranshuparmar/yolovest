@@ -513,9 +513,12 @@ class TradeExecuteSkill(SkillBase):
 
                 # For CNC trades, attach a broker-side OCO GTT for target +
                 # stoploss. Kite only allows GTT on CNC — MIS positions
-                # continue to rely on client-side detection.
+                # get a resting LIMIT order at target instead, with
+                # position-monitor enforcing OCO across SL and target.
                 if product == "CNC":
                     await self._attach_oco_gtt(trade)
+                elif product == "MIS":
+                    await self._attach_mis_target_limit(trade)
 
                 await self.ctx.notify.send_trade_alert(trade)
                 await self.broadcast("trade_executed", {
@@ -742,6 +745,48 @@ class TradeExecuteSkill(SkillBase):
                 await self.ctx.db.set_trade_gtt(trade["trade_id"], gtt_id)
             except Exception:
                 logger.debug("Failed to persist gtt_id", exc_info=True)
+
+    async def _attach_mis_target_limit(self, trade: dict[str, Any]) -> None:
+        """Place a resting LIMIT order at target for a freshly-filled MIS
+        trade. Kite doesn't allow GTT on MIS, so we DIY an OCO: this LIMIT
+        sits on the book; position-monitor cancels the SL when it fills,
+        and cancels this when the SL fills.
+
+        Failure is non-fatal — the trade itself succeeded; position-monitor
+        falls back to client-side target detection (with the 0.15% buffer).
+        """
+        exit_side = "SELL" if trade["signal_type"] == "BUY" else "BUY"
+        target_price = float(trade["target_price"])
+        qty = int(trade["quantity"])
+        try:
+            target_order_id = await self.ctx.broker.place_order(
+                symbol=trade["symbol"],
+                side=exit_side,
+                quantity=qty,
+                order_type="LIMIT",
+                price=target_price,
+                product="MIS",
+            )
+        except Exception as e:
+            logger.warning(
+                "trade-execute: target LIMIT attach failed for %s (entry "
+                "succeeded; heartbeat target detection still active): %s",
+                trade.get("trade_id"), e,
+            )
+            return
+
+        if target_order_id:
+            trade["target_order_id"] = target_order_id
+            try:
+                await self.ctx.db.set_trade_target_order_id(
+                    trade["trade_id"], target_order_id,
+                )
+            except Exception:
+                logger.debug("Failed to persist target_order_id", exc_info=True)
+            logger.info(
+                "trade-execute: MIS target LIMIT placed for %s @ %.2f (order=%s)",
+                trade["symbol"], target_price, target_order_id,
+            )
 
     async def _verify_fill(self, order_id: str, timeout_sec: int = 5) -> str:
         """Poll order status until it reaches a terminal state.

@@ -589,13 +589,19 @@ def create_app(ctx: AppContext) -> FastAPI:
         exit_side = "SELL" if trade["signal_type"] == "BUY" else "BUY"
         product = trade.get("product", "MIS")
 
-        # Cancel any open SL order so the exit isn't double-placed
-        sl_order_id = trade.get("sl_order_id")
-        if sl_order_id:
+        # Cancel any open SL / target (MIS LIMIT) orders so the exit isn't
+        # double-placed and dangling orders don't fire after we've closed.
+        for oid_key, label in (("sl_order_id", "SL"), ("target_order_id", "target")):
+            oid = trade.get(oid_key)
+            if not oid:
+                continue
             try:
-                await ctx.broker.cancel_order(sl_order_id)
+                await ctx.broker.cancel_order(oid)
             except Exception:
-                logger.debug("close_position: SL cancel failed (already executed?)", exc_info=True)
+                logger.debug(
+                    "close_position: %s cancel failed (already executed?)",
+                    label, exc_info=True,
+                )
 
         # Delete attached GTT (CNC only — MIS has no GTT)
         gtt_id = trade.get("gtt_id")

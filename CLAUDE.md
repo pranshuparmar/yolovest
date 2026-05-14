@@ -152,9 +152,10 @@ Risk-check includes pending-trade notional in the `max_portfolio_exposure_pct` c
 
 Exit paths:
 - **Broker-side GTT** (CNC only) — placed by `trade-execute._attach_oco_gtt` after entry fill. `position-monitor` skips client-side target/SL checks when `gtt_id` is set; ghost-position reconciliation closes the DB row when the GTT fires and the broker position vanishes.
-- **Client-side detection** — when no GTT (e.g. MIS), `position-monitor` queues an exit when LTP crosses target/SL.
-- **Manual close** — `POST /api/positions/{trade_id}/close` (UI: red Close button per row) cancels SL, deletes GTT, places market exit at the broker, computes realised PnL with costs, closes the row.
-- **Square-off** — CRON skill at `market_hours.square_off` (default 15:15) closes MIS positions. `/kill` runs it with `force=True`.
+- **Broker-side MIS OCO** — Kite doesn't allow GTT on MIS, so `trade-execute._attach_mis_target_limit` places a resting LIMIT order at the target alongside the SL after entry fills. `position-monitor._enforce_mis_oco` watches both order statuses each cycle and cancels the surviving leg when one fills. Ghost-position reconciliation closes the DB row.
+- **Client-side detection** — fallback for trades that have neither `gtt_id` nor both `target_order_id`+`sl_order_id` (older rows, or LIMIT placement failed). `position-monitor` exits when LTP crosses target (with `risk.target_early_exit_pct` buffer) or SL.
+- **Manual close** — `POST /api/positions/{trade_id}/close` (UI: red Close button per row) cancels SL and target orders, deletes GTT, places market exit at the broker, computes realised PnL with costs, closes the row.
+- **Square-off** — CRON skill at `market_hours.square_off` (default 15:15) cancels SL + target orders then market-exits open MIS positions. `/kill` runs it with `force=True`.
 
 ### AppContext
 

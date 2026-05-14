@@ -2257,6 +2257,33 @@ class Database:
         )
         await self.conn.commit()
 
+    async def set_trade_target_order_id(
+        self, trade_id: str, target_order_id: str | None,
+    ) -> None:
+        """Attach (or clear) the broker target-LIMIT order id on a MIS trade.
+
+        MIS positions can't use GTT, so trade-execute places a LIMIT order
+        at target alongside the SL. Position-monitor enforces OCO semantics
+        by cancelling whichever side hasn't filled when the other does.
+        """
+        await self.conn.execute(
+            "UPDATE trades SET target_order_id = ? WHERE trade_id = ?",
+            (target_order_id, trade_id),
+        )
+        await self.conn.commit()
+
+    async def set_trade_sl_order_id(
+        self, trade_id: str, sl_order_id: str | None,
+    ) -> None:
+        """Update the SL order id on a trade — used when position-monitor
+        cancels and re-places SL (e.g. trailing) or clears it after the
+        target LIMIT fills."""
+        await self.conn.execute(
+            "UPDATE trades SET sl_order_id = ? WHERE trade_id = ?",
+            (sl_order_id, trade_id),
+        )
+        await self.conn.commit()
+
     async def get_trade(self, trade_id: str) -> dict[str, Any] | None:
         """Fetch a single trade row by id (any status)."""
         cursor = await self.read_conn.execute(
