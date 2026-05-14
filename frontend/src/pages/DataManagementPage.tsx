@@ -14,6 +14,7 @@ import {
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
+import { SymbolLink } from "../components/SymbolLink";
 
 const TABLE_INFO: Record<string, { label: string; description: string; defaultDays: number }> = {
   ohlcv: { label: "OHLCV Candles", description: "Daily and intraday price bars", defaultDays: 730 },
@@ -268,7 +269,9 @@ function QuarantinedSymbolsSection() {
             <tbody>
               {symbols.map((s) => (
                 <tr key={s.symbol} className="border-b border-gray-800 hover:bg-gray-800/30">
-                  <td className="py-2 px-4 font-medium text-gray-200">{s.symbol}</td>
+                  <td className="py-2 px-4 font-medium text-gray-200">
+                    <SymbolLink symbol={s.symbol} className="text-gray-200" />
+                  </td>
                   <td className="py-2 px-4 text-right text-red-400">{s.consecutive_failures}</td>
                   <td className="py-2 px-4">
                     <ReplacementInput symbol={s.symbol} current={s.replacement_symbol} />

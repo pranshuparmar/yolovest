@@ -118,7 +118,9 @@ export function WatchlistPage() {
           <div className="mt-3 space-y-2">
             {review.data.recommendations.map((r) => (
               <div key={r.symbol} className="flex items-center gap-3 bg-gray-800/50 rounded px-3 py-2 text-sm">
-                <span className="font-medium text-gray-200 w-24">{r.symbol}</span>
+                <span className="font-medium text-gray-200 w-24">
+                  <SymbolLink symbol={r.symbol} className="text-gray-200" />
+                </span>
                 <span className={clsx("px-1.5 py-0.5 rounded text-xs font-medium", {
                   "bg-red-900/40 text-red-400": r.action === "SELL" || r.action === "SHORT",
                   "bg-emerald-900/40 text-emerald-400": r.action === "BUY" || r.action === "BUY_MORE",

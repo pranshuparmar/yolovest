@@ -2,6 +2,7 @@ import { useState } from "react";
 import clsx from "clsx";
 import { useRecommendations } from "../hooks/queries";
 import type { Recommendation, SignalDisposition } from "../types/api";
+import { SymbolLink } from "./SymbolLink";
 
 const DISPOSITION_LABELS: Record<SignalDisposition, string> = {
   pending: "Pending",
@@ -55,7 +56,9 @@ function RecommendationRow({ r }: { r: Recommendation }) {
           <span className={clsx("text-xs font-bold w-10 shrink-0", sigColor)}>
             {r.signal_type}
           </span>
-          <span className="font-medium text-gray-100 truncate">{r.symbol}</span>
+          <span className="font-medium text-gray-100 truncate">
+            <SymbolLink symbol={r.symbol} className="text-gray-100" />
+          </span>
           <span className="text-xs text-gray-500">
             ₹{fmt(r.entry_price)} × {r.position_size}
           </span>

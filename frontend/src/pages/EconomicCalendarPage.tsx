@@ -8,6 +8,7 @@ import {
   usePnlCalendar,
 } from "../hooks/queries";
 import { useTheme } from "../hooks/useTheme";
+import { SymbolLink } from "../components/SymbolLink";
 import clsx from "clsx";
 
 // ---------------------------------------------------------------------------
@@ -436,7 +437,11 @@ function WeekView({
                   {evt.impact && (
                     <span className={clsx("inline-block mt-1 px-1.5 py-0 rounded text-[10px]", IMPACT_COLORS[evt.impact])}>{evt.impact}</span>
                   )}
-                  {evt.symbol && <span className="block mt-0.5 text-emerald-400 text-[10px]">{evt.symbol}</span>}
+                  {evt.symbol && (
+                    <span className="block mt-0.5 text-emerald-400 text-[10px]">
+                      <SymbolLink symbol={evt.symbol} className="text-emerald-400" />
+                    </span>
+                  )}
                   {evt.source && <span className="block mt-0.5 text-gray-600 text-[10px]">{evt.source}</span>}
                 </div>
               ))}
