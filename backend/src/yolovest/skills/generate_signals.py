@@ -153,6 +153,11 @@ class GenerateSignalsSkill(SkillBase):
 
         for stock in watchlist:
             symbol = stock["symbol"]
+            # Default: any rejection path that doesn't explicitly set
+            # outcome_tracker counts as "no actionable signal produced"
+            # so the rotation cooldown metric reflects reality. Success
+            # paths override to True before the loop ends.
+            outcome_tracker.setdefault(symbol, False)
 
             if symbol in already_signaled:
                 filter_counts.setdefault("already_signaled", 0)

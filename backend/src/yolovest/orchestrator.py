@@ -298,8 +298,12 @@ class HeartbeatOrchestrator:
         risk_result = await self._run_skill("risk-check", signal=signal)
         results[f"{prefix}/risk-check"] = risk_result
         if not risk_result.success:
+            # Skill threw an exception (not a clean rejection). Marking
+            # this as 'risk_rejected' would burn the retry cap on a
+            # persistent bug; mark it distinctly so the retry-cap math
+            # only counts genuine risk decisions.
             logger.info("risk-check failed for signal %d — skipping", index)
-            await self._set_disposition(signal, "risk_rejected", "risk-check skill failed")
+            await self._set_disposition(signal, "skill_error", "risk-check skill failed")
             return results
 
         # Check risk approval and use adjusted signal
@@ -427,17 +431,16 @@ class HeartbeatOrchestrator:
         if not trade_result.success:
             symbol = signal.get("symbol", "?") if isinstance(signal, dict) else "?"
             logger.warning("trade-execute failed for signal %d (%s): %s", index, symbol, trade_result.error)
-            # Remove signal from DB so it's not blocked by already_signaled dedup
-            # and can be regenerated on the next heartbeat
-            try:
-                await self._ctx.db.conn.execute(
-                    "DELETE FROM signals WHERE symbol = ? AND created_at >= ?",
-                    (symbol, self._today_start()),
-                )
-                await self._ctx.db.conn.commit()
-                logger.info("Removed failed signal for %s so it can be retried next heartbeat", symbol)
-            except Exception:
-                logger.debug("Failed to remove signal for %s", symbol, exc_info=True)
+            # Mark the signal as trade_execute_failed (retryable, see
+            # get_todays_signaled_symbols) instead of DELETEing the row.
+            # The old DELETE wiped all of today's signal rows for the
+            # symbol — losing audit history for prior risk-rejections,
+            # adopted positions, etc. that happened to have the same
+            # symbol earlier in the day.
+            await self._set_disposition(
+                signal, "trade_execute_failed",
+                trade_result.error or "trade-execute failed",
+            )
             await self._ctx.notify.send(
                 f"Trade execution failed for {symbol}: {trade_result.error}",
                 alert_type="errors",

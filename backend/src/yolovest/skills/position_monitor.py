@@ -1036,6 +1036,17 @@ class PositionMonitorSkill(SkillBase):
                 "OCO: SL filled for %s — cancelled target LIMIT %s",
                 pos.get("symbol"), target_oid,
             )
+            return
+
+        if target_filled and sl_filled:
+            # Both filled in the same window (violent reversal). Nothing
+            # to cancel; ghost recovery will close the DB row next cycle.
+            # Log it so a post-mortem doesn't look at the trade and ask
+            # "where did the OCO cancel go?".
+            logger.info(
+                "OCO: both legs filled for %s in same window — no cancel needed",
+                pos.get("symbol"),
+            )
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:
         """Check if new SL is tighter (more protective) than current."""

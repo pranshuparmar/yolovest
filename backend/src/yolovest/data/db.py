@@ -1069,6 +1069,12 @@ class Database:
           still favour the setup — give it another shot. Hard "no"
           should come via /reject, which routes through the separate
           rejection_cooldown_hours mechanism.
+        - trade_execute_failed: the broker rejected the order or the
+          skill crashed — usually a transient condition.
+        - skill_error: risk-check or llm-review itself threw an
+          exception. Treated as retryable so a persistent skill bug
+          doesn't burn the cap on the *risk decision* side; the cap
+          still protects against churn loops.
         """
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -1078,18 +1084,22 @@ class Database:
         # non-retryable signal today (count_other > 0) or the retryable
         # budget is exhausted (count_retryable >= cap). Mode-scoped so
         # paper signals don't block live and vice versa.
-        retryable = ('risk_rejected', 'expired')
+        retryable = (
+            'risk_rejected', 'expired',
+            'trade_execute_failed', 'skill_error',
+        )
+        placeholders = ", ".join(["?"] * len(retryable))
         mode_clause = " AND mode = ?" if mode else ""
         sig_params: tuple[Any, ...] = (today_start,)
         if mode:
             sig_params = sig_params + (mode,)
-        sig_params = sig_params + (*retryable, *retryable, int(risk_rejected_retry_cap))
+        sig_params = sig_params + retryable + retryable + (int(risk_rejected_retry_cap),)
         cursor = await self.read_conn.execute(
             "SELECT symbol FROM signals "
             f"WHERE created_at >= ?{mode_clause} "
             "GROUP BY symbol "
-            "HAVING SUM(CASE WHEN disposition IN (?, ?) THEN 0 ELSE 1 END) > 0 "
-            "   OR SUM(CASE WHEN disposition IN (?, ?) THEN 1 ELSE 0 END) >= ?",
+            f"HAVING SUM(CASE WHEN disposition IN ({placeholders}) THEN 0 ELSE 1 END) > 0 "
+            f"   OR SUM(CASE WHEN disposition IN ({placeholders}) THEN 1 ELSE 0 END) >= ?",
             sig_params,
         )
         signaled = {row[0] for row in await cursor.fetchall()}
@@ -2057,6 +2067,13 @@ class Database:
                     json.dumps({"trade_id": pos_id, "exit_price": exit_price}),
                     json.dumps({"pnl": pnl}),
                 ),
+            )
+            # Per-trade sentinels in system_state (e.g. partial_booked_{id})
+            # outlive the position they describe and have no TTL — clean
+            # them up here so system_state doesn't grow monotonically.
+            await self.conn.execute(
+                "DELETE FROM system_state WHERE key = ?",
+                (f"partial_booked_{pos_id}",),
             )
             await self.conn.execute("RELEASE SAVEPOINT close_position")
             await self.conn.commit()
