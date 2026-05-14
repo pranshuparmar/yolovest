@@ -32,14 +32,18 @@ from yolovest.timezone import now_ist
 logger = logging.getLogger(__name__)
 
 
-def _signal_dedup_key(signal: dict[str, Any]) -> str:
+def _signal_dedup_key(signal: dict[str, Any], mode: str = "paper") -> str:
     """Generate a dedup key for a signal to prevent duplicate order placement.
 
-    Key components: symbol + signal_type + date + entry_price (rounded).
-    If the process crashes after placing a broker order but before recording
-    the trade, the same signal re-entering this skill will be detected.
+    Key components: mode + symbol + signal_type + date + entry_price.
+    Mode is part of the key so a paper test in the morning doesn't
+    block a live execution of the same setup that afternoon (or vice
+    versa). If the process crashes after placing a broker order but
+    before recording the trade, the same signal re-entering this
+    skill in the same mode will still be detected.
     """
     parts = (
+        mode,
         signal["symbol"],
         signal["signal_type"],
         now_ist().strftime("%Y-%m-%d"),
@@ -209,7 +213,7 @@ class TradeExecuteSkill(SkillBase):
 
         # Idempotency check: prevent duplicate orders on crash/restart.
         # Uses agent_memory with a TTL to track in-flight executions.
-        dedup_key = _signal_dedup_key(signal)
+        dedup_key = _signal_dedup_key(signal, mode=self.ctx.config.mode)
         if self.ctx.memory:
             existing = await self.ctx.memory.get("trade_dedup", dedup_key)
             if existing:

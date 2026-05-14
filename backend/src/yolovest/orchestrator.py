@@ -271,7 +271,9 @@ class HeartbeatOrchestrator:
             size = None
         try:
             await self._ctx.db.update_signal_disposition(
-                symbol, disposition, reason, position_size=size,
+                symbol, disposition, reason,
+                position_size=size,
+                mode=self._ctx.config.mode,
             )
         except Exception:
             logger.debug("Failed to update signal disposition", exc_info=True)

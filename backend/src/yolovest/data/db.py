@@ -981,6 +981,7 @@ class Database:
         disposition: str,
         reason: str | None = None,
         position_size: int | None = None,
+        mode: str | None = None,
     ) -> None:
         """Update disposition for the most recent signal for a symbol today.
 
@@ -989,8 +990,13 @@ class Database:
         with SQLite's space-separator format (`2026-05-13 04:18:30`)
         from `datetime('now')` or the ISO 'T' format from explicit
         Python timestamps.
+
+        When mode is provided, the update is scoped to rows of that
+        mode so a live execution can't accidentally flip a stale paper
+        signal's disposition (or vice versa).
         """
         today_ist = now_ist().strftime("%Y-%m-%d")
+        mode_clause = " AND mode = ?" if mode else ""
         # ml_signal seeds position_size=1 as a placeholder; risk-check
         # determines the real number. Update both columns here so the
         # signals row reflects the actual planned size when this
@@ -998,22 +1004,30 @@ class Database:
         # post-risk-check value handy). When the caller doesn't pass
         # position_size, leave it untouched via COALESCE.
         if position_size is not None and position_size > 0:
+            params: tuple[Any, ...] = (
+                disposition, reason, int(position_size), symbol, today_ist,
+            )
+            if mode:
+                params = params + (mode,)
             await self.conn.execute(
                 "UPDATE signals "
                 "SET disposition = ?, disposition_reason = ?, "
                 "    position_size = ? "
                 "WHERE id = (SELECT id FROM signals WHERE symbol = ? "
-                "AND substr(created_at, 1, 10) = ? "
+                f"AND substr(created_at, 1, 10) = ?{mode_clause} "
                 "ORDER BY created_at DESC LIMIT 1)",
-                (disposition, reason, int(position_size), symbol, today_ist),
+                params,
             )
         else:
+            params = (disposition, reason, symbol, today_ist)
+            if mode:
+                params = params + (mode,)
             await self.conn.execute(
                 "UPDATE signals SET disposition = ?, disposition_reason = ? "
                 "WHERE id = (SELECT id FROM signals WHERE symbol = ? "
-                "AND substr(created_at, 1, 10) = ? "
+                f"AND substr(created_at, 1, 10) = ?{mode_clause} "
                 "ORDER BY created_at DESC LIMIT 1)",
-                (disposition, reason, symbol, today_ist),
+                params,
             )
         await self.conn.commit()
 
@@ -1062,15 +1076,21 @@ class Database:
 
         # Symbols where dedup applies — either has at least one
         # non-retryable signal today (count_other > 0) or the retryable
-        # budget is exhausted (count_retryable >= cap).
+        # budget is exhausted (count_retryable >= cap). Mode-scoped so
+        # paper signals don't block live and vice versa.
         retryable = ('risk_rejected', 'expired')
+        mode_clause = " AND mode = ?" if mode else ""
+        sig_params: tuple[Any, ...] = (today_start,)
+        if mode:
+            sig_params = sig_params + (mode,)
+        sig_params = sig_params + (*retryable, *retryable, int(risk_rejected_retry_cap))
         cursor = await self.read_conn.execute(
             "SELECT symbol FROM signals "
-            "WHERE created_at >= ? "
+            f"WHERE created_at >= ?{mode_clause} "
             "GROUP BY symbol "
             "HAVING SUM(CASE WHEN disposition IN (?, ?) THEN 0 ELSE 1 END) > 0 "
             "   OR SUM(CASE WHEN disposition IN (?, ?) THEN 1 ELSE 0 END) >= ?",
-            (today_start, *retryable, *retryable, int(risk_rejected_retry_cap)),
+            sig_params,
         )
         signaled = {row[0] for row in await cursor.fetchall()}
 
