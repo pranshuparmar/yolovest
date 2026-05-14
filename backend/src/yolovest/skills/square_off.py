@@ -102,24 +102,19 @@ class SquareOffSkill(SkillBase):
                 data={"squared_off": [], "total_pnl": 0, "failures": [], "force": force},
             )
 
-        # In manual mode (non-force), notify user instead of auto-closing.
-        # MIS positions MUST close by EOD — warn urgently via Telegram.
+        # Manual mode does NOT apply to square-off. EOD is a hard
+        # broker-enforced deadline — Zerodha will auto-square any
+        # remaining MIS positions at market close with penalty, so
+        # asking for human approval defeats the point (and there's no
+        # exit-approval UI on the dashboard either; pending_trades is
+        # entry-only). User already committed to the trade when it
+        # entered; the exit at EOD is a deterministic consequence.
         if self.ctx.config.execution.transaction_mode == "manual" and not force:
-            symbols = [p["symbol"] for p in positions]
-            logger.warning(
-                "square-off: %d MIS positions need closing but manual mode is active: %s",
-                len(positions), symbols,
-            )
-            await self.ctx.notify.send(
-                f"URGENT: {len(positions)} MIS positions must close before 3:30 PM!\n"
-                f"Symbols: {', '.join(symbols)}\n"
-                f"Approve exits on dashboard or Zerodha will auto-square with penalty.",
-                alert_type="errors",
-            )
-            return SkillResult(
-                success=True, skill_name=self.name,
-                data={"squared_off": [], "total_pnl": 0, "failures": [],
-                      "manual_mode_warning": symbols, "force": force},
+            logger.info(
+                "square-off: manual mode is active, but square-off auto-closes "
+                "regardless (EOD broker deadline) — proceeding to close %d MIS "
+                "positions: %s",
+                len(positions), [p["symbol"] for p in positions],
             )
 
         deadline = self._get_hard_deadline()
