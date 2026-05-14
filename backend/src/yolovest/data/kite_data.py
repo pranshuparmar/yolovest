@@ -319,6 +319,15 @@ class KiteDataProvider(MarketDataBase):
             buy_depth = depth.get("buy") or []
             sell_depth = depth.get("sell") or []
 
+            # Aggregate top-5 levels into single quantities. The full
+            # total_buy_quantity / total_sell_quantity from the quote
+            # body cover the entire book; the top-5 sums proxy "what's
+            # close to the touch and likely to clear within the
+            # session". Order-flow features the OHLCV-only feature set
+            # can't see.
+            top5_buy_qty = sum(int(l.get("quantity") or 0) for l in buy_depth[:5])
+            top5_sell_qty = sum(int(l.get("quantity") or 0) for l in sell_depth[:5])
+
             ohlc = quote.get("ohlc", {}) or {}
             return {
                 "ltp": ltp,
@@ -334,6 +343,11 @@ class KiteDataProvider(MarketDataBase):
                 "bid": buy_depth[0].get("price") if buy_depth else None,
                 "ask": sell_depth[0].get("price") if sell_depth else None,
                 "depth": depth,
+                "total_buy_quantity": int(quote.get("buy_quantity") or 0),
+                "total_sell_quantity": int(quote.get("sell_quantity") or 0),
+                "top5_buy_qty": top5_buy_qty,
+                "top5_sell_qty": top5_sell_qty,
+                "last_quantity": int(quote.get("last_quantity") or 0),
             }
         except Exception as e:
             logger.warning("Kite quote failed for %s: %s", symbol, e)

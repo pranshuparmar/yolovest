@@ -179,6 +179,17 @@ class RiskCheckSkill(SkillBase):
             if corr_rejection:
                 return self._reject(signal, corr_rejection)
 
+        # Depth-imbalance gate — reject when the live order book
+        # strongly opposes the signal direction. Only meaningful with
+        # the paid Kite feed (jugaad/yfinance can't return depth qty).
+        if (
+            cfg.depth_gate.enabled
+            and self.ctx.config.market_data.kite_data_enabled
+        ):
+            depth_rejection = await self._check_depth_gate(signal, cfg.depth_gate)
+            if depth_rejection:
+                return self._reject(signal, depth_rejection)
+
         # Mandatory stop-loss
         if cfg.mandatory_stop_loss and not signal.get("stop_loss_price"):
             return self._reject(signal, "No stop-loss set (mandatory)")
@@ -387,6 +398,44 @@ class RiskCheckSkill(SkillBase):
             cfg.confidence_ceiling - cfg.confidence_floor
         )
         return cfg.min_multiplier + ratio * (cfg.max_multiplier - cfg.min_multiplier)
+
+    async def _check_depth_gate(
+        self,
+        signal: dict[str, Any],
+        cfg: Any,
+    ) -> str | None:
+        """Reject BUY when total_sell_quantity dominates the book and
+        SELL when total_buy_quantity dominates. Quote fetch failures
+        return None so the gate never blocks on infra issues.
+        """
+        try:
+            quote = await self.ctx.market_data.get_quote(signal["symbol"])
+        except Exception:
+            logger.debug(
+                "risk-check: depth-gate quote fetch failed for %s",
+                signal["symbol"], exc_info=True,
+            )
+            return None
+
+        buy_qty = float(quote.get("total_buy_quantity") or 0)
+        sell_qty = float(quote.get("total_sell_quantity") or 0)
+        if buy_qty + sell_qty <= 0:
+            return None  # No depth available — let the trade through.
+
+        imbalance = (buy_qty - sell_qty) / (buy_qty + sell_qty)
+        signal_type = signal.get("signal_type", "BUY")
+
+        if signal_type == "BUY" and imbalance < cfg.min_imbalance_for_buy:
+            return (
+                f"Depth gate: book opposes BUY "
+                f"(imbalance={imbalance:+.2f}, threshold>={cfg.min_imbalance_for_buy:+.2f})"
+            )
+        if signal_type == "SELL" and imbalance > cfg.max_imbalance_for_sell:
+            return (
+                f"Depth gate: book opposes SELL "
+                f"(imbalance={imbalance:+.2f}, threshold<={cfg.max_imbalance_for_sell:+.2f})"
+            )
+        return None
 
     async def _check_correlation_limit(
         self,

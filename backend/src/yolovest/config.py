@@ -287,6 +287,24 @@ class CorrelationLimitConfig(BaseModel):
     lookback_days: int = Field(default=60, ge=20, le=252)
 
 
+class DepthGateConfig(BaseModel):
+    """Order-flow depth gate using Kite quote depth.
+
+    Imbalance = (total_buy_qty - total_sell_qty) / (total_buy_qty +
+    total_sell_qty). Ranges -1 (all sell pressure) to +1 (all buy
+    pressure). Rejects when the book strongly opposes the signal.
+
+    Requires market_data.kite_data_enabled — only the paid feed exposes
+    total_buy_quantity / total_sell_quantity. Off by default; enable
+    once you've watched a few sessions to confirm the thresholds match
+    your universe's typical book depth.
+    """
+
+    enabled: bool = False
+    min_imbalance_for_buy: float = Field(default=-0.30, ge=-1.0, le=0.0)
+    max_imbalance_for_sell: float = Field(default=0.30, ge=0.0, le=1.0)
+
+
 class ReentryConfig(BaseModel):
     """Smart re-entry — allow re-entering after SL hit if conditions improve."""
 
@@ -354,6 +372,7 @@ class RiskConfig(BaseModel):
     partial_profit: PartialProfitConfig = Field(default_factory=PartialProfitConfig)
     conviction_sizing: ConvictionSizingConfig = Field(default_factory=ConvictionSizingConfig)
     correlation_limit: CorrelationLimitConfig = Field(default_factory=CorrelationLimitConfig)
+    depth_gate: DepthGateConfig = Field(default_factory=DepthGateConfig)
     reentry: ReentryConfig = Field(default_factory=ReentryConfig)
 
 
