@@ -2257,6 +2257,31 @@ class Database:
         )
         await self.conn.commit()
 
+    async def find_trade_by_order_id(
+        self, order_id: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Find an open trade that has this order_id attached to any of
+        its order columns (entry, SL, target). Returns (trade, leg)
+        where leg is "entry", "sl", or "target". Returns (None, None) if
+        nothing matches.
+
+        Used by the postback handler to route broker-side order updates
+        to the right business logic.
+        """
+        for leg, column in (
+            ("entry", "order_id"),
+            ("sl", "sl_order_id"),
+            ("target", "target_order_id"),
+        ):
+            cursor = await self.read_conn.execute(
+                f"SELECT * FROM trades WHERE {column} = ? LIMIT 1",
+                (str(order_id),),
+            )
+            row = await cursor.fetchone()
+            if row:
+                return dict[str, Any](row), leg
+        return None, None
+
     async def log_gtt_event(
         self,
         *,

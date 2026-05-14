@@ -36,20 +36,28 @@ detection in position-monitor and on the 15:15 auto-square-off.
 
 ---
 
-## P1 — Security
+## ~~P1 — Security: postback checksum verification~~ (done)
 
-### Postback checksum verification
+`/api/auth/zerodha/postback` now reads the raw request body, computes
+`SHA-256(order_id + order_timestamp + api_secret)`, and rejects with
+401 when the result doesn't match the body's `checksum`. Spoofed
+order-update broadcasts to dashboard clients are no longer possible.
 
-**What:** Kite signs every postback with
-`checksum = SHA256(order_id + order_timestamp + api_secret)`. The
-`/api/auth/zerodha/postback` endpoint currently accepts any POST.
+In addition to the security fix, the postback now drives real business
+logic instead of just broadcasting to the UI:
 
-**Why:** The endpoint URL is published. Anyone who knows it can spoof
-order updates, broadcasting fake `order_update` events over the
-WebSocket to all dashboard clients.
+- Entry REJECTED → trade row marked `failed`, urgent Telegram alert.
+- Entry COMPLETE → fill_price / slippage backfilled if not already set.
+- SL COMPLETE → cancel resting target LIMIT (MIS OCO bookkeeping);
+  ghost-recovery closes the DB row on the next heartbeat.
+- SL REJECTED → loud Telegram alert (position is unprotected).
+- Target LIMIT COMPLETE → cancel SL leg; ghost-recovery closes DB row.
 
-**Scope:** compare the `checksum` field in the body against locally
-computed SHA256, reject mismatches with 401.
+The match is done by `db.find_trade_by_order_id` which searches all
+three columns (`order_id`, `sl_order_id`, `target_order_id`). Orders
+that don't match any local trade (e.g. GTT-triggered orders we never
+saw an order_id for) are logged and left for ghost-recovery to clean
+up by detecting the broker position vanishing.
 
 ---
 

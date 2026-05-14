@@ -287,6 +287,107 @@ async def _compute_capital_breakdown(broker: Any) -> dict[str, float]:
     return breakdown
 
 
+async def _apply_order_postback(
+    ctx: AppContext, order_id: str, status: str, body: dict[str, Any],
+) -> None:
+    """Route a Zerodha postback to the matching trade row and act on it.
+
+    Terminal statuses (COMPLETE / CANCELLED / REJECTED) handled here so
+    trade-row state updates within seconds of the broker event rather
+    than waiting for the next position-monitor heartbeat. Polling is
+    still authoritative — this is a latency optimisation, not a
+    replacement for `kite.orders()` reconciliation.
+    """
+    trade, leg = await ctx.db.find_trade_by_order_id(order_id)
+    if not trade:
+        # Could be a GTT-triggered order (we don't track that order_id
+        # locally — ghost recovery cleans up the position when broker
+        # qty hits zero) or an order placed outside the system. Log and
+        # move on; ghost recovery is the safety net.
+        logger.info(
+            "Postback for order=%s status=%s — no matching local trade",
+            order_id, status,
+        )
+        return
+
+    symbol = trade.get("symbol")
+    trade_id = trade.get("trade_id")
+    log_prefix = f"Postback {symbol} {trade_id} {leg}={order_id}"
+
+    if leg == "entry":
+        # Entry-leg lifecycle
+        if status == "REJECTED":
+            logger.warning("%s: entry REJECTED — marking trade failed", log_prefix)
+            try:
+                await ctx.db.conn.execute(
+                    "UPDATE trades SET status = 'failed' WHERE trade_id = ?",
+                    (trade_id,),
+                )
+                await ctx.db.conn.commit()
+            except Exception:
+                logger.exception("%s: failed to mark trade failed", log_prefix)
+            await ctx.notify.send(
+                f"Trade entry REJECTED: {symbol} ({order_id})\n"
+                f"Reason: {body.get('status_message') or 'see Zerodha'}",
+                alert_type="errors",
+            )
+        elif status == "COMPLETE":
+            # Most entries already get marked filled by verify_fill at
+            # placement time; the postback may arrive after we've moved
+            # on. Update fill_price + slippage if not already set.
+            try:
+                fill_price = float(body.get("average_price") or 0)
+            except (TypeError, ValueError):
+                fill_price = 0.0
+            if fill_price > 0 and not trade.get("fill_price"):
+                slippage = abs(fill_price - float(trade.get("entry_price") or 0))
+                await ctx.db.conn.execute(
+                    "UPDATE trades SET fill_price = ?, slippage = ?, status = 'open' "
+                    "WHERE trade_id = ? AND fill_price IS NULL",
+                    (fill_price, slippage, trade_id),
+                )
+                await ctx.db.conn.commit()
+                logger.info("%s: filled @ %.2f (slippage %.2f)", log_prefix, fill_price, slippage)
+        elif status == "CANCELLED":
+            # Usually expected — we cancelled it ourselves on retry/timeout.
+            logger.info("%s: entry CANCELLED", log_prefix)
+
+    elif leg == "sl":
+        if status == "COMPLETE":
+            # Broker-side SL fired — position is closed at broker. Cancel
+            # any resting target leg so it doesn't try to sell on a now-
+            # empty position. Ghost recovery (next heartbeat) closes the
+            # DB row with the actual fill price.
+            target_oid = trade.get("target_order_id")
+            if target_oid:
+                try:
+                    await ctx.broker.cancel_order(target_oid)
+                    await ctx.db.set_trade_target_order_id(trade_id, None)
+                except Exception:
+                    logger.debug("%s: target cancel after SL fill failed", log_prefix, exc_info=True)
+            logger.info("%s: SL fired — broker exit registered, ghost recovery will close DB row", log_prefix)
+        elif status == "REJECTED":
+            logger.warning("%s: SL order REJECTED — position is unprotected!", log_prefix)
+            await ctx.notify.send(
+                f"WARNING: SL order REJECTED for {symbol} ({order_id})\n"
+                f"Position is UNPROTECTED. Reason: {body.get('status_message') or 'see Zerodha'}",
+                alert_type="errors",
+            )
+
+    elif leg == "target":
+        if status == "COMPLETE":
+            # Target LIMIT filled — same shape as SL fill: cancel the
+            # other leg, let ghost recovery close the row.
+            sl_oid = trade.get("sl_order_id")
+            if sl_oid:
+                try:
+                    await ctx.broker.cancel_order(sl_oid)
+                    await ctx.db.set_trade_sl_order_id(trade_id, None)
+                except Exception:
+                    logger.debug("%s: SL cancel after target fill failed", log_prefix, exc_info=True)
+            logger.info("%s: target LIMIT filled — broker exit registered", log_prefix)
+
+
 async def _compute_total_capital(broker: Any) -> float:
     """Backward-compat wrapper. Returns the total of the breakdown."""
     bd = await _compute_capital_breakdown(broker)
@@ -1424,20 +1525,69 @@ def create_app(ctx: AppContext) -> FastAPI:
             return RedirectResponse(url="/integrations?zerodha_auth=failed")
 
     @app.post("/api/auth/zerodha/postback")
-    async def zerodha_postback(body: dict[str, Any]) -> dict[str, str]:
-        """Zerodha order postback — receives order status updates.
+    async def zerodha_postback(request: Request) -> dict[str, str]:
+        """Zerodha order postback. Fires on every order status change
+        (COMPLETE / CANCELLED / REJECTED / partial-fill UPDATE).
 
-        No auth required (called by Zerodha servers).
-        Logs the update and broadcasts to WebSocket clients.
+        Two things happen:
+          1. Checksum verification — SHA-256(order_id + order_timestamp +
+             api_secret) must match the body's checksum field. Without
+             this, anyone who knows the endpoint URL could spoof updates
+             at our dashboard clients.
+          2. Business logic — for terminal states (COMPLETE, CANCELLED,
+             REJECTED) we route the update to _apply_order_postback,
+             which updates the matching trade row immediately rather
+             than waiting for the next 15-min heartbeat reconciliation.
         """
-        order_id = body.get("order_id", "unknown")
-        order_status = body.get("status", "unknown")
-        logger.info("Zerodha postback: order=%s status=%s", order_id, order_status)
+        import hashlib
+        import json as _json
+
+        raw = await request.body()
+        try:
+            body = _json.loads(raw or b"{}")
+        except (ValueError, TypeError):
+            logger.warning("Zerodha postback: invalid JSON body")
+            raise HTTPException(status_code=400, detail="invalid body")
+
+        order_id = str(body.get("order_id") or "")
+        order_timestamp = str(body.get("order_timestamp") or "")
+        received_checksum = body.get("checksum") or ""
+
+        api_secret_val = ctx.config.broker.api_secret.get_secret_value() \
+            if ctx.config.broker.api_secret else ""
+        if api_secret_val and order_id and order_timestamp:
+            expected = hashlib.sha256(
+                f"{order_id}{order_timestamp}{api_secret_val}".encode(),
+            ).hexdigest()
+            if not secrets.compare_digest(expected, str(received_checksum)):
+                logger.warning(
+                    "Zerodha postback: checksum mismatch for order=%s "
+                    "(possibly spoofed) — rejecting", order_id,
+                )
+                raise HTTPException(status_code=401, detail="invalid checksum")
+        else:
+            # Mode where checksum can't be computed (paper / dev). Log
+            # but accept so local testing isn't blocked.
+            logger.debug(
+                "Zerodha postback: skipping checksum (api_secret/order_id/timestamp missing)",
+            )
+
+        status_str = (body.get("status") or "").upper()
+        logger.info("Zerodha postback: order=%s status=%s", order_id, status_str)
+
+        if status_str in ("COMPLETE", "CANCELLED", "REJECTED"):
+            try:
+                await _apply_order_postback(ctx, order_id, status_str, body)
+            except Exception:
+                logger.exception(
+                    "Zerodha postback: business-logic failed for order=%s",
+                    order_id,
+                )
 
         try:
             await broadcast_ws("order_update", {
                 "order_id": order_id,
-                "status": order_status,
+                "status": status_str,
                 "symbol": body.get("tradingsymbol"),
                 "transaction_type": body.get("transaction_type"),
             })
