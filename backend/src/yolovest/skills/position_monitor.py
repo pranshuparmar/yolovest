@@ -331,8 +331,9 @@ class PositionMonitorSkill(SkillBase):
                         target_progress = self._target_progress_pct(
                             pos["signal_type"], entry, target, current_price,
                         )
-                        if target_progress >= tweaks.tighten_at_target_pct:
-                            step_pct *= tweaks.tighten_step_multiplier
+                        step_pct *= self._trailing_step_multiplier(
+                            target_progress, tweaks,
+                        )
                     step = current_price * step_pct
                     if pos["signal_type"] == "BUY":
                         new_sl = max(entry, current_price - step)  # at least breakeven
@@ -994,8 +995,7 @@ class PositionMonitorSkill(SkillBase):
                 signal_type, entry, float(pos.get("target_price") or 0.0),
                 current_price,
             )
-            if target_progress >= tweaks.tighten_at_target_pct:
-                step_pct *= tweaks.tighten_step_multiplier
+            step_pct *= self._trailing_step_multiplier(target_progress, tweaks)
         step = current_price * step_pct
         if signal_type == "BUY":
             new_sl = max(entry, current_price - step)  # at least breakeven
@@ -1107,6 +1107,28 @@ class PositionMonitorSkill(SkillBase):
                 "OCO: both legs filled for %s in same window — no cancel needed",
                 pos.get("symbol"),
             )
+
+    @staticmethod
+    def _trailing_step_multiplier(progress: float, cfg: Any) -> float:
+        """Step-up curve. progress < start → 1.0 (no tighten). At
+        start, first bucket of decay applies; every step_size of
+        additional progress applies another bucket. Floored at
+        min_multiplier so the SL doesn't crawl to zero.
+        """
+        if not cfg.tighten_trailing_enabled:
+            return 1.0
+        if progress < cfg.tighten_start_at_target_pct:
+            return 1.0
+        excess = progress - cfg.tighten_start_at_target_pct
+        # +1 so bucket 1 applies at the start threshold (some tighten
+        # at the trigger, rather than zero). 1e-9 epsilon to avoid
+        # floating-point drift at exact 0.10 multiples (without it,
+        # 0.60 - 0.50 = 0.0999... and floors to bucket 1 instead of 2).
+        buckets = int(excess / cfg.tighten_step_size + 1e-9) + 1
+        return max(
+            cfg.tighten_min_multiplier,
+            1.0 - buckets * cfg.tighten_step_decay,
+        )
 
     @staticmethod
     def _target_progress_pct(

@@ -349,15 +349,32 @@ class ExitTweaksConfig(BaseModel):
     volume_exit_lookback_bars: int = Field(default=12, ge=3, le=60)
     volume_exit_min_ratio: float = Field(default=0.30, gt=0, le=1.0)
 
-    # Trailing-SL tightening near target. Once profit has covered
-    # `tighten_at_target_pct` of the entry-to-target distance, scale
-    # the trailing-SL step by `tighten_step_multiplier` (< 1.0). The
-    # SL ratchets up in smaller increments so a near-target pullback
-    # doesn't surrender the gain. Applies to both client-side and
-    # GTT-managed trailing SL paths.
+    # Trailing-SL tightening near target. Step-up curve: once target
+    # progress hits `tighten_start_at_target_pct`, the trailing-SL
+    # step shrinks by `tighten_step_decay` per bucket of
+    # `tighten_step_size` progress, floored at `tighten_min_multiplier`.
+    # Defaults give a gradual ramp — first tightening at 50% target
+    # progress, fully floored at 100%.
+    #
+    # Default curve:
+    #   progress  multiplier
+    #   < 0.50    1.00 (full step, no tighten)
+    #   0.50      0.85
+    #   0.60      0.70
+    #   0.70      0.55
+    #   0.80      0.40
+    #   0.90      0.25
+    #   >= 1.00   0.20 (floor)
+    #
+    # Increase tighten_step_decay or lower tighten_min_multiplier for
+    # an aggressive lock-in; raise tighten_start_at_target_pct for
+    # wider trades that need room to breathe. Applies to both
+    # client-side and GTT-managed trailing SL paths.
     tighten_trailing_enabled: bool = True
-    tighten_at_target_pct: float = Field(default=0.70, ge=0.5, le=1.0)
-    tighten_step_multiplier: float = Field(default=0.50, gt=0, le=1.0)
+    tighten_start_at_target_pct: float = Field(default=0.50, ge=0.3, le=0.95)
+    tighten_step_size: float = Field(default=0.10, ge=0.05, le=0.50)
+    tighten_step_decay: float = Field(default=0.15, ge=0.05, le=0.50)
+    tighten_min_multiplier: float = Field(default=0.20, gt=0, le=1.0)
 
 
 class RegimeGateConfig(BaseModel):
