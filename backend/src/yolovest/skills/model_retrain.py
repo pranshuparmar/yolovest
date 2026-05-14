@@ -357,8 +357,9 @@ class ModelRetrainSkill(SkillBase):
                 # Merge cross-sectional market-regime features for this
                 # timestamp (universe breadth + avg %-return). Symbols
                 # alone can't tell the model "today is a chop day" —
-                # this layer does.
-                _ts = bars[i].timestamp
+                # this layer does. Key is the YYYY-MM-DD date string
+                # to match the index built by _compute_regime_index.
+                _ts = bars[i].timestamp.strftime("%Y-%m-%d")
                 _regime = regime_by_ts.get(_ts)
                 if _regime:
                     features["universe_breadth"] = _regime["breadth"]
@@ -392,8 +393,11 @@ class ModelRetrainSkill(SkillBase):
                 # predate the data sources). Compounds with the
                 # institutional_flow risk-check multiplier so the model
                 # learns to score these signals natively at inference.
-                _sample_date = bars[i].timestamp[:10]
-                _bulk_window_start = bars[max(0, i - 5)].timestamp[:10]
+                # bars[i].timestamp is a datetime; the bulk_deals table
+                # stores deal_date as YYYY-MM-DD strings, so format
+                # consistently before the lookup.
+                _sample_date = bars[i].timestamp.strftime("%Y-%m-%d")
+                _bulk_window_start = bars[max(0, i - 5)].timestamp.strftime("%Y-%m-%d")
                 _bd_dates = bulk_dates_by_sym.get(sym, [])
                 _bd_buy = _bd_sell = 0
                 for d in _bd_dates:
@@ -500,12 +504,18 @@ class ModelRetrainSkill(SkillBase):
         would give but doesn't require a separate index ingest — the
         500-stock universe alone is more than enough breadth.
         """
-        # Build per-timestamp aggregator
+        # Build per-timestamp aggregator. Date-string key (YYYY-MM-DD)
+        # so it matches sample-time lookups that derive the key from
+        # bars[i].timestamp (a datetime, formatted to date-only).
+        # Without the explicit date prefix, full ISO strings and
+        # datetime objects miss each other and every sample falls back
+        # to the neutral 0.5 breadth — silently neutering the feature.
         agg: dict[str, list[float]] = {}
         for rows in by_symbol.values():
             prev_close: float | None = None
             for r in rows:
-                ts = r.get("timestamp")
+                raw_ts = r.get("timestamp")
+                ts = str(raw_ts)[:10] if raw_ts else ""
                 c = r.get("close") or 0.0
                 if ts and prev_close and prev_close > 0:
                     ret = (c - prev_close) / prev_close
@@ -547,13 +557,17 @@ class ModelRetrainSkill(SkillBase):
         cohorts produce noisy breadth and the model is better served
         falling back to neutral than learning from noise.
         """
+        # Date-string keys (YYYY-MM-DD), see _compute_regime_index for
+        # why — sample-time lookups derive the key from a datetime and
+        # mismatched key types silently zero the features out.
         sector_agg: dict[tuple[str, str], list[float]] = {}
         symbol_returns: dict[tuple[str, str], float] = {}
         for sym, rows in by_symbol.items():
             sector = sector_map.get(sym)
             prev_close: float | None = None
             for r in rows:
-                ts = r.get("timestamp")
+                raw_ts = r.get("timestamp")
+                ts = str(raw_ts)[:10] if raw_ts else ""
                 c = r.get("close") or 0.0
                 if ts and prev_close and prev_close > 0:
                     ret = (c - prev_close) / prev_close
