@@ -539,6 +539,15 @@ export function useSymbolPredictions(symbol: string) {
   });
 }
 
+export function useSymbolContext(symbol: string) {
+  return useQuery({
+    queryKey: ["symbol-context", symbol],
+    queryFn: () => api.symbolContext(symbol),
+    enabled: !!symbol,
+    staleTime: 60_000,
+  });
+}
+
 // Feature #5
 export function useStrategyPerformance() {
   return useQuery({

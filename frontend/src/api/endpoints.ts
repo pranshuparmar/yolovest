@@ -35,6 +35,7 @@ import type {
   ExecutionQuality,
   ModelDrift,
   InstitutionalFlows,
+  SymbolContext,
   CorrelationData,
   PriceAlert,
   RiskSimParams,
@@ -311,6 +312,9 @@ export const api = {
 
   symbolPredictions: (symbol: string) =>
     apiFetch<PredictionDetail[]>(`/api/symbol/${symbol}/predictions`),
+
+  symbolContext: (symbol: string) =>
+    apiFetch<SymbolContext>(`/api/symbol/${symbol}/context`),
 
   // Feature #5
   strategyPerformance: () =>

@@ -3,6 +3,7 @@ import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLo
 import { useLtpStream } from "../hooks/useLtpStream";
 import clsx from "clsx";
 import type { ManualOrder } from "../types/api";
+import { SymbolLink } from "../components/SymbolLink";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", {
@@ -295,7 +296,9 @@ export function HoldingsPage() {
               <tbody>
                 {review.data.recommendations.map((r: Rec) => (
                   <tr key={r.symbol} className="border-b border-gray-800/50 hover:bg-gray-800/20">
-                    <td className="py-2 px-3 font-medium text-gray-200">{r.symbol}</td>
+                    <td className="py-2 px-3 font-medium text-gray-200">
+                      <SymbolLink symbol={r.symbol} className="text-gray-200" />
+                    </td>
                     <td className="py-2 px-3 text-center">
                       <span className={clsx("px-1.5 py-0.5 rounded text-xs font-medium", {
                         "bg-red-900/40 text-red-400": r.action === "SELL" || r.action === "SHORT",

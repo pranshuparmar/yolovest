@@ -3,6 +3,7 @@ import clsx from "clsx";
 import type { Trade } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
 import { useLtpStream } from "../hooks/useLtpStream";
+import { SymbolLink } from "./SymbolLink";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", {
@@ -51,7 +52,9 @@ export function TradesTable({
               onClick={() => navigate(`/trades/${t.trade_id}`)}
               className="border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer"
             >
-              <td className="py-2 pr-4 font-medium">{t.symbol}</td>
+              <td className="py-2 pr-4 font-medium">
+                <SymbolLink symbol={t.symbol} />
+              </td>
               <td className="py-2 pr-4">
                 <span
                   className={clsx(

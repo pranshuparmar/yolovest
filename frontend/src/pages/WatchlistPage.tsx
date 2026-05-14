@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { SectorMap } from "../components/SectorMap";
 import { Pagination } from "../components/Pagination";
+import { SymbolLink } from "../components/SymbolLink";
 import clsx from "clsx";
 import {
   useWatchlist,
@@ -284,7 +285,7 @@ export function WatchlistPage() {
                       className="border-b border-gray-800/50 hover:bg-gray-800/30"
                     >
                       <td className="py-2 pr-3 font-medium text-emerald-400">
-                        {item.symbol}
+                        <SymbolLink symbol={item.symbol} className="text-emerald-400" />
                       </td>
                       <td className="py-2 pr-3 text-gray-300">
                         {score(item.composite_score)}
@@ -389,7 +390,7 @@ export function WatchlistPage() {
                           {algoOffset + idx + 1}
                         </td>
                         <td className="py-2 pr-3 font-medium">
-                          <span className="text-blue-400">{item.symbol}</span>
+                          <SymbolLink symbol={item.symbol} className="text-blue-400" />
                           {inUser && (
                             <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-emerald-900/30 text-emerald-500">
                               yours

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { usePendingTrades, useApprovePendingTrade, useRejectPendingTrade, useClearTodaysSignals } from "../hooks/queries";
 import { useLtpStream } from "../hooks/useLtpStream";
 import clsx from "clsx";
+import { SymbolLink } from "./SymbolLink";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -55,7 +56,9 @@ function OverrideRow({
 
   return (
     <tr className="border-b border-amber-800/30 bg-amber-950/20">
-      <td className="py-2 px-3 font-medium text-amber-300">{trade.symbol}</td>
+      <td className="py-2 px-3 font-medium text-amber-300">
+        <SymbolLink symbol={trade.symbol} className="text-amber-300" />
+      </td>
       <td className="py-2 px-3 text-center">
         <select
           value={signalType}
@@ -285,7 +288,9 @@ export function PendingTradesBanner() {
                 />
               ) : (
                 <tr key={t.id} className="border-b border-gray-800/30 hover:bg-gray-800/20">
-                  <td className="py-2 px-3 font-medium text-gray-200">{t.symbol}</td>
+                  <td className="py-2 px-3 font-medium text-gray-200">
+                    <SymbolLink symbol={t.symbol} className="text-gray-200" />
+                  </td>
                   <td className="py-2 px-3 text-center">
                     <span
                       className={clsx(

@@ -4,6 +4,7 @@ import {
   useWeeklyLLMReviews,
 } from "../hooks/queries";
 import { TradesTable } from "../components/TradesTable";
+import { SymbolLink } from "../components/SymbolLink";
 import clsx from "clsx";
 
 function fmt(n: number | null | undefined, d = 2) {
@@ -259,7 +260,9 @@ export function WeeklySummaryPage() {
                     className="border-b border-gray-800/50 hover:bg-gray-800/30"
                   >
                     <td className="py-2 pr-4 font-medium text-emerald-400">
-                      {p.symbol || "—"}
+                      {p.symbol
+                        ? <SymbolLink symbol={p.symbol} className="text-emerald-400" />
+                        : "—"}
                     </td>
                     <td className="py-2 pr-4 text-gray-400">
                       {p.signal_type || "—"}

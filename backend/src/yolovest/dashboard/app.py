@@ -2279,25 +2279,76 @@ def create_app(ctx: AppContext) -> FastAPI:
     # Symbol Deep-Dive (Feature #3)
     # ------------------------------------------------------------------
 
+    @app.get("/api/symbol/{symbol}/context")
+    async def get_symbol_context(
+        symbol: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Symbol detail-page extras: quarantine status, recent bulk
+        deals, average delivery %. Composed in one round-trip so the
+        page doesn't fire 4 separate queries on load.
+        """
+        sym = symbol.upper()
+        try:
+            quarantined = await ctx.db.get_quarantined_symbols()
+        except Exception:
+            quarantined = []
+        q_entry = next(
+            (q for q in quarantined if q.get("symbol", "").upper() == sym), None,
+        )
+        try:
+            bulk = await ctx.db.get_bulk_deals_list(days=30, symbol=sym, limit=20)
+        except Exception:
+            bulk = []
+        try:
+            delivery_avg = await ctx.db.get_recent_delivery_pct(sym, lookback_days=5)
+        except Exception:
+            delivery_avg = None
+        return {
+            "quarantine": q_entry,
+            "recent_bulk_deals": bulk,
+            "delivery_pct_avg_5d": delivery_avg,
+        }
+
     @app.get("/api/symbol/{symbol}/ohlcv")
     async def get_symbol_ohlcv(
         symbol: str,
         days: int = Query(60, ge=1, le=365),
-        interval: str = Query("1d"),
-        user: str = Depends(verify_credentials),
+        interval: str = Query("daily"),
+        _user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
-        """OHLCV bars for a symbol."""
-        bars = await ctx.db.get_ohlcv(symbol.upper(), interval, days)
+        """OHLCV bars for a symbol with delivery_pct overlay. The DB
+        stores daily bars under the canonical interval "daily"
+        (matching ingester / market-scan conventions); "1d" / "1day"
+        are normalised so older frontend builds still work.
+        """
+        from datetime import timedelta
+        from yolovest.timezone import now_ist
+        iv = interval.lower()
+        if iv in ("1d", "1day", "day"):
+            iv = "daily"
+        # Direct query so we can include delivery_pct alongside the
+        # standard OHLCV columns without round-tripping through
+        # OHLCVBar (which doesn't have a delivery_pct field).
+        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cursor = await ctx.db.read_conn.execute(
+            "SELECT timestamp, open, high, low, close, volume, delivery_pct "
+            "FROM ohlcv WHERE symbol = ? AND interval = ? AND timestamp >= ? "
+            "ORDER BY timestamp",
+            (symbol.upper(), iv, cutoff),
+        )
+        rows = await cursor.fetchall()
         return [
             {
-                "timestamp": b.timestamp.isoformat(),
-                "open": b.open,
-                "high": b.high,
-                "low": b.low,
-                "close": b.close,
-                "volume": b.volume,
+                "timestamp": r[0],
+                "open": r[1],
+                "high": r[2],
+                "low": r[3],
+                "close": r[4],
+                "volume": r[5],
+                "delivery_pct": r[6],
             }
-            for b in bars
+            for r in rows
         ]
 
     @app.get("/api/symbol/{symbol}/trades")

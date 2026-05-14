@@ -6,15 +6,35 @@ import {
   useSymbolPredictions,
   useSentiment,
   useNews,
+  useSymbolContext,
 } from "../hooks/queries";
 import {
-  ComposedChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  ComposedChart, Area, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
   BarChart, Bar, CartesianGrid, Scatter, Cell,
 } from "recharts";
 import clsx from "clsx";
 import { parseUTC, getTimezone } from "../utils/datetime";
 import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 import { useLtpStream } from "../hooks/useLtpStream";
+
+/** Trailing simple moving average over the last `period` values of
+ * the named field. Returns null for indices that don't have enough
+ * history yet (so recharts hides the line until the window fills). */
+function trailingSMA<T extends object>(
+  rows: T[], field: keyof T, period: number,
+): (number | null)[] {
+  const out: (number | null)[] = [];
+  let sum = 0;
+  const window: number[] = [];
+  for (const row of rows) {
+    const v = Number((row as Record<string, unknown>)[field as string] ?? 0);
+    window.push(v);
+    sum += v;
+    if (window.length > period) sum -= window.shift()!;
+    out.push(window.length === period ? sum / period : null);
+  }
+  return out;
+}
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -31,6 +51,7 @@ export function SymbolPage() {
   const { data: predictions } = useSymbolPredictions(sym);
   const { data: sentiment } = useSentiment(sym);
   const { data: news } = useNews({ symbol: sym, limit: 10 });
+  const { data: ctxData } = useSymbolContext(sym);
   const ct = useChartTheme();
   const tooltipStyle = useTooltipStyle();
   // Live LTP — falls back to the latest chart close when no tick has
@@ -51,22 +72,39 @@ export function SymbolPage() {
       }
     }
 
-    return (ohlcv || []).map((b) => {
+    const base = (ohlcv || []).map((b) => {
       const date = parseUTC(b.timestamp).toLocaleDateString("en-IN", { timeZone: getTimezone(), month: "short", day: "numeric" });
       const entry = entryMap.get(date);
       const exit = exitMap.get(date);
       return {
         date,
+        open: b.open,
         close: b.close,
         volume: b.volume,
         high: b.high,
         low: b.low,
+        deliveryPct: b.delivery_pct ?? null,
+        // green when close > open, red otherwise — used by the volume bar
+        // colour to telegraph buying vs selling pressure intraday.
+        volumeColor: b.close >= b.open ? "#3fb950" : "#f85149",
         entryPrice: entry?.price ?? null,
         entryType: entry?.type ?? null,
         exitPrice: exit?.price ?? null,
         exitPnl: exit?.pnl ?? null,
       };
     });
+    // Trailing SMAs as EMA proxy. Real EMAs need recursive smoothing
+    // which is fine but trailing SMA is enough at the daily-bar
+    // resolution and is cheaper/simpler in client code.
+    const sma9 = trailingSMA(base, "close", 9);
+    const sma21 = trailingSMA(base, "close", 21);
+    const sma50 = trailingSMA(base, "close", 50);
+    return base.map((row, i) => ({
+      ...row,
+      sma9: sma9[i],
+      sma21: sma21[i],
+      sma50: sma50[i],
+    }));
   }, [ohlcv, trades]);
 
   const chartClose = chartData.length > 0 ? chartData[chartData.length - 1].close : null;
@@ -136,6 +174,12 @@ export function SymbolPage() {
                 }}
               />
               <Area type="monotone" dataKey="close" stroke="#3fb950" fill="url(#priceGrad)" strokeWidth={2} />
+              {/* SMA overlays — match conventional 9/21/50 colors. Lines
+                  start drawing only when their window fills, so the
+                  short-term line appears first. */}
+              <Line type="monotone" dataKey="sma9" stroke="#fbbf24" strokeWidth={1} dot={false} isAnimationActive={false} connectNulls={false} name="SMA9" />
+              <Line type="monotone" dataKey="sma21" stroke="#60a5fa" strokeWidth={1} dot={false} isAnimationActive={false} connectNulls={false} name="SMA21" />
+              <Line type="monotone" dataKey="sma50" stroke="#a78bfa" strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls={false} name="SMA50" />
               {/* Trade entry points */}
               <Scatter dataKey="entryPrice" name="entryPrice" shape="triangle" isAnimationActive={false}>
                 {chartData.map((d, i) => (
@@ -161,32 +205,48 @@ export function SymbolPage() {
               </Scatter>
             </ComposedChart>
           </ResponsiveContainer>
-          {/* Legend for trade markers */}
-          {(trades?.length ?? 0) > 0 && (
-            <div className="flex items-center gap-4 mt-2 text-[10px] text-gray-500">
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-0 h-0 border-l-[4px] border-r-[4px] border-b-[6px] border-l-transparent border-r-transparent border-b-emerald-400" />
-                BUY Entry
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-0 h-0 border-l-[4px] border-r-[4px] border-b-[6px] border-l-transparent border-r-transparent border-b-red-400" />
-                SELL Entry
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-2.5 h-2.5 rotate-45 bg-emerald-400 border border-white" />
-                Profitable Exit
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-2.5 h-2.5 rotate-45 bg-red-400 border border-white" />
-                Loss Exit
-              </span>
-            </div>
-          )}
+          {/* Legend for chart elements (trade markers + SMA lines) */}
+          <div className="flex items-center gap-4 flex-wrap mt-2 text-[10px] text-gray-500">
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-3 h-0.5 bg-amber-400" />
+              SMA 9
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-3 h-0.5 bg-blue-400" />
+              SMA 21
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-3 h-0.5 bg-violet-400" />
+              SMA 50
+            </span>
+            {(trades?.length ?? 0) > 0 && (
+              <>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-0 h-0 border-l-[4px] border-r-[4px] border-b-[6px] border-l-transparent border-r-transparent border-b-emerald-400" />
+                  BUY Entry
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-0 h-0 border-l-[4px] border-r-[4px] border-b-[6px] border-l-transparent border-r-transparent border-b-red-400" />
+                  SELL Entry
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-2.5 h-2.5 rotate-45 bg-emerald-400 border border-white" />
+                  Profitable Exit
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-2.5 h-2.5 rotate-45 bg-red-400 border border-white" />
+                  Loss Exit
+                </span>
+              </>
+            )}
+          </div>
           </>
         )}
       </div>
 
-      {/* Volume chart */}
+      {/* Volume chart — bars coloured by close-vs-open so a glance
+          tells you whether the day was net buying (green) or net
+          selling (red). */}
       {chartData.length > 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
           <h3 className="text-sm font-medium text-gray-400 mb-3">Volume</h3>
@@ -194,9 +254,126 @@ export function SymbolPage() {
             <BarChart data={chartData}>
               <XAxis dataKey="date" tick={{ fontSize: 10, fill: ct.tick }} />
               <YAxis tick={{ fontSize: 10, fill: ct.tick }} />
-              <Bar dataKey="volume" fill="#58a6ff" opacity={0.6} />
+              <Tooltip contentStyle={tooltipStyle} />
+              <Bar dataKey="volume" opacity={0.7} isAnimationActive={false}>
+                {chartData.map((d, i) => (
+                  <Cell key={i} fill={d.volumeColor} />
+                ))}
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Delivery % chart — from migration 038's ohlcv.delivery_pct
+          column. High = strong-hand accumulation (institutional
+          buying), low = intraday churn. NULL bars are skipped. */}
+      {chartData.some((d) => d.deliveryPct != null) && (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+          <h3 className="text-sm font-medium text-gray-400 mb-1">Delivery %</h3>
+          <p className="text-xs text-gray-500 mb-3">
+            Fraction of volume that took delivery (strong-hand accumulation).
+            NSE source — only populated on days the ingest priority loop
+            covers this symbol.
+          </p>
+          <ResponsiveContainer width="100%" height={120}>
+            <BarChart data={chartData}>
+              <XAxis dataKey="date" tick={{ fontSize: 10, fill: ct.tick }} />
+              <YAxis tick={{ fontSize: 10, fill: ct.tick }} domain={[0, 100]} />
+              <Tooltip contentStyle={tooltipStyle} />
+              <Bar dataKey="deliveryPct" fill="#0ea5e9" opacity={0.7} isAnimationActive={false} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Quarantine banner. Surfaces when ingest-data has tripped the
+          3-strike quarantine on this symbol — explains why signals
+          might be missing for it. */}
+      {ctxData?.quarantine && (
+        <div className="bg-amber-900/20 border border-amber-700/60 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-amber-400 mb-1">
+            Quarantined ({ctxData.quarantine.consecutive_failures} fetch failures)
+          </h3>
+          <p className="text-xs text-amber-200/80">
+            {ctxData.quarantine.last_error || "Reason not recorded."}
+          </p>
+          {ctxData.quarantine.replacement_symbol && (
+            <p className="text-xs text-amber-200 mt-2">
+              Routed to replacement{" "}
+              <Link
+                to={`/symbol/${ctxData.quarantine.replacement_symbol}`}
+                className="font-medium underline"
+              >
+                {ctxData.quarantine.replacement_symbol}
+              </Link>
+              .
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Recent bulk / block deals on this symbol — institutional
+          activity feeds the institutional_flow risk-check multiplier
+          and the bulk_deal_* ML features. */}
+      {ctxData?.recent_bulk_deals && ctxData.recent_bulk_deals.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+          <div className="flex items-baseline justify-between mb-3">
+            <h3 className="text-sm font-medium text-gray-400">
+              Recent Bulk / Block Deals
+            </h3>
+            <span className="text-xs text-gray-600">
+              avg delivery % last 5d:{" "}
+              <span className="text-gray-300 font-mono">
+                {ctxData.delivery_pct_avg_5d != null
+                  ? `${ctxData.delivery_pct_avg_5d.toFixed(1)}%`
+                  : "—"}
+              </span>
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                  <th className="py-1.5 pr-3 text-left">Date</th>
+                  <th className="py-1.5 pr-3 text-left">Type</th>
+                  <th className="py-1.5 pr-3 text-left">Client</th>
+                  <th className="py-1.5 pr-3 text-left">B/S</th>
+                  <th className="py-1.5 pr-3 text-right">Qty</th>
+                  <th className="py-1.5 pr-3 text-right">Price</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ctxData.recent_bulk_deals.map((d, i) => (
+                  <tr key={i} className="border-b border-gray-800/50">
+                    <td className="py-1.5 pr-3 text-gray-400">{d.deal_date}</td>
+                    <td className="py-1.5 pr-3 text-gray-500">{d.deal_type}</td>
+                    <td className="py-1.5 pr-3 text-gray-400 max-w-[18rem] truncate" title={d.client_name ?? ""}>
+                      {d.client_name || "—"}
+                    </td>
+                    <td className="py-1.5 pr-3">
+                      <span className={clsx(
+                        "text-[10px] px-1.5 py-0.5 rounded font-medium",
+                        (d.buy_sell ?? "").toUpperCase() === "BUY"
+                          ? "bg-emerald-900/40 text-emerald-400"
+                          : (d.buy_sell ?? "").toUpperCase() === "SELL"
+                            ? "bg-red-900/40 text-red-400"
+                            : "bg-gray-700/50 text-gray-300",
+                      )}>
+                        {d.buy_sell || "—"}
+                      </span>
+                    </td>
+                    <td className="py-1.5 pr-3 text-right text-gray-300 font-mono">
+                      {d.quantity?.toLocaleString("en-IN") ?? "—"}
+                    </td>
+                    <td className="py-1.5 pr-3 text-right text-gray-300 font-mono">
+                      {d.trade_price != null ? `₹${d.trade_price.toFixed(2)}` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

@@ -18,6 +18,7 @@ function fmt(n: number | null | undefined, d = 2) {
 }
 
 import { formatIST } from "../utils/datetime";
+import { SymbolLink } from "../components/SymbolLink";
 
 function formatDate(iso: string) {
   return formatIST(iso);
@@ -341,7 +342,7 @@ export function DryRunPage() {
                       className="border-b border-gray-800/50 hover:bg-gray-800/30"
                     >
                       <td className="py-2 px-3 font-medium text-gray-200">
-                        {s.symbol}
+                        <SymbolLink symbol={s.symbol} className="text-gray-200" />
                       </td>
                       <td className="py-2 px-3 text-center">
                         <span

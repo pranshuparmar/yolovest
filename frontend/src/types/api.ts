@@ -469,6 +469,7 @@ export interface OHLCVBar {
   low: number;
   close: number;
   volume: number;
+  delivery_pct?: number | null;
 }
 
 export interface StrategyPerformance {
@@ -551,6 +552,20 @@ export interface InstitutionalFlows {
   fii_dii_timeline: FiiDiiDayPoint[];
   fii_dii_summary: FiiDiiSummary;
   bulk_deals: BulkDealRow[];
+}
+
+export interface QuarantineEntry {
+  symbol: string;
+  consecutive_failures: number;
+  last_error: string | null;
+  quarantined_at: string | null;
+  replacement_symbol: string | null;
+}
+
+export interface SymbolContext {
+  quarantine: QuarantineEntry | null;
+  recent_bulk_deals: BulkDealRow[];
+  delivery_pct_avg_5d: number | null;
 }
 
 export interface ExecutionQuality {

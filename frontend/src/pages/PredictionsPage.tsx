@@ -9,6 +9,7 @@ import {
 } from "../hooks/queries";
 import { ScoreboardTable } from "../components/ScoreboardTable";
 import { Pagination } from "../components/Pagination";
+import { SymbolLink } from "../components/SymbolLink";
 import clsx from "clsx";
 import type { PredictionDetail } from "../types/api";
 
@@ -34,7 +35,9 @@ function PredictionRow({ p }: { p: PredictionDetail }) {
         onClick={() => setExpanded(!expanded)}
       >
         <span className="text-sm font-medium text-emerald-400 w-24 shrink-0">
-          {p.symbol || "\u2014"}
+          {p.symbol
+            ? <SymbolLink symbol={p.symbol} className="text-emerald-400" />
+            : "\u2014"}
         </span>
         <span className="text-xs text-gray-400 w-16">
           {p.signal_type || "\u2014"}

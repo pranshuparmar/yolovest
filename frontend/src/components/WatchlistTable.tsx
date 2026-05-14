@@ -1,6 +1,7 @@
 import type { WatchlistItem } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
 import { useLtpStream } from "../hooks/useLtpStream";
+import { SymbolLink } from "./SymbolLink";
 
 function score(v: number | null) {
   if (v === null) return "—";
@@ -42,7 +43,9 @@ export function WatchlistTable({ items }: { items: WatchlistItem[] }) {
                 key={item.symbol}
                 className="border-b border-gray-800/50 hover:bg-gray-800/30"
               >
-                <td className="py-2 pr-4 font-medium">{item.symbol}</td>
+                <td className="py-2 pr-4 font-medium">
+                  <SymbolLink symbol={item.symbol} />
+                </td>
                 <td className="py-2 pr-4 font-mono">
                   {ltp ? fmtPrice(ltp) : <span className="text-gray-600">—</span>}
                 </td>

@@ -7,6 +7,7 @@ import clsx from "clsx";
 import { useInstitutionalFlows } from "../hooks/queries";
 import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 import { Pagination } from "../components/Pagination";
+import { SymbolLink } from "../components/SymbolLink";
 import { parseUTC, getTimezone } from "../utils/datetime";
 
 const selectCls =
@@ -221,7 +222,9 @@ export function InstitutionalFlowsPage() {
                         <td className="py-2 px-4 text-gray-400 whitespace-nowrap">
                           {dateLocal}
                         </td>
-                        <td className="py-2 px-4 font-medium text-gray-200">{d.symbol}</td>
+                        <td className="py-2 px-4 font-medium text-gray-200">
+                          <SymbolLink symbol={d.symbol} className="text-gray-200" />
+                        </td>
                         <td className="py-2 px-4">
                           <span className={clsx(
                             "text-[10px] px-1.5 py-0.5 rounded font-medium",

@@ -1,6 +1,7 @@
 import { PositionsTable } from "../components/PositionsTable";
 import { CSVExportButton } from "../components/CSVExportButton";
 import { usePositions } from "../hooks/queries";
+import { SymbolLink } from "../components/SymbolLink";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", {
@@ -81,7 +82,7 @@ export function PositionsPage() {
               return (
                 <div key={p.trade_id} className="flex items-center gap-3">
                   <span className="text-xs font-medium text-emerald-400 w-20 shrink-0 truncate">
-                    {p.symbol}
+                    <SymbolLink symbol={p.symbol} className="text-emerald-400" />
                   </span>
                   <div className="flex-1 h-6 bg-gray-800 rounded-full relative">
                     {/* SL marker */}
