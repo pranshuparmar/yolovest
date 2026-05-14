@@ -598,39 +598,15 @@ async def async_main(args: argparse.Namespace) -> None:
             )
             logger.info("Set initial capital to %.0f from config", ctx.config.capital.initial_amount)
 
-    # Load production ML models from disk (if any exist)
-    if ctx.ml is not None:
-        for model_type in ("intraday", "swing"):
-            try:
-                await ctx.ml.load_model(model_type)
-                logger.info("Loaded production %s model at startup", model_type)
-            except FileNotFoundError:
-                logger.info("No saved %s model found, will be available after model-retrain", model_type)
-            except Exception as e:
-                logger.warning("Failed to load %s model at startup: %s", model_type, e)
-
-        # Load shadow models (if any are in shadow status in DB)
-        try:
-            shadow_models = await ctx.db.get_all_shadow_models()
-            for shadow in shadow_models:
-                try:
-                    await ctx.ml.load_shadow_model(
-                        shadow["model_type"], shadow["version"],
-                    )
-                except FileNotFoundError:
-                    # .pkl file missing — revert to retired
-                    logger.warning(
-                        "Shadow %s model %s has no .pkl file — reverting to retired",
-                        shadow["model_type"], shadow["version"],
-                    )
-                    await ctx.db.retire_model(shadow["model_type"], shadow["version"])
-                except Exception as e:
-                    logger.warning(
-                        "Failed to load shadow %s model %s: %s",
-                        shadow["model_type"], shadow["version"], e,
-                    )
-        except Exception:
-            logger.warning("Failed to load shadow models", exc_info=True)
+    # ML model loading happens in a background task started AFTER the
+    # dashboard is up — see `_load_ml_models_background` below. Loading
+    # pickled XGBoost models can take 30–60 s when shadow models have
+    # accumulated, and on a memory-pressured small host the
+    # deserialization stalls long enough that the docker healthcheck
+    # times out before /api/health binds. Delaying the load lets the
+    # FastAPI server come up first; the orchestrator's first heartbeat
+    # is gated by an `await asyncio.sleep(2)` so models almost always
+    # finish loading before the first inference is needed anyway.
 
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
@@ -747,6 +723,14 @@ async def async_main(args: argparse.Namespace) -> None:
     # Start dashboard
     dashboard_task = asyncio.create_task(_start_dashboard(ctx))
 
+    # Start ML model loading as a background task so /api/health binds
+    # without waiting for pickle deserialization (see note ~120 lines
+    # above). Models are loaded sequentially inside the task so they
+    # don't compete for memory on small hosts.
+    ml_load_task: asyncio.Task[None] | None = None
+    if ctx.ml is not None:
+        ml_load_task = asyncio.create_task(_load_ml_models_background(ctx))
+
     # Start CRON scheduler as background task
     cron_task = asyncio.create_task(_start_cron_scheduler(cron_scheduler))
 
@@ -826,6 +810,53 @@ async def _start_telegram(bot: Any) -> None:
         await bot.start()
     except Exception:
         logger.exception("Telegram bot failed to start")
+
+
+async def _load_ml_models_background(ctx: AppContext) -> None:
+    """Load production + shadow ML models in a background task so the
+    /api/health endpoint binds before pickle deserialization stalls
+    the event loop. Loading is sequential to avoid memory spikes from
+    multiple XGBoost models being unpickled in parallel.
+
+    Models that aren't loaded yet when generate-signals runs will
+    cause the skill to fall back to "no model available"; the
+    orchestrator's first heartbeat is gated by a 2-second sleep so
+    this is unlikely in practice, but if a shadow has dozens of MB
+    of trees and a host is under memory pressure, it's possible.
+    """
+    if ctx.ml is None:
+        return
+    for model_type in ("intraday", "swing"):
+        try:
+            await ctx.ml.load_model(model_type)
+            logger.info("Loaded production %s model at startup", model_type)
+        except FileNotFoundError:
+            logger.info(
+                "No saved %s model found, will be available after model-retrain",
+                model_type,
+            )
+        except Exception as e:
+            logger.warning("Failed to load %s model at startup: %s", model_type, e)
+    try:
+        shadow_models = await ctx.db.get_all_shadow_models()
+        for shadow in shadow_models:
+            try:
+                await ctx.ml.load_shadow_model(
+                    shadow["model_type"], shadow["version"],
+                )
+            except FileNotFoundError:
+                logger.warning(
+                    "Shadow %s model %s has no .pkl file — reverting to retired",
+                    shadow["model_type"], shadow["version"],
+                )
+                await ctx.db.retire_model(shadow["model_type"], shadow["version"])
+            except Exception as e:
+                logger.warning(
+                    "Failed to load shadow %s model %s: %s",
+                    shadow["model_type"], shadow["version"], e,
+                )
+    except Exception:
+        logger.warning("Failed to load shadow models", exc_info=True)
 
 
 async def _start_cron_scheduler(scheduler: CronScheduler) -> None:

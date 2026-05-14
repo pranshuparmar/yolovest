@@ -103,9 +103,12 @@ services:
       retries: 5
       # First cold boot runs migrations, builds the broker / market-data /
       # LLM stack, restores the Kite session, and warms the rate limiter
-      # before the FastAPI server binds. Generous start_period covers that
-      # without slowing failure detection once the app is up.
-      start_period: 90s
+      # before the FastAPI server binds. ML model deserialization
+      # (production + any accumulated shadow models) used to be in
+      # this critical path too but now runs in a background task. The
+      # generous start_period covers swap-fault-in on memory-pressured
+      # small hosts without slowing failure detection once the app is up.
+      start_period: 180s
     deploy:
       resources:
         limits:
