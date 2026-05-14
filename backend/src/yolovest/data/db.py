@@ -3348,8 +3348,43 @@ class Database:
     # Symbol Quarantine (auto-block after repeated fetch failures)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_transient_fetch_error(error: str) -> bool:
+        """Recognise temporary infrastructure failures that shouldn't
+        count toward the 3-strike quarantine threshold. A 30-min Kite
+        outage with a heartbeat retrying every 15min was previously
+        enough to mass-quarantine the entire universe even though no
+        symbol was actually broken.
+        """
+        if not error:
+            return False
+        msg = error.lower()
+        transient_markers = (
+            "too many requests", "rate limit", "429",
+            "timeout", "timed out",
+            "connection reset", "connection refused", "connection aborted",
+            "temporarily unavailable", "service unavailable",
+            "unreachable", "network is",
+            "ssl", "tls",
+            "http 5",  # 500, 502, 503, 504 — server-side, retry-safe
+            " 502", " 503", " 504",
+        )
+        return any(marker in msg for marker in transient_markers)
+
     async def record_fetch_failure(self, symbol: str, error: str) -> bool:
-        """Record a data fetch failure. Returns True if symbol is now quarantined."""
+        """Record a data fetch failure. Returns True if symbol is now quarantined.
+
+        Transient errors (rate limit, timeouts, 5xx, SSL/network) are
+        logged but don't bump the counter — quarantining a symbol
+        because Zerodha had a 5-minute outage is exactly the kind of
+        silent-fragility this counter is meant to avoid.
+        """
+        if self._is_transient_fetch_error(error):
+            logger.info(
+                "Skipping quarantine counter for %s — transient error: %s",
+                symbol, error,
+            )
+            return False
         row = await self.conn.execute(
             "SELECT consecutive_failures FROM quarantined_symbols WHERE symbol = ?",
             (symbol,),
