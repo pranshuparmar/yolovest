@@ -89,7 +89,7 @@ class ModelRetrainSkill(SkillBase):
         for model_type in ("intraday", "swing"):
             # Build feature matrix with model-specific labeling + feedback features
             lookahead = lookahead_map[model_type]
-            X, y, feat_names, sample_weights = self._prepare_training_data(
+            X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
                 training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
             )
             if len(y) < min_samples:
@@ -111,6 +111,12 @@ class ModelRetrainSkill(SkillBase):
                 train_params: dict[str, Any] = {}
                 if sample_weights:
                     train_params["sample_weights"] = sample_weights
+                # Real-PnL backtest config: intraday model uses MIS for
+                # cost calc (lower STT); swing model uses CNC.
+                train_params["bars_meta"] = bars_meta
+                train_params["backtest_product"] = (
+                    "MIS" if model_type == "intraday" else "CNC"
+                )
                 metrics = await self.ctx.ml.train(
                     model_type, X, y, train_params, feature_names=feat_names,
                 )
@@ -171,7 +177,10 @@ class ModelRetrainSkill(SkillBase):
     def _prepare_training_data(
         self, training_data: dict[str, Any], lookahead_bars: int = 1,
         feedback_data: dict[str, dict[str, float]] | None = None,
-    ) -> tuple[list[list[float]], list[int], list[str], list[float]]:
+    ) -> tuple[
+        list[list[float]], list[int], list[str], list[float],
+        list[dict[str, Any]],
+    ]:
         """Convert raw OHLCV bars into feature matrix X, labels y, and sample weights.
 
         Groups bars by symbol, computes technical features using a sliding window,
@@ -217,6 +226,9 @@ class ModelRetrainSkill(SkillBase):
         sample_weights: list[float] = []
         feature_names: list[str] = []
         feature_names_set: set[str] = set()
+        # Parallel to X/y — used by the walk-forward backtest to
+        # simulate real PnL instead of the legacy +1%/-0.5% fiction.
+        bars_meta: list[dict[str, Any]] = []
 
         for sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
@@ -286,8 +298,13 @@ class ModelRetrainSkill(SkillBase):
                 X.append([features.get(k, 0.0) for k in feature_names])
                 y.append(label)
                 sample_weights.append(sym_weight)
+                bars_meta.append({
+                    "symbol": sym,
+                    "entry_close": float(current_close),
+                    "exit_close": float(future_close),
+                })
 
-        return X, y, feature_names, sample_weights
+        return X, y, feature_names, sample_weights, bars_meta
 
     async def _check_shadow_promotions(self) -> list[dict[str, Any]]:
         """Check if shadow models have completed trial period.

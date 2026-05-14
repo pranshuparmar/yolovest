@@ -209,26 +209,39 @@ leg untouched.
 
 ---
 
-## P3 — Backtest realism
+## ~~P3 — Backtest realism: walk-forward sim with real PnL~~ (done)
 
-### Replace synthetic +1%/−0.5% scoring with a real walk-forward sim
+`strategy/walk_forward_backtest.py` (`run_walk_forward_backtest`)
+replaces the legacy +1%/-0.5% fiction. Each non-HOLD prediction now
+simulates a one-bar trade through the real cost model
+(`compute_transaction_costs`), size by `risk_per_trade_pct × capital`,
+with configurable entry slippage. The equity curve is real PnL;
+Sharpe / drawdown / win-rate / profit-factor fall out of that PnL
+series.
 
-**What:** `ml_signal.py` currently scores each prediction with a
-hardcoded payoff (+1% correct, −0.5% wrong, 0% HOLD) and computes
-Sharpe / drawdown / win-rate off that synthetic stream. The metrics
-shown on the ML Models dashboard are inflated by this geometry —
-Sharpe > 5 looks great but doesn't translate to real PnL.
+`model_retrain._prepare_training_data` now emits `bars_meta` parallel
+to X/y (each entry has `symbol`, `entry_close`, `exit_close`) and
+passes it through to `ml_signal.train` via the params dict.
+`ml_signal.train` switches to the real-PnL backtest when bars_meta is
+supplied; the legacy synthetic path stays as a fallback for callers
+that don't (older tests).
 
-**Why:** A proper backtest walks the test set day-by-day applying the
-full signal pipeline: risk-check, position sizing, entry slippage,
-SL/target/holding-period exits, transaction costs. The resulting
-equity curve is the honest basis for Sharpe and drawdown.
+The returned metrics dict gains two new fields when the real path is
+used: `net_pnl` (₹ across all simulated trades) and `final_capital`
+(starting + net_pnl). A `backtest_source` tag (`walk_forward_real_pnl`
+vs `synthetic_legacy`) makes the source explicit on the ML Models
+dashboard so old/new metrics can be told apart.
 
-**Scope:** moderate refactor. New `strategy/backtest.py` that mirrors
-the live pipeline but operates on historical OHLCV. Hooks into
-`model_retrain` to replace the synthetic scoring block. Reuses
-`compute_transaction_costs`, `apply_session_caps`, and the holding-
-period logic so backtest geometry matches production exactly.
+**Deliberately out of scope for v1:**
+- Concurrent open positions / portfolio simulator with sector caps,
+  max-open-positions, daily/weekly circuit breakers. Each test sample
+  is treated independently in v1.
+- Intra-bar SL/target hits. Exit is always the lookahead-bar close
+  (1 bar for intraday model, 5 bars for swing). Adding intra-bar
+  path-dependent sim would need OHLC of intermediate bars.
+
+Both gaps are honest improvements over today but produce diminishing
+returns relative to the fiction → real-PnL jump that's shipped.
 
 ---
 

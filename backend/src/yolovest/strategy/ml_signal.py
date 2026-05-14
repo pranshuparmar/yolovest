@@ -410,6 +410,13 @@ class XGBoostSignalModel(MLBase):
             "min_training_samples", _MIN_TRAINING_SAMPLES_DEFAULT
         )
         sample_weights_raw = params.pop("sample_weights", None)
+        # Walk-forward backtest inputs — when bars_meta is supplied,
+        # we score predictions through the real cost / sizing /
+        # slippage model in strategy/walk_forward_backtest.py instead
+        # of the legacy +1%/-0.5% synthetic payoff. Callers that don't
+        # pass these (e.g. older tests) keep the synthetic path.
+        bars_meta_raw = params.pop("bars_meta", None)
+        backtest_product = params.pop("backtest_product", "MIS")
 
         import numpy as np
 
@@ -467,12 +474,25 @@ class XGBoostSignalModel(MLBase):
             # Train on full data first
             model = xgb.XGBClassifier(**xgb_params)
 
-            # Collect walk-forward metrics
-            all_returns: list[float] = []
-            wins = 0
-            losses = 0
-            gross_profit = 0.0
-            gross_loss = 0.0
+            # Walk-forward predictions accumulator. We collect every test
+            # fold's predictions (with the matching bars_meta when
+            # available) and feed them through the real-PnL backtest at
+            # the end so the metrics reflect actual costs / sizing /
+            # slippage rather than the legacy +1%/-0.5% fiction.
+            from yolovest.strategy.walk_forward_backtest import (
+                BacktestConfig, BarMeta, run_walk_forward_backtest,
+            )
+
+            collected_preds: list[int] = []
+            collected_meta: list[BarMeta] = []
+            # Legacy synthetic accumulators — kept so trainings without
+            # bars_meta (older callers, focused unit tests) still emit
+            # comparable metrics.
+            synthetic_returns: list[float] = []
+            synthetic_wins = 0
+            synthetic_losses = 0
+            synthetic_gross_profit = 0.0
+            synthetic_gross_loss = 0.0
 
             for train_idx, test_idx in tscv.split(X_arr):
                 X_train, X_test = X_arr[train_idx], X_arr[test_idx]  # noqa: N806
@@ -483,19 +503,31 @@ class XGBoostSignalModel(MLBase):
                 fold_model.fit(X_train, y_train, sample_weight=w_train, verbose=False)
 
                 preds = fold_model.predict(X_test)
-                # Simulated returns: correct direction = +1%, wrong = -0.5%
-                for pred, actual in zip(preds, y_test, strict=False):
-                    if pred == actual and pred != 1:  # non-HOLD correct
-                        ret = 0.01
-                        wins += 1
-                        gross_profit += ret
-                    elif pred != actual and pred != 1:  # non-HOLD wrong
-                        ret = -0.005
-                        losses += 1
-                        gross_loss += abs(ret)
-                    else:
-                        ret = 0.0  # HOLD
-                    all_returns.append(ret)
+
+                if bars_meta_raw is not None:
+                    for pred, idx in zip(preds, test_idx, strict=False):
+                        meta = bars_meta_raw[int(idx)]
+                        collected_preds.append(int(pred))
+                        collected_meta.append(BarMeta(
+                            symbol=str(meta.get("symbol", "")),
+                            entry_close=float(meta.get("entry_close") or 0.0),
+                            exit_close=float(meta.get("exit_close") or 0.0),
+                        ))
+                else:
+                    # Legacy synthetic payoff — kept for backwards compat
+                    # with callers that don't yet thread bars_meta.
+                    for pred, actual in zip(preds, y_test, strict=False):
+                        if pred == actual and pred != 1:
+                            ret = 0.01
+                            synthetic_wins += 1
+                            synthetic_gross_profit += ret
+                        elif pred != actual and pred != 1:
+                            ret = -0.005
+                            synthetic_losses += 1
+                            synthetic_gross_loss += abs(ret)
+                        else:
+                            ret = 0.0
+                        synthetic_returns.append(ret)
 
             # Final model trained on all data (with sample weights if available)
             model.fit(X_arr, y_arr, sample_weight=weights_arr, verbose=False)
@@ -506,34 +538,59 @@ class XGBoostSignalModel(MLBase):
             )
             calibrator.fit(X_arr, y_arr)
 
-            # Compute metrics
-            returns_arr = np.array(all_returns)
-            if len(returns_arr) > 0 and returns_arr.std() > 0:
-                sharpe = float(
-                    (returns_arr.mean() / returns_arr.std()) * np.sqrt(252)
+            if bars_meta_raw is not None and collected_preds:
+                # Real-PnL backtest path
+                bt = run_walk_forward_backtest(
+                    preds=collected_preds,
+                    bars_meta=collected_meta,
+                    config=BacktestConfig(product=backtest_product),
                 )
+                metrics = {
+                    "sharpe": bt.sharpe,
+                    "max_drawdown_pct": bt.max_drawdown_pct,
+                    "win_rate": bt.win_rate,
+                    "profit_factor": (
+                        bt.profit_factor if bt.profit_factor != float("inf")
+                        else 999.0
+                    ),
+                    "total_trades": bt.total_trades,
+                    "total_samples": len(y_arr),
+                    # Extra real-PnL fields not produced by the legacy
+                    # synthetic path — useful on the ML Models dashboard.
+                    "net_pnl": bt.net_pnl,
+                    "final_capital": bt.final_capital,
+                    "backtest_source": "walk_forward_real_pnl",
+                }
             else:
-                sharpe = 0.0
-
-            equity = np.cumsum(returns_arr) + 1.0
-            peak = np.maximum.accumulate(equity)
-            drawdowns = (peak - equity) / np.where(peak > 0, peak, 1.0)
-            max_dd = float(drawdowns.max()) if len(drawdowns) > 0 else 0.0
-
-            total_trades = wins + losses
-            win_rate = wins / total_trades if total_trades > 0 else 0.0
-            profit_factor = (
-                gross_profit / gross_loss if gross_loss > 0 else float("inf")
-            )
-
-            metrics = {
-                "sharpe": round(sharpe, 4),
-                "max_drawdown_pct": round(max_dd, 4),
-                "win_rate": round(win_rate, 4),
-                "profit_factor": round(profit_factor, 4),
-                "total_trades": total_trades,
-                "total_samples": len(y_arr),
-            }
+                # Legacy synthetic metrics — kept for tests / older callers
+                returns_arr = np.array(synthetic_returns)
+                if len(returns_arr) > 0 and returns_arr.std() > 0:
+                    sharpe = float(
+                        (returns_arr.mean() / returns_arr.std()) * np.sqrt(252)
+                    )
+                else:
+                    sharpe = 0.0
+                equity = np.cumsum(returns_arr) + 1.0
+                peak = np.maximum.accumulate(equity)
+                drawdowns = (peak - equity) / np.where(peak > 0, peak, 1.0)
+                max_dd = float(drawdowns.max()) if len(drawdowns) > 0 else 0.0
+                total_trades = synthetic_wins + synthetic_losses
+                win_rate = (
+                    synthetic_wins / total_trades if total_trades > 0 else 0.0
+                )
+                profit_factor = (
+                    synthetic_gross_profit / synthetic_gross_loss
+                    if synthetic_gross_loss > 0 else float("inf")
+                )
+                metrics = {
+                    "sharpe": round(sharpe, 4),
+                    "max_drawdown_pct": round(max_dd, 4),
+                    "win_rate": round(win_rate, 4),
+                    "profit_factor": round(profit_factor, 4),
+                    "total_trades": total_trades,
+                    "total_samples": len(y_arr),
+                    "backtest_source": "synthetic_legacy",
+                }
 
             return model, calibrator, metrics
 

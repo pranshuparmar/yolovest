@@ -44,7 +44,7 @@ class TestFeatureMatrixRectangular:
         bars = _bars(350)
         training_data = {"bars": bars}
 
-        X, y, feature_names, weights = skill._prepare_training_data(
+        X, y, feature_names, weights, _meta = skill._prepare_training_data(
             training_data, lookahead_bars=1,
         )
 
@@ -60,7 +60,7 @@ class TestFeatureMatrixRectangular:
 
     def test_ema_200_eventually_appears_in_feature_names(self, skill):
         bars = _bars(350)
-        _, _, feature_names, _ = skill._prepare_training_data(
+        _, _, feature_names, _, _ = skill._prepare_training_data(
             {"bars": bars}, lookahead_bars=1,
         )
         assert "ema_200" in feature_names, (
@@ -69,7 +69,7 @@ class TestFeatureMatrixRectangular:
 
     def test_early_rows_have_zero_for_late_features(self, skill):
         bars = _bars(350)
-        X, _, feature_names, _ = skill._prepare_training_data(
+        X, _, feature_names, _, _ = skill._prepare_training_data(
             {"bars": bars}, lookahead_bars=1,
         )
         if "ema_200" not in feature_names:
