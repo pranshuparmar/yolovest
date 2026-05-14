@@ -10,6 +10,8 @@ XGBoost and sklearn are lazily imported so tests can run without them.
 import asyncio
 import logging
 from datetime import UTC, datetime
+
+from yolovest.timezone import now_ist
 from pathlib import Path
 from typing import Any
 
@@ -684,7 +686,11 @@ class XGBoostSignalModel(MLBase):
             elif model_type == "swing":
                 self._swing_features = feature_names
 
-        version = f"xgb_{model_type}_v{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+        # Version stamp in IST so it matches log timestamps the user
+        # reads (and matches the daily-bar timezone used elsewhere).
+        # UTC stamping previously caused the model version to read 5h30m
+        # earlier than the log line that announced its creation.
+        version = f"xgb_{model_type}_v{now_ist().strftime('%Y%m%d_%H%M%S')}"
         self._set_version(model_type, version)
 
         logger.info(
@@ -708,7 +714,7 @@ class XGBoostSignalModel(MLBase):
         if model is None:
             raise RuntimeError(f"No {model_type} model to save.")
 
-        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        timestamp = now_ist().strftime("%Y%m%d_%H%M%S")
         version_str = f"{model_type}_v{timestamp}"
         filename = f"{version_str}.pkl"
         filepath = self.model_dir / filename
