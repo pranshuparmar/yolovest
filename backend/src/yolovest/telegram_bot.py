@@ -812,6 +812,7 @@ class TelegramBot:
                 await self._ctx.db.update_signal_disposition(
                     signal.get("symbol", ""), "executed",
                     f"trade_id={trade.get('trade_id') or trade.get('order_id')}",
+                    position_size=int(trade.get("quantity") or 0) or None,
                 )
             except Exception:
                 logger.debug("Failed to mark signal executed", exc_info=True)

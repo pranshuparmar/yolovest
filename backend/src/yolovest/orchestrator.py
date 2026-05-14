@@ -238,8 +238,21 @@ class HeartbeatOrchestrator:
         symbol = self._signal_symbol(signal)
         if not symbol:
             return
+        # Pull the post-risk-check position_size off the signal so the
+        # signals row stops showing the model's placeholder 1.
+        size: int | None = None
+        if isinstance(signal, dict):
+            raw = signal.get("position_size")
+        else:
+            raw = getattr(signal, "position_size", None)
         try:
-            await self._ctx.db.update_signal_disposition(symbol, disposition, reason)
+            size = int(raw) if raw else None
+        except (TypeError, ValueError):
+            size = None
+        try:
+            await self._ctx.db.update_signal_disposition(
+                symbol, disposition, reason, position_size=size,
+            )
         except Exception:
             logger.debug("Failed to update signal disposition", exc_info=True)
 
