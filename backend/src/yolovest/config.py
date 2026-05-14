@@ -84,6 +84,11 @@ class MarketDataConfig(BaseModel):
     daily_fallback: str = "yfinance"
     intraday_provider: str = "tvdatafeed"
     kite_data_enabled: bool = False  # enable Kite Connect as data provider
+    # KiteTicker WebSocket for sub-second LTP cache. Requires the paid
+    # Kite data plan and a valid access token. Position-monitor uses
+    # the cached price first, falling back to REST when stale or
+    # missing. Off by default — opt-in until tested in the user's env.
+    kite_websocket_enabled: bool = False
     news_enabled: bool = True  # fetch news from MoneyControl, ET Markets, LiveMint
     scrapers_enabled: bool = True  # fetch from Screener.in, Trendlyne, Google Finance, NSE, economic calendar
     bhavcopy_dir: str = "./data/bhavcopy"

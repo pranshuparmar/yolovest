@@ -74,6 +74,10 @@ YoloVest is an AI-driven Indian stock trading platform. It uses Google Gemini fo
 - **`NewsSource`** (`news/base.py`) → MoneyControl, ET Markets, LiveMint (RSS); NSE Official (API); Google Finance (scraper).
 - **`MLBase`** (`strategy/ml_base.py`) → `XGBoostSignalModel` with Platt scaling calibration and `tree_method='hist'` for memory-efficient training.
 
+### KiteTicker WebSocket
+
+Optional sub-second LTP feed (opt-in via `market_data.kite_websocket_enabled`). When enabled and the broker is authenticated, `main.async_main` instantiates `broker.kite_ticker.KiteTickerClient` and attaches it to `ctx.ticker`. Position-monitor subscribes to every open-position symbol each cycle (idempotent), and `_get_ltp_with_retry` reads from the cache first (max 5s freshness) before falling back to REST. Mode is `MODE_LTP` — the 8-byte payload is enough for target/SL; richer modes (`MODE_QUOTE` / `MODE_FULL`) are available on the wrapper but not consumed yet. Order-update text frames are *not* bridged — HTTP postbacks with checksum verification already cover that path.
+
 ### Kite Rate Limiter
 
 `broker/kite_rate_limiter.py` provides a single `KiteRateLimiter` (concurrency cap + time-based interval) shared between `ZerodhaBroker` and `KiteDataProvider`. Built once in `main.build_context()` and injected. Default: 10 req/s and 8 concurrent.

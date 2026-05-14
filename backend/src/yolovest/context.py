@@ -496,3 +496,7 @@ class AppContext:
     ml: MLProtocol | None = None
     news_aggregator: Any = None
     memory: Any = None
+    # KiteTicker WebSocket client — populated only when
+    # market_data.kite_websocket_enabled is true and the broker is
+    # authenticated. Skills can read latest LTP via ctx.ticker.get_ltp.
+    ticker: Any = None

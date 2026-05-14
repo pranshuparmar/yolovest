@@ -95,24 +95,34 @@ notional check — accurate for CNC, intentionally conservative for MIS
 
 ---
 
-## P2 — Real-time monitoring
+## ~~P2 — Real-time monitoring: KiteTicker~~ (LTP cache shipped)
 
-### WebSocket streaming (KiteTicker)
+`broker/kite_ticker.py` (`KiteTickerClient`) wraps `KiteTicker` with
+an asyncio-friendly facade — `start`, `stop`, `subscribe`,
+`unsubscribe`, `get_ltp`. Runs in threaded mode (Twisted reactor in a
+background thread); auto-reconnect from the SDK; sync callbacks
+marshal back to asyncio via `loop.call_soon_threadsafe`.
 
-**What:** Persistent WebSocket to `wss://ws.kite.trade`. Subscribe to
-instrument tokens, receive tick-by-tick LTP/quote/depth updates.
+Lifecycle wired in `main.py`: when `market_data.kite_websocket_enabled`
+is true and the broker has a restored access token, the ticker is
+created, started, and attached to `ctx.ticker`. `position-monitor`
+subscribes to every open-position symbol each cycle (idempotent), and
+`_get_ltp_with_retry` prefers the cached LTP (max 5s old) before
+falling back to the existing REST path. Sub-second target/SL detection
+becomes the primary path; REST stays as a safety net.
 
-**Why:** Heartbeat-polled quotes give 15-minute resolution. A
-target/SL crossing mid-window isn't acted on until the next heartbeat.
-With WebSocket, `position-monitor` reacts in real time and quote/LTP
-REST quota usage is eliminated.
+Subscription mode is `MODE_LTP` (cheapest, 8-byte payload) — that's
+enough for the target/SL use case. `MODE_QUOTE` / `MODE_FULL` (OHLC,
+volume, depth) can be enabled per-symbol later if a charting feature
+needs them.
 
-**Scope:**
-- New `KiteTickerStreamer` class managing the WS connection (reconnect,
-  subscription churn, heartbeat).
-- New `position-monitor` mode that subscribes to currently-held symbols
-  and reacts to tick events instead of timer.
-- Graceful fallback to REST polling if WS connection fails.
+**Not in this round:** order-update bridge from the ticker into the
+postback business logic. HTTP postbacks already cover that path with
+checksum verification; using both would just be redundant. Wire it up
+later if HTTP postbacks turn out to be lossy in practice.
+
+**Default:** off (`kite_websocket_enabled: false`). Opt-in until the
+user has tested it on their EC2 setup.
 
 ---
 

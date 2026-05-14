@@ -493,6 +493,40 @@ async def async_main(args: argparse.Namespace) -> None:
         # Sync Kite data provider with broker's access token
         _sync_kite_data_token(ctx)
 
+        # KiteTicker WebSocket — gated behind a flag because it requires
+        # the paid Kite data plan. When enabled, position-monitor reads
+        # the sub-second LTP cache before falling back to REST.
+        if (
+            restored
+            and ctx.config.market_data.kite_websocket_enabled
+            and ctx.broker._access_token  # noqa: SLF001 — needed to start ticker
+        ):
+            try:
+                from yolovest.broker.kite_ticker import KiteTickerClient
+                # Find the KiteDataProvider in the ingester chain for token resolution
+                kite_provider = None
+                ingester = getattr(ctx.market_data, "providers", None)
+                if ingester:
+                    for p in ingester:
+                        if type(p).__name__ == "KiteDataProvider":
+                            kite_provider = p
+                            break
+                if kite_provider is not None:
+                    ticker = KiteTickerClient(
+                        api_key=ctx.config.broker.api_key.get_secret_value(),
+                        access_token=ctx.broker._access_token,  # noqa: SLF001
+                        kite_data_provider=kite_provider,
+                    )
+                    await ticker.start()
+                    ctx.ticker = ticker
+                    logger.info("KiteTicker started — sub-second LTP cache active")
+                else:
+                    logger.warning(
+                        "kite_websocket_enabled but no KiteDataProvider in ingester chain",
+                    )
+            except Exception:
+                logger.exception("KiteTicker startup failed; continuing without it")
+
         # First-time bootstrap: if no baseline exists yet, seed it from the
         # broker's current funds (cash + utilised). Subsequent restarts must
         # not overwrite it — the baseline is what the user deposited, and
@@ -700,6 +734,11 @@ async def async_main(args: argparse.Namespace) -> None:
         cron_task.cancel()
         watchdog.stop()
         watchdog_task.cancel()
+        if ctx.ticker is not None:
+            try:
+                await ctx.ticker.stop()
+            except Exception:
+                logger.debug("ticker stop failed", exc_info=True)
 
         # 2. Cancel telegram task to interrupt the long-poll HTTP request,
         #    then call stop() to cleanly shut down the updater.

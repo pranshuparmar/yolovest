@@ -145,6 +145,15 @@ class KiteDataProvider(MarketDataBase):
             len(self._token_cache),
         )
 
+    async def get_instrument_token(self, symbol: str) -> int | None:
+        """Public alias for the cached symbol → token lookup. Returns
+        None on failure (the private form raises) — convenient for
+        consumers like KiteTickerClient that want a soft miss."""
+        try:
+            return await self._get_instrument_token(symbol)
+        except Exception:
+            return None
+
     async def _get_instrument_token(self, symbol: str) -> int:
         """Resolve NSE symbol to Kite instrument token.
 

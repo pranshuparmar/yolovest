@@ -44,6 +44,17 @@ class PositionMonitorSkill(SkillBase):
         local_positions = await self.ctx.db.get_open_positions()
         broker_positions = await self.ctx.broker.get_positions()
 
+        # Make sure KiteTicker is subscribed to every open-position symbol
+        # so the cached LTP is fresh by the time _get_ltp_with_retry asks
+        # for it. Subscription is idempotent — already-subscribed tokens
+        # are skipped inside the ticker.
+        ticker = getattr(self.ctx, "ticker", None)
+        if ticker is not None and local_positions:
+            try:
+                await ticker.subscribe([p["symbol"] for p in local_positions])
+            except Exception:
+                logger.debug("ticker subscribe failed", exc_info=True)
+
         # Reconcile gtt_id / gtt_status against the broker's GTT list.
         # Cleared GTTs (user-cancelled on Kite web, rejected at trigger
         # time, expired, etc.) get their gtt_id wiped from the local row
@@ -342,8 +353,18 @@ class PositionMonitorSkill(SkillBase):
     ) -> float | None:
         """Fetch LTP with exponential backoff retries.
 
-        Returns the price on success, or None if all retries exhausted.
+        Prefers the KiteTicker cached price (sub-second, fresh within
+        5s) when available — that's the killer-feature payoff of the
+        WebSocket integration. Falls back to the REST market_data path
+        if the ticker isn't running, the cache is stale, or the symbol
+        was never subscribed.
         """
+        ticker = getattr(self.ctx, "ticker", None)
+        if ticker is not None:
+            cached = ticker.get_ltp(symbol)
+            if cached and cached > 0:
+                return cached
+
         for attempt in range(max_retries):
             try:
                 price = await self.ctx.market_data.get_ltp(symbol)
