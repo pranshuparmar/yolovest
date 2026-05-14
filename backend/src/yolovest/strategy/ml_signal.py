@@ -477,6 +477,7 @@ class XGBoostSignalModel(MLBase):
         # pass these (e.g. older tests) keep the synthetic path.
         bars_meta_raw = params.pop("bars_meta", None)
         backtest_product = params.pop("backtest_product", "MIS")
+        backtest_max_positions = int(params.pop("backtest_max_positions", 0))
 
         import numpy as np
 
@@ -624,7 +625,10 @@ class XGBoostSignalModel(MLBase):
                 bt = run_walk_forward_backtest(
                     preds=collected_preds,
                     bars_meta=collected_meta,
-                    config=BacktestConfig(product=backtest_product),
+                    config=BacktestConfig(
+                        product=backtest_product,
+                        max_concurrent_positions=backtest_max_positions,
+                    ),
                 )
                 metrics = {
                     "sharpe": bt.sharpe,
@@ -641,6 +645,8 @@ class XGBoostSignalModel(MLBase):
                     "net_pnl": bt.net_pnl,
                     "final_capital": bt.final_capital,
                     "backtest_source": "walk_forward_real_pnl",
+                    "signals_skipped_at_cap": bt.signals_skipped_at_cap,
+                    "backtest_max_positions": backtest_max_positions,
                 }
             else:
                 # Legacy synthetic metrics — kept for tests / older callers

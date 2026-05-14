@@ -171,6 +171,14 @@ class ModelRetrainSkill(SkillBase):
                 train_params["backtest_product"] = (
                     "MIS" if model_type == "intraday" else "CNC"
                 )
+                # Bound the backtest's concurrent-positions count to
+                # the same cap the live engine enforces. Without
+                # this, the simulator treats every signal as
+                # independently fillable and inflates Sharpe (e.g.
+                # 12.98 intraday on the user's last run).
+                train_params["backtest_max_positions"] = (
+                    self.ctx.config.risk.max_open_positions
+                )
                 metrics = await self.ctx.ml.train(
                     model_type, X, y, train_params, feature_names=feat_names,
                 )

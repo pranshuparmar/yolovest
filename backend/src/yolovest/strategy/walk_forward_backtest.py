@@ -96,6 +96,15 @@ class BacktestConfig:
     # share). A 1% SL is a sane default that matches the live strategy's
     # ATR-multiplier sizing on most stocks.
     sizing_sl_pct: float = 0.01
+    # Portfolio cap. When > 0 the simulator only fills a signal if
+    # fewer than this many positions are currently "in-flight" (i.e.
+    # entered but not yet exited per the lookahead window). Matches
+    # the live engine's risk.max_open_positions so the reported
+    # Sharpe is bounded by the same parallelism constraint live
+    # trading enforces. 0 = legacy behaviour (no cap; every signal
+    # is fillable — overstates Sharpe on broad universes with
+    # high concurrency).
+    max_concurrent_positions: int = 0
 
 
 @dataclass
@@ -112,6 +121,11 @@ class BacktestResult:
     net_pnl: float
     final_capital: float
     returns: list[float] = field(default_factory=list)
+    # Count of non-HOLD predictions skipped because the portfolio
+    # cap was already full. Reported so the user can see how much
+    # opportunity the cap closes off (and decide whether
+    # max_open_positions is set sensibly).
+    signals_skipped_at_cap: int = 0
 
 
 def _path_aware_exit(
@@ -202,10 +216,26 @@ def run_walk_forward_backtest(
             "must be the same length"
         )
 
+    from datetime import date as _date, timedelta as _td
+
+    def _parse_iso_date(s: str) -> _date | None:
+        try:
+            # Accept either "YYYY-MM-DD" or full ISO with time prefix.
+            return _date.fromisoformat(s[:10])
+        except (ValueError, TypeError):
+            return None
+
     capital = cfg.initial_capital
     peak = capital
     max_dd = 0.0
     returns: list[float] = []
+    # Portfolio cap: track in-flight exit dates so a signal can only
+    # enter when there's a free slot, matching what the live engine's
+    # risk.max_open_positions enforces. Stored sorted ascending so
+    # the "expire-completed" sweep is O(k) per loop iteration where
+    # k is the number of newly-completed positions.
+    in_flight_exits: list[_date] = []
+    signals_skipped_at_cap = 0
     # Daily aggregation for honest Sharpe. Per-trade Sharpe with
     # annualization_factor=252 inflates massively on high-frequency
     # strategies (5 intraday trades/day × 252 days → annualization
@@ -226,6 +256,20 @@ def run_walk_forward_backtest(
         if meta.entry_close <= 0 or meta.exit_close <= 0:
             continue
         direction = 1 if pred == _LABEL_BUY else -1
+
+        # Portfolio cap enforcement. When the user has set
+        # max_concurrent_positions > 0, only fill if there's a free
+        # slot. Without entry_date we can't determine when an
+        # existing position frees up, so we silently skip the cap
+        # (legacy callers without entry_date keep their old behaviour).
+        entry_dt = _parse_iso_date(meta.entry_date) if meta.entry_date else None
+        if cfg.max_concurrent_positions > 0 and entry_dt is not None:
+            # Free positions whose lookahead window has expired by
+            # the time this signal arrives.
+            in_flight_exits = [d for d in in_flight_exits if d > entry_dt]
+            if len(in_flight_exits) >= cfg.max_concurrent_positions:
+                signals_skipped_at_cap += 1
+                continue
 
         if direction > 0:
             entry = meta.entry_close * (1 + cfg.entry_slippage_pct)
@@ -256,6 +300,17 @@ def run_walk_forward_backtest(
         position_value = entry * size
         if position_value <= 0:
             continue
+        # Reserve a portfolio slot for this position. Approximate exit
+        # date = entry_date + (lookahead bars). Bars are daily so we
+        # treat each bar as one calendar day. Path-aware exit may
+        # fire earlier inside the window; this is a conservative
+        # (longer) reservation, which means the cap blocks slightly
+        # more signals than strictly necessary — fine for a more
+        # honest backtest.
+        if cfg.max_concurrent_positions > 0 and entry_dt is not None:
+            lookahead = max(1, len(meta.path_highs))
+            in_flight_exits.append(entry_dt + _td(days=lookahead))
+
         ret = net / position_value
         # Skip non-finite returns / nets defensively. A single bad
         # bar can otherwise propagate inf/nan into sharpe and the
@@ -333,4 +388,5 @@ def run_walk_forward_backtest(
         net_pnl=round(net_pnl_total, 2),
         final_capital=round(capital, 2),
         returns=returns,
+        signals_skipped_at_cap=signals_skipped_at_cap,
     )
