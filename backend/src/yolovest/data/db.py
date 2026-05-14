@@ -1338,6 +1338,32 @@ class Database:
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
+    async def minutes_since_last_loss_for_symbol(
+        self, symbol: str, mode: str | None = None,
+    ) -> float:
+        """Minutes since the most recent losing trade closed for this
+        symbol+mode. Returns a large sentinel (999999) when the symbol
+        has never recorded a loss in the current mode.
+        """
+        mode_clause = " AND mode = ?" if mode else ""
+        params: tuple[Any, ...] = (
+            (symbol, mode) if mode else (symbol,)
+        )
+        cursor = await self.read_conn.execute(
+            f"SELECT closed_at FROM trades "
+            f"WHERE symbol = ? AND pnl IS NOT NULL AND pnl < 0{mode_clause} "
+            f"ORDER BY closed_at DESC LIMIT 1",
+            params,
+        )
+        row = await cursor.fetchone()
+        if not row or not row[0]:
+            return 999999.0
+        last_loss_time = datetime.fromisoformat(row[0])
+        if last_loss_time.tzinfo is None:
+            last_loss_time = last_loss_time.replace(tzinfo=IST)
+        now = datetime.now(IST)
+        return (now - last_loss_time).total_seconds() / 60
+
     async def get_feedback_data(self, lookback_days: int = 14) -> dict[str, dict[str, float]]:
         """Get per-symbol feedback stats from recent predictions, dry runs, and trades.
 
@@ -1435,6 +1461,9 @@ class Database:
                 n = len(trades)
                 fb["trade_count"] = float(n)
                 fb["trade_win_rate"] = sum(1 for t in trades if (t["pnl"] or 0) > 0) / n
+                fb["trade_loss_count"] = float(
+                    sum(1 for t in trades if (t["pnl"] or 0) < 0),
+                )
                 pnls = [t["pnl"] for t in trades if t["pnl"] is not None]
                 fb["trade_avg_pnl"] = sum(pnls) / len(pnls) if pnls else 0.0
                 slips = [t["slippage_pct"] for t in trades]

@@ -135,6 +135,12 @@ def merge_feedback_features(
     features["fb_trade_win_rate"] = fb.get("trade_win_rate", 0.5)
     features["fb_trade_avg_pnl"] = fb.get("trade_avg_pnl", 0.0)
     features["fb_trade_avg_slippage"] = fb.get("trade_avg_slippage_pct", 0.0)
+    # Recent-loss count (over the feedback lookback window). Lets the
+    # model deprioritise symbols that have been bleeding lately — same
+    # data agent_memory tracks but exposed as a model feature so the
+    # learned scoring can react automatically rather than via hardcoded
+    # cooldowns alone.
+    features["fb_recent_loss_count"] = fb.get("trade_loss_count", 0.0)
     features["fb_has_data"] = 1.0 if has_data else 0.0
 
 

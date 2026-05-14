@@ -103,10 +103,25 @@ class RiskCheckSkill(SkillBase):
                 f"limit={cfg.max_trades_per_day})",
             )
 
-        # Loss cooldown
+        # Loss cooldown — portfolio-wide (any losing trade pauses everything)
         if portfolio["minutes_since_last_loss"] < cfg.loss_cooldown_minutes:
             remaining = cfg.loss_cooldown_minutes - portfolio["minutes_since_last_loss"]
             return self._reject(signal, f"Loss cooldown active ({remaining:.0f}min remaining)")
+
+        # Loss cooldown — per-symbol. Without this, the intraday model can
+        # re-signal the same symbol minutes after it SL'd, walking the user
+        # straight back into the same losing setup before regime has changed.
+        if cfg.loss_cooldown_minutes > 0:
+            sym_loss_age = await self.ctx.db.minutes_since_last_loss_for_symbol(
+                signal["symbol"], mode=self.ctx.config.mode,
+            )
+            if sym_loss_age < cfg.loss_cooldown_minutes:
+                remaining = cfg.loss_cooldown_minutes - sym_loss_age
+                return self._reject(
+                    signal,
+                    f"Symbol cooldown active ({signal['symbol']} lost "
+                    f"{sym_loss_age:.0f}min ago, {remaining:.0f}min remaining)",
+                )
 
         system_positions = portfolio.get("system_positions", portfolio["open_positions"])
         adopted_positions = portfolio.get("adopted_positions", 0)
@@ -391,11 +406,24 @@ class RiskCheckSkill(SkillBase):
             return None
 
         open_positions = await self.ctx.db.get_open_positions(mode=self.ctx.config.mode)
-        if not open_positions:
-            return None
-
-        open_symbols = [p["symbol"] for p in open_positions]
+        # Pending BUYs/SELLs from the same heartbeat batch count too —
+        # the original failure mode (3-correlated-trades in one batch)
+        # slipped past this check because none had executed yet.
         new_symbol = signal["symbol"]
+        new_signal_type = signal.get("signal_type", "BUY")
+        try:
+            pending = await self.ctx.db.get_pending_trades()
+        except Exception:
+            pending = []
+        pending_symbols = [
+            t["symbol"] for t in pending
+            if t.get("symbol") and t["symbol"] != new_symbol
+            and (t.get("signal_type") or "BUY") == new_signal_type
+        ]
+
+        open_symbols = [p["symbol"] for p in open_positions] + pending_symbols
+        if not open_symbols:
+            return None
 
         # Fetch daily close prices for the new symbol
         try:
