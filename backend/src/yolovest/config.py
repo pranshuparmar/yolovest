@@ -430,6 +430,10 @@ class ExecutionConfig(BaseModel):
     price_drift_max_pct: float = Field(default=0.02, gt=0, lt=1)
     transaction_mode: Literal["auto", "manual"] = "auto"  # manual = require approval before execution
     rejection_cooldown_hours: int = Field(default=48, ge=0, le=168)  # skip re-queuing a rejected trade
+    # Pending trade auto-expiry. Heartbeat sweeps anything older than
+    # this before running risk-check so abandoned approvals don't
+    # silently lock max_open_positions / max_trades_per_day budgets.
+    pending_expiry_minutes: int = Field(default=30, ge=1, le=1440)
 
 
 class TransactionCostConfig(BaseModel):

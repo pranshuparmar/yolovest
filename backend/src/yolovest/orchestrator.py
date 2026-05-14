@@ -121,6 +121,26 @@ class HeartbeatOrchestrator:
             "market_hours": self._ctx.market_hours.is_market_hours(),
         })
 
+        # Sweep abandoned pending trades before anything else. Risk-check
+        # counts pending notional and pending count toward exposure /
+        # max_open_positions / max_trades_per_day, so a forgotten pending
+        # silently locks those budgets and chokes off signal generation
+        # for the rest of the day. Previously this only ran when the
+        # dashboard polled /api/pending-trades, which Telegram-only users
+        # never trigger.
+        try:
+            expiry_min = self._ctx.config.execution.pending_expiry_minutes
+            expired_count = await self._ctx.db.expire_pending_trades(
+                max_age_minutes=expiry_min,
+            )
+            if expired_count:
+                logger.info(
+                    "Heartbeat: auto-expired %d pending trade(s) (>%dmin old)",
+                    expired_count, expiry_min,
+                )
+        except Exception:
+            logger.debug("Pending-trade auto-expiry failed", exc_info=True)
+
         # --- Step 1: health-check (ABORT on failure) ---
         health_result = await self._run_skill("health-check")
         results["health-check"] = health_result

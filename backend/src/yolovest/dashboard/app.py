@@ -3016,11 +3016,13 @@ def create_app(ctx: AppContext) -> FastAPI:
         _user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Get all trades awaiting manual approval."""
-        # Expire stale pending trades — use generous timeout so trades
-        # survive server restarts and user away periods
-        expired = await ctx.db.expire_pending_trades(max_age_minutes=480)  # 8 hours (full trading day)
+        # Defensive sweep — heartbeat already runs this each cycle, but
+        # the UI render happens to be a convenient backstop if the
+        # heartbeat is paused or wedged.
+        expiry_min = ctx.config.execution.pending_expiry_minutes
+        expired = await ctx.db.expire_pending_trades(max_age_minutes=expiry_min)
         if expired:
-            logger.info("Expired %d stale pending trades (>8h old)", expired)
+            logger.info("Expired %d stale pending trades (>%dmin old)", expired, expiry_min)
             try:
                 await broadcast_ws("pending_expired", {"count": expired})
             except Exception:
