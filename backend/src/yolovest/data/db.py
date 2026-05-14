@@ -1072,7 +1072,15 @@ class Database:
         return signaled | positioned
 
     async def clear_todays_signals(self) -> dict[str, int]:
-        """Clear today's signals and expired/pending trades to allow regeneration.
+        """Clear today's actionable signals so the next heartbeat can
+        regenerate fresh ones. Preserves:
+          - `executed` rows (real trades happened — keep the audit link)
+          - `rejected` rows (user explicitly said no — don't re-suggest)
+
+        Deletes everything else: NULL (never processed), `awaiting_approval`,
+        `risk_rejected`, `llm_rejected`, and `expired`. Pending trades in
+        `pending` / `expired` state are also dropped so the symbols are
+        free for re-evaluation.
 
         Returns counts of deleted rows per table.
         """
@@ -1081,7 +1089,12 @@ class Database:
         ).astimezone(UTC).isoformat()
 
         cursor = await self.conn.execute(
-            "DELETE FROM signals WHERE created_at >= ?", (today_start,),
+            "DELETE FROM signals "
+            "WHERE created_at >= ? "
+            "AND (disposition IS NULL "
+            "     OR disposition IN ('awaiting_approval', 'risk_rejected', "
+            "                        'llm_rejected', 'expired'))",
+            (today_start,),
         )
         signals_deleted = cursor.rowcount
 
@@ -1092,7 +1105,7 @@ class Database:
 
         await self.conn.commit()
         logger.info(
-            "Cleared %d signals (today) and %d pending/expired trades",
+            "Cleared %d signals (today, non-terminal) and %d pending/expired trades",
             signals_deleted, pending_deleted,
         )
         return {"signals_deleted": signals_deleted, "pending_deleted": pending_deleted}
