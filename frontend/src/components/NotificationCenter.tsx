@@ -145,6 +145,39 @@ export function useNotifications() {
               );
               queryClient.invalidateQueries({ queryKey: ["ml-models"] });
             }
+          } else if (type === "order_update") {
+            // Broker order state changed (postback or KiteTicker order frame).
+            // Refresh anything that depends on order state so the UI doesn't
+            // need a manual reload after fills/cancels/rejects.
+            const status = (data.status || "").toString().toUpperCase();
+            if (status === "REJECTED") {
+              addNotification(
+                "alert",
+                `Order REJECTED: ${data.symbol || "?"} ${data.transaction_type || ""} (${data.order_id || "?"})`
+              );
+            }
+            queryClient.invalidateQueries({ queryKey: ["positions"] });
+            queryClient.invalidateQueries({ queryKey: ["trades"] });
+            queryClient.invalidateQueries({ queryKey: ["trade-detail"] });
+            queryClient.invalidateQueries({ queryKey: ["portfolio"] });
+          } else if (type === "pending_approved" || type === "pending_rejected" || type === "pending_expired") {
+            const action = type.replace("pending_", "");
+            addNotification(
+              type === "pending_expired" ? "alert" : "trade",
+              `${data.symbol || "?"} pending ${action}`
+            );
+            queryClient.invalidateQueries({ queryKey: ["pending-trades"] });
+            queryClient.invalidateQueries({ queryKey: ["recommendations"] });
+          } else if (type === "heartbeat_stage") {
+            // Per-skill progress within a heartbeat — surface on Skills page
+            // and as a low-priority chip. No notification to avoid spam.
+            window.dispatchEvent(new CustomEvent("yolovest-heartbeat-stage", { detail: data }));
+          } else if (type === "broker_auth_lost") {
+            addNotification(
+              "alert",
+              `Broker auth lost — re-auth required via /auth or Integrations page`
+            );
+            queryClient.invalidateQueries({ queryKey: ["integrations-status"] });
           } else {
             addNotification(type, JSON.stringify(data).slice(0, 100));
           }

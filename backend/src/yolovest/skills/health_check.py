@@ -56,6 +56,13 @@ class HealthCheckSkill(SkillBase):
         # send periodic Telegram reminder (throttled to every 30 minutes)
         if not checks.get("broker") and self.ctx.market_hours.is_market_hours():
             await self._send_broker_auth_reminder()
+            # Push to dashboard WS so any open tab gets a banner
+            # immediately rather than waiting for the next REST poll.
+            try:
+                from yolovest.dashboard.app import broadcast_ws
+                await broadcast_ws("broker_auth_lost", {})
+            except Exception:
+                logger.debug("broker_auth_lost broadcast failed", exc_info=True)
 
         # Check 2: Database
         try:

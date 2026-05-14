@@ -816,6 +816,13 @@ class TelegramBot:
                 )
             except Exception:
                 logger.debug("Failed to mark signal executed", exc_info=True)
+            try:
+                from yolovest.dashboard.app import broadcast_ws
+                await broadcast_ws("pending_approved", {
+                    "trade_id": trade_id, "symbol": signal.get("symbol"),
+                })
+            except Exception:
+                logger.debug("pending_approved broadcast failed", exc_info=True)
             msg = (
                 f"<b>Executed ({exec_mode.upper()})</b>: "
                 f"{trade.get('signal_type')} <b>{trade.get('symbol')}</b> "
@@ -865,6 +872,13 @@ class TelegramBot:
             return
 
         await self._ctx.db.decide_pending_trade(trade["id"], "rejected", "telegram")
+        try:
+            from yolovest.dashboard.app import broadcast_ws
+            await broadcast_ws("pending_rejected", {
+                "trade_id": trade["id"], "symbol": symbol,
+            })
+        except Exception:
+            logger.debug("pending_rejected broadcast failed", exc_info=True)
         await update.message.reply_text(f"Rejected {trade['signal_type']} {symbol}.")
 
     async def _cmd_trade(self, update: Any, context: Any) -> None:

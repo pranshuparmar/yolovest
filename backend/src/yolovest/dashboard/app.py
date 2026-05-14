@@ -3021,6 +3021,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         expired = await ctx.db.expire_pending_trades(max_age_minutes=480)  # 8 hours (full trading day)
         if expired:
             logger.info("Expired %d stale pending trades (>8h old)", expired)
+            try:
+                await broadcast_ws("pending_expired", {"count": expired})
+            except Exception:
+                logger.debug("pending_expired broadcast failed", exc_info=True)
         return await ctx.db.get_pending_trades()
 
     @app.post("/api/clear-signals")
@@ -3076,6 +3080,12 @@ def create_app(ctx: AppContext) -> FastAPI:
                 )
             except Exception:
                 logger.debug("Failed to mark signal executed", exc_info=True)
+            try:
+                await broadcast_ws("pending_approved", {
+                    "trade_id": trade_id, "symbol": signal.get("symbol"),
+                })
+            except Exception:
+                logger.debug("pending_approved broadcast failed", exc_info=True)
             return {"success": True, "trade": trade, "mode": exec_mode}
         logger.error(
             "Trade #%d execution failed: %s", trade_id, result.error,
@@ -3125,6 +3135,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Reject a pending trade."""
         await ctx.db.decide_pending_trade(trade_id, "rejected", "dashboard")
         logger.info("Rejected pending trade #%d", trade_id)
+        try:
+            await broadcast_ws("pending_rejected", {"trade_id": trade_id})
+        except Exception:
+            logger.debug("pending_rejected broadcast failed", exc_info=True)
         return {"success": True}
 
     @app.post("/api/change-password")

@@ -358,6 +358,10 @@ class HeartbeatOrchestrator:
             await self._set_disposition(
                 signal, "awaiting_approval", f"pending_id={pending_id}"
             )
+            await self._broadcast("pending_queued", {
+                "trade_id": pending_id,
+                "symbol": self._signal_symbol(signal),
+            })
             symbol = sym_for_dedup or "?"
             sig_type = signal.get("signal_type", "?") if isinstance(signal, dict) else "?"
             conf = signal.get("confidence_score", 0) if isinstance(signal, dict) else 0
@@ -451,6 +455,15 @@ class HeartbeatOrchestrator:
             )
 
         logger.info("Running skill: %s", name)
+        # Broadcast stage start so the dashboard can render a per-skill
+        # progress chip instead of just "heartbeat running" for 30-60s.
+        # skill_completed event is already broadcast separately when
+        # the skill finishes (via _on_skill_complete in main.py).
+        try:
+            await self._broadcast("heartbeat_stage", {"skill": name, "status": "started"})
+        except Exception:
+            logger.debug("heartbeat_stage broadcast failed", exc_info=True)
+
         # Timeout to prevent a hung skill from blocking the entire heartbeat
         _SKILL_TIMEOUT_SEC = 300  # 5 minutes max per skill
         try:
