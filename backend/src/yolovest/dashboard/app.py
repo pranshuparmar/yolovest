@@ -726,6 +726,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 quantity=qty,
                 order_type="MARKET",
                 product=product,
+                tag="yv-close",
             )
         except Exception as e:
             logger.exception("close_position: place exit order failed for %s", trade_id)
@@ -1097,6 +1098,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 product=product,
                 price=float(price) if price else None,
                 trigger_price=float(trigger_price) if trigger_price else None,
+                tag="yv-manual",
             )
 
             # Record trade in DB

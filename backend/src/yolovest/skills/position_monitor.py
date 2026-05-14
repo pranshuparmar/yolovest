@@ -1006,6 +1006,7 @@ class PositionMonitorSkill(SkillBase):
                     price=current_price,
                     order_type="MARKET",
                     product=pos.get("product", "MIS"),
+                    tag="yv-partial",
                 )
             else:
                 await self.ctx.broker.place_order(
@@ -1015,6 +1016,7 @@ class PositionMonitorSkill(SkillBase):
                     price=current_price,
                     order_type="MARKET",
                     product=pos.get("product", "MIS"),
+                    tag="yv-partial",
                 )
         except Exception:
             logger.exception(

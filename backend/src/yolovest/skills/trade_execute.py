@@ -269,6 +269,7 @@ class TradeExecuteSkill(SkillBase):
                         order_type="LIMIT",
                         price=order_price,
                         product=product,
+                        tag="yv-entry-l1",
                     )
 
                     # Wait for first leg to fill
@@ -286,6 +287,7 @@ class TradeExecuteSkill(SkillBase):
                             quantity=leg1_qty,
                             order_type="MARKET",
                             product=product,
+                            tag="yv-entry-l1",
                         )
                         await asyncio.sleep(1)
                         leg1_status = await self.ctx.broker.get_order_status(leg1_order_id)
@@ -309,6 +311,7 @@ class TradeExecuteSkill(SkillBase):
                         order_type="LIMIT",
                         price=leg2_price,
                         product=product,
+                        tag="yv-entry-l2",
                     )
 
                     # Wait for second leg fill within order_timeout
@@ -348,6 +351,7 @@ class TradeExecuteSkill(SkillBase):
                         order_type="SL-M",
                         trigger_price=signal["stop_loss_price"],
                         product=product,
+                        tag="yv-sl",
                     )
 
                     slippage = abs(fill_price - signal["entry_price"])
@@ -407,6 +411,7 @@ class TradeExecuteSkill(SkillBase):
                         order_type="LIMIT",
                         price=order_price,
                         product=product,
+                        tag="yv-entry",
                     )
 
                     # Place stop-loss order
@@ -417,6 +422,7 @@ class TradeExecuteSkill(SkillBase):
                         order_type="SL-M",
                         trigger_price=signal["stop_loss_price"],
                         product=product,
+                        tag="yv-sl",
                     )
 
                     # Track order status, handle partial fills
@@ -449,6 +455,7 @@ class TradeExecuteSkill(SkillBase):
                                     quantity=signal["position_size"],
                                     order_type="MARKET",
                                     product=product,
+                                    tag="yv-entry",
                                 )
                                 await asyncio.sleep(1)
                                 order_status = await self.ctx.broker.get_order_status(order_id)
@@ -463,6 +470,7 @@ class TradeExecuteSkill(SkillBase):
                                     order_type="SL-M",
                                     trigger_price=signal["stop_loss_price"],
                                     product=product,
+                                    tag="yv-sl",
                                 )
 
                     actual_qty = filled_qty if filled_qty > 0 else signal["position_size"]
@@ -858,6 +866,7 @@ class TradeExecuteSkill(SkillBase):
                 order_type="LIMIT",
                 price=target_price,
                 product="MIS",
+                tag="yv-tgt",
             )
         except Exception as e:
             logger.warning(

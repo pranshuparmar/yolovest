@@ -29,6 +29,7 @@ class BrokerBase(ABC):
         product: str,  # "MIS" or "CNC"
         price: float | None = None,
         trigger_price: float | None = None,
+        tag: str | None = None,  # ≤20 chars, flows back via orders() and postbacks
     ) -> str:
         """Place an order and return the order ID."""
         ...

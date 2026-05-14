@@ -61,21 +61,19 @@ up by detecting the broker position vanishing.
 
 ---
 
-## P1 — Observability
+## ~~P1 — Observability: order `tag` parameter~~ (done)
 
-### Order `tag` parameter for provenance
+`BrokerBase.place_order` now accepts an optional `tag` kwarg (truncated
+to Kite's 20-char limit). Callers pass an identifier so the placer is
+visible in every `kite.orders()` row and on every postback:
 
-**What:** Kite `place_order` accepts a `tag` (≤20 chars) that flows
-back through `orders()` and postbacks.
-
-**Why:** The codebase currently can't programmatically distinguish
-which skill or code path placed a given order. The
-`origin='system'/'adopted'` column on `trades` helps but doesn't
-separate `trade-execute` from `square-off` or manual Telegram
-`/trade` entries.
-
-**Scope:** add a `tag` kwarg to `broker.place_order`, callers pass
-their identifier, surface in audit log.
+  - `yv-entry`, `yv-entry-l1`, `yv-entry-l2` — trade-execute entries
+  - `yv-sl` — stop-loss orders
+  - `yv-tgt` — MIS resting target LIMIT
+  - `yv-partial` — partial profit-booking exits
+  - `yv-sqoff` — square-off market exits
+  - `yv-close` — dashboard manual close
+  - `yv-manual` — Telegram `/trade` / dashboard manual order placement
 
 ---
 

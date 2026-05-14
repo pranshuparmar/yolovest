@@ -305,6 +305,7 @@ class SquareOffSkill(SkillBase):
             quantity=pos["quantity"],
             order_type="MARKET",
             product=pos.get("product", "MIS"),
+            tag="yv-sqoff",
         )
 
         # Get fill price — wait for fill if not immediate

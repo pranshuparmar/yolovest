@@ -258,6 +258,7 @@ class ZerodhaBroker(BrokerBase):
         product: str,
         price: float | None = None,
         trigger_price: float | None = None,
+        tag: str | None = None,
     ) -> str:
         if self._mode == "paper":
             return self._paper_place_order(
@@ -265,7 +266,7 @@ class ZerodhaBroker(BrokerBase):
             )
 
         return await self._live_place_order(
-            symbol, side, quantity, order_type, product, price, trigger_price
+            symbol, side, quantity, order_type, product, price, trigger_price, tag,
         )
 
     def _paper_place_order(
@@ -365,6 +366,7 @@ class ZerodhaBroker(BrokerBase):
         product: str,
         price: float | None,
         trigger_price: float | None,
+        tag: str | None = None,
     ) -> str:
         """Place order via Kite API with retry.
 
@@ -452,6 +454,11 @@ class ZerodhaBroker(BrokerBase):
         # own protection band (typically ~3% on equity cash).
         if order_type in ("MARKET", "SL-M"):
             params["market_protection"] = -1
+        # Tag flows back through orders() and postbacks so we can tell
+        # which skill / code path placed any given order. Kite enforces
+        # ≤20 chars; we truncate defensively.
+        if tag:
+            params["tag"] = tag[:20]
 
         return str(await self._retry_api_call(
             lambda: self._kite.place_order(variety="regular", **params)
