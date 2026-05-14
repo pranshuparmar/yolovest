@@ -4,6 +4,7 @@ import type {
   PortfolioState,
   Trade,
   TradeDetail,
+  TradeOrderDetail,
   EquityCurvePoint,
   PnlCalendarDay,
   WatchlistItem,

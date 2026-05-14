@@ -303,7 +303,8 @@ export function TradeDetailPage() {
               {orderDetail.error && (
                 <p className="text-red-400">Failed to fetch order detail</p>
               )}
-              {orderDetail.data && Object.entries(orderDetail.data.legs).map(([leg, info]) => {
+              {orderDetail.data && (["entry", "sl", "target"] as const).map((leg) => {
+                const info = orderDetail.data?.legs[leg];
                 if (!info) return null;
                 return (
                   <div key={leg} className="border border-gray-800 rounded p-2">

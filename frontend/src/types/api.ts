@@ -50,6 +50,7 @@ export interface Trade {
   target_price: number;
   order_id: string | null;
   sl_order_id: string | null;
+  target_order_id: string | null;
   gtt_id: number | null;
   gtt_status: string | null;
   origin: "system" | "adopted" | null;
