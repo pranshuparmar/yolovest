@@ -761,6 +761,32 @@ class ZerodhaBroker(BrokerBase):
     # Executed trades (for ghost-position recovery)
     # ------------------------------------------------------------------
 
+    async def estimate_margin(
+        self, legs: list[dict[str, Any]],
+    ) -> dict[str, float] | None:
+        """Pre-trade margin via kite.order_margins. Falls back to None
+        when paper/offline so the caller uses the naive notional check.
+        """
+        if self._mode == "paper" or self._kite is None or not legs:
+            return None
+        try:
+            async with self._rate_limiter:
+                resp = await asyncio.to_thread(self._kite.order_margins, legs)
+        except Exception as e:
+            logger.debug("kite.order_margins failed: %s", e)
+            return None
+        if not isinstance(resp, list) or not resp:
+            return None
+        total = 0.0
+        for leg in resp:
+            try:
+                total += float(leg.get("total") or 0.0)
+            except (TypeError, ValueError):
+                continue
+        # Return the broker's per-leg list under "legs" plus the rolled-up
+        # `total` so callers can choose granularity.
+        return {"total": round(total, 2), "legs": resp}  # type: ignore[dict-item]
+
     async def get_order_history(self, order_id: str) -> list[dict[str, Any]]:
         """State-transition timeline for a single order via kite.order_history."""
         if self._mode == "paper" or self._kite is None or not order_id:

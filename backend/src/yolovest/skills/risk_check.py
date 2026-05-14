@@ -217,15 +217,55 @@ class RiskCheckSkill(SkillBase):
         max_by_exposure = int((cfg.max_single_stock_pct * capital) / entry)
         position_size = min(position_size, max_by_exposure)
 
-        # Margin enforcement — when disabled, total trade value must fit in available cash
-        if not cfg.margin_usage_enabled and entry > 0:
-            max_by_cash = int(available_cash / entry)
-            if position_size > max_by_cash:
+        # Margin enforcement.
+        #
+        # If margin_usage_enabled is False (default), every rupee of
+        # notional must fit in available cash — accurate for CNC, and a
+        # safe conservative choice for MIS (where Zerodha would give
+        # leverage but we choose not to use it).
+        #
+        # If margin_usage_enabled is True, ask the broker for the
+        # canonical margin via kite.order_margins. For MIS that returns
+        # the real ~5× leveraged requirement; for CNC it returns the
+        # full notional plus any STT/duty add-ons. We pick the broker
+        # number when available, else fall back to notional.
+        product = signal.get("product", "CNC")
+        if entry > 0 and position_size > 0:
+            margin_required: float | None = None
+            if cfg.margin_usage_enabled:
+                try:
+                    legs = [{
+                        "exchange": "NSE",
+                        "tradingsymbol": signal["symbol"],
+                        "transaction_type": signal["signal_type"],
+                        "variety": "regular",
+                        "product": product,
+                        "order_type": "LIMIT",
+                        "quantity": int(position_size),
+                        "price": float(entry),
+                    }]
+                    est = await self.ctx.broker.estimate_margin(legs)
+                    if est and est.get("total", 0) > 0:
+                        margin_required = float(est["total"])
+                except Exception:
+                    logger.debug("estimate_margin failed; falling back to notional", exc_info=True)
+
+            if margin_required is None:
+                # Notional fallback (also used when margin_usage_enabled is False)
+                margin_required = entry * position_size
+
+            if margin_required > available_cash and position_size > 0:
+                # Shrink to whatever fits, scaling proportionally
+                shrink = available_cash / margin_required
+                new_size = max(0, int(position_size * shrink))
                 logger.info(
-                    "risk-check: margin disabled — capping %s size from %d to %d (cash=₹%.0f)",
-                    signal["symbol"], position_size, max_by_cash, available_cash,
+                    "risk-check: capping %s size from %d to %d "
+                    "(margin ₹%.0f vs cash ₹%.0f, source=%s)",
+                    signal["symbol"], position_size, new_size,
+                    margin_required, available_cash,
+                    "broker" if cfg.margin_usage_enabled and margin_required != entry * position_size else "notional",
                 )
-                position_size = max_by_cash
+                position_size = new_size
 
         # Slippage feedback — reduce sizing for high-slippage symbols
         slippage_penalty = await self._get_slippage_penalty(signal["symbol"])

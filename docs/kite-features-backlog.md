@@ -77,23 +77,21 @@ visible in every `kite.orders()` row and on every postback:
 
 ---
 
-## P2 — Risk accuracy
+## ~~P2 — Risk accuracy: pre-trade margin~~ (done)
 
-### Pre-trade margin via `order_margins` / `basket_order_margins`
+`BrokerBase.estimate_margin(legs)` wraps `kite.order_margins`;
+ZerodhaBroker returns `{total, legs}` (per-leg breakdown with the
+broker's exact charges block) or None on paper/offline.
 
-**What:** Kite returns the canonical margin/brokerage/tax/duty
-breakdown for a proposed order before placement.
+Risk-check uses it when `margin_usage_enabled` is true — the broker's
+canonical margin (which includes MIS leverage, STT, GST, exchange,
+SEBI, stamp) replaces the `entry × qty` notional check. When position
+size would exceed available cash, risk-check shrinks proportionally
+rather than rejecting outright.
 
-**Why:** The current cash check is `entry × qty ≤ available_cash`,
-which ignores brokerage, STT, exchange charges, GST, SEBI fees, and
-stamp duty. Replacing it with `order_margins` gives accurate pre-trade
-sizing and unlocks an exact "total cost" column in the
-PendingTradesBanner.
-
-**Scope:**
-- New method `broker.estimate_margin(orders)`.
-- `risk-check`: replace simple cash check with margin check.
-- API endpoint to expose breakdown for the pending-trades UI.
+When `margin_usage_enabled` is false (current default) we keep the
+notional check — accurate for CNC, intentionally conservative for MIS
+(no leverage applied).
 
 ---
 

@@ -76,6 +76,21 @@ class BrokerBase(ABC):
         """Get all CNC holdings from the broker (delivery stocks held overnight)."""
         ...
 
+    async def estimate_margin(
+        self, legs: list[dict[str, Any]],
+    ) -> dict[str, float] | None:
+        """Return the broker's canonical margin estimate for a proposed
+        order (or basket of orders). Each leg dict has: exchange,
+        tradingsymbol, transaction_type, variety, product, order_type,
+        quantity, price (and trigger_price for SL).
+
+        Result dict carries at minimum `total` (margin required across
+        all legs) plus a `charges` sub-dict on a per-leg basis when the
+        broker returns one. Returning None signals the caller to fall
+        back to a naive `entry × qty` notional check.
+        """
+        return None
+
     async def get_order_history(self, order_id: str) -> list[dict[str, Any]]:
         """Return the state-transition timeline of a single order
         (placed → modified → triggered → complete, with timestamps and
