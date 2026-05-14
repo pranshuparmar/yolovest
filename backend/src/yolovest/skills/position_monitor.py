@@ -124,10 +124,16 @@ class PositionMonitorSkill(SkillBase):
 
             # If a broker-side GTT is attached, exit enforcement is at the
             # broker. Skip client-side target/SL detection so we don't
-            # double-place an exit order. The ghost-position reconciler
-            # below still catches the case where the GTT fires and the
-            # broker position vanishes.
+            # double-place an exit order. We still trail the SL by
+            # modifying the GTT itself when the trailing condition fires,
+            # so winning positions ratchet up their breakeven floor.
+            # The ghost-position reconciler catches the case where the
+            # GTT fires and the broker position vanishes.
             if pos.get("gtt_id"):
+                if cfg.trailing_sl_enabled and risk_per_share > 0:
+                    await self._maybe_trail_gtt_sl(
+                        pos, entry, sl, current_price, risk_per_share,
+                    )
                 await self.ctx.db.update_unrealized_pnl(
                     pos["trade_id"], current_price,
                 )
@@ -798,6 +804,79 @@ class PositionMonitorSkill(SkillBase):
                     logger.debug("set_trade_gtt(None) failed", exc_info=True)
                 pos["gtt_id"] = None
 
+    async def _maybe_trail_gtt_sl(
+        self,
+        pos: dict[str, Any],
+        entry: float,
+        current_sl: float,
+        current_price: float,
+        risk_per_share: float,
+    ) -> None:
+        """If the position has a broker-side GTT and the trailing-SL
+        condition is met, modify the GTT to raise the stoploss leg.
+
+        Without this, GTT-attached positions silently skip trailing
+        because the previous trailing path called `modify_sl_order`,
+        which only works on plain SL orders, not GTT legs.
+        """
+        cfg = self.ctx.config.risk
+        gtt_id = pos.get("gtt_id")
+        if not (gtt_id and hasattr(self.ctx.broker, "modify_gtt")):
+            return
+
+        signal_type = pos["signal_type"]
+        if signal_type == "BUY":
+            profit = current_price - entry
+        else:
+            profit = entry - current_price
+        profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0
+        if profit_multiple < cfg.trailing_sl_trigger_multiple:
+            return
+
+        step = current_price * cfg.trailing_sl_step_pct
+        if signal_type == "BUY":
+            new_sl = max(entry, current_price - step)  # at least breakeven
+        else:
+            new_sl = min(entry, current_price + step)
+
+        if not self._is_better_sl(signal_type, new_sl, current_sl):
+            return
+
+        # Re-supply both legs (Kite's modify_gtt requires it). Target
+        # stays at original; only SL trigger / SL limit move.
+        exit_side = "SELL" if signal_type == "BUY" else "BUY"
+        tgt = float(pos["target_price"])
+        buf = 0.005
+        if exit_side == "SELL":
+            sl_limit = new_sl * (1 - buf)
+            tgt_limit = tgt * (1 - buf * 0.5)
+        else:
+            sl_limit = new_sl * (1 + buf)
+            tgt_limit = tgt * (1 + buf * 0.5)
+
+        try:
+            await self.ctx.broker.modify_gtt(
+                gtt_id=int(gtt_id),
+                symbol=pos["symbol"],
+                side=exit_side,
+                quantity=int(pos["quantity"]),
+                stoploss_trigger=new_sl,
+                stoploss_limit=sl_limit,
+                target_trigger=tgt,
+                target_limit=tgt_limit,
+                last_price=float(current_price),
+            )
+            await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+            logger.info(
+                "trailing SL via GTT: %s SL %.2f → %.2f (profit %.2fR, gtt=%d)",
+                pos["symbol"], current_sl, new_sl, profit_multiple, gtt_id,
+            )
+        except Exception:
+            logger.exception(
+                "trailing SL via GTT failed for %s (gtt=%d)",
+                pos["symbol"], gtt_id,
+            )
+
     async def _enforce_mis_oco(self, pos: dict[str, Any]) -> None:
         """Keep MIS OCO honest: when one of the two broker-side exit orders
         (target LIMIT or SL) fills, cancel the other.
@@ -929,6 +1008,7 @@ class PositionMonitorSkill(SkillBase):
             return False
 
         # Move SL to breakeven if configured
+        remaining_qty = qty - close_qty
         if cfg.move_sl_to_breakeven:
             try:
                 sl_order_id = pos.get("sl_order_id")
@@ -938,6 +1018,44 @@ class PositionMonitorSkill(SkillBase):
             except Exception:
                 logger.exception(
                     "position-monitor: Failed to move SL to breakeven for %s",
+                    pos["symbol"],
+                )
+
+        # If a broker-side OCO GTT protects this CNC position, resize it
+        # to match the remaining quantity. Without this, when either leg
+        # fires Kite will reject the order because we no longer have the
+        # original qty. SL trigger moves to breakeven too when configured.
+        gtt_id = pos.get("gtt_id")
+        if gtt_id and remaining_qty > 0 and hasattr(self.ctx.broker, "modify_gtt"):
+            exit_side = "SELL" if signal_type == "BUY" else "BUY"
+            new_sl = entry if cfg.move_sl_to_breakeven else float(pos["stop_loss_price"])
+            tgt = float(pos["target_price"])
+            limit_buf = 0.005
+            if exit_side == "SELL":
+                sl_limit = new_sl * (1 - limit_buf)
+                tgt_limit = tgt * (1 - limit_buf * 0.5)
+            else:
+                sl_limit = new_sl * (1 + limit_buf)
+                tgt_limit = tgt * (1 + limit_buf * 0.5)
+            try:
+                await self.ctx.broker.modify_gtt(
+                    gtt_id=int(gtt_id),
+                    symbol=pos["symbol"],
+                    side=exit_side,
+                    quantity=int(remaining_qty),
+                    stoploss_trigger=new_sl,
+                    stoploss_limit=sl_limit,
+                    target_trigger=tgt,
+                    target_limit=tgt_limit,
+                    last_price=float(current_price),
+                )
+                logger.info(
+                    "position-monitor: resized GTT %d for %s to qty=%d (SL=%.2f)",
+                    gtt_id, pos["symbol"], remaining_qty, new_sl,
+                )
+            except Exception:
+                logger.exception(
+                    "position-monitor: GTT resize after partial booking failed for %s",
                     pos["symbol"],
                 )
 

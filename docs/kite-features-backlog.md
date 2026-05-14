@@ -24,11 +24,12 @@ detection in position-monitor and on the 15:15 auto-square-off.
 
 **Still open under this theme:**
 
-- Modify GTT on trailing SL — currently trailing is disabled when
-  `gtt_id` is set. A proper implementation would call `kite.modify_gtt`
-  to raise the stoploss trigger as profit accrues. Skipped because
-  Kite's modify_gtt requires re-supplying both legs in full; needs a
-  clean API on the broker.
+- ~~Modify GTT on trailing SL~~ — done. `ZerodhaBroker.modify_gtt`
+  wraps `kite.modify_gtt` (re-supplies both legs);
+  `position-monitor._maybe_trail_gtt_sl` raises the SL leg in place
+  once the `trailing_sl_trigger_multiple` × initial risk threshold is
+  hit. Partial-profit booking also calls `modify_gtt` to resize the
+  GTT to the remaining quantity so subsequent fires don't get rejected.
 - Postback handler verification + business logic (next P1 item) so a
   GTT firing closes the trade row in real time instead of waiting for
   position-monitor's next heartbeat to reconcile.

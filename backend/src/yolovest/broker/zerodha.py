@@ -648,6 +648,77 @@ class ZerodhaBroker(BrokerBase):
         )
         return trigger_id
 
+    async def modify_gtt(
+        self,
+        gtt_id: int,
+        symbol: str,
+        side: str,
+        quantity: int,
+        stoploss_trigger: float,
+        stoploss_limit: float,
+        target_trigger: float,
+        target_limit: float,
+        last_price: float,
+    ) -> bool:
+        """Modify an existing two-leg OCO GTT. Kite's modify_gtt requires
+        re-supplying BOTH legs in full (you can't update only one side),
+        so the signature mirrors place_oco_gtt with the trigger_id added.
+
+        Returns True on success; raises on hard failure. Paper mode is
+        a no-op.
+        """
+        if self._mode == "paper":
+            logger.info(
+                "[PAPER] modify_gtt %d %s qty=%d sl=%.2f→%.2f target=%.2f→%.2f",
+                gtt_id, symbol, quantity, stoploss_trigger, stoploss_limit,
+                target_trigger, target_limit,
+            )
+            return True
+        if self._kite is None:
+            raise RuntimeError("Not authenticated")
+
+        kite_side = "BUY" if side == "BUY" else "SELL"
+        st_trig = self._tick_round(stoploss_trigger)
+        st_lim = self._tick_round(stoploss_limit)
+        tg_trig = self._tick_round(target_trigger)
+        tg_lim = self._tick_round(target_limit)
+
+        legs = [
+            {
+                "transaction_type": kite_side,
+                "quantity": quantity,
+                "order_type": "LIMIT",
+                "price": st_lim,
+                "product": "CNC",
+            },
+            {
+                "transaction_type": kite_side,
+                "quantity": quantity,
+                "order_type": "LIMIT",
+                "price": tg_lim,
+                "product": "CNC",
+            },
+        ]
+
+        def _modify() -> dict[str, Any]:
+            return self._kite.modify_gtt(
+                trigger_id=int(gtt_id),
+                trigger_type=self._kite.GTT_TYPE_OCO,
+                tradingsymbol=symbol,
+                exchange="NSE",
+                trigger_values=[st_trig, tg_trig],
+                last_price=float(self._tick_round(last_price)),
+                orders=legs,
+            )
+
+        await self._retry_api_call(_modify)
+        logger.info(
+            "GTT modified: %d %s qty=%d sl_trig=%.2f sl_lim=%.2f "
+            "tgt_trig=%.2f tgt_lim=%.2f",
+            gtt_id, symbol, quantity, st_trig, st_lim, tg_trig, tg_lim,
+        )
+        return True
+
     async def delete_gtt(self, gtt_id: int) -> bool:
         """Delete a GTT by trigger_id. Idempotent — already-deleted /
         already-fired GTTs return True silently."""
