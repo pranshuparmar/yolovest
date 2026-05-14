@@ -340,7 +340,6 @@ class RiskConfig(BaseModel):
     llm_fallback_to_rules: bool = True
     max_same_sector_positions: int = Field(default=1, ge=1)
     kill_switch_enabled: bool = True
-    min_confidence_score: float = Field(default=0.65, ge=0, le=1)  # legacy fallback
     min_confidence_buy: float = Field(default=0.60, ge=0, le=1)
     min_confidence_sell: float = Field(default=0.75, ge=0, le=1)
     skip_sell_on_holdings: bool = True  # position-monitor handles exits; no SELL on held symbols

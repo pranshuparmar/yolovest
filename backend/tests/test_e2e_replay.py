@@ -147,7 +147,6 @@ def e2e_config():
             "weekly_loss_sizing_reduction": 0.50,
             "llm_review_enabled": True,
             "llm_fallback_to_rules": True,
-            "min_confidence_score": 0.60,
             "mandatory_stop_loss": True,
             "max_trades_per_day": 5,
             "loss_cooldown_minutes": 0,

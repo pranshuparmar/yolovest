@@ -8,7 +8,8 @@ Flow:
 2. For each watchlist stock, compute features
 3. Run appropriate ML model
 4. Generate signal with required fields
-5. Filter: only emit signals where confidence >= risk.min_confidence_score
+5. Filter: only emit signals where confidence >= per-direction threshold
+   (risk.min_confidence_buy for BUY, risk.min_confidence_sell for SELL)
 6. Emit signals as events for risk-check skill to consume
 """
 

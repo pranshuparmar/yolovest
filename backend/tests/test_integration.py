@@ -73,7 +73,6 @@ def integration_config():
             "weekly_loss_sizing_reduction": 0.50,
             "llm_review_enabled": True,
             "llm_fallback_to_rules": True,
-            "min_confidence_score": 0.65,
         },
         market_hours={
             "open": "09:15",

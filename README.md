@@ -226,7 +226,7 @@ The settings you change directly affect trading behavior:
 - **`risk.max_open_positions`** — Limits how many stocks you hold simultaneously. Lower = more conservative.
 - **`risk.max_portfolio_exposure_pct`** — Caps total capital deployed. At 0.60, the system never invests more than 60% of capital.
 - **`risk.daily_loss_limit_pct`** — Circuit breaker. At 0.03, if you lose 3% of capital in a day, all new trades stop.
-- **`risk.min_confidence_score`** — ML confidence threshold. At 0.65, only signals with 65%+ model confidence are considered. Higher = fewer but more selective trades.
+- **`risk.min_confidence_buy` / `risk.min_confidence_sell`** — Per-direction ML confidence gates (defaults 0.60 / 0.75). Higher = fewer, more selective trades. SELL is typically tighter than BUY because exit signals carry less asymmetric upside.
 - **`scanning.shortlist_size`** — How many stocks are evaluated each cycle. Larger shortlists find more opportunities but take longer.
 - **`strategy.mode`** — Controls holding period preference: `intraday` (MIS, auto-squared at EOD), `short_term`, `balanced`, or `long_term` (CNC, held overnight).
 - **`execution.paper_slippage_pct`** — Simulated slippage in paper mode. Set higher (e.g., 0.3%) for more conservative backtests.
