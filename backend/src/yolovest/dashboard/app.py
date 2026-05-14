@@ -2995,6 +2995,21 @@ def create_app(ctx: AppContext) -> FastAPI:
         )
         return {"success": True, **result}
 
+    @app.delete("/api/backups/{filename}")
+    async def delete_backup(
+        filename: str, _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete a single backup file. Returns the freed size in bytes."""
+        backup_dir = ctx.config.database.backup_dir
+        try:
+            result = await ctx.db.delete_backup(backup_dir, filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        logger.info("Deleted backup %s (%d bytes)", filename, result["size_bytes"])
+        return {"success": True, **result}
+
     @app.post("/api/bulk-delete/{group}")
     async def bulk_delete(
         group: str,

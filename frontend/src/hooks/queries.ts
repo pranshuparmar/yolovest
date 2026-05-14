@@ -649,6 +649,14 @@ export function useRestoreBackup() {
   });
 }
 
+export function useDeleteBackup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (filename: string) => api.deleteBackup(filename),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["backups"] }),
+  });
+}
+
 export function useChangePassword() {
   return useMutation({
     mutationFn: (newPassword: string) => api.changePassword(newPassword),

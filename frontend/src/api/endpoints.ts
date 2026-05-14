@@ -362,6 +362,12 @@ export const api = {
       { method: "POST" },
     ),
 
+  deleteBackup: (filename: string) =>
+    apiFetch<{ success: boolean; filename: string; size_bytes: number }>(
+      `/api/backups/${filename}`,
+      { method: "DELETE" },
+    ),
+
   changePassword: (newPassword: string) =>
     apiFetch<{ success: boolean }>("/api/change-password", {
       method: "POST",

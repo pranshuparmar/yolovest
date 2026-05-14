@@ -3984,6 +3984,34 @@ class Database:
             })
         return backups
 
+    async def delete_backup(self, backup_dir: str, filename: str) -> dict[str, Any]:
+        """Delete a single backup file. Validates the name belongs to the
+        backup directory and matches the standard yolovest_*.db pattern so
+        a crafted path can't escape into other parts of the filesystem.
+        """
+        backup_path = Path(backup_dir).resolve()
+        if not backup_path.is_dir():
+            raise ValueError(f"Backup directory does not exist: {backup_dir}")
+
+        # Disallow path components entirely — filename only.
+        if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
+            raise ValueError(f"Invalid backup filename: {filename!r}")
+        if not (filename.startswith("yolovest_") and filename.endswith(".db")):
+            raise ValueError(
+                f"Refusing to delete {filename!r}: not a recognised backup file",
+            )
+
+        target = (backup_path / filename).resolve()
+        # Resolved path must still live inside backup_dir.
+        if backup_path not in target.parents:
+            raise ValueError(f"Path escape attempt: {filename!r}")
+        if not target.is_file():
+            raise FileNotFoundError(f"Backup not found: {filename}")
+
+        size_bytes = target.stat().st_size
+        target.unlink()
+        return {"filename": filename, "size_bytes": size_bytes}
+
     # ------------------------------------------------------------------
     # Slippage Stats
     # ------------------------------------------------------------------

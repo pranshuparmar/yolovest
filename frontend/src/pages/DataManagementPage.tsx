@@ -5,6 +5,7 @@ import {
   useBackups,
   useCreateBackup,
   useRestoreBackup,
+  useDeleteBackup,
   useResetAllData,
   useQuarantinedSymbols,
   useUnquarantineSymbol,
@@ -307,15 +308,17 @@ function QuarantinedSymbolsSection() {
 }
 
 export function DataManagementPage() {
-  const { data, isLoading, error } = useStorageStats();
+  const { data, isLoading: storageLoading, error: storageError } = useStorageStats();
   const { data: backups } = useBackups();
   const cleanup = useCleanupTable();
   const createBackup = useCreateBackup();
   const restoreBackup = useRestoreBackup();
+  const deleteBackup = useDeleteBackup();
   const resetAll = useResetAllData();
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [resetStep, setResetStep] = useState<"idle" | "warn" | "confirm">("idle");
   const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
   const handleCleanup = (table: string, days: number) => {
     cleanup.mutate(
@@ -361,32 +364,16 @@ export function DataManagementPage() {
     });
   };
 
-  if (isLoading) {
-    return (
-      <div className="space-y-4 p-6">
-        <div className="h-8 w-48 animate-pulse bg-gray-800 rounded" />
-        <div className="h-64 animate-pulse bg-gray-800 rounded" />
-      </div>
-    );
-  }
-
-  if (error || !data) {
-    return (
-      <div className="p-6">
-        <div className="bg-red-900/20 border border-red-800 rounded-lg p-4 text-red-400">
-          Failed to load storage stats.
-        </div>
-      </div>
-    );
-  }
-
-  const dbFile = data._db_file;
+  // Storage stats is the slowest query on the page (COUNT(*) per table).
+  // Render the rest of the page immediately so backups, quarantine and
+  // bulk-delete are usable while the counts trickle in.
+  const dbFile = data?._db_file;
   const cleanableTables = Object.keys(TABLE_INFO);
-
-  // Read-only tables (trades, agent_memory)
-  const readOnlyTables = Object.entries(data)
-    .filter(([k]) => !cleanableTables.includes(k) && k !== "_db_file")
-    .map(([k, v]) => ({ name: k, stats: v as TableStats }));
+  const readOnlyTables = data
+    ? Object.entries(data)
+        .filter(([k]) => !cleanableTables.includes(k) && k !== "_db_file")
+        .map(([k, v]) => ({ name: k, stats: v as TableStats }))
+    : [];
 
   return (
     <div className="space-y-6">
@@ -402,19 +389,25 @@ export function DataManagementPage() {
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
           <div className="text-xs text-gray-500 uppercase tracking-wide">Database Size</div>
           <div className="text-2xl font-bold text-gray-100 mt-1">
-            {formatBytes(dbFile.db_bytes)}
+            {dbFile ? formatBytes(dbFile.db_bytes) : (
+              <span className="inline-block h-7 w-24 animate-pulse bg-gray-800 rounded" />
+            )}
           </div>
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
           <div className="text-xs text-gray-500 uppercase tracking-wide">WAL Size</div>
           <div className="text-2xl font-bold text-gray-100 mt-1">
-            {formatBytes(dbFile.wal_bytes)}
+            {dbFile ? formatBytes(dbFile.wal_bytes) : (
+              <span className="inline-block h-7 w-24 animate-pulse bg-gray-800 rounded" />
+            )}
           </div>
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
           <div className="text-xs text-gray-500 uppercase tracking-wide">Total on Disk</div>
           <div className="text-2xl font-bold text-emerald-400 mt-1">
-            {formatBytes(dbFile.total_bytes)}
+            {dbFile ? formatBytes(dbFile.total_bytes) : (
+              <span className="inline-block h-7 w-24 animate-pulse bg-gray-800 rounded" />
+            )}
           </div>
         </div>
       </div>
@@ -480,7 +473,7 @@ export function DataManagementPage() {
                           disabled={restoreBackup.isPending}
                           className="px-2 py-0.5 rounded text-xs font-medium bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50"
                         >
-                          {restoreBackup.isPending ? "Restoring..." : "Confirm"}
+                          {restoreBackup.isPending ? "Restoring..." : "Confirm Restore"}
                         </button>
                         <button
                           onClick={() => setRestoreConfirm(null)}
@@ -489,13 +482,46 @@ export function DataManagementPage() {
                           Cancel
                         </button>
                       </div>
+                    ) : deleteConfirm === b.filename ? (
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => {
+                            deleteBackup.mutate(b.filename, {
+                              onSuccess: (result) => {
+                                setLastResult(
+                                  `Deleted ${result.filename} (${formatBytes(result.size_bytes)} freed)`,
+                                );
+                                setDeleteConfirm(null);
+                              },
+                            });
+                          }}
+                          disabled={deleteBackup.isPending}
+                          className="px-2 py-0.5 rounded text-xs font-medium bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
+                        >
+                          {deleteBackup.isPending ? "Deleting..." : "Confirm Delete"}
+                        </button>
+                        <button
+                          onClick={() => setDeleteConfirm(null)}
+                          className="text-xs text-gray-500 hover:text-gray-300"
+                        >
+                          Cancel
+                        </button>
+                      </div>
                     ) : (
-                      <button
-                        onClick={() => setRestoreConfirm(b.filename)}
-                        className="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
-                      >
-                        Restore
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => { setRestoreConfirm(b.filename); setDeleteConfirm(null); }}
+                          className="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+                        >
+                          Restore
+                        </button>
+                        <button
+                          onClick={() => { setDeleteConfirm(b.filename); setRestoreConfirm(null); }}
+                          className="px-2 py-0.5 rounded text-xs font-medium bg-gray-800 hover:bg-red-900/40 text-gray-400 hover:text-red-400 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -515,34 +541,42 @@ export function DataManagementPage() {
         <div className="px-4 py-3 border-b border-gray-800">
           <h3 className="text-sm font-semibold text-gray-300">Storage by Table</h3>
         </div>
-        <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
-              <th className="py-2 px-4 text-left">Table</th>
-              <th className="py-2 px-4 text-right">Rows</th>
-              <th className="py-2 px-4 text-center">Oldest</th>
-              <th className="py-2 px-4 text-center">Newest</th>
-              <th className="py-2 px-4 text-left">Cleanup</th>
-            </tr>
-          </thead>
-          <tbody>
-            {cleanableTables.map((table) => {
-              const stats = data[table] as TableStats;
-              if (!stats) return null;
-              return (
-                <TableRow
-                  key={table}
-                  table={table}
-                  stats={stats}
-                  onCleanup={handleCleanup}
-                  cleanupLoading={cleanup.isPending}
-                />
-              );
-            })}
-          </tbody>
-        </table>
-        </div>
+        {storageLoading ? (
+          <div className="h-40 m-4 animate-pulse bg-gray-800 rounded" />
+        ) : storageError || !data ? (
+          <div className="px-4 py-6 text-sm text-red-400">
+            Failed to load storage stats.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                <th className="py-2 px-4 text-left">Table</th>
+                <th className="py-2 px-4 text-right">Rows</th>
+                <th className="py-2 px-4 text-center">Oldest</th>
+                <th className="py-2 px-4 text-center">Newest</th>
+                <th className="py-2 px-4 text-left">Cleanup</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cleanableTables.map((table) => {
+                const stats = data[table] as TableStats;
+                if (!stats) return null;
+                return (
+                  <TableRow
+                    key={table}
+                    table={table}
+                    stats={stats}
+                    onCleanup={handleCleanup}
+                    cleanupLoading={cleanup.isPending}
+                  />
+                );
+              })}
+            </tbody>
+          </table>
+          </div>
+        )}
       </div>
 
       {/* Read-only Tables */}
