@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLockHoldings, useReviewHoldings } from "../hooks/queries";
+import { useLtpStream } from "../hooks/useLtpStream";
 import clsx from "clsx";
 import type { ManualOrder } from "../types/api";
 
@@ -187,6 +188,7 @@ function OrderForm({
 
 export function HoldingsPage() {
   const { data: response, isLoading, isError, error, refetch, isFetching } = useHoldings();
+  const ltps = useLtpStream();
   const [orderForm, setOrderForm] = useState<{
     symbol?: string;
     side?: "BUY" | "SELL";
@@ -452,10 +454,14 @@ export function HoldingsPage() {
               </thead>
               <tbody>
                 {holdings.map((h) => {
-                  const pnl = (h.last_price - h.average_price) * h.quantity;
+                  // Prefer live WebSocket LTP; fall back to last_price
+                  // from the REST snapshot. PnL recalculates as ticks
+                  // arrive so the column stays current without a refetch.
+                  const ltp = ltps.get(h.tradingsymbol) ?? h.last_price;
+                  const pnl = (ltp - h.average_price) * h.quantity;
                   const pnlPct =
                     h.average_price > 0
-                      ? ((h.last_price - h.average_price) / h.average_price) * 100
+                      ? ((ltp - h.average_price) / h.average_price) * 100
                       : 0;
 
                   return (
@@ -480,8 +486,8 @@ export function HoldingsPage() {
                       <td className="py-2.5 px-3 text-right text-gray-400">
                         {fmtInr(h.average_price)}
                       </td>
-                      <td className="py-2.5 px-3 text-right text-gray-300">
-                        {fmtInr(h.last_price)}
+                      <td className="py-2.5 px-3 text-right text-gray-300 font-mono">
+                        {fmtInr(ltp)}
                       </td>
                       <td
                         className={clsx(

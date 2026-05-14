@@ -14,6 +14,7 @@ import {
 import clsx from "clsx";
 import { parseUTC, getTimezone } from "../utils/datetime";
 import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
+import { useLtpStream } from "../hooks/useLtpStream";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -32,6 +33,9 @@ export function SymbolPage() {
   const { data: news } = useNews({ symbol: sym, limit: 10 });
   const ct = useChartTheme();
   const tooltipStyle = useTooltipStyle();
+  // Live LTP — falls back to the latest chart close when no tick has
+  // arrived yet (e.g. symbol not subscribed by the ticker yet).
+  const ltps = useLtpStream();
 
   // Build chart data with trade entry/exit overlays
   const chartData = useMemo(() => {
@@ -65,7 +69,9 @@ export function SymbolPage() {
     });
   }, [ohlcv, trades]);
 
-  const lastPrice = chartData.length > 0 ? chartData[chartData.length - 1].close : null;
+  const chartClose = chartData.length > 0 ? chartData[chartData.length - 1].close : null;
+  const liveLtp = ltps.get(sym);
+  const lastPrice = liveLtp ?? chartClose;
   const firstPrice = chartData.length > 0 ? chartData[0].close : null;
   const changePct = firstPrice && lastPrice ? ((lastPrice - firstPrice) / firstPrice) * 100 : 0;
 

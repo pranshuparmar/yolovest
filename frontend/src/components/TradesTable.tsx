@@ -2,6 +2,7 @@ import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import type { Trade } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
+import { useLtpStream } from "../hooks/useLtpStream";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", {
@@ -18,6 +19,8 @@ export function TradesTable({
   compact?: boolean;
 }) {
   const navigate = useNavigate();
+  // Live LTP — useful for OPEN rows. Closed rows show — instead.
+  const ltps = useLtpStream();
 
   if (trades.length === 0) {
     return <p className="text-gray-500 text-sm py-4">No trades found</p>;
@@ -33,6 +36,7 @@ export function TradesTable({
             <th className="pb-2 pr-4">Entry</th>
             {!compact && <th className="pb-2 pr-4">Fill</th>}
             <th className="pb-2 pr-4">Exit</th>
+            <th className="pb-2 pr-4">LTP</th>
             <th className="pb-2 pr-4">Qty</th>
             {!compact && <th className="pb-2 pr-4">Product</th>}
             <th className="pb-2 pr-4">Status</th>
@@ -64,6 +68,12 @@ export function TradesTable({
               {!compact && <td className="py-2 pr-4">{fmt(t.fill_price)}</td>}
               <td className="py-2 pr-4">
                 {t.exit_price !== null ? fmt(t.exit_price) : <span className="text-gray-500">—</span>}
+              </td>
+              <td className="py-2 pr-4 font-mono">
+                {(() => {
+                  const ltp = ltps.get(t.symbol);
+                  return ltp ? fmt(ltp) : <span className="text-gray-600">—</span>;
+                })()}
               </td>
               <td className="py-2 pr-4">{t.quantity}</td>
               {!compact && <td className="py-2 pr-4 text-gray-400">{t.product}</td>}

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { usePendingTrades, useApprovePendingTrade, useRejectPendingTrade, useClearTodaysSignals } from "../hooks/queries";
+import { useLtpStream } from "../hooks/useLtpStream";
 import clsx from "clsx";
 
 function fmt(n: number, d = 2) {
@@ -95,6 +96,9 @@ function OverrideRow({
           )}
         />
       </td>
+      {/* LTP column placeholder — only the read row populates it; edit
+          mode keeps the slot for alignment. */}
+      <td className="py-2 px-3 text-right text-gray-600 font-mono">—</td>
       <td className="py-2 px-3">
         <input
           type="number"
@@ -184,6 +188,7 @@ export function PendingTradesBanner() {
   const approve = useApprovePendingTrade();
   const reject = useRejectPendingTrade();
   const [editingId, setEditingId] = useState<number | null>(null);
+  const ltps = useLtpStream();
 
   if (!pending || pending.length === 0) return null;
 
@@ -255,6 +260,7 @@ export function PendingTradesBanner() {
               <th className="py-2 px-3 text-center">Signal</th>
               <th className="py-2 px-3 text-center">Product</th>
               <th className="py-2 px-3 text-right">Entry</th>
+              <th className="py-2 px-3 text-right">LTP</th>
               <th className="py-2 px-3 text-right">Target</th>
               <th className="py-2 px-3 text-right">SL</th>
               <th className="py-2 px-3 text-right">Qty</th>
@@ -305,6 +311,21 @@ export function PendingTradesBanner() {
                     </span>
                   </td>
                   <td className="py-2 px-3 text-right font-mono text-gray-300">{fmt(t.entry_price)}</td>
+                  <td className="py-2 px-3 text-right font-mono">
+                    {(() => {
+                      const ltp = ltps.get(t.symbol);
+                      if (!ltp) return <span className="text-gray-600">—</span>;
+                      const drift = ((ltp - t.entry_price) / t.entry_price) * 100;
+                      const cls =
+                        Math.abs(drift) < 0.25 ? "text-gray-300"
+                        : (drift > 0 ? "text-emerald-400" : "text-red-400");
+                      return (
+                        <span className={cls} title={`${drift >= 0 ? "+" : ""}${drift.toFixed(2)}% vs entry`}>
+                          {fmt(ltp)}
+                        </span>
+                      );
+                    })()}
+                  </td>
                   <td className="py-2 px-3 text-right font-mono text-emerald-400">{fmt(t.target_price)}</td>
                   <td className="py-2 px-3 text-right font-mono text-red-400">{fmt(t.stop_loss_price)}</td>
                   <td className="py-2 px-3 text-right text-gray-400">{t.position_size}</td>

@@ -44,16 +44,50 @@ class PositionMonitorSkill(SkillBase):
         local_positions = await self.ctx.db.get_open_positions()
         broker_positions = await self.ctx.broker.get_positions()
 
-        # Make sure KiteTicker is subscribed to every open-position symbol
-        # so the cached LTP is fresh by the time _get_ltp_with_retry asks
-        # for it. Subscription is idempotent — already-subscribed tokens
-        # are skipped inside the ticker.
+        # KiteTicker subscription set: open positions + holdings +
+        # watchlist + user_watchlist. The ticker broadcasts throttled
+        # tick_update events for every subscribed symbol, which the
+        # dashboard's useLtpStream hook consumes to render live LTP +
+        # move% on Positions / Holdings / Watchlist / Trades / Symbol
+        # pages. Subscription is idempotent (already-subscribed tokens
+        # are skipped inside the ticker) so re-running every heartbeat
+        # is cheap. Cap watchlist at 50 so we don't subscribe to the
+        # full 500-stock scan universe.
         ticker = getattr(self.ctx, "ticker", None)
-        if ticker is not None and local_positions:
+        if ticker is not None:
+            symbols_to_subscribe: set[str] = set()
+            symbols_to_subscribe.update(p["symbol"] for p in local_positions)
+            for bp in broker_positions:
+                sym = bp.get("tradingsymbol") or bp.get("symbol")
+                if sym:
+                    symbols_to_subscribe.add(sym)
             try:
-                await ticker.subscribe([p["symbol"] for p in local_positions])
+                holdings = await self.ctx.broker.get_holdings()
+                for h in holdings or []:
+                    sym = h.get("tradingsymbol") or h.get("symbol")
+                    if sym:
+                        symbols_to_subscribe.add(sym)
             except Exception:
-                logger.debug("ticker subscribe failed", exc_info=True)
+                logger.debug("ticker subscribe: get_holdings failed", exc_info=True)
+            try:
+                wl = await self.ctx.db.get_watchlist()
+                for w in (wl or [])[:50]:
+                    if w.get("symbol"):
+                        symbols_to_subscribe.add(w["symbol"])
+            except Exception:
+                logger.debug("ticker subscribe: get_watchlist failed", exc_info=True)
+            try:
+                uw = await self.ctx.db.get_user_watchlist()
+                for u in uw or []:
+                    if u.get("symbol"):
+                        symbols_to_subscribe.add(u["symbol"])
+            except Exception:
+                logger.debug("ticker subscribe: get_user_watchlist failed", exc_info=True)
+            if symbols_to_subscribe:
+                try:
+                    await ticker.subscribe(sorted(symbols_to_subscribe))
+                except Exception:
+                    logger.debug("ticker subscribe failed", exc_info=True)
 
         # Reconcile gtt_id / gtt_status against the broker's GTT list.
         # Cleared GTTs (user-cancelled on Kite web, rejected at trigger
