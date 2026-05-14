@@ -196,8 +196,16 @@ class PositionMonitorSkill(SkillBase):
             # skip client-side target/SL detection. Client-side only fires
             # for trades where the broker LIMIT never got placed (e.g.
             # historical rows, or LIMIT placement failed at entry time).
+            #
+            # Trailing still applies — we lift the broker-side SL order
+            # in place via modify_sl_order so the position locks in
+            # gains as price moves toward target.
             if pos.get("target_order_id") and pos.get("sl_order_id"):
                 await self._enforce_mis_oco(pos)
+                if cfg.trailing_sl_enabled and risk_per_share > 0:
+                    await self._maybe_trail_mis_sl(
+                        pos, entry, sl, current_price, risk_per_share, target,
+                    )
                 await self.ctx.db.update_unrealized_pnl(
                     pos["trade_id"], current_price,
                 )
@@ -1049,6 +1057,66 @@ class PositionMonitorSkill(SkillBase):
             logger.exception(
                 "trailing SL via GTT failed for %s (gtt=%d)",
                 pos["symbol"], gtt_id,
+            )
+
+    async def _maybe_trail_mis_sl(
+        self,
+        pos: dict[str, Any],
+        entry: float,
+        current_sl: float,
+        current_price: float,
+        risk_per_share: float,
+        target: float,
+    ) -> None:
+        """If a MIS position has a broker-side SL order and the
+        trailing condition is met, lift the SL trigger via
+        modify_sl_order (same order_id; trigger lifted in place).
+
+        Mirrors the client-side trailing path and the GTT path so
+        MIS OCO positions get the same lock-in behaviour. Without
+        this the broker-side SL stays at the original level forever
+        and a near-target pullback can wipe out the gains.
+        """
+        cfg = self.ctx.config.risk
+        sl_oid = pos.get("sl_order_id")
+        if not sl_oid:
+            return
+        signal_type = pos["signal_type"]
+        if signal_type == "BUY":
+            profit = current_price - entry
+        else:
+            profit = entry - current_price
+        profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0
+        if profit_multiple < cfg.trailing_sl_trigger_multiple:
+            return
+
+        step_pct = cfg.trailing_sl_step_pct
+        tweaks = cfg.exit_tweaks
+        if tweaks.tighten_trailing_enabled:
+            target_progress = self._target_progress_pct(
+                signal_type, entry, target, current_price,
+            )
+            step_pct *= self._trailing_step_multiplier(target_progress, tweaks)
+        step = current_price * step_pct
+        if signal_type == "BUY":
+            new_sl = max(entry, current_price - step)  # at least breakeven
+        else:
+            new_sl = min(entry, current_price + step)
+
+        if not self._is_better_sl(signal_type, new_sl, current_sl):
+            return
+
+        try:
+            await self.ctx.broker.modify_sl_order(sl_oid, new_sl)
+            await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+            logger.info(
+                "trailing SL via MIS modify: %s SL %.2f → %.2f (profit %.2fR)",
+                pos.get("symbol"), current_sl, new_sl, profit_multiple,
+            )
+        except Exception:
+            logger.exception(
+                "trailing SL via MIS modify failed for %s (sl_order_id=%s)",
+                pos.get("symbol"), sl_oid,
             )
 
     async def _enforce_mis_oco(self, pos: dict[str, Any]) -> None:
