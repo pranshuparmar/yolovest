@@ -147,7 +147,14 @@ export interface Signal {
   confidence_score: number;
   model_version: string;
   features_snapshot: string | null;
+  attribution_json: string | null;
   created_at: string;
+}
+
+export interface FeatureAttribution {
+  feature: string;
+  value: number;
+  contribution: number;
 }
 
 export interface Prediction {

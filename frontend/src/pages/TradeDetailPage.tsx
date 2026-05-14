@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useTradeDetail, useDeleteTrade, useTradeOrderDetail } from "../hooks/queries";
 import clsx from "clsx";
 import { parseUTC, getTimezone } from "../utils/datetime";
+import type { FeatureAttribution } from "../types/api";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -124,6 +125,59 @@ function ReasoningTimeline({ data }: { data: NonNullable<ReturnType<typeof useTr
   );
 }
 
+function AttributionPanel({ attributionJson }: { attributionJson: string | null }) {
+  if (!attributionJson) return null;
+  let parsed: FeatureAttribution[] | null = null;
+  try {
+    parsed = JSON.parse(attributionJson) as FeatureAttribution[];
+  } catch {
+    return null;
+  }
+  if (!parsed || parsed.length === 0) return null;
+  const maxMag = Math.max(...parsed.map((a) => Math.abs(a.contribution)), 1e-9);
+  return (
+    <Section title="Why this signal? Top features driving the prediction">
+      <div className="space-y-1.5">
+        {parsed.map((a) => {
+          const pct = (Math.abs(a.contribution) / maxMag) * 100;
+          const positive = a.contribution > 0;
+          return (
+            <div key={a.feature} className="flex items-center gap-3 text-xs">
+              <div className="w-44 truncate text-gray-300 font-mono">{a.feature}</div>
+              <div className="w-20 text-right text-gray-500 font-mono">
+                {a.value.toFixed(3)}
+              </div>
+              <div className="flex-1 h-3 bg-gray-800 rounded overflow-hidden">
+                <div
+                  className={clsx(
+                    "h-full",
+                    positive ? "bg-emerald-500/70" : "bg-red-500/70",
+                  )}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+              <div
+                className={clsx(
+                  "w-20 text-right font-mono",
+                  positive ? "text-emerald-400" : "text-red-400",
+                )}
+              >
+                {positive ? "+" : ""}
+                {a.contribution.toFixed(3)}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-[10px] text-gray-600 mt-3">
+        Contributions are TreeSHAP values in log-odds space. Positive (green)
+        pushed the model toward the predicted class; negative (red) pushed
+        against. Bar length is relative magnitude within this signal.
+      </p>
+    </Section>
+  );
+}
+
 export function TradeDetailPage() {
   const { tradeId } = useParams<{ tradeId: string }>();
   const navigate = useNavigate();
@@ -177,6 +231,9 @@ export function TradeDetailPage() {
 
       {/* Visual Reasoning Chain */}
       <ReasoningTimeline data={data} />
+
+      {/* Why this signal? — model attribution */}
+      <AttributionPanel attributionJson={data.signal?.attribution_json ?? null} />
 
       {/* Trade Summary */}
       <Section title="Execution">

@@ -960,12 +960,17 @@ class Database:
     async def insert_signal(self, signal: dict[str, Any]) -> None:
         """Persist a generated signal. Caller should set `mode` to the
         active trading mode so bulk-delete and analytics can scope by it.
+        attribution_json holds the top-N feature contributions surfaced
+        on TradeDetailPage; None when the ML layer couldn't compute
+        them (e.g. booster unreachable through calibration wrapper).
         """
+        attribution = signal.get("attribution")
+        attribution_json = json.dumps(attribution) if attribution else None
         await self.conn.execute(
             "INSERT INTO signals (symbol, signal_type, entry_price, target_price, "
             "stop_loss_price, position_size, confidence_score, model_version, "
-            "features_snapshot, mode, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            "features_snapshot, mode, attribution_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
             (
                 signal["symbol"],
                 signal["signal_type"],
@@ -977,6 +982,7 @@ class Database:
                 signal.get("model_version", ""),
                 json.dumps(signal.get("features_snapshot", {})),
                 signal.get("mode", "paper"),
+                attribution_json,
             ),
         )
         await self.conn.commit()
@@ -1045,7 +1051,7 @@ class Database:
         cursor = await self.read_conn.execute(
             "SELECT id, symbol, signal_type, entry_price, target_price, "
             "stop_loss_price, position_size, confidence_score, model_version, "
-            "disposition, disposition_reason, created_at "
+            "disposition, disposition_reason, attribution_json, created_at "
             "FROM signals WHERE created_at >= ? ORDER BY created_at DESC",
             (today_start,),
         )

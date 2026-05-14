@@ -375,6 +375,11 @@ class XGBoostSignalModel(MLBase):
         from typing import Literal, cast
         signal_type = cast(Literal["BUY", "SELL", "HOLD"], signal_type_str)
 
+        attribution = await asyncio.to_thread(
+            self._compute_attribution,
+            model, feature_vector, expected, pred_label,
+        )
+
         return MLPrediction(
             signal_type=signal_type,
             entry_price=round(entry_price, 2),
@@ -384,7 +389,60 @@ class XGBoostSignalModel(MLBase):
             holding_period=holding_period,
             confidence=round(confidence, 4),
             model_version=self._get_version(model_type),
+            attribution=attribution,
         )
+
+    @staticmethod
+    def _compute_attribution(
+        model: Any,
+        feature_vector: list[float],
+        feature_names: list[str] | None,
+        pred_label: int,
+        top_n: int = 5,
+    ) -> list[Any] | None:
+        """Return the top-N feature contributions to `pred_label` via
+        XGBoost's `pred_contribs=True` (TreeSHAP-style). For multiclass
+        the output shape is (1, n_classes, n_features+1); the last
+        column is bias. Reading the slice for the predicted class
+        gives us per-feature contributions in log-odds space.
+
+        Returns None defensively when the booster isn't reachable
+        through the model wrapper or anything else throws — we don't
+        want a presentation feature to break prediction.
+        """
+        if not feature_names:
+            return None
+        try:
+            import numpy as np
+            import xgboost as xgb
+
+            booster = model.get_booster()
+            X = np.array(feature_vector, dtype=np.float32)
+            d = xgb.DMatrix(X, feature_names=feature_names)
+            contribs = booster.predict(d, pred_contribs=True)
+            # Multiclass: (1, n_classes, n_features+1). Binary: (1, n_features+1).
+            if contribs.ndim == 3:
+                class_idx = min(pred_label, contribs.shape[1] - 1)
+                feat_contribs = contribs[0, class_idx, :-1]
+            else:
+                feat_contribs = contribs[0, :-1]
+            # Top-N by absolute value of contribution.
+            order = np.argsort(-np.abs(feat_contribs))[:top_n]
+            from yolovest.models.schemas import FeatureAttribution
+            out: list[Any] = []
+            for idx in order:
+                idx_i = int(idx)
+                if idx_i >= len(feature_names):
+                    continue
+                out.append(FeatureAttribution(
+                    feature=feature_names[idx_i],
+                    value=float(feature_vector[idx_i]),
+                    contribution=float(feat_contribs[idx_i]),
+                ))
+            return out
+        except Exception:
+            logger.debug("_compute_attribution failed", exc_info=True)
+            return None
 
     # ------------------------------------------------------------------
     # Training

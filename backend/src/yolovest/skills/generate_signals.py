@@ -421,6 +421,17 @@ class GenerateSignalsSkill(SkillBase):
                     "confidence_score": prediction.confidence,
                     "features_snapshot": features,
                     "model_version": prediction.model_version,
+                    "attribution": (
+                        [
+                            {
+                                "feature": a.feature,
+                                "value": a.value,
+                                "contribution": a.contribution,
+                            }
+                            for a in prediction.attribution
+                        ]
+                        if prediction.attribution else None
+                    ),
                 }
 
                 if is_reentry:
