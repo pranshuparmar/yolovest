@@ -219,7 +219,14 @@ def run_walk_forward_backtest(
             entry = meta.entry_close * (1 - cfg.entry_slippage_pct)
         exit_price = _path_aware_exit(entry, direction, meta)
 
-        size = _size_position(entry, capital, cfg)
+        # Size on fixed initial_capital, not on compounded capital.
+        # Otherwise a high-win-rate simulated equity curve doubles
+        # over and over until it overflows float64 and the next
+        # int(capital * ratio) call raises
+        # "cannot convert float infinity to integer". This also
+        # matches how a real account is sized — risk-per-trade is a
+        # fraction of a stable base, not of the running balance.
+        size = _size_position(entry, cfg.initial_capital, cfg)
         if size <= 0:
             continue
 
@@ -235,10 +242,21 @@ def run_walk_forward_backtest(
         position_value = entry * size
         if position_value <= 0:
             continue
-        returns.append(net / position_value)
+        ret = net / position_value
+        # Skip non-finite returns / nets defensively. A single bad
+        # bar can otherwise propagate inf/nan into sharpe and the
+        # downstream metrics dict.
+        if not (math.isfinite(ret) and math.isfinite(net)):
+            continue
+        returns.append(ret)
 
         capital += net
         net_pnl_total += net
+        if not math.isfinite(capital):
+            # Should never happen with fixed-base sizing above, but
+            # guard so a runaway equity curve can't crash the loop.
+            capital = peak
+            break
         peak = max(peak, capital)
         dd = (peak - capital) / peak if peak > 0 else 0.0
         if dd > max_dd:
