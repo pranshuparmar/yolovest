@@ -363,6 +363,11 @@ class RiskConfig(BaseModel):
     skip_sell_on_holdings: bool = True  # position-monitor handles exits; no SELL on held symbols
     max_trades_per_day: int = Field(default=5, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
+    # Risk-rejected signals get re-evaluated each heartbeat (most
+    # reasons — exposure, drift, depth, correlation, cooldown — are
+    # transient). This caps how many times a chronically-rejected
+    # symbol may regenerate per day before we give up on it.
+    max_risk_rejected_retries_per_day: int = Field(default=5, ge=1, le=20)
     symbol_cooldown_days: int = Field(default=1, ge=0)
     symbol_repeat_lookback_days: int = Field(default=5, ge=0)
     symbol_repeat_min_confidence: float = Field(default=0.80, ge=0, le=1)

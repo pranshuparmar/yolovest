@@ -125,9 +125,12 @@ class GenerateSignalsSkill(SkillBase):
         # Load locked symbols — SELL signals for these will be skipped entirely
         locked_symbols = await self.ctx.db.get_locked_symbols()
 
-        # Skip symbols that already have a signal or open position today
+        # Skip symbols that already have a signal or open position today.
+        # Risk-rejected symbols are intentionally re-evaluated each
+        # heartbeat (capped) — most rejection reasons are transient.
         already_signaled = await self.ctx.db.get_todays_signaled_symbols(
             mode=self.ctx.config.mode,
+            risk_rejected_retry_cap=self.ctx.config.risk.max_risk_rejected_retries_per_day,
         )
         if already_signaled:
             filter_counts["already_signaled"] = 0
