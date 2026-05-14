@@ -320,6 +320,46 @@ class LiquidityGateConfig(BaseModel):
     max_pct_of_top5: float = Field(default=0.10, gt=0, le=1.0)
 
 
+class ExitTweaksConfig(BaseModel):
+    """Auxiliary exit conditions for client-side-managed positions.
+
+    These run alongside the standard target/SL geometry. Currently
+    only apply to positions without a broker-side GTT or MIS OCO
+    pair (adopted positions, paper trades, edge cases where OCO
+    placement failed). Broker-managed exits handle their own
+    lifecycle; extending these conditions to MIS OCO / GTT positions
+    would require cancelling broker orders and is left for a later
+    iteration.
+    """
+
+    # Time-stop: intraday positions still open after this many minutes
+    # of zero / negligible target progress get exited at market.
+    # Captures the "chop trade" failure mode where the setup neither
+    # works nor breaks, just stalls.
+    time_stop_enabled: bool = False
+    intraday_stop_after_min: int = Field(default=180, ge=30, le=375)
+    intraday_stop_progress_threshold: float = Field(default=0.30, ge=0, le=1)
+
+    # Volume-exhaustion exit: when the most recent 5-min bar's volume
+    # collapses below `min_volume_ratio` × average of the previous
+    # `lookback_bars`, and the position is in modest profit
+    # (0.5R - 2R), exit. Reads "trend is dying" before SL has a
+    # chance to take back the gains.
+    volume_exit_enabled: bool = False
+    volume_exit_lookback_bars: int = Field(default=12, ge=3, le=60)
+    volume_exit_min_ratio: float = Field(default=0.30, gt=0, le=1.0)
+
+    # Trailing-SL tightening near target. Once profit has covered
+    # `tighten_at_target_pct` of the entry-to-target distance, scale
+    # the trailing-SL step by `tighten_step_multiplier` (< 1.0). The
+    # SL ratchets up in smaller increments so a near-target pullback
+    # doesn't surrender the gain. Applies to both client-side and
+    # GTT-managed trailing SL paths.
+    tighten_trailing_enabled: bool = True
+    tighten_at_target_pct: float = Field(default=0.70, ge=0.5, le=1.0)
+    tighten_step_multiplier: float = Field(default=0.50, gt=0, le=1.0)
+
+
 class RegimeGateConfig(BaseModel):
     """Cross-sectional market-regime gate.
 
@@ -426,6 +466,7 @@ class RiskConfig(BaseModel):
     depth_gate: DepthGateConfig = Field(default_factory=DepthGateConfig)
     liquidity_gate: LiquidityGateConfig = Field(default_factory=LiquidityGateConfig)
     regime_gate: RegimeGateConfig = Field(default_factory=RegimeGateConfig)
+    exit_tweaks: ExitTweaksConfig = Field(default_factory=ExitTweaksConfig)
     reentry: ReentryConfig = Field(default_factory=ReentryConfig)
 
 

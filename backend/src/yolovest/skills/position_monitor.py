@@ -203,6 +203,46 @@ class PositionMonitorSkill(SkillBase):
                 )
                 continue
 
+            # Auxiliary exits — time-stop / volume-exhaustion. Only fire
+            # for client-side managed positions (no broker GTT, no MIS
+            # OCO pair). Broker-managed exits keep their own lifecycle;
+            # extending these conditions there would need cancel + market
+            # exit and is left for later.
+            aux_exit = await self._check_auxiliary_exits(
+                pos, current_price, entry, target,
+            )
+            if aux_exit:
+                qty = pos.get("quantity", 0)
+                product = pos.get("product", "MIS")
+                if pos["signal_type"] == "BUY":
+                    gross_pnl = (current_price - entry) * qty
+                else:
+                    gross_pnl = (entry - current_price) * qty
+                costs, _src, breakdown = await resolve_round_trip_costs(
+                    self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                    entry_price=entry, exit_price=current_price, quantity=qty,
+                    product=product, cost_config=self.ctx.config.transaction_costs,
+                )
+                pnl = round(gross_pnl - costs, 2)
+                if self.ctx.config.execution.transaction_mode == "manual":
+                    await self._queue_exit_for_approval(
+                        pos, current_price, pnl, aux_exit,
+                    )
+                else:
+                    await self.ctx.db.close_position(
+                        pos["trade_id"], current_price, pnl,
+                        realized_costs=breakdown,
+                    )
+                expiry_actions.append({
+                    "action": "closed", "symbol": symbol, "reason": aux_exit,
+                    "days_held": 0, "expected_days": 0, "pnl": pnl,
+                })
+                logger.info(
+                    "position-monitor: AUX EXIT %s [%s] — exit=%.2f pnl=₹%.2f",
+                    symbol, aux_exit, current_price, pnl,
+                )
+                continue
+
             # Target hit (with early-exit buffer). Heartbeats are 15 min
             # apart; a price that's within `target_early_exit_pct` of target
             # but never quite touches it would otherwise wait a full cycle
@@ -282,8 +322,18 @@ class PositionMonitorSkill(SkillBase):
                 profit_multiple = profit / risk_per_share
 
                 if profit_multiple >= cfg.trailing_sl_trigger_multiple:
-                    # Calculate new trailing SL
-                    step = current_price * cfg.trailing_sl_step_pct
+                    # Calculate new trailing SL. Tighten the step when
+                    # we're already close to target so a final pullback
+                    # can't surrender the gain.
+                    step_pct = cfg.trailing_sl_step_pct
+                    tweaks = cfg.exit_tweaks
+                    if tweaks.tighten_trailing_enabled:
+                        target_progress = self._target_progress_pct(
+                            pos["signal_type"], entry, target, current_price,
+                        )
+                        if target_progress >= tweaks.tighten_at_target_pct:
+                            step_pct *= tweaks.tighten_step_multiplier
+                    step = current_price * step_pct
                     if pos["signal_type"] == "BUY":
                         new_sl = max(entry, current_price - step)  # at least breakeven
                     else:
@@ -936,7 +986,17 @@ class PositionMonitorSkill(SkillBase):
         if profit_multiple < cfg.trailing_sl_trigger_multiple:
             return
 
-        step = current_price * cfg.trailing_sl_step_pct
+        # Mirror the client-side trailing-SL tightening near target.
+        step_pct = cfg.trailing_sl_step_pct
+        tweaks = cfg.exit_tweaks
+        if tweaks.tighten_trailing_enabled:
+            target_progress = self._target_progress_pct(
+                signal_type, entry, float(pos.get("target_price") or 0.0),
+                current_price,
+            )
+            if target_progress >= tweaks.tighten_at_target_pct:
+                step_pct *= tweaks.tighten_step_multiplier
+        step = current_price * step_pct
         if signal_type == "BUY":
             new_sl = max(entry, current_price - step)  # at least breakeven
         else:
@@ -1047,6 +1107,111 @@ class PositionMonitorSkill(SkillBase):
                 "OCO: both legs filled for %s in same window — no cancel needed",
                 pos.get("symbol"),
             )
+
+    @staticmethod
+    def _target_progress_pct(
+        signal_type: str, entry: float, target: float, current_price: float,
+    ) -> float:
+        """Fraction of the entry-to-target distance already covered, in
+        [0, 1]+. Returns 0 if target is unset or geometry is invalid.
+        Goes >1 when current_price has already crossed target.
+        """
+        if target <= 0 or entry <= 0:
+            return 0.0
+        total = abs(target - entry)
+        if total <= 0:
+            return 0.0
+        if signal_type == "BUY":
+            covered = current_price - entry
+        else:
+            covered = entry - current_price
+        return max(0.0, covered / total)
+
+    async def _check_auxiliary_exits(
+        self,
+        pos: dict[str, Any],
+        current_price: float,
+        entry: float,
+        target: float,
+    ) -> str | None:
+        """Return a reason string when a time-stop or volume-exhaustion
+        exit should fire, else None. Only fires for client-side
+        managed positions (no GTT, no MIS OCO pair).
+
+        Time-stop: intraday positions that have been open longer than
+        `intraday_stop_after_min` without crossing
+        `intraday_stop_progress_threshold` of target progress get
+        exited at market.
+
+        Volume-exhaustion: when the last 5-min bar's volume drops below
+        `volume_exit_min_ratio` × average of the previous N bars AND
+        the position is in 0.5R-2R profit (the "trend is dying" zone),
+        exit at market.
+        """
+        if pos.get("gtt_id") or (
+            pos.get("target_order_id") and pos.get("sl_order_id")
+        ):
+            return None
+        tweaks = self.ctx.config.risk.exit_tweaks
+        if not tweaks.time_stop_enabled and not tweaks.volume_exit_enabled:
+            return None
+
+        signal_type = pos.get("signal_type", "BUY")
+        progress = self._target_progress_pct(
+            signal_type, entry, target, current_price,
+        )
+
+        # Time-stop: intraday only — swing rows already have
+        # holding-expiry covering them.
+        if (
+            tweaks.time_stop_enabled
+            and pos.get("expected_holding_period") == "intraday"
+        ):
+            from datetime import datetime as _dt
+            from yolovest.timezone import IST as _IST, now_ist as _now_ist
+            created_at_str = pos.get("created_at") or ""
+            try:
+                created_at = _dt.fromisoformat(str(created_at_str))
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=_IST)
+                age_min = (
+                    _now_ist() - created_at.astimezone(_IST)
+                ).total_seconds() / 60
+                if (
+                    age_min >= tweaks.intraday_stop_after_min
+                    and progress < tweaks.intraday_stop_progress_threshold
+                ):
+                    return "time_stop"
+            except (ValueError, TypeError):
+                logger.debug("time-stop: bad created_at on %s",
+                             pos.get("symbol"), exc_info=True)
+
+        # Volume-exhaustion: last 5-min bar volume vs lookback average.
+        if tweaks.volume_exit_enabled:
+            sl = float(pos.get("stop_loss_price") or 0)
+            risk_per_share = abs(entry - sl)
+            if risk_per_share > 0:
+                if signal_type == "BUY":
+                    profit_R = (current_price - entry) / risk_per_share
+                else:
+                    profit_R = (entry - current_price) / risk_per_share
+                if 0.5 <= profit_R <= 2.0:
+                    try:
+                        bars = await self.ctx.db.get_ohlcv(
+                            pos["symbol"], "5minute", days=1,
+                        )
+                    except Exception:
+                        bars = []
+                    needed = tweaks.volume_exit_lookback_bars + 1
+                    if len(bars) >= needed:
+                        latest = bars[-1]
+                        history = bars[-needed:-1]
+                        avg_vol = sum(b.volume for b in history) / len(history)
+                        if avg_vol > 0:
+                            ratio = latest.volume / avg_vol
+                            if ratio < tweaks.volume_exit_min_ratio:
+                                return "volume_exhaustion"
+        return None
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:
         """Check if new SL is tighter (more protective) than current."""
