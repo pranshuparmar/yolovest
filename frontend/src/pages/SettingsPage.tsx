@@ -21,7 +21,7 @@ const TABS: Tab[] = [
   {
     id: "strategy",
     label: "Strategy",
-    sections: ["_strategy_top", "strategy", "scanning"],
+    sections: ["_strategy_top", "strategy", "scanning", "retraining"],
   },
   {
     id: "risk",
