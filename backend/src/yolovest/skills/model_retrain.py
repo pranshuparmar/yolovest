@@ -86,11 +86,26 @@ class ModelRetrainSkill(SkillBase):
         # Lookahead periods: intraday uses 1-bar, swing uses 5-bar returns
         lookahead_map = {"intraday": 1, "swing": 5}
 
+        # Match each model's path-aware label geometry to the holding
+        # bucket it actually trades at runtime: intraday uses the tight
+        # MIS multipliers (0.6 / 0.3 by default), swing uses the wider
+        # short-swing CNC multipliers (1.5 / 0.75). Keeping label
+        # geometry in sync with runtime geometry is the whole point of
+        # path-aware labels — otherwise the model learns one game and
+        # plays a different one.
+        hp = self.ctx.config.strategy.holding_periods
+        atr_mult_map = {
+            "intraday": (hp.intraday.target, hp.intraday.stop_loss),
+            "swing": (hp.short_swing.target, hp.short_swing.stop_loss),
+        }
+
         for model_type in ("intraday", "swing"):
             # Build feature matrix with model-specific labeling + feedback features
             lookahead = lookahead_map[model_type]
+            target_mult, sl_mult = atr_mult_map[model_type]
             X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
                 training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
+                target_atr_mult=target_mult, sl_atr_mult=sl_mult,
             )
             if len(y) < min_samples:
                 logger.warning(
@@ -177,6 +192,8 @@ class ModelRetrainSkill(SkillBase):
     def _prepare_training_data(
         self, training_data: dict[str, Any], lookahead_bars: int = 1,
         feedback_data: dict[str, dict[str, float]] | None = None,
+        target_atr_mult: float = 1.5,
+        sl_atr_mult: float = 0.75,
     ) -> tuple[
         list[list[float]], list[int], list[str], list[float],
         list[dict[str, Any]],
@@ -230,6 +247,15 @@ class ModelRetrainSkill(SkillBase):
         # simulate real PnL instead of the legacy +1%/-0.5% fiction.
         bars_meta: list[dict[str, Any]] = []
 
+        # Cross-sectional market-regime features. For each timestamp
+        # (date for daily bars, datetime for intraday) compute the
+        # universe-wide breadth: fraction of stocks up vs prior close
+        # and the average %-return. This proxies the "is today
+        # broadly trending or chopping" context that the per-stock
+        # features can't see, without requiring a separate NIFTY
+        # ingest. Built once up-front, then looked up per-sample.
+        regime_by_ts: dict[str, dict[str, float]] = self._compute_regime_index(by_symbol)
+
         for sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
                 continue
@@ -270,17 +296,37 @@ class ModelRetrainSkill(SkillBase):
                 if feedback_data:
                     merge_feedback_features(features, sym, feedback_data)
 
-                # Label: future N-bar return
+                # Merge cross-sectional market-regime features for this
+                # timestamp (universe breadth + avg %-return). Symbols
+                # alone can't tell the model "today is a chop day" —
+                # this layer does.
+                _regime = regime_by_ts.get(bars[i].timestamp)
+                if _regime:
+                    features["universe_breadth"] = _regime["breadth"]
+                    features["universe_avg_return"] = _regime["avg_return"]
+                else:
+                    features["universe_breadth"] = 0.5
+                    features["universe_avg_return"] = 0.0
+
+                # Path-aware label: BUY iff target hits before SL when
+                # walking forward bar-by-bar, using the same ATR-based
+                # geometry the live trades use. Replaces the legacy
+                # close[i+N] vs close[i] ±0.5% rule, which was blind to
+                # intra-window SL hits and didn't match runtime exits.
                 current_close = bars[i].close
                 future_close = bars[i + lookahead_bars].close
-                ret = (future_close - current_close) / current_close if current_close else 0
-
-                if ret > 0.005:
-                    label = 2  # BUY
-                elif ret < -0.005:
-                    label = 0  # SELL
+                atr_pct = features.get("atr_pct") or 0.0
+                if current_close <= 0 or atr_pct <= 0:
+                    label = 1
                 else:
-                    label = 1  # HOLD
+                    label = self._path_aware_label(
+                        bars=bars,
+                        start_idx=i,
+                        lookahead=lookahead_bars,
+                        entry=current_close,
+                        target_pct=atr_pct * target_atr_mult,
+                        sl_pct=atr_pct * sl_atr_mult,
+                    )
 
                 # Maintain a stable feature_names list across all samples.
                 # Indicators that need more history (e.g. EMA-200) only
@@ -305,6 +351,121 @@ class ModelRetrainSkill(SkillBase):
                 })
 
         return X, y, feature_names, sample_weights, bars_meta
+
+    @staticmethod
+    def _compute_regime_index(
+        by_symbol: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, dict[str, float]]:
+        """For each unique timestamp across the training set, aggregate
+        the universe to a {breadth, avg_return} dict.
+
+        breadth = fraction of symbols whose close > prior close at that
+                  timestamp (0..1). 0.5 = neutral, ≥0.6 strong up,
+                  ≤0.4 strong down.
+        avg_return = mean of (close − prev_close) / prev_close across
+                     symbols at that timestamp.
+
+        This is a cross-sectional proxy for "what is the broad market
+        doing right now". It mirrors what a NIFTY 50 day-return feature
+        would give but doesn't require a separate index ingest — the
+        500-stock universe alone is more than enough breadth.
+        """
+        # Build per-timestamp aggregator
+        agg: dict[str, list[float]] = {}
+        for rows in by_symbol.values():
+            prev_close: float | None = None
+            for r in rows:
+                ts = r.get("timestamp")
+                c = r.get("close") or 0.0
+                if ts and prev_close and prev_close > 0:
+                    ret = (c - prev_close) / prev_close
+                    agg.setdefault(ts, []).append(ret)
+                prev_close = c
+
+        # Need at least 5 symbols at a timestamp for a meaningful breadth
+        # reading — otherwise sparse-data timestamps would dominate with
+        # noisy 0/1 fractions.
+        out: dict[str, dict[str, float]] = {}
+        for ts, returns in agg.items():
+            if len(returns) < 5:
+                continue
+            avg_ret = sum(returns) / len(returns)
+            up = sum(1 for r in returns if r > 0)
+            out[ts] = {
+                "breadth": up / len(returns),
+                "avg_return": avg_ret,
+            }
+        return out
+
+    @staticmethod
+    def _path_aware_label(
+        *,
+        bars: list["OHLCVBar"],
+        start_idx: int,
+        lookahead: int,
+        entry: float,
+        target_pct: float,
+        sl_pct: float,
+    ) -> int:
+        """Simulate hypothetical BUY and SELL trades from `start_idx`
+        and label by which (if either) hits its target before its SL,
+        walking forward bar-by-bar over `lookahead` future bars.
+
+        - BUY:  target_hit when high ≥ entry × (1 + target_pct)
+                 SL_hit    when low  ≤ entry × (1 − sl_pct)
+        - SELL: target_hit when low  ≤ entry × (1 − target_pct)
+                 SL_hit    when high ≥ entry × (1 + sl_pct)
+
+        Both touched in the same bar is treated as ambiguous (HOLD)
+        because daily OHLC can't tell us the intra-bar order.
+
+        Returns: 2 BUY, 0 SELL, 1 HOLD.
+        """
+        buy_target = entry * (1 + target_pct)
+        buy_sl = entry * (1 - sl_pct)
+        sell_target = entry * (1 - target_pct)
+        sell_sl = entry * (1 + sl_pct)
+
+        buy_outcome: str | None = None  # "win" / "loss" / None
+        sell_outcome: str | None = None
+
+        end_idx = min(start_idx + lookahead, len(bars) - 1)
+        for k in range(start_idx + 1, end_idx + 1):
+            bar = bars[k]
+            hi, lo = bar.high, bar.low
+
+            # BUY trade leg
+            if buy_outcome is None:
+                target_now = hi >= buy_target
+                sl_now = lo <= buy_sl
+                if target_now and sl_now:
+                    buy_outcome = "ambiguous"
+                elif target_now:
+                    buy_outcome = "win"
+                elif sl_now:
+                    buy_outcome = "loss"
+
+            # SELL trade leg
+            if sell_outcome is None:
+                target_now = lo <= sell_target
+                sl_now = hi >= sell_sl
+                if target_now and sl_now:
+                    sell_outcome = "ambiguous"
+                elif target_now:
+                    sell_outcome = "win"
+                elif sl_now:
+                    sell_outcome = "loss"
+
+            if buy_outcome is not None and sell_outcome is not None:
+                break
+
+        # Decide label. Only label BUY/SELL when one side cleanly won
+        # and the other didn't also win — otherwise HOLD.
+        if buy_outcome == "win" and sell_outcome != "win":
+            return 2
+        if sell_outcome == "win" and buy_outcome != "win":
+            return 0
+        return 1
 
     async def _check_shadow_promotions(self) -> list[dict[str, Any]]:
         """Check if shadow models have completed trial period.
