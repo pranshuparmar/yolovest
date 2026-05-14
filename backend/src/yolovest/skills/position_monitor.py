@@ -513,6 +513,43 @@ class PositionMonitorSkill(SkillBase):
             )
             recovered.append(symbol)
 
+            # Cancel any still-open broker exit legs. When the broker's
+            # SL fires server-side, Kite SHOULD postback the SL COMPLETE
+            # so our postback handler cancels the resting target LIMIT
+            # — but Kite postbacks are best-effort with no retry, and
+            # when one is dropped the target stays open at the broker
+            # ready to fire on a price spike. Same risk in reverse if
+            # the target LIMIT fills and the postback is lost. Issue a
+            # cancel here as a backstop; broker treats
+            # already-cancelled / already-filled orders as no-op so
+            # double-cancelling is harmless.
+            for oid_key, label in (
+                ("target_order_id", "target"),
+                ("sl_order_id", "SL"),
+            ):
+                oid = pos.get(oid_key)
+                if not oid:
+                    continue
+                try:
+                    await self.ctx.broker.cancel_order(str(oid))
+                    if oid_key == "target_order_id":
+                        await self.ctx.db.set_trade_target_order_id(
+                            pos["trade_id"], None,
+                        )
+                    else:
+                        await self.ctx.db.set_trade_sl_order_id(
+                            pos["trade_id"], None,
+                        )
+                    logger.info(
+                        "Ghost recovery: cancelled dangling %s order %s for %s",
+                        label, oid, symbol,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Ghost recovery: cancel %s %s for %s failed: %s",
+                        label, oid, symbol, e,
+                    )
+
             logger.warning(
                 "GHOST POSITION RECOVERED: %s — closed in DB with exit=%.2f "
                 "(source=%s) pnl=₹%.2f",
