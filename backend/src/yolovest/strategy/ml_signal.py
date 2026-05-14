@@ -512,6 +512,10 @@ class XGBoostSignalModel(MLBase):
                             symbol=str(meta.get("symbol", "")),
                             entry_close=float(meta.get("entry_close") or 0.0),
                             exit_close=float(meta.get("exit_close") or 0.0),
+                            path_highs=list(meta.get("path_highs") or []),
+                            path_lows=list(meta.get("path_lows") or []),
+                            target_pct=float(meta.get("target_pct") or 0.0),
+                            sl_pct=float(meta.get("sl_pct") or 0.0),
                         ))
                 else:
                     # Legacy synthetic payoff — kept for backwards compat

@@ -17,12 +17,12 @@ What this is NOT (deliberately):
     Those gates are pre-trade filters in the live path; here we treat
     every fold-test sample independently. Adding them is a multi-day
     refactor with a much smaller honest-metric payoff than this step.
-  - An intra-bar SL/target sim. For daily models the label uses
-    `lookahead_bars=1` (next close) which is what we use as exit; for
-    swing models the label uses 5-bar lookahead and we exit at the
-    5th-bar close. Adding intra-bar SL hits would need the actual
-    high/low of intermediate bars and a path-dependent simulation
-    loop — out of scope for v1.
+
+Path-aware exits: when BarMeta carries `path_highs` / `path_lows` /
+`target_pct` / `sl_pct`, the simulator walks the future window bar by
+bar and exits at the first SL or target hit using the same geometry
+the label uses. Without those fields, it falls back to close-to-close
+exit at `exit_close` for backwards-compat with older tests.
 """
 
 from __future__ import annotations
@@ -51,13 +51,22 @@ class BarMeta:
     """Per-sample metadata the backtest needs to simulate a trade.
 
     Parallel to X / y rows emitted by `_prepare_training_data` — entry
-    is the close at sample index `i`, exit is the close at
-    `i + lookahead_bars` (the label's own forward window). symbol is
-    informational; the simulator doesn't enforce per-symbol caps in v1.
+    is the close at sample index `i`, exit_close is the close at
+    `i + lookahead_bars` (the label's own forward window).
+
+    When path_highs / path_lows / target_pct / sl_pct are supplied,
+    the simulator walks the future window bar-by-bar and exits at the
+    first SL or target hit (path-aware), matching the geometry the
+    path-aware label uses. Without them, the simulator falls back to
+    close-to-close exit at exit_close.
     """
     symbol: str
     entry_close: float
     exit_close: float
+    path_highs: list[float] = field(default_factory=list)
+    path_lows: list[float] = field(default_factory=list)
+    target_pct: float = 0.0
+    sl_pct: float = 0.0
 
 
 @dataclass
@@ -97,6 +106,56 @@ class BacktestResult:
     net_pnl: float
     final_capital: float
     returns: list[float] = field(default_factory=list)
+
+
+def _path_aware_exit(
+    entry: float,
+    direction: int,
+    meta: BarMeta,
+) -> float:
+    """Walk the future window bar by bar; return the price the trade
+    actually exited at. Conservative ordering when both target and SL
+    are touched in the same bar: assume SL fires first (the metric
+    should be hard to game, not optimistic).
+
+    Returns `meta.exit_close` when path data is missing or neither
+    barrier is touched.
+    """
+    if (
+        not meta.path_highs
+        or not meta.path_lows
+        or meta.target_pct <= 0
+        or meta.sl_pct <= 0
+        or len(meta.path_highs) != len(meta.path_lows)
+    ):
+        return meta.exit_close
+
+    if direction > 0:  # BUY
+        target = entry * (1 + meta.target_pct)
+        sl = entry * (1 - meta.sl_pct)
+        for hi, lo in zip(meta.path_highs, meta.path_lows, strict=False):
+            hit_target = hi >= target
+            hit_sl = lo <= sl
+            if hit_target and hit_sl:
+                return sl
+            if hit_target:
+                return target
+            if hit_sl:
+                return sl
+    else:  # SELL
+        target = entry * (1 - meta.target_pct)
+        sl = entry * (1 + meta.sl_pct)
+        for hi, lo in zip(meta.path_highs, meta.path_lows, strict=False):
+            hit_target = lo <= target
+            hit_sl = hi >= sl
+            if hit_target and hit_sl:
+                return sl
+            if hit_target:
+                return target
+            if hit_sl:
+                return sl
+
+    return meta.exit_close
 
 
 def _size_position(
@@ -158,7 +217,7 @@ def run_walk_forward_backtest(
             entry = meta.entry_close * (1 + cfg.entry_slippage_pct)
         else:
             entry = meta.entry_close * (1 - cfg.entry_slippage_pct)
-        exit_price = meta.exit_close
+        exit_price = _path_aware_exit(entry, direction, meta)
 
         size = _size_position(entry, capital, cfg)
         if size <= 0:

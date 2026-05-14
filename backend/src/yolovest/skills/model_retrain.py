@@ -344,10 +344,21 @@ class ModelRetrainSkill(SkillBase):
                 X.append([features.get(k, 0.0) for k in feature_names])
                 y.append(label)
                 sample_weights.append(sym_weight)
+                # Capture the future-window high/low path so the
+                # walk-forward backtest can exit at SL or target with
+                # the same geometry as the path-aware label, instead of
+                # mark-to-market at exit_close.
+                window_end = min(i + lookahead_bars, len(bars) - 1)
+                path_highs = [bars[k].high for k in range(i + 1, window_end + 1)]
+                path_lows = [bars[k].low for k in range(i + 1, window_end + 1)]
                 bars_meta.append({
                     "symbol": sym,
                     "entry_close": float(current_close),
                     "exit_close": float(future_close),
+                    "path_highs": path_highs,
+                    "path_lows": path_lows,
+                    "target_pct": float(atr_pct * target_atr_mult),
+                    "sl_pct": float(atr_pct * sl_atr_mult),
                 })
 
         return X, y, feature_names, sample_weights, bars_meta
