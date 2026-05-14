@@ -789,6 +789,78 @@ def create_app(ctx: AppContext) -> FastAPI:
             "exit_order_id": exit_order_id,
         }
 
+    @app.post("/api/positions/{trade_id}/convert")
+    async def convert_position(
+        trade_id: str,
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Convert an open MIS position to CNC (or back). Promotes a
+        winning intraday trade to delivery so it survives the 3:15 PM
+        auto-square-off. Caller must ensure sufficient delivery margin
+        is available — broker rejection bubbles up as 502.
+        """
+        trade = await ctx.db.get_trade(trade_id)
+        if not trade:
+            raise HTTPException(status_code=404, detail="Trade not found")
+        if trade.get("status") != "open":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trade is not open (status={trade.get('status')})",
+            )
+
+        current = trade.get("product", "MIS")
+        target = (body.get("to_product") or "").upper()
+        if target not in ("MIS", "CNC"):
+            raise HTTPException(status_code=400, detail="to_product must be MIS or CNC")
+        if current == target:
+            return {"status": "noop", "product": current}
+
+        ok = await ctx.broker.convert_position(
+            symbol=trade["symbol"],
+            quantity=int(trade["quantity"]),
+            from_product=current,
+            to_product=target,
+            side=trade["signal_type"],
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Broker rejected {current}->{target} conversion",
+            )
+
+        await ctx.db.set_trade_product(trade_id, target)
+        try:
+            await ctx.notify.send(
+                f"Position converted: {trade['symbol']} {current} -> {target}",
+                alert_type="trade_exit",
+            )
+        except Exception:
+            logger.debug("convert_position: notify failed", exc_info=True)
+
+        # If we just promoted MIS -> CNC and the trade had MIS broker-side
+        # OCO orders (resting LIMIT target + SL), those are now stale —
+        # they're product-specific. Cancel both; the user can re-attach a
+        # GTT manually or let the next heartbeat see it as CNC and place
+        # one automatically via the existing _attach_oco_gtt path on a
+        # future code path. For now we leave attach to manual / next-day.
+        if current == "MIS" and target == "CNC":
+            for oid_key in ("sl_order_id", "target_order_id"):
+                oid = trade.get(oid_key)
+                if not oid:
+                    continue
+                try:
+                    await ctx.broker.cancel_order(oid)
+                except Exception:
+                    logger.debug("convert_position: %s cancel failed", oid_key, exc_info=True)
+
+        logger.info(
+            "convert_position: %s %s -> %s qty=%d",
+            trade["symbol"], current, target, trade["quantity"],
+        )
+        return {"status": "converted", "trade_id": trade_id, "product": target}
+
+
     # Track whether we've already sent a broker-expired Telegram alert this session
     # to avoid spamming on every page load / auto-refresh.
     _broker_expired_alerted = {"sent": False}

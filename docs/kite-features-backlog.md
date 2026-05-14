@@ -149,18 +149,23 @@ first. Revisit when that exists.
 
 ---
 
-### `convert_position` — promote winning MIS to CNC
+### ~~`convert_position` — manual MIS → CNC~~ (primitive done)
 
-**What:** Convert an open MIS (intraday) position to CNC (delivery)
-before square-off, holding overnight.
+`BrokerBase.convert_position(symbol, qty, from, to, side)` wraps
+`kite.convert_position`. Exposed via
+`POST /api/positions/{trade_id}/convert` with `{"to_product": "CNC"}`.
+Updates the local trade row's `product`, cancels any MIS-side broker
+OCO orders (resting target LIMIT + SL) since those are product-
+specific, and sends a Telegram alert.
 
-**Why:** Profitable MIS trades hit auto-square-off and the gain is
-locked. With conversion, a high-confidence MIS trade up significantly
-near close could be held overnight on the swing thesis.
-
-**Scope:** new skill/method to evaluate conversion candidates near
-square-off time. Touches risk checks (margin requirements change
-CNC↔MIS), `square-off` skill.
+**Still open under this theme:**
+- Auto-decision logic — `square-off` could evaluate "profitable
+  MIS trades up >X% with confidence >Y" near the 3:15 cutoff and
+  call `convert_position` instead of `_close_single_position`.
+  Skipped because the heuristic is opinionated; keeping it as an
+  explicit user action for now.
+- UI button on the positions table to trigger conversion in one
+  click. Currently only API + Telegram.
 
 ---
 

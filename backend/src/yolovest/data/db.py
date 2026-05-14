@@ -2347,6 +2347,18 @@ class Database:
         )
         await self.conn.commit()
 
+    async def set_trade_product(
+        self, trade_id: str, product: str,
+    ) -> None:
+        """Update the product (MIS / CNC) on a trade after a broker-side
+        position conversion. Used by `/api/positions/{trade_id}/convert`.
+        """
+        await self.conn.execute(
+            "UPDATE trades SET product = ? WHERE trade_id = ?",
+            (product, trade_id),
+        )
+        await self.conn.commit()
+
     async def set_trade_target_order_id(
         self, trade_id: str, target_order_id: str | None,
     ) -> None:

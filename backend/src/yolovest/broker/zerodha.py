@@ -761,6 +761,53 @@ class ZerodhaBroker(BrokerBase):
     # Executed trades (for ghost-position recovery)
     # ------------------------------------------------------------------
 
+    async def convert_position(
+        self,
+        symbol: str,
+        quantity: int,
+        from_product: str,
+        to_product: str,
+        side: str = "BUY",
+    ) -> bool:
+        """Convert open position via kite.convert_position.
+        Paper mode is a no-op returning True so test paths still flow.
+        """
+        if self._mode == "paper":
+            logger.info(
+                "[PAPER] convert_position %s qty=%d %s -> %s",
+                symbol, quantity, from_product, to_product,
+            )
+            return True
+        if self._kite is None:
+            raise RuntimeError("Not authenticated")
+
+        kite_side = "BUY" if side.upper() == "BUY" else "SELL"
+
+        def _convert() -> Any:
+            return self._kite.convert_position(
+                tradingsymbol=symbol,
+                exchange="NSE",
+                transaction_type=kite_side,
+                position_type="day",
+                quantity=int(quantity),
+                old_product=from_product,
+                new_product=to_product,
+            )
+
+        try:
+            await self._retry_api_call(_convert)
+            logger.info(
+                "convert_position: %s qty=%d %s -> %s OK",
+                symbol, quantity, from_product, to_product,
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "convert_position failed for %s (%s -> %s): %s",
+                symbol, from_product, to_product, e,
+            )
+            return False
+
     async def estimate_margin(
         self, legs: list[dict[str, Any]],
     ) -> dict[str, float] | None:

@@ -76,6 +76,25 @@ class BrokerBase(ABC):
         """Get all CNC holdings from the broker (delivery stocks held overnight)."""
         ...
 
+    async def convert_position(
+        self,
+        symbol: str,
+        quantity: int,
+        from_product: str,
+        to_product: str,
+        side: str = "BUY",
+    ) -> bool:
+        """Convert an existing open position between product types (e.g.
+        MIS → CNC, taking delivery of intraday shares before square-off).
+        Returns True on success; default implementation is a no-op
+        returning False.
+
+        Zerodha allows MIS → CNC and CNC → MIS for equity. Margin
+        requirements change between products; the caller must have
+        already verified the new requirement fits available margin.
+        """
+        return False
+
     async def estimate_margin(
         self, legs: list[dict[str, Any]],
     ) -> dict[str, float] | None:
