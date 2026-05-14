@@ -114,6 +114,37 @@ REST quota usage is eliminated.
 
 ## P3 — Strategy features
 
+### Single-leg entry GTT for breakouts (deferred)
+
+**What:** Place a single-leg GTT that fires a BUY order only when
+price breaks above a configured trigger, rather than sitting on a
+resting LIMIT order that may or may not fill.
+
+**Why deferred:** the current signal-generation flow produces entries
+at or near LTP — there's no breakout-style signal that would benefit
+from this. The primitive (`broker.place_entry_gtt` + a
+`pending_entry_gtt` trade status + a reconciler that promotes the row
+to `open` when the GTT fires) is straightforward, but the higher-level
+integration (when to use entry GTT vs immediate LIMIT, lifecycle on
+stale signals, risk-check timing) needs a breakout strategy module
+first. Revisit when that exists.
+
+**Scope when picked up:**
+- `ZerodhaBroker.place_entry_gtt(symbol, side, qty, trigger, limit)`
+- New trade status `pending_entry_gtt` (no migration needed, just a
+  string value).
+- Trade-execute branch: if `signal.entry_price > LTP * (1 + threshold)`
+  for BUY (or `< LTP * (1 - threshold)` for SELL) and product is CNC,
+  use entry GTT instead of LIMIT.
+- Position-monitor reconciler: for `pending_entry_gtt` rows, watch GTT
+  status; on `triggered`, fetch the resulting order id, capture fill
+  price, transition trade to `open`, then attach the standard
+  exit-side OCO GTT.
+- Telegram `/breakout` command and a `/api/breakouts/{trade_id}/cancel`
+  endpoint for manual cancellation.
+
+---
+
 ### `convert_position` — promote winning MIS to CNC
 
 **What:** Convert an open MIS (intraday) position to CNC (delivery)
