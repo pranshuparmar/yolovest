@@ -27,6 +27,7 @@ import { AlertsPage } from "./pages/AlertsPage";
 import { RiskSimulatorPage } from "./pages/RiskSimulatorPage";
 import { CorrelationPage } from "./pages/CorrelationPage";
 import { ExecutionQualityPage } from "./pages/ExecutionQualityPage";
+import { ModelDriftPage } from "./pages/ModelDriftPage";
 import { DataManagementPage } from "./pages/DataManagementPage";
 import { DryRunPage } from "./pages/DryRunPage";
 import { SkillsPage } from "./pages/SkillsPage";
@@ -82,6 +83,7 @@ function AppRoutes() {
         <Route path="/alerts" element={<AlertsPage />} />
         <Route path="/strategy" element={<StrategyPerformancePage />} />
         <Route path="/execution" element={<ExecutionQualityPage />} />
+        <Route path="/model-drift" element={<ModelDriftPage />} />
         <Route path="/correlations" element={<CorrelationPage />} />
         <Route path="/risk-sim" element={<RiskSimulatorPage />} />
         <Route path="/analytics" element={<AnalyticsPage />} />

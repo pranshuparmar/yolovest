@@ -33,6 +33,7 @@ import type {
   OHLCVBar,
   StrategyPerformance,
   ExecutionQuality,
+  ModelDrift,
   CorrelationData,
   PriceAlert,
   RiskSimParams,
@@ -317,6 +318,9 @@ export const api = {
   // Feature #8
   executionQuality: (days = 30) =>
     apiFetch<ExecutionQuality>(`/api/execution-quality?days=${days}`),
+
+  modelDrift: (days = 30) =>
+    apiFetch<ModelDrift>(`/api/model-drift?days=${days}`),
 
   // Feature #7
   correlations: (days = 60) =>

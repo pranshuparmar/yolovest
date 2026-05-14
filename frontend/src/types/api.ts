@@ -485,6 +485,33 @@ export interface PerformanceRow {
   avg_pnl: number;
 }
 
+export interface ModelDriftDayPoint {
+  date: string;
+  predicted_win_rate: number | null;
+  realised_win_rate: number;
+  sample_size: number;
+}
+
+export interface ModelDriftCalibrationBucket {
+  bucket: string;
+  predicted_mean: number | null;
+  realised_rate: number | null;
+  samples: number;
+}
+
+export interface ModelDriftVersion {
+  model_type: string;
+  version: string;
+  is_production: boolean;
+  by_day: ModelDriftDayPoint[];
+  calibration_buckets: ModelDriftCalibrationBucket[];
+}
+
+export interface ModelDrift {
+  model_versions: ModelDriftVersion[];
+  warning: string | null;
+}
+
 export interface ExecutionQuality {
   total_orders: number;
   filled_orders: number;

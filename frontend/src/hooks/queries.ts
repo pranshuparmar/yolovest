@@ -557,6 +557,14 @@ export function useExecutionQuality(days = 30) {
   });
 }
 
+export function useModelDrift(days = 30) {
+  return useQuery({
+    queryKey: ["model-drift", days],
+    queryFn: () => api.modelDrift(days),
+    staleTime: 60_000,
+  });
+}
+
 // Feature #7
 export function useCorrelations(days = 60) {
   return useQuery({
