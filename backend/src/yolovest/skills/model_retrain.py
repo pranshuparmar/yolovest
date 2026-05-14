@@ -54,6 +54,19 @@ class ModelRetrainSkill(SkillBase):
         training_data = await self.ctx.db.get_training_dataset()
         predictions_vs_actual = await self.ctx.db.get_prediction_outcomes()
 
+        # Sector map for sector-relative momentum features. A stock
+        # outperforming its sector is a stronger signal than just
+        # outperforming the universe; the model gets both.
+        unique_symbols = sorted({
+            row.get("symbol", "") for row in training_data.get("bars", [])
+            if row.get("symbol")
+        })
+        try:
+            sector_map = await self.ctx.db.get_symbol_sectors_map(unique_symbols)
+        except Exception:
+            logger.warning("Failed to load sector map; sector features will be neutral", exc_info=True)
+            sector_map = {}
+
         # Load feedback data for the ML feedback loop
         feedback_cfg = self.ctx.config.strategy.feedback
         feedback_data: dict[str, dict[str, float]] | None = None
@@ -106,6 +119,7 @@ class ModelRetrainSkill(SkillBase):
             X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
                 training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
                 target_atr_mult=target_mult, sl_atr_mult=sl_mult,
+                sector_map=sector_map,
             )
             if len(y) < min_samples:
                 logger.warning(
@@ -194,6 +208,7 @@ class ModelRetrainSkill(SkillBase):
         feedback_data: dict[str, dict[str, float]] | None = None,
         target_atr_mult: float = 1.5,
         sl_atr_mult: float = 0.75,
+        sector_map: dict[str, str] | None = None,
     ) -> tuple[
         list[list[float]], list[int], list[str], list[float],
         list[dict[str, Any]],
@@ -256,6 +271,16 @@ class ModelRetrainSkill(SkillBase):
         # ingest. Built once up-front, then looked up per-sample.
         regime_by_ts: dict[str, dict[str, float]] = self._compute_regime_index(by_symbol)
 
+        # Sector-relative features. Compute per-(sector, ts) breadth
+        # and avg-return plus a per-(symbol, ts) return so the sample
+        # build can derive `relative_momentum` = stock_return -
+        # sector_avg_return. A stock outperforming its sector index
+        # is a stronger signal than just outperforming the universe.
+        sector_map = sector_map or {}
+        sector_regime, symbol_returns = self._compute_sector_index(
+            by_symbol, sector_map,
+        )
+
         for sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
                 continue
@@ -300,13 +325,33 @@ class ModelRetrainSkill(SkillBase):
                 # timestamp (universe breadth + avg %-return). Symbols
                 # alone can't tell the model "today is a chop day" —
                 # this layer does.
-                _regime = regime_by_ts.get(bars[i].timestamp)
+                _ts = bars[i].timestamp
+                _regime = regime_by_ts.get(_ts)
                 if _regime:
                     features["universe_breadth"] = _regime["breadth"]
                     features["universe_avg_return"] = _regime["avg_return"]
                 else:
                     features["universe_breadth"] = 0.5
                     features["universe_avg_return"] = 0.0
+
+                # Sector-relative features. relative_momentum is the
+                # main signal — stock's return minus its sector's
+                # average return. Falls back to neutral when the
+                # symbol's sector is unknown or has < 3 peers at this
+                # timestamp.
+                _sec = sector_map.get(sym)
+                _sec_stats = sector_regime.get((_sec, _ts)) if _sec else None
+                _stock_ret = symbol_returns.get((sym, _ts))
+                if _sec_stats and _stock_ret is not None:
+                    features["sector_breadth"] = _sec_stats["breadth"]
+                    features["sector_avg_return"] = _sec_stats["avg_return"]
+                    features["relative_momentum"] = (
+                        _stock_ret - _sec_stats["avg_return"]
+                    )
+                else:
+                    features["sector_breadth"] = 0.5
+                    features["sector_avg_return"] = 0.0
+                    features["relative_momentum"] = 0.0
 
                 # Path-aware label: BUY iff target hits before SL when
                 # walking forward bar-by-bar, using the same ATR-based
@@ -407,6 +452,52 @@ class ModelRetrainSkill(SkillBase):
                 "avg_return": avg_ret,
             }
         return out
+
+    @staticmethod
+    def _compute_sector_index(
+        by_symbol: dict[str, list[dict[str, Any]]],
+        sector_map: dict[str, str],
+    ) -> tuple[
+        dict[tuple[str, str], dict[str, float]],
+        dict[tuple[str, str], float],
+    ]:
+        """Aggregate per-(sector, ts) breadth + avg_return, and emit
+        the per-(symbol, ts) return series so the sample builder can
+        compute relative_momentum cheaply.
+
+        Returns: (sector_stats, symbol_returns) where
+          sector_stats[(sector, ts)] = {"breadth": .., "avg_return": ..}
+          symbol_returns[(symbol, ts)] = return  (close - prev) / prev
+
+        Sectors with < 3 peers at a given timestamp are dropped — small
+        cohorts produce noisy breadth and the model is better served
+        falling back to neutral than learning from noise.
+        """
+        sector_agg: dict[tuple[str, str], list[float]] = {}
+        symbol_returns: dict[tuple[str, str], float] = {}
+        for sym, rows in by_symbol.items():
+            sector = sector_map.get(sym)
+            prev_close: float | None = None
+            for r in rows:
+                ts = r.get("timestamp")
+                c = r.get("close") or 0.0
+                if ts and prev_close and prev_close > 0:
+                    ret = (c - prev_close) / prev_close
+                    symbol_returns[(sym, ts)] = ret
+                    if sector:
+                        sector_agg.setdefault((sector, ts), []).append(ret)
+                prev_close = c
+
+        sector_stats: dict[tuple[str, str], dict[str, float]] = {}
+        for key, returns in sector_agg.items():
+            if len(returns) < 3:
+                continue
+            up = sum(1 for x in returns if x > 0)
+            sector_stats[key] = {
+                "breadth": up / len(returns),
+                "avg_return": sum(returns) / len(returns),
+            }
+        return sector_stats, symbol_returns
 
     @staticmethod
     def _path_aware_label(

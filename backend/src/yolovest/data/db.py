@@ -1571,6 +1571,52 @@ class Database:
             "warning": "; ".join(warnings) if warnings else None,
         }
 
+    async def get_symbol_sectors_map(
+        self, symbols: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Return a {symbol: sector} mapping. Prefers symbol_sectors
+        (canonical NSE Industry) and falls back to watchlist.sector
+        for user-added symbols. Symbols with no sector are omitted.
+        """
+        if symbols is not None:
+            if not symbols:
+                return {}
+            placeholders = ", ".join(["?"] * len(symbols))
+            cursor = await self.read_conn.execute(
+                f"SELECT symbol, COALESCE(sector, '') FROM symbol_sectors "
+                f"WHERE symbol IN ({placeholders})",
+                symbols,
+            )
+        else:
+            cursor = await self.read_conn.execute(
+                "SELECT symbol, COALESCE(sector, '') FROM symbol_sectors"
+            )
+        out: dict[str, str] = {}
+        for sym, sector in await cursor.fetchall():
+            if sector:
+                out[sym] = sector
+        # Watchlist fallback for any symbols missing from symbol_sectors.
+        if symbols is not None:
+            missing = [s for s in symbols if s not in out]
+            if missing:
+                placeholders = ", ".join(["?"] * len(missing))
+                cursor = await self.read_conn.execute(
+                    f"SELECT symbol, COALESCE(sector, '') FROM watchlist "
+                    f"WHERE symbol IN ({placeholders})",
+                    missing,
+                )
+                for sym, sector in await cursor.fetchall():
+                    if sector:
+                        out[sym] = sector
+        else:
+            cursor = await self.read_conn.execute(
+                "SELECT symbol, COALESCE(sector, '') FROM watchlist"
+            )
+            for sym, sector in await cursor.fetchall():
+                if sector and sym not in out:
+                    out[sym] = sector
+        return out
+
     async def compute_live_regime(self) -> dict[str, float]:
         """Cross-sectional regime stats over the latest two daily closes
         of every tracked symbol. Cheap proxy for "is the broad market
