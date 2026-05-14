@@ -548,6 +548,25 @@ export function useSymbolContext(symbol: string) {
   });
 }
 
+export function useRotationCooldown() {
+  return useQuery({
+    queryKey: ["rotation-cooldown"],
+    queryFn: api.rotationCooldown,
+    staleTime: 60_000,
+  });
+}
+
+export function useClearRotationCooldown() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (symbol?: string) => api.clearRotationCooldown(symbol),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["rotation-cooldown"] });
+      qc.invalidateQueries({ queryKey: ["watchlist"] });
+    },
+  });
+}
+
 // Feature #5
 export function useStrategyPerformance() {
   return useQuery({

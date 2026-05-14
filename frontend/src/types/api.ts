@@ -568,6 +568,14 @@ export interface SymbolContext {
   delivery_pct_avg_5d: number | null;
 }
 
+export interface RotationCooldown {
+  enabled: boolean;
+  no_signal_threshold: number;
+  cooldown_hours: number;
+  symbols: string[];
+  count: number;
+}
+
 export interface ExecutionQuality {
   total_orders: number;
   filled_orders: number;

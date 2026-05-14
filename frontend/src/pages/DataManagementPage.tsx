@@ -11,6 +11,8 @@ import {
   useUnquarantineSymbol,
   useSetReplacementSymbol,
   useBulkDelete,
+  useRotationCooldown,
+  useClearRotationCooldown,
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
@@ -231,6 +233,99 @@ function BulkDeleteSection() {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function RotationCooldownSection() {
+  const { data, isLoading } = useRotationCooldown();
+  const clear = useClearRotationCooldown();
+  const [confirming, setConfirming] = useState(false);
+
+  const handleClearAll = () => {
+    if (!confirming) {
+      setConfirming(true);
+      return;
+    }
+    clear.mutate(undefined, { onSettled: () => setConfirming(false) });
+  };
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-800 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-300">Rotation Cooldown</h3>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Symbols benched by market-scan after consecutive no-signal
+            heartbeats. Resetting forces them back into the scoring pool
+            on the next market-scan.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {confirming && (
+            <button
+              onClick={() => setConfirming(false)}
+              className="text-xs text-gray-500 hover:text-gray-300"
+            >
+              Cancel
+            </button>
+          )}
+          <button
+            onClick={handleClearAll}
+            disabled={clear.isPending || (data?.count ?? 0) === 0}
+            className={`px-3 py-1 rounded text-sm font-medium disabled:opacity-40 transition-colors whitespace-nowrap ${
+              confirming
+                ? "bg-red-600 hover:bg-red-700 text-white"
+                : "bg-gray-700 hover:bg-gray-600 text-gray-200"
+            }`}
+          >
+            {clear.isPending
+              ? "Clearing..."
+              : confirming
+                ? "Confirm Clear All"
+                : "Clear All"}
+          </button>
+        </div>
+      </div>
+      {isLoading ? (
+        <div className="h-20 m-4 animate-pulse bg-gray-800 rounded" />
+      ) : !data ? (
+        <div className="px-4 py-6 text-center text-sm text-gray-500">—</div>
+      ) : (
+        <div className="px-4 py-3 space-y-3">
+          <div className="flex flex-wrap items-center gap-4 text-xs text-gray-500">
+            <span>
+              Status:{" "}
+              <span className={data.enabled ? "text-emerald-400" : "text-gray-400"}>
+                {data.enabled ? "enabled" : "disabled"}
+              </span>
+            </span>
+            <span>
+              Threshold:{" "}
+              <span className="text-gray-300 font-mono">
+                {data.no_signal_threshold}
+              </span>{" "}
+              heartbeats
+            </span>
+            <span>
+              Cooldown:{" "}
+              <span className="text-gray-300 font-mono">
+                {data.cooldown_hours}h
+              </span>
+            </span>
+            <span>
+              In cooldown:{" "}
+              <span className="text-gray-300 font-mono">{data.count}</span>{" "}
+              symbol{data.count === 1 ? "" : "s"}
+            </span>
+          </div>
+          {data.count > 0 && (
+            <div className="text-xs text-gray-400 leading-relaxed max-h-32 overflow-y-auto font-mono">
+              {data.symbols.join(", ")}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -620,6 +715,8 @@ export function DataManagementPage() {
       )}
 
       {/* Quarantined Symbols */}
+      <RotationCooldownSection />
+
       <QuarantinedSymbolsSection />
 
       {/* Bulk Delete */}

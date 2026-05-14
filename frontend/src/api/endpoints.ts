@@ -36,6 +36,7 @@ import type {
   ModelDrift,
   InstitutionalFlows,
   SymbolContext,
+  RotationCooldown,
   CorrelationData,
   PriceAlert,
   RiskSimParams,
@@ -315,6 +316,17 @@ export const api = {
 
   symbolContext: (symbol: string) =>
     apiFetch<SymbolContext>(`/api/symbol/${symbol}/context`),
+
+  rotationCooldown: () =>
+    apiFetch<RotationCooldown>("/api/rotation-cooldown"),
+
+  clearRotationCooldown: (symbol?: string) => {
+    const qs = symbol ? `?symbol=${encodeURIComponent(symbol)}` : "";
+    return apiFetch<{ success: boolean; cleared: number; symbol: string | null }>(
+      `/api/rotation-cooldown/clear${qs}`,
+      { method: "POST" },
+    );
+  },
 
   // Feature #5
   strategyPerformance: () =>

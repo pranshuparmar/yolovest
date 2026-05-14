@@ -3056,6 +3056,39 @@ def create_app(ctx: AppContext) -> FastAPI:
             "replacement": replacement,
         }
 
+    @app.get("/api/rotation-cooldown")
+    async def get_rotation_cooldown(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """List symbols currently held in rotation cooldown + the
+        active threshold / window for the user to gauge how aggressive
+        the screening rotation is.
+        """
+        cfg = ctx.config.scanning
+        symbols = await ctx.db.get_rotation_cooldown_symbols()
+        return {
+            "enabled": cfg.rotation_enabled,
+            "no_signal_threshold": cfg.rotation_no_signal_threshold,
+            "cooldown_hours": cfg.rotation_cooldown_hours,
+            "symbols": sorted(symbols),
+            "count": len(symbols),
+        }
+
+    @app.post("/api/rotation-cooldown/clear")
+    async def clear_rotation_cooldown(
+        symbol: str | None = Query(None, description="Clear one symbol; omit for all"),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """One-shot reset of rotation cooldown so market-scan reconsiders
+        the affected symbols on the next run. Omit `symbol` to clear all.
+        """
+        cleared = await ctx.db.clear_rotation_cooldown(symbol)
+        logger.info(
+            "Rotation cooldown cleared: %s (%d rows)",
+            symbol or "ALL", cleared,
+        )
+        return {"success": True, "cleared": cleared, "symbol": symbol}
+
     def _model_dir() -> str:
         return getattr(ctx.config.strategy, "model_dir", "./models")
 
