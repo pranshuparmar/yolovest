@@ -168,19 +168,21 @@ CNC↔MIS), `square-off` skill.
 
 ## P3 — Analytics
 
-### `order_history` / `order_trades` for fill detail
+### ~~`order_history` / `order_trades` for fill detail~~ (done)
 
-**What:** `order_history(order_id)` returns the state-transition
-timeline of an order. `order_trades(order_id)` returns individual fill
-records for partial fills.
+`BrokerBase` gained `get_order_history(order_id)` and
+`get_order_trades(order_id)`; `ZerodhaBroker` wraps the SDK calls.
+`GET /api/trades/{trade_id}/order-detail` aggregates history + fills
+across every order id attached to a trade (entry / SL / target).
 
-**Why:** Only a status snapshot is persisted today. History gives exact
-slippage (placement price vs fill price with timestamps), partial-fill
-visibility, and better feedback data for the existing
-`_get_slippage_penalty` loop.
+The trade detail page surfaces this behind a "Fetch from broker"
+toggle (kept lazy so opening a trade page doesn't fire 3 extra API
+calls every time). Renders the lifecycle table (timestamps, status
+transitions, filled qty, avg price, broker notes) and the per-fill
+table (essential for partial-fill cases).
 
-**Scope:** methods on broker + persistence into a new `order_history`
-table (or extra columns on `trades`).
+Not persisted to DB — fetched live each click so the data is always
+current and there's no migration to maintain.
 
 ---
 

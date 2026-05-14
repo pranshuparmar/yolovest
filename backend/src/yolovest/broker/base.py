@@ -76,6 +76,18 @@ class BrokerBase(ABC):
         """Get all CNC holdings from the broker (delivery stocks held overnight)."""
         ...
 
+    async def get_order_history(self, order_id: str) -> list[dict[str, Any]]:
+        """Return the state-transition timeline of a single order
+        (placed → modified → triggered → complete, with timestamps and
+        broker-side notes). Empty list when unavailable."""
+        return []
+
+    async def get_order_trades(self, order_id: str) -> list[dict[str, Any]]:
+        """Return individual fill records for a single order — important
+        when partial fills compose the full quantity. Empty list when
+        unavailable."""
+        return []
+
     async def get_executed_trades(self) -> list[dict[str, Any]]:
         """Return today's executed trades from the broker.
 

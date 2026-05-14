@@ -1,5 +1,6 @@
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { useTradeDetail, useDeleteTrade } from "../hooks/queries";
+import { useState } from "react";
+import { useTradeDetail, useDeleteTrade, useTradeOrderDetail } from "../hooks/queries";
 import clsx from "clsx";
 import { parseUTC, getTimezone } from "../utils/datetime";
 
@@ -128,6 +129,8 @@ export function TradeDetailPage() {
   const navigate = useNavigate();
   const { data, isLoading, error } = useTradeDetail(tradeId || "");
   const deleteTrade = useDeleteTrade();
+  const [orderDetailOpen, setOrderDetailOpen] = useState(false);
+  const orderDetail = useTradeOrderDetail(tradeId || "", orderDetailOpen);
 
   if (isLoading) return <div className="h-96 animate-pulse bg-gray-900 rounded-lg" />;
 
@@ -279,6 +282,100 @@ export function TradeDetailPage() {
           </div>
         </div>
       </Section>
+
+      {/* Broker order history — fetched on demand from kite.order_history /
+          kite.order_trades. Hidden behind a toggle to avoid an extra API
+          call on every page load. */}
+      {(data.order_id || data.sl_order_id || data.target_order_id) && (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-gray-400">Broker Order History</h3>
+            <button
+              onClick={() => setOrderDetailOpen((v) => !v)}
+              className="text-xs px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200"
+            >
+              {orderDetailOpen ? "Hide" : "Fetch from broker"}
+            </button>
+          </div>
+          {orderDetailOpen && (
+            <div className="space-y-4 text-xs">
+              {orderDetail.isLoading && <p className="text-gray-500">Loading…</p>}
+              {orderDetail.error && (
+                <p className="text-red-400">Failed to fetch order detail</p>
+              )}
+              {orderDetail.data && Object.entries(orderDetail.data.legs).map(([leg, info]) => {
+                if (!info) return null;
+                return (
+                  <div key={leg} className="border border-gray-800 rounded p-2">
+                    <p className="text-gray-400 mb-2">
+                      <span className="uppercase font-medium">{leg}</span>{" "}
+                      <span className="font-mono text-gray-500">{info.order_id}</span>
+                    </p>
+                    {info.history.length > 0 && (
+                      <div className="mb-2">
+                        <p className="text-gray-500 mb-1">Lifecycle</p>
+                        <table className="w-full">
+                          <thead className="text-gray-600">
+                            <tr>
+                              <th className="text-left pr-2">Time</th>
+                              <th className="text-left pr-2">Status</th>
+                              <th className="text-right pr-2">Filled</th>
+                              <th className="text-right pr-2">Avg Price</th>
+                              <th className="text-left">Note</th>
+                            </tr>
+                          </thead>
+                          <tbody className="font-mono">
+                            {info.history.map((h, i) => (
+                              <tr key={i} className="border-t border-gray-800/50">
+                                <td className="pr-2 text-gray-400">
+                                  {h.order_timestamp ?
+                                    parseUTC(h.order_timestamp).toLocaleTimeString("en-IN", { timeZone: getTimezone(), hour: "2-digit", minute: "2-digit", second: "2-digit" })
+                                    : "—"}
+                                </td>
+                                <td className="pr-2">{h.status}</td>
+                                <td className="text-right pr-2">{h.filled_quantity ?? "—"}/{h.quantity ?? "—"}</td>
+                                <td className="text-right pr-2">{h.average_price ? `₹${h.average_price.toFixed(2)}` : "—"}</td>
+                                <td className="text-gray-500 truncate">{h.status_message ?? ""}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {info.fills.length > 0 && (
+                      <div>
+                        <p className="text-gray-500 mb-1">Fills</p>
+                        <table className="w-full">
+                          <thead className="text-gray-600">
+                            <tr>
+                              <th className="text-left pr-2">Time</th>
+                              <th className="text-right pr-2">Qty</th>
+                              <th className="text-right pr-2">Avg Price</th>
+                            </tr>
+                          </thead>
+                          <tbody className="font-mono">
+                            {info.fills.map((f, i) => (
+                              <tr key={i} className="border-t border-gray-800/50">
+                                <td className="pr-2 text-gray-400">
+                                  {f.fill_timestamp ?
+                                    parseUTC(f.fill_timestamp).toLocaleTimeString("en-IN", { timeZone: getTimezone(), hour: "2-digit", minute: "2-digit", second: "2-digit" })
+                                    : "—"}
+                                </td>
+                                <td className="text-right pr-2">{f.quantity}</td>
+                                <td className="text-right pr-2">₹{f.average_price.toFixed(2)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* GTT lifecycle audit trail */}
       {data.gtt_events && data.gtt_events.length > 0 && (

@@ -92,6 +92,9 @@ export const api = {
   tradeDetail: (tradeId: string) =>
     apiFetch<TradeDetail>(`/api/trades/${tradeId}`),
 
+  tradeOrderDetail: (tradeId: string) =>
+    apiFetch<TradeOrderDetail>(`/api/trades/${tradeId}/order-detail`),
+
   deleteTrade: (tradeId: string) =>
     apiFetch<{ success: boolean; trade_id: string }>(`/api/trades/${tradeId}`, { method: "DELETE" }),
 

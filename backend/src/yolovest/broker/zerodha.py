@@ -761,6 +761,34 @@ class ZerodhaBroker(BrokerBase):
     # Executed trades (for ghost-position recovery)
     # ------------------------------------------------------------------
 
+    async def get_order_history(self, order_id: str) -> list[dict[str, Any]]:
+        """State-transition timeline for a single order via kite.order_history."""
+        if self._mode == "paper" or self._kite is None or not order_id:
+            return []
+        try:
+            async with self._rate_limiter:
+                rows = await asyncio.to_thread(
+                    self._kite.order_history, order_id,
+                )
+            return list(rows or [])
+        except Exception as e:
+            logger.debug("kite.order_history(%s) failed: %s", order_id, e)
+            return []
+
+    async def get_order_trades(self, order_id: str) -> list[dict[str, Any]]:
+        """Per-fill records for a single order via kite.order_trades."""
+        if self._mode == "paper" or self._kite is None or not order_id:
+            return []
+        try:
+            async with self._rate_limiter:
+                rows = await asyncio.to_thread(
+                    self._kite.order_trades, order_id,
+                )
+            return list(rows or [])
+        except Exception as e:
+            logger.debug("kite.order_trades(%s) failed: %s", order_id, e)
+            return []
+
     async def get_executed_trades(self) -> list[dict[str, Any]]:
         """Today's executed trades from Kite. Empty in paper or when offline."""
         if self._mode == "paper" or self._kite is None:

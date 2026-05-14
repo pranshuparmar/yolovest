@@ -150,6 +150,16 @@ export function useTradeDetail(tradeId: string) {
   });
 }
 
+export function useTradeOrderDetail(tradeId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["trade", tradeId, "order-detail"],
+    queryFn: () => api.tradeOrderDetail(tradeId),
+    enabled: !!tradeId && enabled,
+    // Live broker call — don't aggressively refetch.
+    staleTime: 30_000,
+  });
+}
+
 export function useEquityCurve(days = 30) {
   return useQuery({
     queryKey: ["equity-curve", days],

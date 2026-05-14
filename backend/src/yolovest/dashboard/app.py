@@ -1237,6 +1237,38 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         return detail
 
+    @app.get("/api/trades/{trade_id}/order-detail")
+    async def get_trade_order_detail(
+        trade_id: str, _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Broker-side order history + per-fill records for each order id
+        attached to a trade (entry / SL / target). Read-only — fetches
+        live from Kite each call, no local cache.
+
+        Useful for forensic review of slippage, partial fills, and the
+        exact state-transition timeline a broker order went through.
+        """
+        trade = await ctx.db.get_trade(trade_id)
+        if not trade:
+            raise HTTPException(status_code=404, detail="Trade not found")
+
+        result: dict[str, Any] = {"trade_id": trade_id, "legs": {}}
+        for leg, oid in (
+            ("entry", trade.get("order_id")),
+            ("sl", trade.get("sl_order_id")),
+            ("target", trade.get("target_order_id")),
+        ):
+            if not oid:
+                continue
+            history = await ctx.broker.get_order_history(str(oid))
+            fills = await ctx.broker.get_order_trades(str(oid))
+            result["legs"][leg] = {
+                "order_id": oid,
+                "history": history,
+                "fills": fills,
+            }
+        return result
+
     # ------------------------------------------------------------------
     # Predictions & Scoreboard
     # ------------------------------------------------------------------

@@ -72,6 +72,49 @@ export interface CostBreakdown {
   source?: "broker" | "estimate" | "contract_note";
 }
 
+export interface BrokerOrderHistoryRow {
+  order_id: string;
+  status: string;
+  status_message?: string | null;
+  order_timestamp?: string;
+  exchange_timestamp?: string;
+  average_price?: number;
+  filled_quantity?: number;
+  pending_quantity?: number;
+  quantity?: number;
+  price?: number;
+  trigger_price?: number;
+  order_type?: string;
+  transaction_type?: string;
+  product?: string;
+  tag?: string;
+}
+
+export interface BrokerOrderTradeRow {
+  trade_id?: string;
+  order_id?: string;
+  fill_timestamp?: string;
+  exchange_timestamp?: string;
+  quantity: number;
+  average_price: number;
+  transaction_type?: string;
+}
+
+export interface TradeOrderDetailLeg {
+  order_id: string;
+  history: BrokerOrderHistoryRow[];
+  fills: BrokerOrderTradeRow[];
+}
+
+export interface TradeOrderDetail {
+  trade_id: string;
+  legs: {
+    entry?: TradeOrderDetailLeg;
+    sl?: TradeOrderDetailLeg;
+    target?: TradeOrderDetailLeg;
+  };
+}
+
 export interface GttEvent {
   id: number;
   timestamp_utc: string;
