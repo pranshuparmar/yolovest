@@ -199,27 +199,13 @@ current and there's no migration to maintain.
 
 ---
 
-## P2 — Adaptive risk
+## ~~P2 — Adaptive risk: trailing SL via `modify_gtt`~~ (done)
 
-### Trailing SL via `modify_gtt`
-
-**What:** When a CNC position is in profit by ≥
-`trailing_sl_trigger_multiple` × initial risk, modify the existing
-GTT's stoploss leg to lock in some of the gain. Continue trailing
-upward in `trailing_sl_step_pct` increments.
-
-**Why:** Currently `position-monitor` skips trailing entirely when
-`gtt_id` is set, because trailing requires modifying an existing SL
-order and `kite.modify_gtt` needs both legs re-supplied in full
-(not just the stoploss leg). Until we implement that, GTT-attached
-positions get the broker-side exit guarantee but lose adaptive
-trailing.
-
-**Scope:**
-- `ZerodhaBroker.modify_gtt(gtt_id, sl_trigger, sl_limit, target_trigger, target_limit, last_price, ...)`.
-- `position-monitor` trail block: when `gtt_id` present and trail
-  condition met, call `modify_gtt` instead of `modify_sl_order`.
-- Test: trail moves SL up over multiple heartbeats.
+Shipped in commit `c472ffb` alongside the partial-booking GTT resize.
+`ZerodhaBroker.modify_gtt` wraps `kite.modify_gtt` (both legs re-
+supplied as the API requires). `position-monitor._maybe_trail_gtt_sl`
+raises the SL leg in place once the trailing condition fires; target
+leg untouched.
 
 ---
 
