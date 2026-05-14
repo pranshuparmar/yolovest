@@ -318,9 +318,36 @@ async def _apply_order_postback(
         # Entry-leg lifecycle
         if status == "REJECTED":
             logger.warning("%s: entry REJECTED — marking trade failed", log_prefix)
+            # Late-rejection cleanup. _verify_fill cancels the SL/target
+            # legs inline when the entry rejects during synchronous
+            # placement, but if Zerodha returned COMPLETE (or we hit the
+            # verify timeout) and the exchange flips to REJECTED seconds
+            # later, the cancel sweep here is the only protection
+            # against orphaned resting orders. An armed SL-M on a
+            # nonexistent position would fire on a downward move and
+            # create an unintended short.
+            for leg_name, oid in (
+                ("sl", trade.get("sl_order_id")),
+                ("target", trade.get("target_order_id")),
+            ):
+                if not oid:
+                    continue
+                try:
+                    await ctx.broker.cancel_order(oid)
+                    logger.info(
+                        "%s: cancelled orphan %s order %s after entry REJECTED",
+                        log_prefix, leg_name, oid,
+                    )
+                except Exception:
+                    logger.warning(
+                        "%s: failed to cancel orphan %s order %s",
+                        log_prefix, leg_name, oid, exc_info=True,
+                    )
             try:
                 await ctx.db.conn.execute(
-                    "UPDATE trades SET status = 'failed' WHERE trade_id = ?",
+                    "UPDATE trades SET status = 'failed', "
+                    "sl_order_id = NULL, target_order_id = NULL "
+                    "WHERE trade_id = ?",
                     (trade_id,),
                 )
                 await ctx.db.conn.commit()
