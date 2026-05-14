@@ -39,6 +39,12 @@ class Database:
         self._migrations_dir = migrations_dir or _DEFAULT_MIGRATIONS_DIR
         self._conn: aiosqlite.Connection | None = None
         self._read_conn: aiosqlite.Connection | None = None
+        # Cached storage_stats result. Each COUNT(*)+MIN/MAX over the
+        # large tables (ohlcv, audit_log, predictions) is a full scan;
+        # the page was waiting on 7 of them serially. Stats shift
+        # slowly so a short TTL is fine.
+        self._storage_stats_cache: dict[str, Any] | None = None
+        self._storage_stats_cache_at: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -3301,9 +3307,28 @@ class Database:
     # Storage Stats & Manual Cleanup
     # ------------------------------------------------------------------
 
-    async def get_storage_stats(self) -> dict[str, Any]:
-        """Get row counts and date ranges for all major tables."""
+    # Cache TTL for storage stats. Stats are advisory — exact freshness
+    # isn't required and the queries are expensive on populated DBs.
+    _STORAGE_STATS_TTL_SEC: float = 60.0
+
+    async def get_storage_stats(self, force_refresh: bool = False) -> dict[str, Any]:
+        """Get row counts and date ranges for all major tables.
+
+        Cached for `_STORAGE_STATS_TTL_SEC` so repeated dashboard
+        polls don't re-scan multi-million-row tables. Pass
+        force_refresh=True after a destructive operation (cleanup,
+        bulk delete, restore) to invalidate the cache.
+        """
         import os
+        import time as _time
+
+        now = _time.monotonic()
+        if (
+            not force_refresh
+            and self._storage_stats_cache is not None
+            and (now - self._storage_stats_cache_at) < self._STORAGE_STATS_TTL_SEC
+        ):
+            return self._storage_stats_cache
 
         tables = {
             "ohlcv": {"ts_col": "timestamp"},
@@ -3354,7 +3379,16 @@ class Database:
         except OSError:
             stats["_db_file"] = {"db_bytes": 0, "wal_bytes": 0, "total_bytes": 0}
 
+        self._storage_stats_cache = stats
+        self._storage_stats_cache_at = now
         return stats
+
+    def invalidate_storage_stats_cache(self) -> None:
+        """Drop the cached storage stats so the next call recomputes
+        from scratch. Called after destructive operations.
+        """
+        self._storage_stats_cache = None
+        self._storage_stats_cache_at = 0.0
 
     async def cleanup_table(self, table: str, older_than_days: int) -> int:
         """Delete rows older than N days from a specific table. Returns rows deleted."""

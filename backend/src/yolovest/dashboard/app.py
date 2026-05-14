@@ -2534,6 +2534,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             # VACUUM to reclaim disk space after large deletes
             if deleted > 100:
                 await ctx.db.conn.execute("VACUUM")
+            ctx.db.invalidate_storage_stats_cache()
             return {"success": True, "table": table, "rows_deleted": deleted}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
@@ -2993,6 +2994,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         result = await ctx.db.restore_backup(
             backup_dir, filename, model_dir=_model_dir(),
         )
+        ctx.db.invalidate_storage_stats_cache()
         return {"success": True, **result}
 
     @app.delete("/api/backups/{filename}")
@@ -3020,6 +3022,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             deleted = await ctx.db.bulk_delete(group)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        ctx.db.invalidate_storage_stats_cache()
         total = sum(deleted.values())
         logger.info("Bulk delete [%s]: %d rows", group, total)
         return {"success": True, "group": group, "deleted": deleted, "total": total}
@@ -3028,6 +3031,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def reset_all_data(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
         """Delete ALL data from all tables and model artifacts. Schema is preserved."""
         deleted = await ctx.db.reset_all_data()
+        ctx.db.invalidate_storage_stats_cache()
         total = sum(deleted.values())
         # Also clean up all model artifacts
         model_cleanup = await ctx.db.cleanup_orphaned_models(_model_dir())
