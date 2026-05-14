@@ -280,6 +280,38 @@ export function TradeDetailPage() {
         </div>
       </Section>
 
+      {/* GTT lifecycle audit trail */}
+      {data.gtt_events && data.gtt_events.length > 0 && (
+        <Section title="GTT History">
+          <div className="space-y-2">
+            {data.gtt_events.map((evt) => {
+              const eventCls =
+                evt.event_type === "placed" ? "text-emerald-400"
+                : evt.event_type === "modified" ? "text-blue-400"
+                : evt.event_type === "deleted" ? "text-amber-400"
+                : evt.event_type === "rejected_placement" ? "text-red-400"
+                : "text-gray-400";
+              let details: Record<string, unknown> | null = null;
+              try {
+                details = evt.details_json ? JSON.parse(evt.details_json) : null;
+              } catch { /* ignore */ }
+              const reason = details?.reason as string | undefined;
+              return (
+                <div key={evt.id} className="flex items-start gap-3 text-xs border-b border-gray-800/50 pb-2">
+                  <span className="text-gray-500 whitespace-nowrap">
+                    {parseUTC(evt.timestamp_utc).toLocaleTimeString("en-IN", { timeZone: getTimezone() })}
+                  </span>
+                  <span className={clsx("font-medium", eventCls)}>{evt.event_type}</span>
+                  {evt.status && <span className="text-gray-500">[{evt.status}]</span>}
+                  {reason && <span className="text-gray-600">reason: {reason}</span>}
+                  {evt.gtt_id && <span className="text-gray-600 font-mono">gtt={evt.gtt_id}</span>}
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      )}
+
       {/* Transaction Cost Breakdown */}
       {data.cost_breakdown && (() => {
         const src = data.cost_breakdown.source;

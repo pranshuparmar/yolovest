@@ -790,6 +790,11 @@ class PositionMonitorSkill(SkillBase):
                     await self.ctx.db.set_trade_gtt_status(pos["trade_id"], status)
                 except Exception:
                     logger.debug("set_trade_gtt_status failed", exc_info=True)
+                await self.ctx.db.log_gtt_event(
+                    trade_id=pos["trade_id"], gtt_id=gid, symbol=pos.get("symbol"),
+                    event_type="status_change", status=status,
+                    details={"previous": pos.get("gtt_status")},
+                )
                 pos["gtt_status"] = status
 
             if clear_id:
@@ -867,6 +872,17 @@ class PositionMonitorSkill(SkillBase):
                 last_price=float(current_price),
             )
             await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+            await self.ctx.db.log_gtt_event(
+                trade_id=pos["trade_id"], gtt_id=int(gtt_id),
+                symbol=pos.get("symbol"),
+                event_type="modified", status="active",
+                details={
+                    "reason": "trailing_sl",
+                    "sl_trigger": new_sl, "sl_limit": sl_limit,
+                    "target_trigger": tgt, "target_limit": tgt_limit,
+                    "profit_multiple": round(profit_multiple, 3),
+                },
+            )
             logger.info(
                 "trailing SL via GTT: %s SL %.2f → %.2f (profit %.2fR, gtt=%d)",
                 pos["symbol"], current_sl, new_sl, profit_multiple, gtt_id,
@@ -1048,6 +1064,17 @@ class PositionMonitorSkill(SkillBase):
                     target_trigger=tgt,
                     target_limit=tgt_limit,
                     last_price=float(current_price),
+                )
+                await self.ctx.db.log_gtt_event(
+                    trade_id=pos["trade_id"], gtt_id=int(gtt_id),
+                    symbol=pos["symbol"],
+                    event_type="modified", status="active",
+                    details={
+                        "reason": "partial_booking_resize",
+                        "quantity": remaining_qty,
+                        "sl_trigger": new_sl, "sl_limit": sl_limit,
+                        "target_trigger": tgt, "target_limit": tgt_limit,
+                    },
                 )
                 logger.info(
                     "position-monitor: resized GTT %d for %s to qty=%d (SL=%.2f)",

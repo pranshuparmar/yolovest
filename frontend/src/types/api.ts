@@ -72,6 +72,17 @@ export interface CostBreakdown {
   source?: "broker" | "estimate" | "contract_note";
 }
 
+export interface GttEvent {
+  id: number;
+  timestamp_utc: string;
+  trade_id: string | null;
+  gtt_id: number | null;
+  symbol: string | null;
+  event_type: string;
+  status: string | null;
+  details_json: string | null;
+}
+
 export interface LLMReview {
   id: number;
   trade_id: string;
@@ -124,6 +135,7 @@ export interface TradeDetail extends Trade {
   signal: Signal | null;
   audit_trail: AuditEntry[];
   cost_breakdown?: CostBreakdown;
+  gtt_events?: GttEvent[];
 }
 
 export interface EquityCurvePoint {

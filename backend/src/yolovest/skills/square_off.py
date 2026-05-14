@@ -247,6 +247,11 @@ class SquareOffSkill(SkillBase):
             try:
                 await broker.delete_gtt(gid)
                 deleted.append(gid)
+                await self.ctx.db.log_gtt_event(
+                    trade_id=None, gtt_id=gid, symbol=g.get("condition", {}).get("tradingsymbol"),
+                    event_type="deleted", status="deleted",
+                    details={"reason": "orphan_sweep", "prior_status": status},
+                )
                 logger.info(
                     "orphan-GTT sweep: deleted GTT %d (not bound to an open trade)",
                     gid,
@@ -280,6 +285,12 @@ class SquareOffSkill(SkillBase):
         if gtt_id and hasattr(self.ctx.broker, "delete_gtt"):
             try:
                 await self.ctx.broker.delete_gtt(int(gtt_id))
+                await self.ctx.db.log_gtt_event(
+                    trade_id=pos.get("trade_id"), gtt_id=int(gtt_id),
+                    symbol=pos.get("symbol"),
+                    event_type="deleted", status="deleted",
+                    details={"reason": "square_off"},
+                )
             except Exception as e:
                 logger.warning(
                     "square-off: failed to delete GTT %s for %s: %s",

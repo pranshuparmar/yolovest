@@ -756,6 +756,11 @@ class TradeExecuteSkill(SkillBase):
                 "skipping GTT, client-side detection active",
                 trade.get("trade_id"), err,
             )
+            await self.ctx.db.log_gtt_event(
+                trade_id=trade.get("trade_id"), gtt_id=None, symbol=symbol,
+                event_type="rejected_placement",
+                details={"reason": err, "stage": "validation"},
+            )
             return
 
         # Slot-cap check — Zerodha allows ≤50 active GTTs per account.
@@ -773,6 +778,11 @@ class TradeExecuteSkill(SkillBase):
                         "trade-execute: %d active GTTs at broker (cap 50) — "
                         "skipping new GTT for %s; client-side exit detection active",
                         active, trade.get("trade_id"),
+                    )
+                    await self.ctx.db.log_gtt_event(
+                        trade_id=trade.get("trade_id"), gtt_id=None, symbol=symbol,
+                        event_type="rejected_placement",
+                        details={"reason": "slot_cap", "active_gtts": active},
                     )
                     return
             except Exception:
@@ -805,6 +815,11 @@ class TradeExecuteSkill(SkillBase):
                 "client-side exit detection still active): %s",
                 trade.get("trade_id"), e,
             )
+            await self.ctx.db.log_gtt_event(
+                trade_id=trade.get("trade_id"), gtt_id=None, symbol=symbol,
+                event_type="rejected_placement",
+                details={"reason": "broker_error", "error": str(e)},
+            )
             return
 
         if gtt_id:
@@ -813,6 +828,15 @@ class TradeExecuteSkill(SkillBase):
                 await self.ctx.db.set_trade_gtt(trade["trade_id"], gtt_id)
             except Exception:
                 logger.debug("Failed to persist gtt_id", exc_info=True)
+            await self.ctx.db.log_gtt_event(
+                trade_id=trade.get("trade_id"), gtt_id=gtt_id, symbol=symbol,
+                event_type="placed", status="active",
+                details={
+                    "side": exit_side, "quantity": qty,
+                    "sl_trigger": sl_trig, "target_trigger": tgt_trig,
+                    "sl_limit": sl_limit, "target_limit": tgt_limit,
+                },
+            )
 
     async def _attach_mis_target_limit(self, trade: dict[str, Any]) -> None:
         """Place a resting LIMIT order at target for a freshly-filled MIS

@@ -609,6 +609,11 @@ def create_app(ctx: AppContext) -> FastAPI:
             try:
                 await ctx.broker.delete_gtt(int(gtt_id))
                 await ctx.db.set_trade_gtt(trade_id, None)
+                await ctx.db.log_gtt_event(
+                    trade_id=trade_id, gtt_id=int(gtt_id), symbol=symbol,
+                    event_type="deleted", status="deleted",
+                    details={"reason": "manual_close"},
+                )
             except Exception:
                 logger.warning("close_position: delete_gtt %s failed", gtt_id, exc_info=True)
 
@@ -1119,6 +1124,13 @@ def create_app(ctx: AppContext) -> FastAPI:
                 )
                 bd["source"] = "estimate"
                 detail["cost_breakdown"] = bd
+
+        # GTT lifecycle audit trail — placed, modified, deleted, status
+        # changes. Empty for trades that never had a GTT (e.g. MIS).
+        try:
+            detail["gtt_events"] = await ctx.db.get_gtt_events_for_trade(trade_id)
+        except Exception:
+            detail["gtt_events"] = []
 
         return detail
 

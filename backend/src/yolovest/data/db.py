@@ -2257,6 +2257,55 @@ class Database:
         )
         await self.conn.commit()
 
+    async def log_gtt_event(
+        self,
+        *,
+        trade_id: str | None,
+        gtt_id: int | None,
+        symbol: str | None,
+        event_type: str,
+        status: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Append a row to the GTT audit log. Idempotent / cheap — used
+        from every GTT lifecycle site (place, modify, delete, reconcile,
+        rejected_placement) so post-mortems have a single source of truth.
+
+        Failure is swallowed; audit gaps shouldn't break the calling
+        trading path.
+        """
+        try:
+            await self.conn.execute(
+                "INSERT INTO gtt_events "
+                "(trade_id, gtt_id, symbol, event_type, status, details_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    trade_id,
+                    int(gtt_id) if gtt_id is not None else None,
+                    symbol,
+                    event_type,
+                    status,
+                    json.dumps(details) if details else None,
+                ),
+            )
+            await self.conn.commit()
+        except Exception:
+            logger.debug("log_gtt_event failed", exc_info=True)
+
+    async def get_gtt_events_for_trade(
+        self, trade_id: str, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return the GTT audit trail for a single trade, newest first."""
+        cursor = await self.read_conn.execute(
+            "SELECT id, timestamp_utc, trade_id, gtt_id, symbol, "
+            "event_type, status, details_json "
+            "FROM gtt_events WHERE trade_id = ? "
+            "ORDER BY timestamp_utc DESC LIMIT ?",
+            (trade_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](r) for r in rows]
+
     async def set_trade_gtt_status(
         self, trade_id: str, status: str | None,
     ) -> None:
