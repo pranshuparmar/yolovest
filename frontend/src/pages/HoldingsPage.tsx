@@ -476,8 +476,8 @@ export function HoldingsPage() {
                         <input type="checkbox" checked={selected.has(h.tradingsymbol)} onChange={() => toggleSelect(h.tradingsymbol)} className="rounded bg-gray-800 border-gray-600" />
                       </td>
                       <td className="py-2.5 px-3">
-                        <span className="font-medium text-gray-200">
-                          {h.tradingsymbol}
+                        <span className="font-medium">
+                          <SymbolLink symbol={h.tradingsymbol} className="text-gray-200" />
                         </span>
                         <span className="text-xs text-gray-600 ml-1">
                           {h.exchange}
