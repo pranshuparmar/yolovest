@@ -8,6 +8,7 @@ from yolovest.skills.auth_broker import AuthBrokerSkill
 from yolovest.skills.backfill_data import BackfillDataSkill
 from yolovest.skills.backfill_intraday import BackfillIntradaySkill
 from yolovest.skills.db_maintenance import DatabaseMaintenanceSkill
+from yolovest.skills.drift_watch import DriftWatchSkill
 from yolovest.skills.generate_signals import GenerateSignalsSkill
 from yolovest.skills.health_check import HealthCheckSkill
 from yolovest.skills.ingest_data import IngestDataSkill
@@ -46,6 +47,7 @@ SKILL_REGISTRY: dict[str, type] = {
     "kill-switch": KillSwitchSkill,
     "database-maintenance": DatabaseMaintenanceSkill,
     "news-digest": NewsDigestSkill,
+    "drift-watch": DriftWatchSkill,
 }
 
 __all__ = ["SKILL_REGISTRY"]
