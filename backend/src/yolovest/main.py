@@ -522,7 +522,10 @@ async def async_main(args: argparse.Namespace) -> None:
                     # channels deliver the same event, the second hit is
                     # a no-op (broker treats already-cancelled orders as
                     # no-op, and the DB updates are themselves idempotent).
-                    from yolovest.dashboard.app import _apply_order_postback
+                    from yolovest.dashboard.app import (
+                        _apply_order_postback,
+                        broadcast_ws,
+                    )
 
                     async def _ticker_order_update(order: dict) -> None:
                         order_id = str(order.get("order_id") or "")
@@ -539,11 +542,20 @@ async def async_main(args: argparse.Namespace) -> None:
                                 order_id,
                             )
 
+                    async def _ticker_tick_broadcast(tick: dict) -> None:
+                        # Throttled in KiteTickerClient itself — this is
+                        # already at most one call per symbol per second.
+                        try:
+                            await broadcast_ws("tick_update", tick)
+                        except Exception:
+                            logger.debug("tick broadcast failed", exc_info=True)
+
                     ticker = KiteTickerClient(
                         api_key=ctx.config.broker.api_key.get_secret_value(),
                         access_token=ctx.broker._access_token,  # noqa: SLF001
                         kite_data_provider=kite_provider,
                         order_update_callback=_ticker_order_update,
+                        tick_broadcast_callback=_ticker_tick_broadcast,
                     )
                     await ticker.start()
                     ctx.ticker = ticker

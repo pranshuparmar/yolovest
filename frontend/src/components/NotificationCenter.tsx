@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import { getTimezone } from "../utils/datetime";
+import { feedTick } from "../hooks/useLtpStream";
 
 interface Notification {
   id: number;
@@ -178,6 +179,10 @@ export function useNotifications() {
               `Broker auth lost — re-auth required via /auth or Integrations page`
             );
             queryClient.invalidateQueries({ queryKey: ["integrations-status"] });
+          } else if (type === "tick_update") {
+            // High-frequency frame: feed the LTP store and skip the
+            // toast/invalidate path so we don't drown the user.
+            feedTick(data.symbol, data.ltp);
           } else {
             addNotification(type, JSON.stringify(data).slice(0, 100));
           }

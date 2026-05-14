@@ -47,12 +47,21 @@ class KiteTickerClient:
         access_token: str,
         kite_data_provider: Any,
         order_update_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        tick_broadcast_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        tick_broadcast_throttle_sec: float = 1.0,
     ) -> None:
         self._api_key = api_key
         self._access_token = access_token
         # Used to resolve symbol → instrument_token (pre-warmed cache)
         self._data_provider = kite_data_provider
         self._order_update_cb = order_update_callback
+        # Optional fan-out to dashboard WebSocket. Throttled to one
+        # broadcast per symbol per `tick_broadcast_throttle_sec` so
+        # we don't saturate browser sockets when 20 symbols are each
+        # ticking multiple times per second.
+        self._tick_broadcast_cb = tick_broadcast_callback
+        self._tick_throttle = tick_broadcast_throttle_sec
+        self._last_tick_broadcast: dict[str, float] = {}
         self._ticker: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
         # symbol → (last_price, monotonic_timestamp)
@@ -183,7 +192,10 @@ class KiteTickerClient:
     # ------------------------------------------------------------------
 
     def _on_ticks(self, _ws: Any, ticks: list[dict[str, Any]]) -> None:
-        # Lightweight: just update the cache. No async work here.
+        # Lightweight: update the cache, then fan out a throttled
+        # `tick_update` event to dashboard clients. Both happen on the
+        # Twisted thread; cache write is fine here (atomic dict ops),
+        # broadcast is marshalled to the asyncio loop.
         now = time.monotonic()
         for tick in ticks or []:
             tok = tick.get("instrument_token")
@@ -191,8 +203,26 @@ class KiteTickerClient:
             if tok is None or price is None:
                 continue
             sym = self._token_to_symbol.get(int(tok))
-            if sym:
-                self._ltp_cache[sym] = (float(price), now)
+            if not sym:
+                continue
+            self._ltp_cache[sym] = (float(price), now)
+
+            if self._tick_broadcast_cb is None or self._loop is None:
+                continue
+            # Throttle: at most one broadcast per symbol per N seconds.
+            last = self._last_tick_broadcast.get(sym, 0.0)
+            if now - last < self._tick_throttle:
+                continue
+            self._last_tick_broadcast[sym] = now
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._tick_broadcast_cb({
+                        "symbol": sym, "ltp": float(price),
+                    }),
+                    self._loop,
+                )
+            except Exception:
+                logger.debug("tick broadcast bridge failed", exc_info=True)
 
     def _on_connect(self, _ws: Any, _resp: Any) -> None:
         self._connected = True

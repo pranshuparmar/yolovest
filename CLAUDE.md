@@ -80,6 +80,8 @@ Optional sub-second LTP feed (opt-in via `market_data.kite_websocket_enabled`). 
 
 The ticker also bridges `on_order_update` text frames into `dashboard.app._apply_order_postback` — the same business logic the HTTP postback handler runs. WebSocket is the primary push channel because Kite postbacks are explicitly best-effort with no retry; the HTTP handler stays as a backup, and the heartbeat ghost-recovery (which cancels dangling exit orders) is the last-resort reconciler. The three layers are idempotent — if the same event arrives via multiple channels, later hits are no-ops.
 
+Tick frames also fan out to dashboard clients as `tick_update` events, throttled to one broadcast per symbol per second so the browser socket doesn't drown. `frontend/src/hooks/useLtpStream.ts` maintains the per-symbol LTP map; `PositionsTable` consumes it to render live LTP + move% columns next to entry/SL/target.
+
 ### Kite Rate Limiter
 
 `broker/kite_rate_limiter.py` provides a single `KiteRateLimiter` (concurrency cap + time-based interval) shared between `ZerodhaBroker` and `KiteDataProvider`. Built once in `main.build_context()` and injected. Default: 10 req/s and 8 concurrent.
