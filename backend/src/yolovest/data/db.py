@@ -4358,35 +4358,55 @@ class Database:
         For each signal, fetch the next trading day's OHLCV and compare.
         Uses date-only comparison to avoid timestamp format mismatches
         (dry-run created_at has time, OHLCV timestamp may not).
+
+        Scoring waits for the next *trading day's* daily bar to exist.
+        Three outcomes possible per signal:
+          - scored: found and compared
+          - same_day: the dry-run was created today (IST) — too early
+          - not_found: previous-day dry-run but next-day OHLCV missing
+            (most often: today's daily bar hasn't been ingested yet)
         """
         signals = await self.get_dry_run_signals(run_id)
         if not signals:
             return {"scored": 0, "not_found": 0}
 
-        today = now_utc().strftime("%Y-%m-%d")
+        # Compare in IST so a late-evening-IST dry-run (which is the next
+        # UTC day) is still recognised as "same trading day" and treated
+        # as too-recent-to-score.
+        today_ist = now_ist().strftime("%Y-%m-%d")
         already_scored = 0
         scored = 0
         not_found = 0
         same_day = 0
+        unfound: list[dict[str, Any]] = []
 
         for sig in signals:
             if sig.get("scored_at"):
                 already_scored += 1
                 continue
 
-            # Extract date-only from created_at (e.g. "2026-03-29T10:30:00" → "2026-03-29")
-            created_date = str(sig["created_at"])[:10]
+            # created_at is stored as SQLite datetime('now') (UTC) e.g.
+            # "2026-05-15 05:11:30". Convert to IST trading day before
+            # comparing.
+            raw_created = str(sig["created_at"])
+            try:
+                # Parse with assumed UTC if no tzinfo present.
+                ts = datetime.fromisoformat(raw_created.replace(" ", "T"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                created_date = ts.astimezone(IST).strftime("%Y-%m-%d")
+            except Exception:
+                created_date = raw_created[:10]
 
-            # Check if this signal was created today — next-day data won't exist yet
-            if created_date >= today:
+            if created_date >= today_ist:
                 same_day += 1
                 continue
 
             # Get the next day's OHLCV after the dry-run date.
             # Use SUBSTR to compare date portions only, avoiding time format issues.
             cursor = await self.read_conn.execute(
-                "SELECT open, high, low, close FROM ohlcv "
-                "WHERE symbol = ? AND interval = 'daily' "
+                "SELECT open, high, low, close, SUBSTR(timestamp, 1, 10) AS d "
+                "FROM ohlcv WHERE symbol = ? AND interval = 'daily' "
                 "AND SUBSTR(timestamp, 1, 10) > ? "
                 "ORDER BY timestamp ASC LIMIT 1",
                 (sig["symbol"], created_date),
@@ -4394,6 +4414,10 @@ class Database:
             row = await cursor.fetchone()
             if not row:
                 not_found += 1
+                unfound.append({
+                    "symbol": sig["symbol"],
+                    "created_date": created_date,
+                })
                 continue
 
             actual_open = row[0]
@@ -4436,6 +4460,27 @@ class Database:
             result["message"] = (
                 "Signals generated today cannot be scored yet — "
                 "next trading day's data is needed. Try again tomorrow."
+            )
+        if not_found > 0 and not same_day:
+            # Tell the user exactly what's missing. Most common cause:
+            # today's daily bar hasn't landed in OHLCV yet — daily bars
+            # from jugaad / yfinance arrive after market close.
+            sample = ", ".join(
+                f"{u['symbol']} (created {u['created_date']})"
+                for u in unfound[:5]
+            )
+            if len(unfound) > 5:
+                sample += f", +{len(unfound) - 5} more"
+            result["unfound"] = unfound
+            result["message"] = (
+                "Next-day OHLCV not yet in DB for these symbols: "
+                + sample
+                + ". Daily bars are usually ingested after market close "
+                "(~3:30 PM IST); try again later today or tomorrow."
+            )
+            logger.info(
+                "score_dry_run %s: %d signals could not be scored — %s",
+                run_id, not_found, sample,
             )
         return result
 
