@@ -503,7 +503,13 @@ async def async_main(args: argparse.Namespace) -> None:
         ):
             try:
                 from yolovest.broker.kite_ticker import KiteTickerClient
-                # Find the KiteDataProvider in the ingester chain for token resolution
+                # Find the KiteDataProvider in the ingester chain for token
+                # resolution. The ticker only needs the provider to translate
+                # NSE symbols → integer instrument tokens via
+                # `kite.instruments("NSE")` — it does NOT need the paid
+                # historical data plan. So if `kite_data_enabled` is off but
+                # `kite_websocket_enabled` is on, stand up a standalone
+                # KiteDataProvider just for token lookup.
                 kite_provider = None
                 ingester = getattr(ctx.market_data, "providers", None)
                 if ingester:
@@ -511,6 +517,36 @@ async def async_main(args: argparse.Namespace) -> None:
                         if type(p).__name__ == "KiteDataProvider":
                             kite_provider = p
                             break
+                if kite_provider is None:
+                    try:
+                        from yolovest.broker.kite_rate_limiter import KiteRateLimiter
+                        from yolovest.data.kite_data import KiteDataProvider
+
+                        # Local rate limiter — token lookup is one-shot per
+                        # symbol with a process-wide cache, so dedicated
+                        # limits are fine.
+                        kite_provider = KiteDataProvider(
+                            api_key=ctx.config.broker.api_key.get_secret_value(),
+                            rate_limiter=KiteRateLimiter(
+                                calls_per_second=10.0, concurrency=4,
+                            ),
+                        )
+                        # Share the broker's access token so the standalone
+                        # provider can call /instruments without a separate
+                        # login. _sync_kite_data_token only walks the
+                        # ingester chain, so we set this directly.
+                        kite_provider.set_access_token(
+                            ctx.broker._access_token,  # noqa: SLF001
+                        )
+                        logger.info(
+                            "Built standalone KiteDataProvider for ticker "
+                            "(kite_data_enabled=False)",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to build standalone KiteDataProvider for ticker",
+                        )
+                        kite_provider = None
                 if kite_provider is not None:
                     # Bridge KiteTicker's on_order_update frames into the
                     # same business logic the HTTP postback handler runs.

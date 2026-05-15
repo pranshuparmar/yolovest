@@ -2285,8 +2285,9 @@ def create_app(ctx: AppContext) -> FastAPI:
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Symbol detail-page extras: quarantine status, recent bulk
-        deals, average delivery %. Composed in one round-trip so the
-        page doesn't fire 4 separate queries on load.
+        deals, average delivery %, latest signal + top-5 attribution.
+        Composed in one round-trip so the page doesn't fire N queries
+        on load.
         """
         sym = symbol.upper()
         try:
@@ -2304,10 +2305,45 @@ def create_app(ctx: AppContext) -> FastAPI:
             delivery_avg = await ctx.db.get_recent_delivery_pct(sym, lookback_days=5)
         except Exception:
             delivery_avg = None
+
+        # Latest signal + TreeSHAP top-5 attribution. Mode-scoped so
+        # paper-mode signals don't leak into a live view.
+        latest_signal: dict[str, Any] | None = None
+        try:
+            cur = await ctx.db.read_conn.execute(
+                "SELECT signal_type, confidence_score, attribution_json, "
+                "disposition, created_at "
+                "FROM signals WHERE symbol = ? AND mode = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (sym, ctx.config.mode),
+            )
+            row = await cur.fetchone()
+            if row:
+                import json as _json
+
+                attribution: list[dict[str, Any]] = []
+                if row[2]:
+                    try:
+                        parsed = _json.loads(row[2])
+                        if isinstance(parsed, list):
+                            attribution = parsed[:5]
+                    except Exception:
+                        attribution = []
+                latest_signal = {
+                    "signal_type": row[0],
+                    "confidence_score": row[1],
+                    "disposition": row[3],
+                    "created_at": row[4],
+                    "attribution": attribution,
+                }
+        except Exception:
+            logger.debug("symbol context: latest_signal lookup failed", exc_info=True)
+
         return {
             "quarantine": q_entry,
             "recent_bulk_deals": bulk,
             "delivery_pct_avg_5d": delivery_avg,
+            "latest_signal": latest_signal,
         }
 
     @app.get("/api/symbol/{symbol}/ohlcv")
@@ -3202,6 +3238,37 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Clear today's signals and pending trades to allow signal regeneration."""
         result = await ctx.db.clear_todays_signals()
         return {"success": True, **result}
+
+    @app.post("/api/kill-switch/{command}")
+    async def kill_switch(
+        command: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Stop / kill / resume trading from the dashboard.
+
+        - stop: cancel pending orders + pause; positions untouched.
+        - kill: cancel pending orders + square off every position + pause.
+        - resume: clear the pause flag.
+
+        Mirrors the /stop /kill /resume Telegram commands. The generic
+        /api/skills/{name}/run endpoint can't carry a command parameter,
+        so this is a dedicated surface.
+        """
+        if command not in {"stop", "kill", "resume"}:
+            raise HTTPException(
+                status_code=400,
+                detail="command must be one of: stop, kill, resume",
+            )
+        from yolovest.skills.kill_switch import KillSwitchSkill
+
+        skill = KillSwitchSkill(ctx)
+        result = await skill.execute(command=command)
+        return {
+            "success": result.success,
+            "command": command,
+            "data": result.data or {},
+            "error": result.error,
+        }
 
     @app.post("/api/pending-trades/{trade_id}/approve")
     async def approve_pending_trade(

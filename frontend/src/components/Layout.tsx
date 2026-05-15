@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { StatusBadge } from "./StatusBadge";
+import { KillSwitchControl } from "./KillSwitchControl";
 import {
   NotificationCenter,
   useNotifications,
@@ -45,6 +46,7 @@ export function Layout() {
           <StatusBadge />
         </div>
         <div className="flex items-center gap-3">
+          <KillSwitchControl />
           {/* Theme toggle */}
           <button
             onClick={toggle}

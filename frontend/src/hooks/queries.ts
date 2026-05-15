@@ -792,6 +792,23 @@ export function useClearTodaysSignals() {
   });
 }
 
+export function useKillSwitch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (command: "stop" | "kill" | "resume") => api.killSwitch(command),
+    onSuccess: () => {
+      // Kill-switch flips system_state.kill_switch and (for "kill") closes
+      // every open position + cancels pending orders, so flush everything
+      // that could be downstream of those.
+      qc.invalidateQueries({ queryKey: ["system-state"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["pending-trades"] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+      qc.invalidateQueries({ queryKey: ["health"] });
+    },
+  });
+}
+
 export function useResetAllData() {
   const qc = useQueryClient();
   return useMutation({

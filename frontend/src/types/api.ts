@@ -566,6 +566,15 @@ export interface SymbolContext {
   quarantine: QuarantineEntry | null;
   recent_bulk_deals: BulkDealRow[];
   delivery_pct_avg_5d: number | null;
+  latest_signal: SymbolLatestSignal | null;
+}
+
+export interface SymbolLatestSignal {
+  signal_type: string;
+  confidence_score: number | null;
+  disposition: string | null;
+  created_at: string;
+  attribution: { feature: string; contribution: number }[];
 }
 
 export interface RotationCooldown {

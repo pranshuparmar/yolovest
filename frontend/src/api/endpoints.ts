@@ -437,6 +437,12 @@ export const api = {
   clearTodaysSignals: () =>
     apiFetch<{ success: boolean; signals_deleted: number; pending_deleted: number }>("/api/clear-signals", { method: "POST" }),
 
+  killSwitch: (command: "stop" | "kill" | "resume") =>
+    apiFetch<{ success: boolean; command: string; data: Record<string, unknown>; error: string | null }>(
+      `/api/kill-switch/${command}`,
+      { method: "POST" },
+    ),
+
   bulkDelete: (group: string) =>
     apiFetch<{ success: boolean; group: string; deleted: Record<string, number>; total: number }>(
       `/api/bulk-delete/${group}`, { method: "POST" },

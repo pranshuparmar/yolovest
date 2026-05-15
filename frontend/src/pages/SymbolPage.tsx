@@ -313,6 +313,88 @@ export function SymbolPage() {
         </div>
       )}
 
+      {/* Latest signal + top-5 TreeSHAP attribution — what the model
+          last said about this symbol and why. Mirrors the /symbol
+          Telegram snapshot so the UI is in parity for the
+          "click-and-find-out" use case. Per-trade attribution lives on
+          the TradeDetail page; this is the per-symbol view. */}
+      {ctxData?.latest_signal && (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+          <div className="flex items-baseline justify-between mb-3">
+            <h3 className="text-sm font-medium text-gray-400">
+              Latest Model Signal
+            </h3>
+            <span className="text-xs text-gray-600">
+              {ctxData.latest_signal.created_at?.slice(0, 16).replace("T", " ")} IST
+            </span>
+          </div>
+          <div className="flex items-center gap-3 mb-3">
+            <span
+              className={clsx(
+                "px-2 py-0.5 rounded text-xs font-semibold",
+                ctxData.latest_signal.signal_type === "BUY"
+                  ? "bg-emerald-900/40 text-emerald-400"
+                  : "bg-red-900/40 text-red-400",
+              )}
+            >
+              {ctxData.latest_signal.signal_type}
+            </span>
+            <span className="text-xs text-gray-400">
+              Confidence{" "}
+              <span className="text-gray-200 font-mono">
+                {ctxData.latest_signal.confidence_score != null
+                  ? `${(ctxData.latest_signal.confidence_score * 100).toFixed(0)}%`
+                  : "—"}
+              </span>
+            </span>
+            {ctxData.latest_signal.disposition && (
+              <span className="text-xs text-gray-500">
+                disposition:{" "}
+                <span className="text-gray-300">
+                  {ctxData.latest_signal.disposition}
+                </span>
+              </span>
+            )}
+          </div>
+          {ctxData.latest_signal.attribution.length > 0 ? (
+            <div>
+              <h4 className="text-xs text-gray-500 uppercase tracking-wide mb-2">
+                Why (top 5 features)
+              </h4>
+              <ul className="space-y-1">
+                {ctxData.latest_signal.attribution.map((a, i) => {
+                  const positive = a.contribution >= 0;
+                  return (
+                    <li
+                      key={i}
+                      className="flex items-center justify-between text-xs"
+                    >
+                      <span className="text-gray-300 font-mono truncate mr-3">
+                        {positive ? "↑" : "↓"} {a.feature}
+                      </span>
+                      <span
+                        className={clsx(
+                          "font-mono",
+                          positive ? "text-emerald-400" : "text-red-400",
+                        )}
+                      >
+                        {positive ? "+" : ""}
+                        {a.contribution.toFixed(3)}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500 italic">
+              No attribution stored for this signal (older signals predate the
+              attribution column, or model didn't expose TreeSHAP).
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Recent bulk / block deals on this symbol — institutional
           activity feeds the institutional_flow risk-check multiplier
           and the bulk_deal_* ML features. */}
