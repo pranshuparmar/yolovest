@@ -83,7 +83,17 @@ class MoneyControlSource(NewsSource):
             return False
 
 
+import re as _re
+
+
 def _match_symbols(headline: str, symbols: list[str]) -> list[str]:
-    """Return symbols whose names appear in the headline (case-insensitive)."""
+    """Return symbols whose names appear in the headline as standalone
+    words (case-insensitive). Word-boundary matching prevents false
+    positives like ITC matching inside BITCOIN, or ITC inside POLITICS.
+    """
     headline_upper = headline.upper()
-    return [s for s in symbols if s.upper() in headline_upper]
+    matched: list[str] = []
+    for s in symbols:
+        if _re.search(rf"(?<![A-Z0-9]){_re.escape(s.upper())}(?![A-Z0-9])", headline_upper):
+            matched.append(s)
+    return matched

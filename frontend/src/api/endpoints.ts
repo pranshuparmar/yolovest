@@ -312,6 +312,11 @@ export const api = {
   symbolTrades: (symbol: string, limit = 50) =>
     apiFetch<Trade[]>(`/api/symbol/${symbol}/trades?limit=${limit}`),
 
+  ltpBatch: (symbols: string[]) => {
+    const qs = encodeURIComponent(symbols.join(","));
+    return apiFetch<Record<string, number>>(`/api/ltp?symbols=${qs}`);
+  },
+
   symbolPredictions: (symbol: string) =>
     apiFetch<PredictionDetail[]>(`/api/symbol/${symbol}/predictions`),
 

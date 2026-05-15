@@ -2,7 +2,8 @@ import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import type { Trade } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
-import { useLtpStream } from "../hooks/useLtpStream";
+import { useLtpStream, useLtpBatch } from "../hooks/useLtpStream";
+import { useMemo } from "react";
 import { SymbolLink } from "./SymbolLink";
 
 function fmt(n: number, d = 2) {
@@ -20,8 +21,15 @@ export function TradesTable({
   compact?: boolean;
 }) {
   const navigate = useNavigate();
-  // Live LTP — useful for OPEN rows. Closed rows show — instead.
+  // Live LTP map. The ticker only feeds OPEN-position symbols, so for
+  // closed-trade rows we poll the batched /api/ltp endpoint to fill
+  // in last-known prices (cached locally; refreshes every 30s).
   const ltps = useLtpStream();
+  const symbols = useMemo(
+    () => Array.from(new Set(trades.map((t) => t.symbol).filter(Boolean))),
+    [trades],
+  );
+  useLtpBatch(symbols);
 
   if (trades.length === 0) {
     return <p className="text-gray-500 text-sm py-4">No trades found</p>;

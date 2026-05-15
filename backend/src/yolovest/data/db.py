@@ -905,8 +905,12 @@ class Database:
         )
         params: list[Any] = []
         if symbol:
+            # Match the symbol as a standalone JSON-string element so
+            # the filter for "ITC" doesn't also return rows tagged
+            # ["BITCOIN"]. symbols is stored as `["ITC", ...]` so we
+            # search for the quoted form.
             query += " AND symbols LIKE ?"
-            params.append(f"%{symbol}%")
+            params.append(f'%"{symbol}"%')
         if source:
             query += " AND source = ?"
             params.append(source)

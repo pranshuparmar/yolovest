@@ -622,6 +622,9 @@ export interface RiskSimParams {
   initial_capital: number;
   date_from?: string;
   date_to?: string;
+  /** Replay set: `signals` (default) replays generated signals, `trades`
+   * replays actually-executed trades from the trades table. */
+  source?: "signals" | "trades";
 }
 
 export interface RiskSimResult {

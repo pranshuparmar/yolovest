@@ -1,4 +1,6 @@
 import { useEffect, useReducer } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../api/endpoints";
 
 // Per-symbol live LTP map fed by the dashboard WebSocket's `tick_update`
 // frames. NotificationCenter calls `feedTick` when a frame arrives; the
@@ -30,4 +32,31 @@ export function useLtpStream(): Map<string, number> {
     };
   }, []);
   return store;
+}
+
+/** Poll the batched /api/ltp endpoint for an arbitrary symbol set and
+ * feed it into the shared LTP store. Used for surfaces that need a
+ * "best-effort" LTP for symbols the ticker isn't subscribed to —
+ * closed trades, history pages, etc.
+ *
+ * The store is shared with the ticker stream, so when a tick lands
+ * for a polled symbol the polled value is overwritten with the live
+ * one on the next ticker frame.
+ */
+export function useLtpBatch(symbols: string[]): void {
+  const key = symbols.slice().sort().join(",");
+  useQuery({
+    queryKey: ["ltp-batch", key],
+    queryFn: async () => {
+      if (!symbols.length) return {} as Record<string, number>;
+      const data = await api.ltpBatch(symbols);
+      for (const [sym, ltp] of Object.entries(data)) {
+        feedTick(sym, ltp);
+      }
+      return data;
+    },
+    enabled: symbols.length > 0,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  });
 }

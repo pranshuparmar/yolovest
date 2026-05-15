@@ -215,11 +215,17 @@ class NSEOfficialSource(NewsSource):
                 symbol = str(item.get("symbol", "")).strip()
                 matched_symbols = [symbol] if symbol else []
 
-                # Also match against provided symbols list
+                # Also match against provided symbols list — word-boundary
+                # so ITC doesn't snag BITCOIN / POLITICS.
                 if not matched_symbols:
+                    import re as _re
                     headline_upper = headline.upper()
                     matched_symbols = [
-                        s for s in symbols if s.upper() in headline_upper
+                        s for s in symbols
+                        if _re.search(
+                            rf"(?<![A-Z0-9]){_re.escape(s.upper())}(?![A-Z0-9])",
+                            headline_upper,
+                        )
                     ]
 
                 published = self._parse_nse_date(item.get("an_dt"))

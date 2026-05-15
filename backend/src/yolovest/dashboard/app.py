@@ -2409,6 +2409,47 @@ def create_app(ctx: AppContext) -> FastAPI:
             for r in rows
         ]
 
+    @app.get("/api/ltp")
+    async def get_ltp_batch(
+        symbols: str = Query(..., description="Comma-separated symbol list"),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, float]:
+        """Best-effort LTP map for arbitrary symbols.
+
+        Order of preference per symbol:
+          1. KiteTicker cache (sub-second real-time when ticker is on)
+          2. Latest OHLCV close from the local DB (last known price,
+             enough to display a stale-but-informative LTP for closed
+             trades).
+
+        Symbols with no cached or stored data are omitted from the
+        response — the caller can render an em-dash for those.
+        """
+        syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        result: dict[str, float] = {}
+        ticker = getattr(ctx, "ticker", None)
+        for sym in syms:
+            ltp: float | None = None
+            if ticker is not None:
+                try:
+                    ltp = ticker.get_ltp(sym, max_age_sec=600.0)
+                except Exception:
+                    ltp = None
+            if ltp is None:
+                try:
+                    row = await ctx.db.read_conn.execute_fetchall(
+                        "SELECT close FROM ohlcv WHERE symbol = ? "
+                        "ORDER BY timestamp DESC LIMIT 1",
+                        (sym,),
+                    )
+                    if row and row[0][0] is not None:
+                        ltp = float(row[0][0])
+                except Exception:
+                    ltp = None
+            if ltp is not None and ltp > 0:
+                result[sym] = ltp
+        return result
+
     @app.get("/api/symbol/{symbol}/trades")
     async def get_symbol_trades(
         symbol: str,
@@ -2565,17 +2606,49 @@ def create_app(ctx: AppContext) -> FastAPI:
         body: dict[str, Any],
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Replay historical signals against modified risk parameters."""
+        """Replay historical signals or executed trades against modified
+        risk parameters.
+
+        `source` ("signals" — default — or "trades") controls the
+        replay set. "trades" reads from the trades table so the user
+        can see "what if I'd applied tighter caps to my actual fills"
+        — useful when most signals never executed (paper mode quirks,
+        risk rejections, etc.) and the signal-derived view feels
+        misleadingly empty.
+        """
         max_exposure_pct = body.get("max_exposure_pct", ctx.config.risk.max_portfolio_exposure_pct)
         max_single_stock_pct = body.get("max_single_stock_pct", ctx.config.risk.max_single_stock_pct)
         max_positions = body.get("max_positions", ctx.config.risk.max_open_positions)
         initial_capital = body.get("initial_capital", 100000)
         date_from = body.get("date_from")  # YYYY-MM-DD or None
         date_to = body.get("date_to")  # YYYY-MM-DD or None
+        source = body.get("source", "signals")
 
-        signals = await ctx.db.get_historical_signals(
-            limit=500, date_from=date_from, date_to=date_to,
-        )
+        if source == "trades":
+            # Pull executed/closed trades for the current mode and
+            # reshape into the same dict structure the signal path
+            # uses below so the simulation loop stays unified.
+            raw = await ctx.db.get_trades_history(
+                start_date=date_from, end_date=date_to,
+                limit=2000, mode=ctx.config.mode,
+            )
+            # Closed trades carry pnl; open ones don't (skipped below).
+            raw.sort(key=lambda t: t.get("created_at") or "")
+            signals: list[dict[str, Any]] = []
+            for t in raw:
+                signals.append({
+                    "symbol": t.get("symbol"),
+                    "signal_type": t.get("signal_type"),
+                    "entry_price": t.get("fill_price") or t.get("entry_price"),
+                    "quantity": t.get("quantity"),
+                    "position_size": t.get("quantity"),
+                    "pnl": t.get("pnl"),
+                    "created_at": t.get("created_at"),
+                })
+        else:
+            signals = await ctx.db.get_historical_signals(
+                limit=500, date_from=date_from, date_to=date_to,
+            )
 
         # Simple simulation
         capital = float(initial_capital)
@@ -2642,6 +2715,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "initial_capital": initial_capital,
                 "date_from": date_from,
                 "date_to": date_to,
+                "source": source,
             },
             "signals_available": len(signals),
             "signals_without_pnl": signals_without_pnl,
@@ -3509,6 +3583,21 @@ def create_app(ctx: AppContext) -> FastAPI:
                 detail=f"Validation failed: {e}",
             )
 
+        # Capture old values BEFORE persisting so the diff log shows
+        # what each key actually changed from. `db_values` was loaded
+        # above before the overlay was applied, so it still holds the
+        # pre-update state.
+        old_values: dict[str, str | None] = {}
+        for k in updates:
+            # Note: read from the freshly-loaded snapshot (it was
+            # mutated by the overlay; use ctx.config flattened instead
+            # to be robust).
+            try:
+                v = await ctx.db.get_config(k)
+            except Exception:
+                v = None
+            old_values[k] = v
+
         # Persist to DB
         await ctx.db.set_config_bulk(str_updates)
 
@@ -3537,7 +3626,18 @@ def create_app(ctx: AppContext) -> FastAPI:
                 ctx.broker._mode = new_config.mode
                 logger.info("Broker mode synced to: %s", new_config.mode)
 
-        logger.info("Config updated via UI: %s", list(updates.keys()))
+        # Emit per-key diff so the audit trail records what each key
+        # actually changed from -> to (instead of just the key list).
+        for k, new_v in str_updates.items():
+            old_v = old_values.get(k)
+            if old_v == new_v:
+                continue
+            logger.info(
+                "Config updated via UI: %s: %r -> %r",
+                k,
+                old_v if old_v is not None else "<unset>",
+                new_v,
+            )
 
         sections = config_to_ui_sections(ctx.config)
         return {"status": "ok", "updated": list(updates.keys()), "sections": sections}

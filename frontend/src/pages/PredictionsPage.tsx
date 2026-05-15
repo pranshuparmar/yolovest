@@ -23,7 +23,7 @@ function fmt(n: number | null | undefined, d = 2) {
   });
 }
 
-function PredictionRow({ p }: { p: PredictionDetail }) {
+function PredictionRow({ p, occurrences }: { p: PredictionDetail; occurrences?: number }) {
   const [expanded, setExpanded] = useState(false);
   const dirOk = p.direction_correct;
   const tgtHit = p.target_hit;
@@ -42,6 +42,14 @@ function PredictionRow({ p }: { p: PredictionDetail }) {
         <span className="text-xs text-gray-400 w-16">
           {p.signal_type || "\u2014"}
         </span>
+        {occurrences && occurrences > 1 && (
+          <span
+            className="text-[10px] px-1.5 py-0.5 rounded bg-blue-900/40 text-blue-300 font-medium"
+            title={`${occurrences} near-duplicate predictions grouped`}
+          >
+            \u00d7{occurrences}
+          </span>
+        )}
         <span className="text-xs text-gray-400 w-20">
           Conf: {fmt(p.confidence_score ? p.confidence_score * 100 : null, 1)}%
         </span>
@@ -141,9 +149,45 @@ const selectCls =
 const inputCls =
   "bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 w-24 focus:outline-none focus:border-emerald-500";
 
+/** Collapse near-duplicate predictions emitted across multiple
+ * heartbeats. Two predictions are treated as duplicates when their
+ * symbol + direction + model match AND the predicted target is within
+ * 0.5%. The most-recent row wins; older ones contribute only to the
+ * `×N` occurrence badge. Keeps the table light on heartbeat-heavy days
+ * without losing the underlying audit trail (the raw rows are still
+ * one API call away). */
+function groupPredictions(
+  items: PredictionDetail[],
+): { p: PredictionDetail; count: number }[] {
+  const byKey = new Map<string, { p: PredictionDetail; count: number }>();
+  for (const p of items) {
+    // 5% confidence bucket so two heartbeats that differ by 0.001
+    // collapse, but a meaningful conviction jump still splits.
+    const confBucket = p.confidence_score != null
+      ? Math.round(p.confidence_score * 20) / 20
+      : 0;
+    const key = `${p.symbol}|${p.signal_type}|${p.model_version || ""}|${confBucket}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, { p, count: 1 });
+    } else {
+      if ((p.created_at || "") > (existing.p.created_at || "")) {
+        existing.p = p;
+      }
+      existing.count += 1;
+    }
+  }
+  return Array.from(byKey.values()).sort(
+    (a, b) => (b.p.created_at || "").localeCompare(a.p.created_at || ""),
+  );
+}
+
 export function PredictionsPage() {
   const [tab, setTab] = useState<"today" | "unscored" | "outcomes">("today");
   const [sbGroup, setSbGroup] = useState<string | undefined>();
+  // Default-on grouping — that's the point of this feature. Toggle off
+  // to see every raw row (audit / debugging).
+  const [group, setGroup] = useState(true);
 
   // Filters
   const [filterSymbol, setFilterSymbol] = useState("");
@@ -356,6 +400,15 @@ export function PredictionsPage() {
               Clear all
             </button>
           )}
+          <label className="ml-auto flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={group}
+              onChange={(e) => setGroup(e.target.checked)}
+              className="accent-emerald-500"
+            />
+            Group near-duplicates
+          </label>
         </div>
       </div>
 
@@ -390,8 +443,8 @@ export function PredictionsPage() {
             <p className="text-gray-500 text-sm py-4">No predictions</p>
           ) : (
             <div>
-              {current.items.map((p) => (
-                <PredictionRow key={p.prediction_id} p={p} />
+              {(group ? groupPredictions(current.items) : current.items.map((p) => ({ p, count: 1 }))).map(({ p, count }) => (
+                <PredictionRow key={p.prediction_id} p={p} occurrences={count} />
               ))}
               <Pagination
                 total={current.total}
