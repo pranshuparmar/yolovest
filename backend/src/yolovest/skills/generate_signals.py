@@ -745,7 +745,18 @@ class GenerateSignalsSkill(SkillBase):
 
             # Count bars since exit using OHLCV data
             bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=reentry_cfg.min_bars_after_exit + 5)
-            bars_after_exit = sum(1 for bar in bars if bar.timestamp > exit_dt)
+            # Different providers (jugaad / yfinance / tvdatafeed / kite)
+            # store OHLCV timestamps with mixed tz state — some naive,
+            # some aware. exit_dt is always-aware now, so normalize each
+            # bar before the > comparison to avoid TypeError.
+            bars_after_exit = sum(
+                1 for bar in bars
+                if (
+                    bar.timestamp.replace(tzinfo=IST)
+                    if bar.timestamp.tzinfo is None
+                    else bar.timestamp
+                ) > exit_dt
+            )
             if bars_after_exit < reentry_cfg.min_bars_after_exit:
                 logger.debug(
                     "Re-entry blocked for %s: only %d bars after exit (need %d)",
