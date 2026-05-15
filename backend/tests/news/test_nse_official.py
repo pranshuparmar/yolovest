@@ -197,8 +197,8 @@ class TestCookieInitialization:
         result = await source._get_session()
         assert result is session
         assert source._cookies_initialized
-        # Homepage was hit with text/html Accept header
-        session.get.assert_called_once()
+        # Warmup is a two-hop sequence: homepage + market-data page.
+        assert session.get.call_count == 2
 
     async def test_cookies_not_reinitialized_if_already_set(self):
         session = _mock_session()
@@ -698,21 +698,20 @@ class TestFetchDeliveryData:
 
 
 class TestHealthCheck:
-    async def test_returns_true_on_200(self):
+    async def test_returns_true_when_cookies_initialized(self):
         session = _mock_session(
             responses={"nseindia.com": _mock_response(status=200)},
         )
         source = NSEOfficialSource(session=session)
-        source._cookies_initialized = True
-
+        # Health check lazy-warms the session, then reports based on the
+        # cookie state. A two-hop 200 sequence yields True.
         assert await source.health_check() is True
 
-    async def test_returns_false_on_non_200(self):
+    async def test_returns_false_when_warmup_failed(self):
         session = _mock_session(
             responses={"nseindia.com": _mock_response(status=403)},
         )
         source = NSEOfficialSource(session=session)
-        source._cookies_initialized = True
 
         assert await source.health_check() is False
 
@@ -725,7 +724,6 @@ class TestHealthCheck:
             ),
         )
         source = NSEOfficialSource(session=session)
-        source._cookies_initialized = True
 
         assert await source.health_check() is False
 
@@ -738,9 +736,17 @@ class TestHealthCheck:
             ),
         )
         source = NSEOfficialSource(session=session)
-        source._cookies_initialized = True
 
         assert await source.health_check() is False
+
+    async def test_short_circuits_after_warmup_already_failed(self):
+        session = _mock_session()
+        source = NSEOfficialSource(session=session)
+        source._cookies_failed = True
+
+        assert await source.health_check() is False
+        # Should not have touched the network.
+        session.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
