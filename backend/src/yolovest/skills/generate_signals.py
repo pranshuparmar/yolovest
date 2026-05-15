@@ -505,6 +505,20 @@ class GenerateSignalsSkill(SkillBase):
                         prediction.signal_type, symbol, prediction.confidence,
                         _format_class_probs(prediction),
                     )
+                    # Subscribe the new symbol to KiteTicker immediately
+                    # so the dashboard's RecommendationsPanel / Pending /
+                    # Positions widgets show live LTP without waiting
+                    # for the next heartbeat (position-monitor's
+                    # subscribe pass). Idempotent inside the ticker.
+                    ticker = getattr(self.ctx, "ticker", None)
+                    if ticker is not None:
+                        try:
+                            await ticker.subscribe([symbol])
+                        except Exception:
+                            logger.debug(
+                                "ticker subscribe failed for %s", symbol,
+                                exc_info=True,
+                            )
                     await self.broadcast("signal_generated", {
                         "symbol": symbol,
                         "signal_type": prediction.signal_type,

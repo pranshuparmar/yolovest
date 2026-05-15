@@ -1,6 +1,7 @@
 import { useState } from "react";
 import clsx from "clsx";
 import { useRecommendations } from "../hooks/queries";
+import { useLtpStream } from "../hooks/useLtpStream";
 import type { Recommendation, SignalDisposition } from "../types/api";
 import { SymbolLink } from "./SymbolLink";
 
@@ -42,10 +43,21 @@ function timeAgo(iso: string) {
   return `${Math.floor(ageSec / 86400)}d ago`;
 }
 
-function RecommendationRow({ r }: { r: Recommendation }) {
+function RecommendationRow({ r, ltp }: { r: Recommendation; ltp?: number }) {
   const [expanded, setExpanded] = useState(false);
   const sigColor = r.signal_type === "BUY" ? "text-emerald-400" : "text-red-400";
   const dispKey: SignalDisposition = (r.disposition || "pending") as SignalDisposition;
+  // Drift = signed % move from entry to LTP. Sign matters because a SELL
+  // at ₹100 with LTP ₹98 is +2% in our favour, whereas the same drift
+  // for a BUY would be -2%. Render in the directionally-correct color
+  // so a glance at the row tells you "good" vs "bad" without arithmetic.
+  let driftPct: number | null = null;
+  let driftFavorable: boolean | null = null;
+  if (ltp && r.entry_price) {
+    const raw = ((ltp - r.entry_price) / r.entry_price) * 100;
+    driftPct = raw;
+    driftFavorable = r.signal_type === "BUY" ? raw < 0 : raw > 0;
+  }
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg">
       <button
@@ -62,6 +74,21 @@ function RecommendationRow({ r }: { r: Recommendation }) {
           <span className="text-xs text-gray-500">
             ₹{fmt(r.entry_price)} × {r.position_size}
           </span>
+          {ltp != null && driftPct != null && (
+            <span
+              className={clsx(
+                "text-xs font-mono",
+                Math.abs(driftPct) < 0.05
+                  ? "text-gray-400"
+                  : driftFavorable
+                    ? "text-emerald-400"
+                    : "text-red-400",
+              )}
+              title={`LTP ₹${fmt(ltp)} (${driftPct >= 0 ? "+" : ""}${driftPct.toFixed(2)}% vs entry)`}
+            >
+              LTP ₹{fmt(ltp)} ({driftPct >= 0 ? "+" : ""}{driftPct.toFixed(2)}%)
+            </span>
+          )}
           <span className="text-xs text-gray-500 hidden md:inline">
             conf {(r.confidence_score * 100).toFixed(0)}%
           </span>
@@ -114,6 +141,7 @@ function RecommendationRow({ r }: { r: Recommendation }) {
 
 export function RecommendationsPanel() {
   const { data, isLoading } = useRecommendations();
+  const ltps = useLtpStream();
   const [filter, setFilter] = useState<SignalDisposition | "all">("all");
 
   if (isLoading) {
@@ -194,7 +222,7 @@ export function RecommendationsPanel() {
       ) : (
         <div className="space-y-2">
           {filtered.map((r) => (
-            <RecommendationRow key={r.id} r={r} />
+            <RecommendationRow key={r.id} r={r} ltp={ltps.get(r.symbol)} />
           ))}
         </div>
       )}

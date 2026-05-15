@@ -8,6 +8,7 @@ import { PremarketCard } from "../components/PremarketCard";
 import { PendingTradesBanner, ClearSignalsButton } from "../components/PendingTradesBanner";
 import { RecommendationsPanel } from "../components/RecommendationsPanel";
 import { SignalClassWidget } from "../components/SignalClassWidget";
+import { KillSwitchControl } from "../components/KillSwitchControl";
 import { useTradesToday, useSystemState } from "../hooks/queries";
 
 export function DashboardPage() {
@@ -45,7 +46,10 @@ export function DashboardPage() {
             </span>
           )}
         </div>
-        <ClearSignalsButton />
+        <div className="flex items-center gap-2">
+          <KillSwitchControl />
+          <ClearSignalsButton />
+        </div>
       </div>
 
       <PendingTradesBanner />

@@ -89,6 +89,25 @@ class PositionMonitorSkill(SkillBase):
                         symbols_to_subscribe.add(u["symbol"])
             except Exception:
                 logger.debug("ticker subscribe: get_user_watchlist failed", exc_info=True)
+            # Today's signals + pending-trade symbols. Catches the case
+            # where generate-signals was triggered manually (outside the
+            # heartbeat) and produced symbols that aren't in the watchlist
+            # — without this the RecommendationsPanel + PendingTradesBanner
+            # would render a blank LTP column until the next heartbeat.
+            try:
+                for r in await self.ctx.db.get_todays_recommendations():
+                    sym = r.get("symbol")
+                    if sym:
+                        symbols_to_subscribe.add(sym)
+            except Exception:
+                logger.debug("ticker subscribe: today's signals failed", exc_info=True)
+            try:
+                for p in await self.ctx.db.get_pending_trades():
+                    sym = p.get("symbol")
+                    if sym:
+                        symbols_to_subscribe.add(sym)
+            except Exception:
+                logger.debug("ticker subscribe: pending trades failed", exc_info=True)
             if symbols_to_subscribe:
                 try:
                     await ticker.subscribe(sorted(symbols_to_subscribe))
