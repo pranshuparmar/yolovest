@@ -466,6 +466,13 @@ class StrategyConfig(BaseModel):
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     min_training_samples: int = 200
     market_regime: MarketRegimeConfig = Field(default_factory=MarketRegimeConfig)
+    # Apply inverse-frequency class weights at training time so a
+    # rare class (e.g. BUY under path-aware 2:1 R/R labelling) isn't
+    # buried by the majority class. Multiplies into the existing
+    # feedback-driven sample weights. Default-on because zero-BUY
+    # output is a failure mode users will hit on first deploy without
+    # it; disable if you ever want the unbalanced classifier back.
+    class_balance_enabled: bool = True
 
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "StrategyConfig":

@@ -180,6 +180,34 @@ class ModelRetrainSkill(SkillBase):
                 total,
             )
 
+            # Class balancing: inverse-frequency weights so rare classes
+            # (typically BUY under path-aware 2:1 R/R labelling) aren't
+            # buried under the HOLD majority. Multiplies into the
+            # existing feedback-driven sample_weights. Sklearn's
+            # "balanced" formula: w[c] = N / (K * count[c]).
+            class_weights: dict[int, float] = {}
+            if self.ctx.config.strategy.class_balance_enabled:
+                # Map: label int → BUY/HOLD/SELL key for count lookup.
+                key_for = {0: "SELL", 1: "HOLD", 2: "BUY"}
+                K = sum(1 for k in key_for.values() if label_counts.get(k, 0) > 0)
+                for lbl, key in key_for.items():
+                    c = label_counts.get(key, 0)
+                    class_weights[lbl] = (total / (K * c)) if c > 0 else 0.0
+
+                if not sample_weights:
+                    sample_weights = [1.0] * len(y)
+                sample_weights = [
+                    sw * class_weights.get(int(lbl), 1.0)
+                    for sw, lbl in zip(sample_weights, y, strict=False)
+                ]
+                logger.info(
+                    "Class weights for %s: BUY=%.2f, HOLD=%.2f, SELL=%.2f",
+                    model_type,
+                    class_weights.get(2, 0.0),
+                    class_weights.get(1, 0.0),
+                    class_weights.get(0, 0.0),
+                )
+
             try:
                 await self.broadcast("retrain_progress", {
                     "model_type": model_type,
@@ -206,12 +234,19 @@ class ModelRetrainSkill(SkillBase):
                 metrics = await self.ctx.ml.train(
                     model_type, X, y, train_params, feature_names=feat_names,
                 )
-                # Stash label distribution so MLModelsPage can show
-                # whether a given checkpoint was trained on a class-
-                # balanced sample or a heavily-skewed one. Lives next
-                # to the existing numeric metrics in metrics_json.
+                # Stash label distribution + class weights so
+                # MLModelsPage can show whether a given checkpoint was
+                # trained on a class-balanced sample or a heavily-skewed
+                # one. Lives next to the existing numeric metrics in
+                # metrics_json.
                 metrics["label_counts"] = label_counts
                 metrics["label_pct"] = label_pct
+                if class_weights:
+                    metrics["class_weights"] = {
+                        "BUY": round(class_weights.get(2, 0.0), 4),
+                        "HOLD": round(class_weights.get(1, 0.0), 4),
+                        "SELL": round(class_weights.get(0, 0.0), 4),
+                    }
                 version = await self.ctx.ml.save_model(model_type, metrics=metrics)
                 await self.broadcast("retrain_progress", {
                     "model_type": model_type,
