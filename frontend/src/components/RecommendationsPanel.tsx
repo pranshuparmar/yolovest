@@ -141,12 +141,25 @@ export function RecommendationsPanel() {
     acc[k] = (acc[k] || 0) + 1;
     return acc;
   }, {});
+  // "Pending" in the UI means "in flight" — covers both freshly-generated
+  // signals that haven't passed risk-check yet (disposition NULL → falls
+  // back to "pending") AND signals queued for the user's manual approval
+  // (disposition "awaiting_approval"). Both surface the same PENDING
+  // badge on the row, so the filter has to match the same shape.
+  const pendingCount = (counts.pending || 0) + (counts.awaiting_approval || 0);
 
-  const filtered = filter === "all" ? items : items.filter((r) => r.disposition === filter);
+  const filtered =
+    filter === "all"
+      ? items
+      : filter === "awaiting_approval"
+        ? items.filter(
+            (r) => !r.disposition || r.disposition === "awaiting_approval",
+          )
+        : items.filter((r) => r.disposition === filter);
   const filterButtons: Array<{ key: SignalDisposition | "all"; label: string }> = [
     { key: "all", label: `All (${items.length})` },
     { key: "executed", label: `Executed (${counts.executed || 0})` },
-    { key: "awaiting_approval", label: `Pending (${counts.awaiting_approval || 0})` },
+    { key: "awaiting_approval", label: `Pending (${pendingCount})` },
     { key: "expired", label: `Expired (${counts.expired || 0})` },
     { key: "rejected", label: `Rejected (${counts.rejected || 0})` },
     { key: "risk_rejected", label: `Risk Blocked (${counts.risk_rejected || 0})` },

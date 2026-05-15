@@ -671,7 +671,25 @@ export function useCleanupTable() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.cleanupTable,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["storage-stats"] }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+      // Cleanup is per-table — bust the caches that read from that
+      // table so the page reflects the deletion without a hard refresh.
+      const tableInvalidations: Record<string, string[][]> = {
+        predictions: [
+          ["predictions"], ["weekly", "predictions"], ["recommendations"],
+          ["model-drift"], ["signal-class-distribution"],
+        ],
+        ohlcv: [["ohlcv"]],
+        news_articles: [["news"], ["news-articles"]],
+        economic_events: [["economic-events"], ["economic-calendar"]],
+        audit_log: [["audit"], ["audit-log"]],
+      };
+      const keys = tableInvalidations[vars.table] || [];
+      for (const key of keys) {
+        qc.invalidateQueries({ queryKey: key });
+      }
+    },
   });
 }
 
