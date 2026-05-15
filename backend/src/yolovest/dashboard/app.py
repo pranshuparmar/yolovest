@@ -1501,6 +1501,21 @@ def create_app(ctx: AppContext) -> FastAPI:
         """
         return await ctx.db.get_model_drift_stats(days=days, mode=ctx.config.mode)
 
+    @app.get("/api/signal-class-distribution")
+    async def get_signal_class_distribution(
+        days: int = Query(7, ge=1, le=90),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """BUY/HOLD/SELL signal counts over the last N days (mode-scoped).
+
+        Surfaces the same data the drift-watch class-collapse alert
+        runs against, so the dashboard can render a visible
+        early-warning widget even when no alert has fired yet.
+        """
+        return await ctx.db.get_signal_class_counts(
+            days=days, mode=ctx.config.mode,
+        )
+
     @app.get("/api/institutional-flows")
     async def get_institutional_flows(
         days: int = Query(30, ge=1, le=180),

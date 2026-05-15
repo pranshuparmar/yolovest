@@ -593,6 +593,14 @@ export function useModelDrift(days = 30) {
   });
 }
 
+export function useSignalClassDistribution(days = 7) {
+  return useQuery({
+    queryKey: ["signal-class-distribution", days],
+    queryFn: () => api.signalClassDistribution(days),
+    staleTime: 60_000,
+  });
+}
+
 export function useInstitutionalFlows(params?: {
   days?: number; bulk_limit?: number; symbol?: string;
 }) {

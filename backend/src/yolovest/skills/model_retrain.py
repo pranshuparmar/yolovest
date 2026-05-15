@@ -180,6 +180,30 @@ class ModelRetrainSkill(SkillBase):
                 total,
             )
 
+            # Train-time guard: refuse to save a model trained on a
+            # corpus where any class is functionally extinct. Catches
+            # the "BUYs ≈ never" failure mode before it ships.
+            min_pct = self.ctx.config.strategy.class_balance_min_pct
+            if min_pct > 0:
+                rare = {k: pct for k, pct in label_pct.items() if pct < min_pct}
+                if rare:
+                    msg = (
+                        f"Refusing to train {model_type}: class(es) "
+                        f"{', '.join(f'{k}={pct:.1f}%' for k, pct in rare.items())} "
+                        f"< min {min_pct:.1f}%. Tune target/SL ATR multipliers "
+                        f"or extend max_training_days to capture more setups."
+                    )
+                    logger.warning(msg)
+                    try:
+                        await self.ctx.notify.send(
+                            f"Retrain skipped for {model_type}: " + msg,
+                            alert_type="errors",
+                        )
+                    except Exception:
+                        logger.debug("Failed to notify on label guard", exc_info=True)
+                    results[model_type] = {"error": msg, "label_pct": label_pct}
+                    continue
+
             # Class balancing: inverse-frequency weights so rare classes
             # (typically BUY under path-aware 2:1 R/R labelling) aren't
             # buried under the HOLD majority. Multiplies into the
@@ -247,6 +271,72 @@ class ModelRetrainSkill(SkillBase):
                         "HOLD": round(class_weights.get(1, 0.0), 4),
                         "SELL": round(class_weights.get(0, 0.0), 4),
                     }
+                # Post-train class check: run the fresh model on the
+                # most recent N training rows and verify all three
+                # classes are reachable. Catches calibration-collapse
+                # or feature-dominance cases where the label balance
+                # was fine but the model still never picks a class.
+                if self.ctx.config.strategy.post_train_class_check_enabled:
+                    try:
+                        import numpy as np  # noqa: PLC0415
+
+                        booster = self.ctx.ml._get_model(model_type)  # noqa: SLF001
+                        # Sample the freshest N rows — that's what the
+                        # production model will see first in live use.
+                        n_check = min(1000, len(X))
+                        X_check = np.asarray(X[-n_check:])
+                        preds = booster.predict(X_check)
+                        pred_counts = {0: 0, 1: 0, 2: 0}
+                        for p in preds:
+                            pred_counts[int(p)] = pred_counts.get(int(p), 0) + 1
+                        # Map: 0=SELL, 1=HOLD, 2=BUY.
+                        pred_dist = {
+                            "SELL": pred_counts.get(0, 0),
+                            "HOLD": pred_counts.get(1, 0),
+                            "BUY": pred_counts.get(2, 0),
+                        }
+                        logger.info(
+                            "Post-train prediction distribution for %s "
+                            "(n=%d): BUY=%d, HOLD=%d, SELL=%d",
+                            model_type, n_check,
+                            pred_dist["BUY"], pred_dist["HOLD"], pred_dist["SELL"],
+                        )
+                        metrics["post_train_pred_dist"] = pred_dist
+
+                        missing = [k for k, v in pred_dist.items() if v == 0]
+                        if missing:
+                            msg = (
+                                f"Refusing to save {model_type}: trained "
+                                f"booster never predicts class(es) "
+                                f"{', '.join(missing)} on the most recent "
+                                f"{n_check} samples. Production would see "
+                                f"zero of those signals."
+                            )
+                            logger.warning(msg)
+                            try:
+                                await self.ctx.notify.send(
+                                    f"Retrain skipped for {model_type}: " + msg,
+                                    alert_type="errors",
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "Failed to notify on post-train guard",
+                                    exc_info=True,
+                                )
+                            results[model_type] = {
+                                "error": msg,
+                                "post_train_pred_dist": pred_dist,
+                                "label_pct": label_pct,
+                            }
+                            continue
+                    except Exception:
+                        # Inference inside the guard shouldn't crash
+                        # the retrain — fall through and save the model.
+                        logger.debug(
+                            "Post-train class check failed; saving anyway",
+                            exc_info=True,
+                        )
+
                 version = await self.ctx.ml.save_model(model_type, metrics=metrics)
                 await self.broadcast("retrain_progress", {
                     "model_type": model_type,

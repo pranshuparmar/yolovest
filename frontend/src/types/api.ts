@@ -793,3 +793,18 @@ export interface ConfigUpdateResult {
   updated: string[];
   sections: Record<string, Record<string, unknown>>;
 }
+
+export interface SignalClassDay {
+  date: string;
+  BUY: number;
+  HOLD: number;
+  SELL: number;
+}
+
+export interface SignalClassDistribution {
+  BUY: number;
+  HOLD: number;
+  SELL: number;
+  total: number;
+  by_day: SignalClassDay[];
+}

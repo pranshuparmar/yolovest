@@ -473,6 +473,19 @@ class StrategyConfig(BaseModel):
     # output is a failure mode users will hit on first deploy without
     # it; disable if you ever want the unbalanced classifier back.
     class_balance_enabled: bool = True
+    # Refuse to save a model when any of {BUY, HOLD, SELL} accounts for
+    # less than this fraction of training labels. Catches the
+    # "BUY is functionally extinct in the data" failure mode at train
+    # time instead of letting a sterile model reach production.
+    # Set to 0 to disable the guard.
+    class_balance_min_pct: float = Field(default=3.0, ge=0.0, le=33.0)
+    # After saving a fresh model, run inference on the most recent
+    # in-training samples and verify all three classes win argmax at
+    # least once. Belt-and-braces for cases where label balance is
+    # fine but the model still never predicts a class (calibration
+    # collapse, feature dominance). Default-on. Cheap (one matmul on
+    # ~hundreds of samples). Disable if you trust the train-time guard.
+    post_train_class_check_enabled: bool = True
 
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "StrategyConfig":

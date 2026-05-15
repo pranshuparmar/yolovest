@@ -2526,6 +2526,59 @@ class Database:
         row = await cursor.fetchone()
         return row[0] if row else 0
 
+    async def get_signal_class_counts(
+        self, days: int = 7, mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Count signals per type (BUY/SELL/HOLD) in the last `days`.
+
+        Returns:
+          {
+            "BUY": int, "SELL": int, "HOLD": int, "total": int,
+            "by_day": [{"date": "YYYY-MM-DD", "BUY": int, ...}, ...],
+          }
+
+        Used by drift-watch (alert on a class going extinct) and the
+        Dashboard signal-distribution widget. Mode-scoped when
+        `mode` is provided so paper- and live-mode signals don't pool.
+        """
+        from datetime import timedelta as _td
+
+        cutoff = (now_utc() - _td(days=days)).isoformat()
+        params: list[Any] = [cutoff]
+        mode_clause = ""
+        if mode:
+            mode_clause = " AND mode = ?"
+            params.append(mode)
+
+        cur = await self.read_conn.execute(
+            f"SELECT signal_type, DATE(created_at) AS d, COUNT(*) "
+            f"FROM signals WHERE created_at >= ?{mode_clause} "
+            f"GROUP BY signal_type, d ORDER BY d ASC",
+            tuple(params),
+        )
+        rows = await cur.fetchall()
+
+        totals = {"BUY": 0, "SELL": 0, "HOLD": 0}
+        per_day: dict[str, dict[str, int]] = {}
+        for sig_type, d, count in rows:
+            key = (sig_type or "").upper()
+            if key not in totals:
+                continue
+            totals[key] += int(count)
+            per_day.setdefault(d, {"BUY": 0, "SELL": 0, "HOLD": 0})
+            per_day[d][key] = int(count)
+        by_day = [
+            {"date": d, **counts}
+            for d, counts in sorted(per_day.items())
+        ]
+        return {
+            "BUY": totals["BUY"],
+            "SELL": totals["SELL"],
+            "HOLD": totals["HOLD"],
+            "total": sum(totals.values()),
+            "by_day": by_day,
+        }
+
     async def get_latest_sentiment(self, symbol: str) -> dict[str, Any] | None:
         """Get latest sentiment for a symbol as dict[str, Any] (for LLM review context)."""
         result = await self.get_sentiment(symbol)

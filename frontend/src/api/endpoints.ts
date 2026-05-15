@@ -34,6 +34,7 @@ import type {
   StrategyPerformance,
   ExecutionQuality,
   ModelDrift,
+  SignalClassDistribution,
   InstitutionalFlows,
   SymbolContext,
   RotationCooldown,
@@ -338,6 +339,11 @@ export const api = {
 
   modelDrift: (days = 30) =>
     apiFetch<ModelDrift>(`/api/model-drift?days=${days}`),
+
+  signalClassDistribution: (days = 7) =>
+    apiFetch<SignalClassDistribution>(
+      `/api/signal-class-distribution?days=${days}`,
+    ),
 
   institutionalFlows: (params?: {
     days?: number; bulk_limit?: number; symbol?: string;

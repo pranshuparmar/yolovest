@@ -184,6 +184,10 @@ class DatabaseProtocol(Protocol):
 
     async def get_todays_signals_count(self) -> int: ...
 
+    async def get_signal_class_counts(
+        self, days: int = 7, mode: str | None = None,
+    ) -> dict[str, Any]: ...
+
     async def update_signal_disposition(
         self, symbol: str, disposition: str, reason: str | None = None
     ) -> None: ...

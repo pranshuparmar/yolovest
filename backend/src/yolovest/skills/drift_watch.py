@@ -55,6 +55,34 @@ class DriftWatchSkill(SkillBase):
         warning = stats.get("warning")
         versions = stats.get("model_versions", [])
 
+        # Signal-class collapse check — catches "model produces zero
+        # BUYs for a week" or "every signal is HOLD." Independent of
+        # the win-rate drift check above; either can fire on its own.
+        class_warnings: list[str] = []
+        class_counts: dict[str, Any] = {}
+        try:
+            class_counts = await self.ctx.db.get_signal_class_counts(
+                days=7, mode=mode,
+            )
+            total = int(class_counts.get("total", 0) or 0)
+            if total >= 30:  # below this it's too noisy to call collapse
+                for key in ("BUY", "SELL", "HOLD"):
+                    n = int(class_counts.get(key, 0) or 0)
+                    pct = (n / total) * 100 if total else 0.0
+                    if n == 0:
+                        class_warnings.append(
+                            f"{key}: 0 of {total} signals in last 7d "
+                            "(model never picks this class).",
+                        )
+                    elif pct > 95:
+                        class_warnings.append(
+                            f"{key}: {n}/{total} signals ({pct:.0f}%) "
+                            "in last 7d — class imbalance suggests a "
+                            "single dominant disposition.",
+                        )
+        except Exception:
+            logger.debug("drift-watch: class-count lookup failed", exc_info=True)
+
         # Build a short per-model digest for the alert + audit.
         digest_lines: list[str] = []
         for v in versions:
@@ -76,25 +104,40 @@ class DriftWatchSkill(SkillBase):
                 f"over {samples} scored predictions in last 7d",
             )
 
-        if warning:
+        if warning or class_warnings:
+            sections: list[str] = []
+            if warning:
+                sections.append(f"Win-rate drift:\n{warning}")
+            if class_warnings:
+                sections.append(
+                    "Signal-class imbalance:\n  " + "\n  ".join(class_warnings),
+                )
+            if digest_lines:
+                sections.append("\n".join(digest_lines))
+            sections.append(
+                "Review the Model Drift page; consider /run model-retrain "
+                "if the decay is recent and persistent.",
+            )
             msg = (
-                f"WARNING: Model drift detected ({mode} mode)\n"
-                f"{warning}\n"
-                + ("\n".join(digest_lines) if digest_lines else "")
-                + "\n\nReview the Model Drift page; consider /run model-retrain "
-                "if the decay is recent and persistent."
+                f"WARNING: Model health alert ({mode} mode)\n\n"
+                + "\n\n".join(sections)
             )
             try:
                 await self.ctx.notify.send(msg, alert_type="errors")
             except Exception:
                 logger.warning("drift-watch: notify.send failed", exc_info=True)
-            logger.warning("drift-watch: %s", warning)
+            if warning:
+                logger.warning("drift-watch: %s", warning)
+            for w in class_warnings:
+                logger.warning("drift-watch class collapse: %s", w)
             return SkillResult(
                 success=True,
                 skill_name=self.name,
                 data={
                     "alerted": True,
                     "warning": warning,
+                    "class_warnings": class_warnings,
+                    "class_counts": class_counts,
                     "digest": digest_lines,
                     "mode": mode,
                 },
@@ -113,6 +156,8 @@ class DriftWatchSkill(SkillBase):
             data={
                 "alerted": False,
                 "warning": None,
+                "class_warnings": class_warnings,
+                "class_counts": class_counts,
                 "digest": digest_lines,
                 "mode": mode,
             },
