@@ -1287,6 +1287,32 @@ class Database:
         )
         await self.conn.commit()
 
+    async def get_stale_fundamentals_symbols(
+        self, symbols: list[str], max_age_hours: int = 24,
+    ) -> list[str]:
+        """Return the subset of `symbols` that need a fundamentals refresh.
+
+        A symbol is "stale" if it has no row in `fundamentals` yet, or its
+        `updated_at` is older than `max_age_hours`. Order is preserved.
+
+        Fundamentals only move at quarterly result announcements, so a
+        24h refresh window is generous. Used by ingest-data to avoid
+        hitting Screener.in / Trendlyne for symbols we already refreshed
+        recently — those scrapers self-throttle at 2s/symbol and would
+        otherwise blow the per-source ingest budget.
+        """
+        if not symbols:
+            return []
+        placeholders = ",".join("?" for _ in symbols)
+        cutoff_expr = f"datetime('now', '-{int(max_age_hours)} hours')"
+        cur = await self.conn.execute(
+            f"SELECT symbol FROM fundamentals "
+            f"WHERE symbol IN ({placeholders}) AND updated_at >= {cutoff_expr}",
+            list(symbols),
+        )
+        fresh = {row[0] for row in await cur.fetchall()}
+        return [s for s in symbols if s not in fresh]
+
     # ------------------------------------------------------------------
     # NSE Universe
     # ------------------------------------------------------------------

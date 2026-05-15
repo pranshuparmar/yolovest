@@ -39,6 +39,17 @@ _EXPENSIVE_BUDGET_SEC = 90
 # Per-source timeout for individual fetches within the expensive phase.
 _PER_SOURCE_TIMEOUT_SEC = 30
 
+# Max symbols to refresh per heartbeat for the two slow per-symbol scrapers.
+# Screener.in self-throttles at ~2s/symbol; Trendlyne at ~2.5s/symbol (API +
+# HTML fallback). With a 30s per-source budget that means ~12-14 symbols max
+# before the timeout fires. Fundamentals/technicals also only change at
+# quarterly result announcements, so a 24h cache + small per-cycle slice is
+# fine — the watchlist is filled in over a handful of heartbeats and then
+# stays warm.
+_FUNDAMENTALS_PER_CYCLE = 10
+_TECHNICALS_PER_CYCLE = 10
+_FUNDAMENTALS_CACHE_HOURS = 24
+
 
 class IngestDataSkill(SkillBase):
     name = "ingest-data"
@@ -460,37 +471,77 @@ class IngestDataSkill(SkillBase):
             await source.close()
 
     async def _fetch_fundamentals(self, symbols: list[str]) -> int:
-        """Fetch fundamental data from Screener.in."""
+        """Fetch fundamental data from Screener.in.
+
+        Refreshes only stale-or-missing rows, capped to a small slice per
+        heartbeat so we never blow the per-source ingest budget. The
+        cooperative refresh fills the watchlist over a handful of cycles.
+        """
         from yolovest.data.screener import ScreenerScraper
+
+        try:
+            stale = await self.ctx.db.get_stale_fundamentals_symbols(
+                symbols, max_age_hours=_FUNDAMENTALS_CACHE_HOURS,
+            )
+        except Exception:
+            logger.debug("ingest-data: stale-fundamentals lookup failed", exc_info=True)
+            stale = list(symbols)
+        targets = stale[:_FUNDAMENTALS_PER_CYCLE]
+        if not targets:
+            logger.debug("ingest-data: all watched fundamentals fresh, skipping Screener.in")
+            return 0
 
         scraper = ScreenerScraper()
         count = 0
         try:
-            batch = await scraper.fetch_batch(symbols)
+            batch = await scraper.fetch_batch(targets)
             for symbol, data in batch.items():
                 await self.ctx.db.upsert_fundamentals(symbol, data)
                 count += 1
             if count:
-                logger.info("Fundamentals updated for %d symbols via Screener.in", count)
+                logger.info(
+                    "Fundamentals updated for %d/%d symbols via Screener.in (queue=%d)",
+                    count, len(targets), len(stale),
+                )
         finally:
             await scraper.close()
         return count
 
     async def _fetch_technicals(self, symbols: list[str]) -> int:
-        """Fetch technical screener data from Trendlyne."""
+        """Fetch technical screener data from Trendlyne.
+
+        Uses the same stale-row + per-cycle-cap strategy as fundamentals;
+        Trendlyne data is upserted into the same `fundamentals` table so
+        a single freshness window covers both scrapers.
+        """
         from yolovest.data.trendlyne import TrendlyneScraper
+
+        try:
+            stale = await self.ctx.db.get_stale_fundamentals_symbols(
+                symbols, max_age_hours=_FUNDAMENTALS_CACHE_HOURS,
+            )
+        except Exception:
+            logger.debug("ingest-data: stale-fundamentals lookup failed", exc_info=True)
+            stale = list(symbols)
+        targets = stale[:_TECHNICALS_PER_CYCLE]
+        if not targets:
+            logger.debug("ingest-data: all watched technicals fresh, skipping Trendlyne")
+            return 0
 
         scraper = TrendlyneScraper()
         count = 0
         try:
-            batch = await scraper.fetch_batch(symbols)
+            batch = await scraper.fetch_batch(targets)
             for symbol, data in batch.items():
                 # Store technical signals alongside fundamentals
                 # Trendlyne data enriches the fundamentals table
                 await self.ctx.db.upsert_fundamentals(symbol, data)
                 count += 1
             if count:
-                logger.info("Technicals updated for %d symbols via Trendlyne", count)
+                logger.info(
+                    "Technicals updated for %d/%d symbols via Trendlyne (queue=%d)",
+                    count, len(targets), len(stale),
+                )
         finally:
             await scraper.close()
         return count
