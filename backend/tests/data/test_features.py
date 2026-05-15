@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from yolovest.data.features import (
+    MODEL_FEATURE_EXCLUSIONS,
     IndicatorConfig,
     compute_atr,
     compute_bollinger_bands,
@@ -215,3 +216,112 @@ class TestComputeFeatures:
 
     def test_empty_bars(self):
         assert compute_features([]) == {}
+
+
+class TestNormalizedFeatures:
+    """The model-facing features should be price-invariant ratios.
+
+    These features are the ones the ML model actually sees after
+    MODEL_FEATURE_EXCLUSIONS filters out raw absolute prices/levels.
+    """
+
+    def test_normalized_features_emitted(self) -> None:
+        bars = _make_bars(50)
+        features = compute_features(bars)
+        # The new normalized derivatives must all be present.
+        assert "range_pct" in features
+        assert "body_pct" in features
+        assert "gap_pct" in features
+        assert "close_change_pct" in features
+        assert "vwap_distance_pct" in features
+        assert "bb_position" in features
+        assert "macd_histogram_pct" in features
+        assert "macd_line_pct" in features
+        assert "close_vs_ema_9_pct" in features
+        assert "ema_9_vs_21_pct" in features
+        assert "supertrend_distance_pct" in features
+        assert "volume_zscore_20d" in features
+
+    def test_range_pct_matches_arithmetic(self) -> None:
+        bars = _make_bars(50)
+        features = compute_features(bars)
+        last = bars[-1]
+        expected = (last.high - last.low) / last.close
+        assert features["range_pct"] == pytest.approx(expected)
+
+    def test_features_scale_invariant_across_price_levels(self) -> None:
+        """Same shape at ₹100 and ₹3000 → normalized features identical."""
+        bars_cheap = _make_bars(50)
+        # Build identically-shaped bars but at 30x the price level.
+        bars_expensive = [
+            OHLCVBar(
+                timestamp=b.timestamp,
+                open=b.open * 30, high=b.high * 30,
+                low=b.low * 30, close=b.close * 30,
+                volume=b.volume,
+            )
+            for b in bars_cheap
+        ]
+        f_cheap = compute_features(bars_cheap)
+        f_exp = compute_features(bars_expensive)
+        # Key invariant: every normalized feature is identical.
+        for key in [
+            "range_pct", "body_pct", "gap_pct", "close_change_pct",
+            "vwap_distance_pct", "bb_position",
+            "macd_histogram_pct", "macd_line_pct",
+            "close_vs_ema_9_pct", "ema_9_vs_21_pct",
+            "supertrend_distance_pct", "atr_pct",
+        ]:
+            assert f_cheap[key] == pytest.approx(f_exp[key], rel=1e-6), \
+                f"feature {key} not scale-invariant"
+
+    def test_bb_position_inside_band(self) -> None:
+        bars = _make_bars(50)
+        features = compute_features(bars)
+        # bb_position can drift outside [0,1] in trending data but should
+        # generally be within a sane band — sanity check, not exact.
+        assert -2.0 <= features["bb_position"] <= 3.0
+
+    def test_volume_zscore_zero_for_flat_volumes(self) -> None:
+        bars = _make_bars(50)
+        # Force all volumes equal so sigma=0 → guard returns 0.0
+        flat_bars = [
+            OHLCVBar(
+                timestamp=b.timestamp, open=b.open, high=b.high,
+                low=b.low, close=b.close, volume=1000,
+            )
+            for b in bars
+        ]
+        features = compute_features(flat_bars)
+        assert features["volume_zscore_20d"] == 0.0
+
+    def test_obv_change_5d_pct_emitted(self) -> None:
+        bars = _make_bars(50)
+        features = compute_features(bars)
+        assert "obv_change_5d_pct" in features
+
+    def test_raw_levels_still_in_features_dict(self) -> None:
+        """Raw prices must remain — the inference layer reads `close`
+        and `atr_14` for entry-price fallbacks."""
+        bars = _make_bars(50)
+        features = compute_features(bars)
+        assert "close" in features
+        assert "atr_14" in features
+
+    def test_exclusion_set_covers_raw_levels(self) -> None:
+        """All emitted raw-level features must be in the exclusion set,
+        so the model never trains on absolute prices."""
+        bars = _make_bars(50)
+        features = compute_features(bars)
+        for raw_key in [
+            "close", "open", "high", "low",
+            "vwap", "atr_14", "obv",
+            "bb_upper", "bb_middle", "bb_lower",
+            "ema_9", "ema_21", "ema_50",
+            "macd_line", "macd_signal", "macd_histogram",
+            "supertrend_upper", "supertrend_lower",
+            "avg_volume",
+        ]:
+            if raw_key in features:
+                assert raw_key in MODEL_FEATURE_EXCLUSIONS, \
+                    f"raw level {raw_key} is emitted but not in MODEL_FEATURE_EXCLUSIONS"

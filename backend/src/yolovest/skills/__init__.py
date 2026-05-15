@@ -12,8 +12,10 @@ from yolovest.skills.drift_watch import DriftWatchSkill
 from yolovest.skills.generate_signals import GenerateSignalsSkill
 from yolovest.skills.health_check import HealthCheckSkill
 from yolovest.skills.ingest_data import IngestDataSkill
+from yolovest.skills.ingest_fno import IngestFnoSkill
 from yolovest.skills.ingest_premarket import IngestPremarketSkill
 from yolovest.skills.ingest_universe import IngestUniverseSkill
+from yolovest.skills.ingest_vix import IngestVixSkill
 from yolovest.skills.kill_switch import KillSwitchSkill
 from yolovest.skills.llm_review import LLMReviewSkill
 from yolovest.skills.market_scan import MarketScanSkill
@@ -31,8 +33,10 @@ SKILL_REGISTRY: dict[str, type] = {
     "backfill-data": BackfillDataSkill,
     "backfill-intraday": BackfillIntradaySkill,
     "ingest-data": IngestDataSkill,
+    "ingest-fno": IngestFnoSkill,
     "ingest-premarket": IngestPremarketSkill,
     "ingest-universe": IngestUniverseSkill,
+    "ingest-vix": IngestVixSkill,
     "market-scan": MarketScanSkill,
     "generate-signals": GenerateSignalsSkill,
     "risk-check": RiskCheckSkill,

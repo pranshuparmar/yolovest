@@ -18,6 +18,9 @@ import logging
 from datetime import datetime, time, timedelta
 from typing import Any
 from yolovest.data.features import IndicatorConfig, compute_features
+from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
+from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
+from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 from yolovest.timezone import IST, now_ist
 
@@ -169,6 +172,33 @@ class GenerateSignalsSkill(SkillBase):
 
         now = now_ist()
 
+        # India VIX is a broadcast series — every symbol on this run gets
+        # the same trailing-window value. Load once, before the per-symbol
+        # loop. Empty result → neutral VIX features at compute time.
+        vix_timeline: list[tuple[str, float]] = []
+        try:
+            vix_timeline = await self.ctx.db.get_vix_timeline(
+                date_from=(now - timedelta(days=40)).strftime("%Y-%m-%d"),
+            )
+        except Exception:
+            logger.debug("VIX timeline load failed; defaulting to neutral", exc_info=True)
+        _today_str = now.strftime("%Y-%m-%d")
+        if vix_timeline:
+            _vix_feats_today = compute_vix_features(vix_timeline, _today_str)
+        else:
+            _vix_feats_today = {k: 0.0 for k in VIX_FEATURE_KEYS}
+
+        # F&O option-chain timeline. Per-symbol lookup; misses → neutral.
+        # Only the last 3 days are needed to derive today's oi_change_pct
+        # and oi_buildup vs yesterday — keep the read window tight.
+        fno_lookup: dict[str, list[tuple[str, dict[str, float]]]] = {}
+        try:
+            fno_lookup = await self.ctx.db.get_fno_timeline(
+                date_from=(now - timedelta(days=5)).strftime("%Y-%m-%d"),
+            )
+        except Exception:
+            logger.debug("F&O timeline load failed; defaulting to neutral", exc_info=True)
+
         for stock in watchlist:
             symbol = stock["symbol"]
             # NOTE: We intentionally do NOT setdefault False here. Only
@@ -256,6 +286,54 @@ class GenerateSignalsSkill(SkillBase):
                     })
                     logger.info("Feature computation failed for %s", symbol)
                     continue
+
+                # Merge live news-sentiment features. Pulls the symbol's
+                # headlines from the last 7 days; compute_news_features
+                # bucketises into 24h / 7d windows. Failures are silently
+                # neutralised — model is robust to NEWS_FEATURE_KEYS=0.
+                try:
+                    news_from = (now - timedelta(days=7)).isoformat()
+                    news_rows = await self.ctx.db.get_news_articles(
+                        symbol=symbol, date_from=news_from, limit=500,
+                    )
+                    headlines: list[tuple[str, datetime]] = []
+                    for row in news_rows:
+                        pub_raw = row.get("published_at")
+                        if not pub_raw:
+                            continue
+                        try:
+                            dt = datetime.fromisoformat(pub_raw)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=IST)
+                        except (ValueError, TypeError):
+                            continue
+                        headlines.append((row.get("headline", ""), dt))
+                    features.update(compute_news_features(headlines, now))
+                except Exception:
+                    logger.debug("News-feature merge failed for %s", symbol, exc_info=True)
+                    features.update({k: 0.0 for k in NEWS_FEATURE_KEYS})
+
+                # India VIX regime features. Same dict for every symbol
+                # on this run — the timeline was loaded once above.
+                features.update(_vix_feats_today)
+
+                # F&O derivatives features. Only F&O-eligible names have
+                # a row; misses return is_fno_stock=0 + others 0. Use the
+                # last two equity closes from the daily_bars window to
+                # drive the oi_buildup classification.
+                _sym_fno = fno_lookup.get(symbol)
+                if _sym_fno:
+                    _prior_close = (
+                        daily_bars[-2].close if len(daily_bars) >= 2 else None
+                    )
+                    _current_close = daily_bars[-1].close
+                    features.update(compute_fno_features(
+                        _sym_fno, _today_str,
+                        prior_stock_close=_prior_close,
+                        current_stock_close=_current_close,
+                    ))
+                else:
+                    features.update({k: 0.0 for k in FNO_FEATURE_KEYS})
 
                 # Fetch fresh LTP for accurate entry/target/SL pricing
                 current_price: float | None = None

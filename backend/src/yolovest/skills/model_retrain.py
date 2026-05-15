@@ -19,9 +19,20 @@ Flow:
 import logging
 from typing import Any
 
-from yolovest.data.features import IndicatorConfig, compute_features, merge_feedback_features
+from datetime import datetime, timedelta
+
+from yolovest.data.features import (
+    MODEL_FEATURE_EXCLUSIONS,
+    IndicatorConfig,
+    compute_features,
+    merge_feedback_features,
+)
+from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
+from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
+from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
 from yolovest.models.schemas import OHLCVBar
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+from yolovest.timezone import IST
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +102,68 @@ class ModelRetrainSkill(SkillBase):
                 exc_info=True,
             )
 
+        # News-sentiment lookup: symbol → list of (headline, published_at_iso),
+        # sorted by published_at. Built once so per-sample VADER aggregation
+        # avoids the N+1 query trap. Window is max_training_days + 7 so the
+        # earliest training sample still has a full 7d news window behind it.
+        news_lookup: dict[str, list[tuple[str, str]]] = {}
+        try:
+            news_from = (
+                datetime.now(IST) - timedelta(days=cfg.max_training_days + 7)
+            ).strftime("%Y-%m-%d")
+            news_lookup = await self.ctx.db.get_news_timeline(date_from=news_from)
+            logger.info(
+                "News timeline: %d symbols with headlines since %s",
+                len(news_lookup), news_from,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to load news timeline; news features will be neutral",
+                exc_info=True,
+            )
+
+        # India VIX timeline: single broadcast series shared across every
+        # symbol on a given date. Window extends 30 calendar days past the
+        # earliest training sample so the trailing-20d z-score has full
+        # history at every sample. Empty list → neutral features at
+        # compute time; no crash.
+        vix_timeline: list[tuple[str, float]] = []
+        try:
+            vix_from = (
+                datetime.now(IST) - timedelta(days=cfg.max_training_days + 30)
+            ).strftime("%Y-%m-%d")
+            vix_timeline = await self.ctx.db.get_vix_timeline(date_from=vix_from)
+            logger.info(
+                "VIX timeline: %d daily bars since %s",
+                len(vix_timeline), vix_from,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to load VIX timeline; VIX features will be neutral",
+                exc_info=True,
+            )
+
+        # F&O option-chain timeline. Per-symbol lookup → list of
+        # (date_str, agg_row). Forward-only (no historical backfill
+        # available from Kite), so older training rows return
+        # is_fno_stock=0 / others=0 and the model learns to weight
+        # these features only when present.
+        fno_lookup: dict[str, list[tuple[str, dict[str, float]]]] = {}
+        try:
+            fno_from = (
+                datetime.now(IST) - timedelta(days=cfg.max_training_days + 2)
+            ).strftime("%Y-%m-%d")
+            fno_lookup = await self.ctx.db.get_fno_timeline(date_from=fno_from)
+            logger.info(
+                "F&O timeline: %d underlyings with daily aggregates since %s",
+                len(fno_lookup), fno_from,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to load F&O timeline; F&O features will be neutral",
+                exc_info=True,
+            )
+
         # Load feedback data for the ML feedback loop
         feedback_cfg = self.ctx.config.strategy.feedback
         feedback_data: dict[str, dict[str, float]] | None = None
@@ -145,6 +218,9 @@ class ModelRetrainSkill(SkillBase):
                 target_atr_mult=target_mult, sl_atr_mult=sl_mult,
                 sector_map=sector_map,
                 bulk_deal_lookup=bulk_deal_lookup,
+                news_lookup=news_lookup,
+                vix_timeline=vix_timeline,
+                fno_lookup=fno_lookup,
             )
             if len(y) < min_samples:
                 logger.warning(
@@ -412,6 +488,9 @@ class ModelRetrainSkill(SkillBase):
         sl_atr_mult: float = 0.75,
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
+        news_lookup: dict[str, list[tuple[str, str]]] | None = None,
+        vix_timeline: list[tuple[str, float]] | None = None,
+        fno_lookup: dict[str, list[tuple[str, dict[str, float]]]] | None = None,
     ) -> tuple[
         list[list[float]], list[int], list[str], list[float],
         list[dict[str, Any]],
@@ -494,6 +573,23 @@ class ModelRetrainSkill(SkillBase):
             bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
         for v in bulk_dates_by_sym.values():
             v.sort()
+
+        # News-sentiment lookup: parse published_at once per article so the
+        # per-sample loop can binary-slice the symbol's headline timeline.
+        news_lookup = news_lookup or {}
+        news_parsed_by_sym: dict[str, list[tuple[str, datetime]]] = {}
+        for sym_key, entries in news_lookup.items():
+            parsed: list[tuple[str, datetime]] = []
+            for headline, published_at in entries:
+                try:
+                    dt = datetime.fromisoformat(published_at)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=IST)
+                    parsed.append((headline, dt))
+                except (ValueError, TypeError):
+                    continue
+            if parsed:
+                news_parsed_by_sym[sym_key] = parsed
 
         for sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
@@ -612,6 +708,50 @@ class ModelRetrainSkill(SkillBase):
                 else:
                     features["delivery_pct_avg_5d"] = 0.0
 
+                # News-sentiment features. Slice the symbol's pre-parsed
+                # headline timeline to entries published before this bar's
+                # timestamp; compute_news_features handles the 24h / 7d
+                # window aggregation. Bar timestamps in training_data are
+                # naive; coerce to IST to match the parsed published_at
+                # tz so the window-cutoff comparisons stay correct.
+                _bar_ts = bars[i].timestamp
+                if _bar_ts.tzinfo is None:
+                    _bar_ts = _bar_ts.replace(tzinfo=IST)
+                _sym_news = news_parsed_by_sym.get(sym)
+                if _sym_news:
+                    news_feats = compute_news_features(_sym_news, _bar_ts)
+                else:
+                    news_feats = {k: 0.0 for k in NEWS_FEATURE_KEYS}
+                features.update(news_feats)
+
+                # India VIX regime features. Single broadcast series — every
+                # symbol on the same _sample_date sees identical VIX values.
+                # compute_vix_features handles the trailing-window slicing.
+                if vix_timeline:
+                    vix_feats = compute_vix_features(vix_timeline, _sample_date)
+                else:
+                    vix_feats = {k: 0.0 for k in VIX_FEATURE_KEYS}
+                features.update(vix_feats)
+
+                # F&O derivatives features. Only F&O-eligible symbols have
+                # rows in the timeline; misses return is_fno_stock=0 and
+                # the model learns to weight these features only when
+                # present. Pass equity closes from the OHLCV window so the
+                # oi_buildup classification uses the canonical underlying
+                # price change instead of the futures close (which can
+                # diverge near expiry).
+                _sym_fno = (fno_lookup or {}).get(sym)
+                if _sym_fno:
+                    _prior_close = bars[i - 1].close if i >= 1 else None
+                    fno_feats = compute_fno_features(
+                        _sym_fno, _sample_date,
+                        prior_stock_close=_prior_close,
+                        current_stock_close=bars[i].close,
+                    )
+                else:
+                    fno_feats = {k: 0.0 for k in FNO_FEATURE_KEYS}
+                features.update(fno_feats)
+
                 # Path-aware label: BUY iff target hits before SL when
                 # walking forward bar-by-bar, using the same ATR-based
                 # geometry the live trades use. Replaces the legacy
@@ -639,7 +779,14 @@ class ModelRetrainSkill(SkillBase):
                 # didn't have. When that happens, extend feature_names
                 # and backfill 0.0 into every prior row so np.array(X)
                 # ends up rectangular instead of inhomogeneous.
+                # MODEL_FEATURE_EXCLUSIONS gates out raw absolute prices /
+                # levels (close, ema_*, obv, ...) that don't transfer
+                # across stocks at different price levels — they stay in
+                # the features dict for the inference layer's entry-price
+                # lookups but the trained model never sees them.
                 for k in features:
+                    if k in MODEL_FEATURE_EXCLUSIONS:
+                        continue
                     if k not in feature_names_set:
                         feature_names.append(k)
                         feature_names_set.add(k)

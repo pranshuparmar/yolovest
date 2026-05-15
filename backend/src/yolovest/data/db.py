@@ -1531,6 +1531,140 @@ class Database:
             for r in await cursor.fetchall()
         ]
 
+    async def get_news_timeline(
+        self, date_from: str | None = None,
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Return all news headlines grouped by symbol since date_from.
+
+        Each entry is (headline, published_at_iso). Used by model_retrain
+        to compute per-(symbol, as_of) sentiment features without an
+        N+1 query per sample — one scan, fan-out in Python.
+        """
+        query = (
+            "SELECT headline, symbols, published_at FROM news_articles "
+            "WHERE published_at IS NOT NULL"
+        )
+        params: list[Any] = []
+        if date_from:
+            query += " AND published_at >= ?"
+            params.append(date_from)
+        rows = await self.read_conn.execute_fetchall(query, tuple(params))
+        out: dict[str, list[tuple[str, str]]] = {}
+        for r in rows:
+            headline, symbols_raw, published_at = r[0], r[1], r[2]
+            if not symbols_raw:
+                continue
+            try:
+                symbols = json.loads(symbols_raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for sym in symbols:
+                if not isinstance(sym, str) or not sym:
+                    continue
+                out.setdefault(sym, []).append((headline, published_at))
+        for sym in out:
+            out[sym].sort(key=lambda x: x[1])
+        return out
+
+    async def upsert_fno_daily(
+        self, date_str: str, aggregates: dict[str, dict[str, float]],
+    ) -> int:
+        """Insert today's F&O aggregates. UPSERT semantics so the skill
+        can be re-run safely if the cron fires twice (idempotent).
+        Returns count of rows upserted.
+        """
+        if not aggregates:
+            return 0
+        rows = [
+            (
+                date_str,
+                symbol,
+                agg.get("pcr_oi"),
+                agg.get("pcr_volume"),
+                agg.get("futures_oi"),
+                agg.get("futures_volume"),
+                agg.get("futures_close"),
+            )
+            for symbol, agg in aggregates.items()
+        ]
+        await self.conn.executemany(
+            "INSERT INTO fno_daily "
+            "(date, symbol, pcr_oi, pcr_volume, futures_oi, "
+            "futures_volume, futures_close) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(symbol, date) DO UPDATE SET "
+            "pcr_oi=excluded.pcr_oi, pcr_volume=excluded.pcr_volume, "
+            "futures_oi=excluded.futures_oi, "
+            "futures_volume=excluded.futures_volume, "
+            "futures_close=excluded.futures_close, "
+            "created_at=datetime('now')",
+            rows,
+        )
+        await self.conn.commit()
+        return len(rows)
+
+    async def get_fno_timeline(
+        self, date_from: str | None = None,
+    ) -> dict[str, list[tuple[str, dict[str, float]]]]:
+        """Return F&O aggregates grouped by symbol, ascending by date.
+
+        Used by model_retrain to bind per-(symbol, date) features without
+        an N+1 query per sample — one scan, fan-out in Python. Same
+        shape as get_news_timeline.
+        """
+        query = (
+            "SELECT date, symbol, pcr_oi, pcr_volume, futures_oi, "
+            "futures_volume, futures_close FROM fno_daily WHERE 1=1"
+        )
+        params: list[Any] = []
+        if date_from:
+            query += " AND date >= ?"
+            params.append(date_from)
+        query += " ORDER BY symbol, date"
+        rows = await self.read_conn.execute_fetchall(query, tuple(params))
+        out: dict[str, list[tuple[str, dict[str, float]]]] = {}
+        for r in rows:
+            row_dict = {
+                "pcr_oi": r[2],
+                "pcr_volume": r[3],
+                "futures_oi": r[4],
+                "futures_volume": r[5],
+                "futures_close": r[6],
+            }
+            out.setdefault(r[1], []).append((r[0], row_dict))
+        return out
+
+    async def get_vix_timeline(
+        self, date_from: str | None = None,
+    ) -> list[tuple[str, float]]:
+        """Return India VIX daily close history as (date_str, close), oldest first.
+
+        Reads from ohlcv where symbol='INDIA VIX' and interval='daily'.
+        Used by model_retrain to bind per-sample VIX regime features and
+        by ingest-vix's cold-start guard to decide whether to backfill.
+        """
+        query = (
+            "SELECT timestamp, close FROM ohlcv "
+            "WHERE symbol = 'INDIA VIX' AND interval = 'daily'"
+        )
+        params: list[Any] = []
+        if date_from:
+            query += " AND timestamp >= ?"
+            params.append(date_from)
+        query += " ORDER BY timestamp"
+        rows = await self.read_conn.execute_fetchall(query, tuple(params))
+        out: list[tuple[str, float]] = []
+        for r in rows:
+            ts_raw = r[0]
+            close = r[1]
+            if close is None:
+                continue
+            # ohlcv.timestamp is ISO datetime; the date portion is what
+            # we join against in model_retrain. Strip cheaply.
+            date_str = ts_raw.split("T")[0] if "T" in ts_raw else ts_raw[:10]
+            out.append((date_str, float(close)))
+        return out
+
     async def get_prediction_outcomes(self) -> list[dict[str, Any]]:
         """Load predictions with actual outcomes for retraining analysis."""
         cursor = await self.conn.execute(
