@@ -1812,6 +1812,12 @@ class Database:
         """Persist bulk/block deals. `deal_date` defaults to today (IST).
         Returns the number of new rows inserted (duplicates ignored via
         unique constraint).
+
+        Skips rows where every payload field beyond symbol is empty.
+        Without this guard, a schema change at NSE that renames the
+        client_name / buy_sell / quantity / trade_price keys would
+        produce one symbol-only row per heartbeat, with the unique
+        constraint not catching the dupes (SQLite treats NULL ≠ NULL).
         """
         if not deals:
             return 0
@@ -1819,9 +1825,23 @@ class Database:
         before = (await (await self.conn.execute(
             "SELECT COUNT(*) FROM bulk_deals WHERE deal_date = ?", (ts,),
         )).fetchone())[0]
+        skipped_empty = 0
         for d in deals:
             sym = str(d.get("symbol") or "").strip()
             if not sym:
+                continue
+            client_raw = d.get("client_name")
+            bs_raw = d.get("buy_sell")
+            qty_raw = d.get("quantity")
+            price_raw = d.get("trade_price")
+            client = str(client_raw or "").strip()
+            bs = str(bs_raw or "").strip()
+            qty_val = int(qty_raw or 0) or None
+            price_val = float(price_raw or 0.0) or None
+            # Reject rows that are symbol-only — likely a parser-vs-API
+            # schema mismatch, not a real deal worth persisting.
+            if not client and not bs and qty_val is None and price_val is None:
+                skipped_empty += 1
                 continue
             await self.conn.execute(
                 "INSERT OR IGNORE INTO bulk_deals "
@@ -1830,13 +1850,16 @@ class Database:
                 (
                     ts, sym,
                     str(d.get("deal_type") or "bulk"),
-                    str(d.get("client_name") or ""),
-                    str(d.get("buy_sell") or ""),
-                    int(d.get("quantity") or 0) or None,
-                    float(d.get("trade_price") or 0.0) or None,
+                    client, bs, qty_val, price_val,
                 ),
             )
         await self.conn.commit()
+        if skipped_empty:
+            logger.warning(
+                "upsert_bulk_deals: skipped %d symbol-only rows (likely "
+                "NSE schema mismatch — only deal_type/symbol present)",
+                skipped_empty,
+            )
         after = (await (await self.conn.execute(
             "SELECT COUNT(*) FROM bulk_deals WHERE deal_date = ?", (ts,),
         )).fetchone())[0]

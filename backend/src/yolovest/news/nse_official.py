@@ -434,15 +434,34 @@ class NSEOfficialSource(NewsSource):
 
     @staticmethod
     def _normalize_deal(item: dict[str, Any], deal_type: str) -> dict[str, Any]:
-        """Normalize a bulk/block deal entry to a consistent dict."""
+        """Normalize a bulk/block deal entry to a consistent dict.
+
+        NSE has shipped at least two different field naming
+        conventions for this endpoint over time:
+          - lowercase camel: symbol / clientName / buySell / quantity / tradePrice
+          - prefixed upper:   BD_SYMBOL / BD_CLIENT_NAME / BD_BUY_SELL /
+                              BD_QTY_TRD / BD_TP_WATP
+        Try the candidates in order and use the first non-empty hit.
+        Without this, a schema change silently fills the table with
+        rows that have only a symbol and "block"/"bulk" type, every
+        other field empty.
+        """
+        def _first(*keys: str, default: Any = "") -> Any:
+            for k in keys:
+                v = item.get(k)
+                if v not in (None, ""):
+                    return v
+            return default
+
         return {
-            "symbol": str(item.get("symbol", "")),
+            "symbol": str(_first("symbol", "BD_SYMBOL", "tradingSymbol", default="")),
             "deal_type": deal_type,
-            "client_name": str(item.get("clientName", "")),
-            "buy_sell": str(item.get("buySell", "")),
-            "quantity": item.get("quantity") or item.get("qty"),
-            "trade_price": item.get("tradePrice")
-            or item.get("weightedAvgPrice"),
+            "client_name": str(_first("clientName", "BD_CLIENT_NAME", default="")),
+            "buy_sell": str(_first("buySell", "BD_BUY_SELL", default="")),
+            "quantity": _first("quantity", "qty", "BD_QTY_TRD", default=None),
+            "trade_price": _first(
+                "tradePrice", "weightedAvgPrice", "BD_TP_WATP", default=None,
+            ),
         }
 
     @staticmethod
