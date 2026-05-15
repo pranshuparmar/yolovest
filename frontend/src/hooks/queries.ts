@@ -796,6 +796,8 @@ export function useClearTodaysSignals() {
       qc.invalidateQueries({ queryKey: ["signals"] });
       qc.invalidateQueries({ queryKey: ["trades"] });
       qc.invalidateQueries({ queryKey: ["system-status"] });
+      qc.invalidateQueries({ queryKey: ["recommendations"] });
+      qc.invalidateQueries({ queryKey: ["signal-class-distribution"] });
     },
   });
 }
