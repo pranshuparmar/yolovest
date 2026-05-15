@@ -56,6 +56,18 @@ def compute_features(
     features["high"] = highs[-1]
     features["low"] = lows[-1]
 
+    # Time-of-day signal. Intraday setups that work in the 9:15–11:00 morning
+    # window often fail in the 11:30–14:00 chop zone and again differ in the
+    # 14:00–15:30 hour. Daily bars don't have a meaningful time of day, so
+    # the feature evaluates to 0 for those — model can treat that as
+    # "ignore me" via tree splits. Last bar's timestamp drives the value.
+    _bar_min = _minutes_since_open(bars[-1].timestamp)
+    if _bar_min is not None:
+        features["minutes_since_open"] = float(_bar_min)
+        # Normalised 0..1 over a 375-min trading day so trees can split
+        # cleanly across regimes (open, mid, close).
+        features["day_phase"] = min(max(_bar_min / 375.0, 0.0), 1.0)
+
     if cfg.rsi:
         rsi = compute_rsi(closes, period=14)
         if rsi is not None:
@@ -123,6 +135,12 @@ def merge_feedback_features(
     features["fb_trade_win_rate"] = fb.get("trade_win_rate", 0.5)
     features["fb_trade_avg_pnl"] = fb.get("trade_avg_pnl", 0.0)
     features["fb_trade_avg_slippage"] = fb.get("trade_avg_slippage_pct", 0.0)
+    # Recent-loss count (over the feedback lookback window). Lets the
+    # model deprioritise symbols that have been bleeding lately — same
+    # data agent_memory tracks but exposed as a model feature so the
+    # learned scoring can react automatically rather than via hardcoded
+    # cooldowns alone.
+    features["fb_recent_loss_count"] = fb.get("trade_loss_count", 0.0)
     features["fb_has_data"] = 1.0 if has_data else 0.0
 
 
@@ -374,3 +392,26 @@ def _ema_series(values: list[float], period: int) -> list[float] | None:
         ema.append((values[i] - ema[-1]) * multiplier + ema[-1])
 
     return ema
+
+
+def _minutes_since_open(ts: str | None) -> int | None:
+    """Minutes elapsed since 09:15 IST market open for the given timestamp.
+
+    Returns None for daily bars or unparseable timestamps. Negative
+    values (pre-market) are clamped to 0; post-close values keep
+    rolling so the model can distinguish closing-auction-period bars.
+    """
+    if not ts:
+        return None
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    # Daily timestamps lack hour info → time component is 00:00:00,
+    # which would always return -555 minutes (before 09:15). Treat as
+    # daily bar with no time-of-day signal.
+    if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+        return None
+    minutes = dt.hour * 60 + dt.minute - (9 * 60 + 15)
+    return max(0, minutes)

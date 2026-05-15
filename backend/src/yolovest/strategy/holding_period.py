@@ -16,17 +16,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# ATR multiplier interpolation anchors: (days, target_mult, sl_mult)
-# Used to interpolate ATR multipliers for any holding duration.
-_INTERP_ANCHORS = [
-    (0, 0.75, 0.5),   # intraday — capture half the daily range
-    (3, 1.5, 0.75),   # short swing
-    (5, 2.5, 1.2),    # week
-    (15, 3.5, 1.5),   # 2-3 weeks
-    (44, 4.5, 2.0),   # ~2 months
-    (66, 5.5, 2.5),   # ~3 months
-]
-
 # Reference ATR% for "normal" volatility (mid-cap average).
 # Stocks with higher ATR% need fewer days; lower ATR% need more.
 _REFERENCE_ATR_PCT = 0.02  # 2%
@@ -301,6 +290,63 @@ def interpolate_atr_multipliers(
 
     # Fallback (shouldn't reach here)
     return (anchors[-1][1], anchors[-1][2])
+
+
+def apply_session_caps(
+    signal_type: str,
+    target: float,
+    stop_loss: float,
+    quote: dict[str, Any],
+) -> tuple[float, float, list[str]]:
+    """Constrain target/SL by exchange circuit limits.
+
+    Only the upper/lower circuit limits are real forward boundaries —
+    orders at or beyond them physically cannot fill. Today's session
+    high/low are intentionally not enforced (they're current extremes,
+    not forward caps; breakouts past them are legitimate).
+
+    Caps applied (for BUY; SELL mirrors):
+      - target < upper_circuit (hard cap at 99% of circuit)
+      - stop_loss > lower_circuit (hard floor at 101% of circuit)
+
+    Returns:
+        (new_target, new_stop_loss, list_of_adjustment_messages)
+
+    No-op for any field missing from `quote`.
+    """
+    upper_circuit = quote.get("upper_circuit")
+    lower_circuit = quote.get("lower_circuit")
+    adjustments: list[str] = []
+
+    if signal_type == "BUY":
+        if upper_circuit and target >= upper_circuit:
+            new_target = upper_circuit * 0.99
+            adjustments.append(
+                f"target {target:.2f} → {new_target:.2f} (upper circuit {upper_circuit:.2f})"
+            )
+            target = new_target
+        if lower_circuit and stop_loss <= lower_circuit:
+            new_sl = lower_circuit * 1.01
+            adjustments.append(
+                f"SL {stop_loss:.2f} → {new_sl:.2f} (lower circuit {lower_circuit:.2f})"
+            )
+            stop_loss = new_sl
+
+    elif signal_type == "SELL":
+        if lower_circuit and target <= lower_circuit:
+            new_target = lower_circuit * 1.01
+            adjustments.append(
+                f"target {target:.2f} → {new_target:.2f} (lower circuit {lower_circuit:.2f})"
+            )
+            target = new_target
+        if upper_circuit and stop_loss >= upper_circuit:
+            new_sl = upper_circuit * 0.99
+            adjustments.append(
+                f"SL {stop_loss:.2f} → {new_sl:.2f} (upper circuit {upper_circuit:.2f})"
+            )
+            stop_loss = new_sl
+
+    return target, stop_loss, adjustments
 
 
 def adjust_sell_for_holdings(

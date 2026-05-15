@@ -23,6 +23,21 @@ class TestMigrationSystem:
         version = await db.get_schema_version()
         assert version >= 1
 
+    def test_split_sql_ignores_semicolons_inside_line_comments(self, db):
+        """Regression: an SQL line comment containing a semicolon (e.g.
+        '-- GTT applies to CNC only; MIS rows skip') used to break the
+        splitter into a fragment starting with the post-semicolon prose."""
+        sql = (
+            "-- header with a semicolon; should not split here\n"
+            "-- second comment line\n"
+            "ALTER TABLE foo ADD COLUMN bar INTEGER;\n"
+            "CREATE INDEX idx_foo_bar ON foo(bar);\n"
+        )
+        stmts = db._split_sql(sql)
+        assert len(stmts) == 2
+        assert stmts[0].upper().startswith("ALTER TABLE")
+        assert stmts[1].upper().startswith("CREATE INDEX")
+
     async def test_migration_is_idempotent(self, db):
         """Running initialize() twice should not fail or re-apply migrations."""
         version_before = await db.get_schema_version()
@@ -241,6 +256,292 @@ class TestWatchlist:
         result = await db.get_watchlist()
         assert len(result) == 1
         assert result[0]["symbol"] == "TCS"
+
+    async def test_shadow_prediction_stores_mode(self, db):
+        """Regression: insert_shadow_prediction must store the trading mode.
+        Previously omitted the mode column, so all shadow predictions
+        defaulted to 'paper' in the DB even when generated in live mode —
+        polluting paper analytics and confusing bulk delete by mode."""
+        pred_id = await db.insert_shadow_prediction({
+            "symbol": "RELIANCE",
+            "predicted_direction": "BUY",
+            "predicted_target": 100.0,
+            "predicted_stop_loss": 90.0,
+            "expected_holding_period": "intraday",
+            "model_version": "swing_v1",
+            "mode": "live",
+        })
+        row = await db.read_conn.execute(
+            "SELECT mode, is_shadow FROM predictions WHERE prediction_id = ?",
+            (pred_id,),
+        )
+        result = await row.fetchone()
+        assert result is not None
+        assert result[0] == "live"
+        assert result[1] == 1  # is_shadow
+
+    async def test_shadow_prediction_defaults_to_paper(self, db):
+        """If caller doesn't pass mode (legacy code path), default to paper."""
+        pred_id = await db.insert_shadow_prediction({
+            "symbol": "RELIANCE",
+            "predicted_direction": "BUY",
+            "predicted_target": 100.0,
+            "predicted_stop_loss": 90.0,
+            "expected_holding_period": "intraday",
+            "model_version": "swing_v1",
+        })
+        row = await db.read_conn.execute(
+            "SELECT mode FROM predictions WHERE prediction_id = ?",
+            (pred_id,),
+        )
+        result = await row.fetchone()
+        assert result[0] == "paper"
+
+    async def test_score_prediction_sets_scored_at(self, db):
+        """Regression: feedback queries filter on predictions.scored_at;
+        score_prediction must populate it."""
+        pred_id = await db.insert_prediction({
+            "symbol": "RELIANCE",
+            "trade_id": None,
+            "predicted_direction": "BUY",
+            "predicted_target": 100.0,
+            "predicted_stop_loss": 90.0,
+            "expected_holding_period": "intraday",
+            "model_version": "swing_v1",
+            "mode": "live",
+        })
+        await db.score_prediction(
+            prediction_id=pred_id,
+            actual_price=105.0,
+            direction_correct=True,
+            target_hit=True,
+            actual_pnl_pct=5.0,
+        )
+        row = await db.read_conn.execute(
+            "SELECT scored_at FROM predictions WHERE prediction_id = ?",
+            (pred_id,),
+        )
+        result = await row.fetchone()
+        assert result[0] is not None  # populated with datetime('now')
+
+    async def test_get_feedback_data_does_not_raise(self, db):
+        """Regression: 'no such column: p.scored_at' from feedback query."""
+        # Empty DB — should still execute the query without error
+        data = await db.get_feedback_data(lookback_days=14)
+        assert isinstance(data, dict)
+
+
+class TestPendingDispositionSync:
+    """Pending lifecycle must keep signals.disposition in sync so the
+    Today's Recommendations panel doesn't show stale 'awaiting_approval'
+    after expire/reject."""
+
+    async def _seed(self, db, symbol: str = "RELIANCE"):
+        # Insert a signal at awaiting_approval and a matching pending row
+        await db.insert_signal({
+            "symbol": symbol, "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "mode": "paper",
+        })
+        await db.update_signal_disposition(
+            symbol, "awaiting_approval", "queued"
+        )
+        pid = await db.insert_pending_trade({
+            "symbol": symbol, "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "product": "MIS",
+            "mode": "paper",
+        })
+        return pid
+
+    async def test_reject_flips_signal_disposition(self, db):
+        pid = await self._seed(db, "RELIANCE")
+
+        await db.decide_pending_trade(pid, "rejected", "dashboard")
+
+        cur = await db.read_conn.execute(
+            "SELECT disposition FROM signals WHERE symbol = ?",
+            ("RELIANCE",),
+        )
+        row = await cur.fetchone()
+        assert row[0] == "rejected"
+
+    async def test_expire_flips_signal_disposition(self, db):
+        await self._seed(db, "TCS")
+        # Force the pending row to be older than the expiry window
+        await db.conn.execute(
+            "UPDATE pending_trades SET created_at = '2000-01-01T00:00:00' "
+            "WHERE symbol = 'TCS'"
+        )
+        await db.conn.commit()
+
+        await db.expire_pending_trades(max_age_minutes=30)
+
+        cur = await db.read_conn.execute(
+            "SELECT disposition FROM signals WHERE symbol = ?",
+            ("TCS",),
+        )
+        row = await cur.fetchone()
+        assert row[0] == "expired"
+
+
+class TestBulkDelete:
+    """Regression: bulk_delete([paper|live]) previously wiped ALL rows
+    from signals / pending_trades — there was no mode column on those
+    tables, so the code just deleted everything. Now those tables are
+    skipped in paper/live groups and have their own dedicated groups."""
+
+    async def _insert_prediction(self, db, mode: str) -> str:
+        return await db.insert_prediction({
+            "symbol": "RELIANCE",
+            "trade_id": None,
+            "predicted_direction": "BUY",
+            "predicted_target": 100.0,
+            "predicted_stop_loss": 90.0,
+            "expected_holding_period": "intraday",
+            "model_version": "swing_v1",
+            "mode": mode,
+        })
+
+    async def test_paper_delete_preserves_live_predictions(self, db):
+        live_pred = await self._insert_prediction(db, "live")
+        paper_pred = await self._insert_prediction(db, "paper")
+
+        result = await db.bulk_delete("paper")
+
+        assert result.get("predictions", 0) == 1
+        # Live prediction must survive
+        cur = await db.read_conn.execute(
+            "SELECT prediction_id FROM predictions WHERE mode = 'live'"
+        )
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == live_pred
+        # Paper prediction gone
+        cur = await db.read_conn.execute(
+            "SELECT prediction_id FROM predictions WHERE prediction_id = ?",
+            (paper_pred,),
+        )
+        assert await cur.fetchone() is None
+
+    async def test_paper_delete_only_removes_paper_signals(self, db):
+        await db.insert_signal({
+            "symbol": "RELIANCE", "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "mode": "paper",
+        })
+        await db.insert_signal({
+            "symbol": "TCS", "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "mode": "live",
+        })
+
+        await db.bulk_delete("paper")
+
+        cur = await db.read_conn.execute("SELECT symbol, mode FROM signals")
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "TCS"
+        assert rows[0][1] == "live"
+
+    async def test_paper_delete_only_removes_paper_pending_trades(self, db):
+        await db.insert_pending_trade({
+            "symbol": "RELIANCE", "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "mode": "paper",
+        })
+        await db.insert_pending_trade({
+            "symbol": "TCS", "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+            "mode": "live",
+        })
+
+        await db.bulk_delete("paper")
+
+        cur = await db.read_conn.execute("SELECT symbol, mode FROM pending_trades")
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "TCS"
+        assert rows[0][1] == "live"
+
+    async def test_insert_signal_defaults_to_paper_mode(self, db):
+        """If caller forgets to set mode, signal lands in paper bucket."""
+        await db.insert_signal({
+            "symbol": "RELIANCE", "signal_type": "BUY",
+            "entry_price": 100.0, "target_price": 105.0,
+            "stop_loss_price": 95.0, "position_size": 1,
+            "confidence_score": 0.7, "model_version": "v1",
+        })
+        cur = await db.read_conn.execute("SELECT mode FROM signals")
+        assert (await cur.fetchone())[0] == "paper"
+
+    async def test_signals_group_clears_signals(self, db):
+        for _ in range(3):
+            await db.insert_signal({
+                "symbol": "RELIANCE", "signal_type": "BUY",
+                "entry_price": 100.0, "target_price": 105.0,
+                "stop_loss_price": 95.0, "position_size": 1,
+                "confidence_score": 0.7, "model_version": "v1",
+            })
+
+        result = await db.bulk_delete("signals")
+
+        assert result["signals"] == 3
+        cur = await db.read_conn.execute("SELECT COUNT(*) FROM signals")
+        assert (await cur.fetchone())[0] == 0
+
+    async def test_pending_trades_group_exists(self, db):
+        """Dedicated bulk group for clearing pending trades."""
+        result = await db.bulk_delete("pending_trades")
+        # Empty DB — just verify the group is recognized
+        assert "pending_trades" in result
+
+    async def test_unknown_group_raises(self, db):
+        import pytest
+        with pytest.raises(ValueError):
+            await db.bulk_delete("not_a_group")
+
+    async def test_upsert_watchlist_concurrent_with_other_write(self, db):
+        """Regression: upsert_watchlist must not raise
+        'cannot start a transaction within a transaction' when another
+        coro is writing on the same connection. Previously the explicit
+        BEGIN clashed with the implicit auto-begin from a concurrent DML.
+        """
+        import asyncio
+        from datetime import datetime
+        from yolovest.models.schemas import OHLCVBar
+
+        bars = [
+            OHLCVBar(
+                timestamp=datetime(2026, 5, 1),
+                open=100, high=101, low=99, close=100.5, volume=1000,
+            ),
+        ]
+
+        async def writer_a():
+            for _ in range(5):
+                await db.upsert_ohlcv("RELIANCE", "daily", bars, "test")
+
+        async def writer_b():
+            for i in range(5):
+                await db.upsert_watchlist([
+                    {"symbol": f"SYM{i}", "composite_score": 0.5, "sector": "Test"},
+                ])
+
+        # Should complete without raising 'transaction within a transaction'
+        await asyncio.gather(writer_a(), writer_b())
 
 
 class TestOpenPositions:

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { usePendingTrades, useApprovePendingTrade, useRejectPendingTrade, useClearTodaysSignals } from "../hooks/queries";
+import { useLtpStream } from "../hooks/useLtpStream";
 import clsx from "clsx";
+import { SymbolLink } from "./SymbolLink";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -54,7 +56,9 @@ function OverrideRow({
 
   return (
     <tr className="border-b border-amber-800/30 bg-amber-950/20">
-      <td className="py-2 px-3 font-medium text-amber-300">{trade.symbol}</td>
+      <td className="py-2 px-3 font-medium text-amber-300">
+        <SymbolLink symbol={trade.symbol} className="text-amber-300" />
+      </td>
       <td className="py-2 px-3 text-center">
         <select
           value={signalType}
@@ -95,6 +99,9 @@ function OverrideRow({
           )}
         />
       </td>
+      {/* LTP column placeholder — only the read row populates it; edit
+          mode keeps the slot for alignment. */}
+      <td className="py-2 px-3 text-right text-gray-600 font-mono">—</td>
       <td className="py-2 px-3">
         <input
           type="number"
@@ -131,6 +138,9 @@ function OverrideRow({
             qty !== trade.position_size ? "border-amber-500" : "border-gray-700",
           )}
         />
+      </td>
+      <td className="py-2 px-3 text-right font-mono text-gray-300">
+        {"₹"}{fmt(entry * qty, 0)}
       </td>
       <td className="py-2 px-3 text-center">
         <div className="flex items-center justify-center gap-1.5">
@@ -181,8 +191,15 @@ export function PendingTradesBanner() {
   const approve = useApprovePendingTrade();
   const reject = useRejectPendingTrade();
   const [editingId, setEditingId] = useState<number | null>(null);
+  const ltps = useLtpStream();
 
   if (!pending || pending.length === 0) return null;
+
+  const totalQty = pending.reduce((sum, t) => sum + t.position_size, 0);
+  const totalInvestment = pending.reduce(
+    (sum, t) => sum + t.entry_price * t.position_size,
+    0,
+  );
 
   const handleApproveAll = () => {
     if (!window.confirm(`Approve all ${pending.length} pending trades?`)) return;
@@ -197,12 +214,23 @@ export function PendingTradesBanner() {
   return (
     <div className="bg-amber-900/20 border border-amber-800 rounded-lg overflow-hidden">
       <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-2 border-b border-amber-800/50">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-x-3 gap-y-1 flex-wrap">
           <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
           <h3 className="text-sm font-semibold text-amber-400">
             {pending.length} trade{pending.length > 1 ? "s" : ""} awaiting approval
           </h3>
-          <span className="text-xs text-gray-500">Click Edit to override before approving</span>
+          <span className="text-xs text-gray-500">·</span>
+          <span className="text-xs text-gray-400">
+            Total qty <span className="text-gray-200 font-medium">{totalQty}</span>
+          </span>
+          <span className="text-xs text-gray-500">·</span>
+          <span className="text-xs text-gray-400">
+            Investment{" "}
+            <span className="text-amber-300 font-semibold font-mono">
+              {"₹"}{fmt(totalInvestment, 0)}
+            </span>
+          </span>
+          <span className="text-xs text-gray-500 w-full md:w-auto">Click Edit to override before approving</span>
         </div>
         <div className="flex items-center gap-2">
           {pending.length > 1 && (
@@ -235,9 +263,11 @@ export function PendingTradesBanner() {
               <th className="py-2 px-3 text-center">Signal</th>
               <th className="py-2 px-3 text-center">Product</th>
               <th className="py-2 px-3 text-right">Entry</th>
+              <th className="py-2 px-3 text-right">LTP</th>
               <th className="py-2 px-3 text-right">Target</th>
               <th className="py-2 px-3 text-right">SL</th>
               <th className="py-2 px-3 text-right">Qty</th>
+              <th className="py-2 px-3 text-right">Investment</th>
               <th className="py-2 px-3 text-center">Actions</th>
             </tr>
           </thead>
@@ -258,7 +288,9 @@ export function PendingTradesBanner() {
                 />
               ) : (
                 <tr key={t.id} className="border-b border-gray-800/30 hover:bg-gray-800/20">
-                  <td className="py-2 px-3 font-medium text-gray-200">{t.symbol}</td>
+                  <td className="py-2 px-3 font-medium text-gray-200">
+                    <SymbolLink symbol={t.symbol} className="text-gray-200" />
+                  </td>
                   <td className="py-2 px-3 text-center">
                     <span
                       className={clsx(
@@ -284,9 +316,27 @@ export function PendingTradesBanner() {
                     </span>
                   </td>
                   <td className="py-2 px-3 text-right font-mono text-gray-300">{fmt(t.entry_price)}</td>
+                  <td className="py-2 px-3 text-right font-mono">
+                    {(() => {
+                      const ltp = ltps.get(t.symbol);
+                      if (!ltp) return <span className="text-gray-600">—</span>;
+                      const drift = ((ltp - t.entry_price) / t.entry_price) * 100;
+                      const cls =
+                        Math.abs(drift) < 0.25 ? "text-gray-300"
+                        : (drift > 0 ? "text-emerald-400" : "text-red-400");
+                      return (
+                        <span className={cls} title={`${drift >= 0 ? "+" : ""}${drift.toFixed(2)}% vs entry`}>
+                          {fmt(ltp)}
+                        </span>
+                      );
+                    })()}
+                  </td>
                   <td className="py-2 px-3 text-right font-mono text-emerald-400">{fmt(t.target_price)}</td>
                   <td className="py-2 px-3 text-right font-mono text-red-400">{fmt(t.stop_loss_price)}</td>
                   <td className="py-2 px-3 text-right text-gray-400">{t.position_size}</td>
+                  <td className="py-2 px-3 text-right font-mono text-gray-300">
+                    {"₹"}{fmt(t.entry_price * t.position_size, 0)}
+                  </td>
                   <td className="py-2 px-3 text-center">
                     <div className="flex items-center justify-center gap-1.5">
                       <button

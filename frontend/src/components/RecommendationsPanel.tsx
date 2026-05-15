@@ -1,7 +1,9 @@
 import { useState } from "react";
 import clsx from "clsx";
 import { useRecommendations } from "../hooks/queries";
+import { useLtpStream } from "../hooks/useLtpStream";
 import type { Recommendation, SignalDisposition } from "../types/api";
+import { SymbolLink } from "./SymbolLink";
 
 const DISPOSITION_LABELS: Record<SignalDisposition, string> = {
   pending: "Pending",
@@ -9,6 +11,8 @@ const DISPOSITION_LABELS: Record<SignalDisposition, string> = {
   llm_rejected: "LLM Rejected",
   awaiting_approval: "Awaiting Approval",
   executed: "Executed",
+  expired: "Expired",
+  rejected: "Rejected",
   recently_rejected_dedup: "Cooldown",
 };
 
@@ -18,6 +22,8 @@ const DISPOSITION_STYLES: Record<SignalDisposition, string> = {
   llm_rejected: "bg-red-900/50 text-red-300",
   awaiting_approval: "bg-blue-900/50 text-blue-300",
   executed: "bg-emerald-900/50 text-emerald-300",
+  expired: "bg-amber-900/50 text-amber-300",
+  rejected: "bg-rose-900/50 text-rose-300",
   recently_rejected_dedup: "bg-gray-700 text-gray-400",
 };
 
@@ -37,10 +43,21 @@ function timeAgo(iso: string) {
   return `${Math.floor(ageSec / 86400)}d ago`;
 }
 
-function RecommendationRow({ r }: { r: Recommendation }) {
+function RecommendationRow({ r, ltp }: { r: Recommendation; ltp?: number }) {
   const [expanded, setExpanded] = useState(false);
   const sigColor = r.signal_type === "BUY" ? "text-emerald-400" : "text-red-400";
   const dispKey: SignalDisposition = (r.disposition || "pending") as SignalDisposition;
+  // Drift = signed % move from entry to LTP. Sign matters because a SELL
+  // at ₹100 with LTP ₹98 is +2% in our favour, whereas the same drift
+  // for a BUY would be -2%. Render in the directionally-correct color
+  // so a glance at the row tells you "good" vs "bad" without arithmetic.
+  let driftPct: number | null = null;
+  let driftFavorable: boolean | null = null;
+  if (ltp && r.entry_price) {
+    const raw = ((ltp - r.entry_price) / r.entry_price) * 100;
+    driftPct = raw;
+    driftFavorable = r.signal_type === "BUY" ? raw < 0 : raw > 0;
+  }
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg">
       <button
@@ -51,10 +68,27 @@ function RecommendationRow({ r }: { r: Recommendation }) {
           <span className={clsx("text-xs font-bold w-10 shrink-0", sigColor)}>
             {r.signal_type}
           </span>
-          <span className="font-medium text-gray-100 truncate">{r.symbol}</span>
+          <span className="font-medium text-gray-100 truncate">
+            <SymbolLink symbol={r.symbol} className="text-gray-100" />
+          </span>
           <span className="text-xs text-gray-500">
             ₹{fmt(r.entry_price)} × {r.position_size}
           </span>
+          {ltp != null && driftPct != null && (
+            <span
+              className={clsx(
+                "text-xs font-mono",
+                Math.abs(driftPct) < 0.05
+                  ? "text-gray-400"
+                  : driftFavorable
+                    ? "text-emerald-400"
+                    : "text-red-400",
+              )}
+              title={`LTP ₹${fmt(ltp)} (${driftPct >= 0 ? "+" : ""}${driftPct.toFixed(2)}% vs entry)`}
+            >
+              LTP ₹{fmt(ltp)} ({driftPct >= 0 ? "+" : ""}{driftPct.toFixed(2)}%)
+            </span>
+          )}
           <span className="text-xs text-gray-500 hidden md:inline">
             conf {(r.confidence_score * 100).toFixed(0)}%
           </span>
@@ -107,6 +141,7 @@ function RecommendationRow({ r }: { r: Recommendation }) {
 
 export function RecommendationsPanel() {
   const { data, isLoading } = useRecommendations();
+  const ltps = useLtpStream();
   const [filter, setFilter] = useState<SignalDisposition | "all">("all");
 
   if (isLoading) {
@@ -134,12 +169,27 @@ export function RecommendationsPanel() {
     acc[k] = (acc[k] || 0) + 1;
     return acc;
   }, {});
+  // "Pending" in the UI means "in flight" — covers both freshly-generated
+  // signals that haven't passed risk-check yet (disposition NULL → falls
+  // back to "pending") AND signals queued for the user's manual approval
+  // (disposition "awaiting_approval"). Both surface the same PENDING
+  // badge on the row, so the filter has to match the same shape.
+  const pendingCount = (counts.pending || 0) + (counts.awaiting_approval || 0);
 
-  const filtered = filter === "all" ? items : items.filter((r) => r.disposition === filter);
+  const filtered =
+    filter === "all"
+      ? items
+      : filter === "awaiting_approval"
+        ? items.filter(
+            (r) => !r.disposition || r.disposition === "awaiting_approval",
+          )
+        : items.filter((r) => r.disposition === filter);
   const filterButtons: Array<{ key: SignalDisposition | "all"; label: string }> = [
     { key: "all", label: `All (${items.length})` },
     { key: "executed", label: `Executed (${counts.executed || 0})` },
-    { key: "awaiting_approval", label: `Pending (${counts.awaiting_approval || 0})` },
+    { key: "awaiting_approval", label: `Pending (${pendingCount})` },
+    { key: "expired", label: `Expired (${counts.expired || 0})` },
+    { key: "rejected", label: `Rejected (${counts.rejected || 0})` },
     { key: "risk_rejected", label: `Risk Blocked (${counts.risk_rejected || 0})` },
     { key: "llm_rejected", label: `LLM Rejected (${counts.llm_rejected || 0})` },
   ];
@@ -172,7 +222,7 @@ export function RecommendationsPanel() {
       ) : (
         <div className="space-y-2">
           {filtered.map((r) => (
-            <RecommendationRow key={r.id} r={r} />
+            <RecommendationRow key={r.id} r={r} ltp={ltps.get(r.symbol)} />
           ))}
         </div>
       )}

@@ -121,6 +121,26 @@ class HeartbeatOrchestrator:
             "market_hours": self._ctx.market_hours.is_market_hours(),
         })
 
+        # Sweep abandoned pending trades before anything else. Risk-check
+        # counts pending notional and pending count toward exposure /
+        # max_open_positions / max_trades_per_day, so a forgotten pending
+        # silently locks those budgets and chokes off signal generation
+        # for the rest of the day. Previously this only ran when the
+        # dashboard polled /api/pending-trades, which Telegram-only users
+        # never trigger.
+        try:
+            expiry_min = self._ctx.config.execution.pending_expiry_minutes
+            expired_count = await self._ctx.db.expire_pending_trades(
+                max_age_minutes=expiry_min,
+            )
+            if expired_count:
+                logger.info(
+                    "Heartbeat: auto-expired %d pending trade(s) (>%dmin old)",
+                    expired_count, expiry_min,
+                )
+        except Exception:
+            logger.debug("Pending-trade auto-expiry failed", exc_info=True)
+
         # --- Step 1: health-check (ABORT on failure) ---
         health_result = await self._run_skill("health-check")
         results["health-check"] = health_result
@@ -170,7 +190,21 @@ class HeartbeatOrchestrator:
             return results
 
         # --- Step 5: Per-signal chain ---
+        # Process highest-conviction signals first. The portfolio-exposure
+        # cap is a binding constraint when several signals fire on the
+        # same heartbeat — earlier signals consume budget that later
+        # ones can't get back. Sorting by confidence descending means
+        # the best signals get evaluated first, and a low-conviction
+        # signal can't block a high-conviction one purely because of
+        # its position in the list.
         signals = signals_result.data.get("signals", [])
+        signals = sorted(
+            signals,
+            key=lambda s: float(
+                (s.get("confidence_score") if isinstance(s, dict) else 0) or 0
+            ),
+            reverse=True,
+        )
         signal_pipeline = []
         for i, signal in enumerate(signals):
             signal_results = await self._execute_signal_chain(signal, i)
@@ -238,8 +272,23 @@ class HeartbeatOrchestrator:
         symbol = self._signal_symbol(signal)
         if not symbol:
             return
+        # Pull the post-risk-check position_size off the signal so the
+        # signals row stops showing the model's placeholder 1.
+        size: int | None = None
+        if isinstance(signal, dict):
+            raw = signal.get("position_size")
+        else:
+            raw = getattr(signal, "position_size", None)
         try:
-            await self._ctx.db.update_signal_disposition(symbol, disposition, reason)
+            size = int(raw) if raw else None
+        except (TypeError, ValueError):
+            size = None
+        try:
+            await self._ctx.db.update_signal_disposition(
+                symbol, disposition, reason,
+                position_size=size,
+                mode=self._ctx.config.mode,
+            )
         except Exception:
             logger.debug("Failed to update signal disposition", exc_info=True)
 
@@ -263,8 +312,12 @@ class HeartbeatOrchestrator:
         risk_result = await self._run_skill("risk-check", signal=signal)
         results[f"{prefix}/risk-check"] = risk_result
         if not risk_result.success:
+            # Skill threw an exception (not a clean rejection). Marking
+            # this as 'risk_rejected' would burn the retry cap on a
+            # persistent bug; mark it distinctly so the retry-cap math
+            # only counts genuine risk decisions.
             logger.info("risk-check failed for signal %d — skipping", index)
-            await self._set_disposition(signal, "risk_rejected", "risk-check skill failed")
+            await self._set_disposition(signal, "skill_error", "risk-check skill failed")
             return results
 
         # Check risk approval and use adjusted signal
@@ -340,10 +393,15 @@ class HeartbeatOrchestrator:
                     )
                     return results
 
+            signal.setdefault("mode", self._ctx.config.mode)
             pending_id = await self._ctx.db.insert_pending_trade(signal)
             await self._set_disposition(
                 signal, "awaiting_approval", f"pending_id={pending_id}"
             )
+            await self._broadcast("pending_queued", {
+                "trade_id": pending_id,
+                "symbol": self._signal_symbol(signal),
+            })
             symbol = sym_for_dedup or "?"
             sig_type = signal.get("signal_type", "?") if isinstance(signal, dict) else "?"
             conf = signal.get("confidence_score", 0) if isinstance(signal, dict) else 0
@@ -387,17 +445,16 @@ class HeartbeatOrchestrator:
         if not trade_result.success:
             symbol = signal.get("symbol", "?") if isinstance(signal, dict) else "?"
             logger.warning("trade-execute failed for signal %d (%s): %s", index, symbol, trade_result.error)
-            # Remove signal from DB so it's not blocked by already_signaled dedup
-            # and can be regenerated on the next heartbeat
-            try:
-                await self._ctx.db.conn.execute(
-                    "DELETE FROM signals WHERE symbol = ? AND created_at >= ?",
-                    (symbol, self._today_start()),
-                )
-                await self._ctx.db.conn.commit()
-                logger.info("Removed failed signal for %s so it can be retried next heartbeat", symbol)
-            except Exception:
-                logger.debug("Failed to remove signal for %s", symbol, exc_info=True)
+            # Mark the signal as trade_execute_failed (retryable, see
+            # get_todays_signaled_symbols) instead of DELETEing the row.
+            # The old DELETE wiped all of today's signal rows for the
+            # symbol — losing audit history for prior risk-rejections,
+            # adopted positions, etc. that happened to have the same
+            # symbol earlier in the day.
+            await self._set_disposition(
+                signal, "trade_execute_failed",
+                trade_result.error or "trade-execute failed",
+            )
             await self._ctx.notify.send(
                 f"Trade execution failed for {symbol}: {trade_result.error}",
                 alert_type="errors",
@@ -437,6 +494,15 @@ class HeartbeatOrchestrator:
             )
 
         logger.info("Running skill: %s", name)
+        # Broadcast stage start so the dashboard can render a per-skill
+        # progress chip instead of just "heartbeat running" for 30-60s.
+        # skill_completed event is already broadcast separately when
+        # the skill finishes (via _on_skill_complete in main.py).
+        try:
+            await self._broadcast("heartbeat_stage", {"skill": name, "status": "started"})
+        except Exception:
+            logger.debug("heartbeat_stage broadcast failed", exc_info=True)
+
         # Timeout to prevent a hung skill from blocking the entire heartbeat
         _SKILL_TIMEOUT_SEC = 300  # 5 minutes max per skill
         try:

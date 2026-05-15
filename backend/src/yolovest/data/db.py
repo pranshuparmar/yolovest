@@ -39,6 +39,12 @@ class Database:
         self._migrations_dir = migrations_dir or _DEFAULT_MIGRATIONS_DIR
         self._conn: aiosqlite.Connection | None = None
         self._read_conn: aiosqlite.Connection | None = None
+        # Cached storage_stats result. Each COUNT(*)+MIN/MAX over the
+        # large tables (ohlcv, audit_log, predictions) is a full scan;
+        # the page was waiting on 7 of them serially. Stats shift
+        # slowly so a short TTL is fine.
+        self._storage_stats_cache: dict[str, Any] | None = None
+        self._storage_stats_cache_at: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -181,7 +187,6 @@ class Database:
 
                 # Run remaining statements in a transaction
                 if other_stmts:
-                    await self.conn.execute("BEGIN")
                     try:
                         for stmt in other_stmts:
                             await self.conn.execute(stmt)
@@ -204,8 +209,18 @@ class Database:
 
     @staticmethod
     def _split_sql(sql: str) -> list[str]:
-        """Split SQL text into individual statements, skipping empty ones."""
-        return [s.strip() for s in sql.split(";") if s.strip()]
+        """Split SQL text into individual statements, skipping empty ones.
+
+        Strips ``--`` line comments first so that semicolons inside
+        commented prose don't fragment the statement on the wrong
+        boundary.
+        """
+        lines = [
+            line for line in sql.splitlines()
+            if not line.lstrip().startswith("--")
+        ]
+        cleaned = "\n".join(lines)
+        return [s.strip() for s in cleaned.split(";") if s.strip()]
 
     async def get_schema_version(self) -> int:
         """Return the highest applied migration version, or 0 if none."""
@@ -287,7 +302,9 @@ class Database:
         """Upsert multiple config values in a single transaction. Returns count."""
         if not items:
             return 0
-        await self.conn.execute("BEGIN")
+        # First DML auto-begins a transaction (Python sqlite3 default
+        # isolation_level). Explicit BEGIN would conflict with concurrent
+        # writers sharing the same aiosqlite connection.
         try:
             for key, value in items.items():
                 await self.conn.execute(
@@ -347,6 +364,45 @@ class Database:
         await self.conn.commit()
         return len(rows)
 
+    async def update_delivery_pct(
+        self, symbol: str, delivery_pct: float, date_str: str | None = None,
+    ) -> bool:
+        """Stamp `delivery_pct` on the daily bar for `symbol` on
+        `date_str` (defaults to today IST). Used as both a live
+        institutional-conviction signal and a future ML feature.
+        Returns True when a row was updated.
+        """
+        ts = date_str or now_ist().strftime("%Y-%m-%d")
+        cursor = await self.conn.execute(
+            "UPDATE ohlcv SET delivery_pct = ? "
+            "WHERE symbol = ? AND interval = 'daily' "
+            "  AND substr(timestamp, 1, 10) = ?",
+            (float(delivery_pct), symbol, ts),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def get_recent_delivery_pct(
+        self, symbol: str, lookback_days: int = 5,
+    ) -> float | None:
+        """Average delivery % over the last N daily bars for a symbol,
+        or None when no data is available. Used by both risk_check
+        (live conviction signal) and model_retrain (ML feature).
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT AVG(delivery_pct) FROM ("
+            "  SELECT delivery_pct FROM ohlcv "
+            "  WHERE symbol = ? AND interval = 'daily' "
+            "    AND delivery_pct IS NOT NULL "
+            "  ORDER BY timestamp DESC LIMIT ?"
+            ")",
+            (symbol, int(lookback_days)),
+        )
+        row = await cursor.fetchone()
+        if not row or row[0] is None:
+            return None
+        return float(row[0])
+
     async def get_ohlcv(
         self, symbol: str, interval: str, days: int = 30
     ) -> list[OHLCVBar]:
@@ -375,12 +431,53 @@ class Database:
         ]
 
     # ------------------------------------------------------------------
+    # Symbol sectors (canonical lookup populated from NSE constituents)
+    # ------------------------------------------------------------------
+
+    async def upsert_symbol_sectors(self, records: list[dict[str, str]]) -> int:
+        """Bulk-upsert sector / industry records keyed by symbol.
+
+        `records` is a list of `{"symbol", "industry"}` (and optionally
+        "sector"). We treat the CSV's Industry as the sector when no
+        explicit sector is provided — niftyindices.com only exposes
+        Industry but it's specific enough to drive sector-cap logic.
+
+        Returns the number of rows touched.
+        """
+        if not records:
+            return 0
+        ts = now_utc().isoformat()
+        touched = 0
+        for r in records:
+            sym = (r.get("symbol") or "").upper()
+            if not sym:
+                continue
+            sector = r.get("sector") or r.get("industry") or None
+            industry = r.get("industry") or None
+            await self.conn.execute(
+                "INSERT INTO symbol_sectors (symbol, sector, industry, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(symbol) DO UPDATE SET "
+                "  sector = COALESCE(excluded.sector, symbol_sectors.sector), "
+                "  industry = COALESCE(excluded.industry, symbol_sectors.industry), "
+                "  updated_at = excluded.updated_at",
+                (sym, sector, industry, ts),
+            )
+            touched += 1
+        await self.conn.commit()
+        return touched
+
+    # ------------------------------------------------------------------
     # Watchlist
     # ------------------------------------------------------------------
 
     async def upsert_watchlist(self, stocks: list[dict[str, Any]]) -> None:
-        """Replace watchlist with new scored stocks (atomic)."""
-        await self.conn.execute("BEGIN")
+        """Replace watchlist with new scored stocks (atomic).
+
+        Relies on Python sqlite3's default deferred isolation: the first
+        DML auto-begins, commit() ends. Explicit BEGIN here would conflict
+        with any other concurrent writer on the same connection.
+        """
         try:
             await self.conn.execute("DELETE FROM watchlist")
             for stock in stocks:
@@ -404,11 +501,20 @@ class Database:
             raise
 
     async def get_watchlist(self) -> list[dict[str, Any]]:
-        """Get current watchlist ordered by composite score."""
+        """Get current watchlist ordered by composite score.
+
+        Sector is resolved via COALESCE(symbol_sectors, watchlist) so
+        rows added before ingest-universe populated the canonical lookup
+        still show their sector once it's available.
+        """
         cursor = await self.read_conn.execute(
-            "SELECT symbol, composite_score, technical_score, volume_momentum_score, "
-            "news_sentiment_score, fundamental_score, sector, updated_at "
-            "FROM watchlist ORDER BY composite_score DESC"
+            "SELECT w.symbol, w.composite_score, w.technical_score, "
+            "w.volume_momentum_score, w.news_sentiment_score, "
+            "w.fundamental_score, COALESCE(ss.sector, w.sector) as sector, "
+            "w.updated_at "
+            "FROM watchlist w "
+            "LEFT JOIN symbol_sectors ss ON w.symbol = ss.symbol "
+            "ORDER BY w.composite_score DESC"
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
@@ -578,6 +684,34 @@ class Database:
         )
         rows = await cursor.fetchall()
         return {row[0] for row in rows}
+
+    async def clear_rotation_cooldown(self, symbol: str | None = None) -> int:
+        """One-shot reset of the watchlist-rotation cooldown. When the
+        threshold/cooldown defaults were too aggressive, ~80% of a
+        nifty500 universe could end up benched within hours. This
+        clears the cooldown flag (and resets the streak counter) so
+        market-scan immediately reconsiders the affected symbols.
+        Pass a symbol to clear just that row; otherwise clears all.
+        Returns the number of rows affected.
+        """
+        if not await self._table_exists("watchlist_signal_stats"):
+            return 0
+        if symbol:
+            cursor = await self.conn.execute(
+                "UPDATE watchlist_signal_stats "
+                "SET no_signal_streak = 0, cooldown_until = NULL, "
+                "    updated_at = datetime('now') "
+                "WHERE symbol = ?",
+                (symbol.upper(),),
+            )
+        else:
+            cursor = await self.conn.execute(
+                "UPDATE watchlist_signal_stats "
+                "SET no_signal_streak = 0, cooldown_until = NULL, "
+                "    updated_at = datetime('now')",
+            )
+        await self.conn.commit()
+        return cursor.rowcount or 0
 
     # ------------------------------------------------------------------
     # Positions (read from trades table)
@@ -891,11 +1025,19 @@ class Database:
     # ------------------------------------------------------------------
 
     async def insert_signal(self, signal: dict[str, Any]) -> None:
-        """Persist a generated signal."""
+        """Persist a generated signal. Caller should set `mode` to the
+        active trading mode so bulk-delete and analytics can scope by it.
+        attribution_json holds the top-N feature contributions surfaced
+        on TradeDetailPage; None when the ML layer couldn't compute
+        them (e.g. booster unreachable through calibration wrapper).
+        """
+        attribution = signal.get("attribution")
+        attribution_json = json.dumps(attribution) if attribution else None
         await self.conn.execute(
             "INSERT INTO signals (symbol, signal_type, entry_price, target_price, "
             "stop_loss_price, position_size, confidence_score, model_version, "
-            "features_snapshot, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            "features_snapshot, mode, attribution_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
             (
                 signal["symbol"],
                 signal["signal_type"],
@@ -906,6 +1048,8 @@ class Database:
                 signal["confidence_score"],
                 signal.get("model_version", ""),
                 json.dumps(signal.get("features_snapshot", {})),
+                signal.get("mode", "paper"),
+                attribution_json,
             ),
         )
         await self.conn.commit()
@@ -915,17 +1059,55 @@ class Database:
         symbol: str,
         disposition: str,
         reason: str | None = None,
+        position_size: int | None = None,
+        mode: str | None = None,
     ) -> None:
-        """Update disposition for the most recent signal for a symbol today."""
-        today_start = now_ist().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ).astimezone(UTC).isoformat()
-        await self.conn.execute(
-            "UPDATE signals SET disposition = ?, disposition_reason = ? "
-            "WHERE id = (SELECT id FROM signals WHERE symbol = ? AND created_at >= ? "
-            "ORDER BY created_at DESC LIMIT 1)",
-            (disposition, reason, symbol, today_start),
-        )
+        """Update disposition for the most recent signal for a symbol today.
+
+        Matches on the date-prefix substring (first 10 chars) of
+        created_at so the comparison works whether the row was stored
+        with SQLite's space-separator format (`2026-05-13 04:18:30`)
+        from `datetime('now')` or the ISO 'T' format from explicit
+        Python timestamps.
+
+        When mode is provided, the update is scoped to rows of that
+        mode so a live execution can't accidentally flip a stale paper
+        signal's disposition (or vice versa).
+        """
+        today_ist = now_ist().strftime("%Y-%m-%d")
+        mode_clause = " AND mode = ?" if mode else ""
+        # ml_signal seeds position_size=1 as a placeholder; risk-check
+        # determines the real number. Update both columns here so the
+        # signals row reflects the actual planned size when this
+        # function is called from the dispatch path (which has the
+        # post-risk-check value handy). When the caller doesn't pass
+        # position_size, leave it untouched via COALESCE.
+        if position_size is not None and position_size > 0:
+            params: tuple[Any, ...] = (
+                disposition, reason, int(position_size), symbol, today_ist,
+            )
+            if mode:
+                params = params + (mode,)
+            await self.conn.execute(
+                "UPDATE signals "
+                "SET disposition = ?, disposition_reason = ?, "
+                "    position_size = ? "
+                "WHERE id = (SELECT id FROM signals WHERE symbol = ? "
+                f"AND substr(created_at, 1, 10) = ?{mode_clause} "
+                "ORDER BY created_at DESC LIMIT 1)",
+                params,
+            )
+        else:
+            params = (disposition, reason, symbol, today_ist)
+            if mode:
+                params = params + (mode,)
+            await self.conn.execute(
+                "UPDATE signals SET disposition = ?, disposition_reason = ? "
+                "WHERE id = (SELECT id FROM signals WHERE symbol = ? "
+                f"AND substr(created_at, 1, 10) = ?{mode_clause} "
+                "ORDER BY created_at DESC LIMIT 1)",
+                params,
+            )
         await self.conn.commit()
 
     async def get_todays_recommendations(self) -> list[dict[str, Any]]:
@@ -936,34 +1118,68 @@ class Database:
         cursor = await self.read_conn.execute(
             "SELECT id, symbol, signal_type, entry_price, target_price, "
             "stop_loss_price, position_size, confidence_score, model_version, "
-            "disposition, disposition_reason, created_at "
+            "disposition, disposition_reason, attribution_json, created_at "
             "FROM signals WHERE created_at >= ? ORDER BY created_at DESC",
             (today_start,),
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
 
-    async def get_todays_signaled_symbols(self, mode: str | None = None) -> set[str]:
+    async def get_todays_signaled_symbols(
+        self, mode: str | None = None,
+        risk_rejected_retry_cap: int = 5,
+    ) -> set[str]:
         """Get symbols that should be skipped from new signal generation today.
 
         Includes:
-        - Symbols with signals already generated today (avoid duplicates)
-        - Symbols with open SYSTEM-generated positions in the current mode
-          (avoid double-trading)
+        - Symbols with non-retryable signals today (executed,
+          llm_rejected, awaiting_approval, or in-flight NULL).
+        - Symbols whose retryable-disposition count (risk_rejected,
+          expired) has reached risk_rejected_retry_cap — guard against
+          chronically-failing setups generating a fresh row every
+          heartbeat.
+        - Symbols with open SYSTEM-generated positions in the current
+          mode (avoid double-trading).
 
-        Excludes:
-        - Adopted holdings — we still want ML signals for them so the user
-          can get exit/buy-more recommendations.
-        - Positions from the other mode (paper vs live should not interfere).
+        Retryable dispositions (re-evaluated when count < cap):
+        - risk_rejected: most risk-check reasons (exposure, drift,
+          depth, correlation, cooldown) clear within the same day.
+        - expired: the user didn't approve in time, but conditions may
+          still favour the setup — give it another shot. Hard "no"
+          should come via /reject, which routes through the separate
+          rejection_cooldown_hours mechanism.
+        - trade_execute_failed: the broker rejected the order or the
+          skill crashed — usually a transient condition.
+        - skill_error: risk-check or llm-review itself threw an
+          exception. Treated as retryable so a persistent skill bug
+          doesn't burn the cap on the *risk decision* side; the cap
+          still protects against churn loops.
         """
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).astimezone(UTC).isoformat()
 
-        # Symbols with signals generated today
+        # Symbols where dedup applies — either has at least one
+        # non-retryable signal today (count_other > 0) or the retryable
+        # budget is exhausted (count_retryable >= cap). Mode-scoped so
+        # paper signals don't block live and vice versa.
+        retryable = (
+            'risk_rejected', 'expired',
+            'trade_execute_failed', 'skill_error',
+        )
+        placeholders = ", ".join(["?"] * len(retryable))
+        mode_clause = " AND mode = ?" if mode else ""
+        sig_params: tuple[Any, ...] = (today_start,)
+        if mode:
+            sig_params = sig_params + (mode,)
+        sig_params = sig_params + retryable + retryable + (int(risk_rejected_retry_cap),)
         cursor = await self.read_conn.execute(
-            "SELECT DISTINCT symbol FROM signals WHERE created_at >= ?",
-            (today_start,),
+            "SELECT symbol FROM signals "
+            f"WHERE created_at >= ?{mode_clause} "
+            "GROUP BY symbol "
+            f"HAVING SUM(CASE WHEN disposition IN ({placeholders}) THEN 0 ELSE 1 END) > 0 "
+            f"   OR SUM(CASE WHEN disposition IN ({placeholders}) THEN 1 ELSE 0 END) >= ?",
+            sig_params,
         )
         signaled = {row[0] for row in await cursor.fetchall()}
 
@@ -983,7 +1199,20 @@ class Database:
         return signaled | positioned
 
     async def clear_todays_signals(self) -> dict[str, int]:
-        """Clear today's signals and expired/pending trades to allow regeneration.
+        """Clear today's actionable signals so the next heartbeat can
+        regenerate fresh ones. Preserves:
+          - `executed` rows (real trades happened — keep the audit link)
+          - `rejected` rows (user explicitly said no — don't re-suggest)
+
+        Deletes everything else: NULL (never processed), `awaiting_approval`,
+        `risk_rejected`, `llm_rejected`, and `expired`. Pending trades in
+        `pending` / `expired` state are also dropped so the symbols are
+        free for re-evaluation.
+
+        Cascades to predictions.signal_id since the schema has no ON
+        DELETE CASCADE — without that, foreign_keys=ON would reject
+        the DELETE on signals that already have a linked prediction
+        (typical after a full heartbeat ran predict-track).
 
         Returns counts of deleted rows per table.
         """
@@ -991,8 +1220,29 @@ class Database:
             hour=0, minute=0, second=0, microsecond=0
         ).astimezone(UTC).isoformat()
 
+        # First null out predictions.signal_id for rows we're about to
+        # delete from signals. NULLing instead of cascading because the
+        # predictions table is part of the model-drift audit trail —
+        # we don't want to lose the scored outcomes just because the
+        # source signal was re-evaluated.
+        await self.conn.execute(
+            "UPDATE predictions SET signal_id = NULL "
+            "WHERE signal_id IN ("
+            "  SELECT id FROM signals WHERE created_at >= ? "
+            "  AND (disposition IS NULL "
+            "       OR disposition IN ('awaiting_approval', 'risk_rejected', "
+            "                          'llm_rejected', 'expired'))"
+            ")",
+            (today_start,),
+        )
+
         cursor = await self.conn.execute(
-            "DELETE FROM signals WHERE created_at >= ?", (today_start,),
+            "DELETE FROM signals "
+            "WHERE created_at >= ? "
+            "AND (disposition IS NULL "
+            "     OR disposition IN ('awaiting_approval', 'risk_rejected', "
+            "                        'llm_rejected', 'expired'))",
+            (today_start,),
         )
         signals_deleted = cursor.rowcount
 
@@ -1003,7 +1253,7 @@ class Database:
 
         await self.conn.commit()
         logger.info(
-            "Cleared %d signals (today) and %d pending/expired trades",
+            "Cleared %d signals (today, non-terminal) and %d pending/expired trades",
             signals_deleted, pending_deleted,
         )
         return {"signals_deleted": signals_deleted, "pending_deleted": pending_deleted}
@@ -1058,6 +1308,32 @@ class Database:
         )
         await self.conn.commit()
 
+    async def get_stale_fundamentals_symbols(
+        self, symbols: list[str], max_age_hours: int = 24,
+    ) -> list[str]:
+        """Return the subset of `symbols` that need a fundamentals refresh.
+
+        A symbol is "stale" if it has no row in `fundamentals` yet, or its
+        `updated_at` is older than `max_age_hours`. Order is preserved.
+
+        Fundamentals only move at quarterly result announcements, so a
+        24h refresh window is generous. Used by ingest-data to avoid
+        hitting Screener.in / Trendlyne for symbols we already refreshed
+        recently — those scrapers self-throttle at 2s/symbol and would
+        otherwise blow the per-source ingest budget.
+        """
+        if not symbols:
+            return []
+        placeholders = ",".join("?" for _ in symbols)
+        cutoff_expr = f"datetime('now', '-{int(max_age_hours)} hours')"
+        cur = await self.conn.execute(
+            f"SELECT symbol FROM fundamentals "
+            f"WHERE symbol IN ({placeholders}) AND updated_at >= {cutoff_expr}",
+            list(symbols),
+        )
+        fresh = {row[0] for row in await cur.fetchall()}
+        return [s for s in symbols if s not in fresh]
+
     # ------------------------------------------------------------------
     # NSE Universe
     # ------------------------------------------------------------------
@@ -1074,17 +1350,21 @@ class Database:
         from datetime import timedelta
         sentiment_cutoff = (now_utc() - timedelta(hours=sentiment_ttl_hours)).isoformat()
 
+        # Prefer the canonical sector from symbol_sectors (populated by
+        # ingest-universe from the NSE Industry column). Fall back to
+        # watchlist.sector for symbols the user added manually.
         cursor = await self.read_conn.execute(
             "SELECT o.symbol, "
             "  AVG(o.volume) as avg_daily_volume, "
             "  CASE WHEN s.created_at >= ? THEN s.sentiment ELSE NULL END as sentiment, "
             "  CASE WHEN s.created_at >= ? THEN s.confidence ELSE NULL END as sentiment_confidence, "
             "  f.pe_ratio, f.debt_to_equity, f.promoter_holding_pct, "
-            "  w.sector "
+            "  COALESCE(ss.sector, w.sector) as sector "
             "FROM ohlcv o "
             "LEFT JOIN sentiment s ON o.symbol = s.symbol "
             "LEFT JOIN fundamentals f ON o.symbol = f.symbol "
             "LEFT JOIN watchlist w ON o.symbol = w.symbol "
+            "LEFT JOIN symbol_sectors ss ON o.symbol = ss.symbol "
             "WHERE o.interval = 'daily' "
             "AND o.symbol NOT IN ("
             "  SELECT symbol FROM quarantined_symbols WHERE quarantined_at IS NOT NULL"
@@ -1132,8 +1412,12 @@ class Database:
         return dict[str, Any](row) if row else None
 
     async def promote_model(self, model_type: str, version: str) -> None:
-        """Promote a shadow model to production, retire the current production."""
-        await self.conn.execute("BEGIN")
+        """Promote a shadow model to production, retire the current production.
+
+        First UPDATE auto-begins the transaction (Python sqlite3 default
+        deferred isolation), commit() ends it. Explicit BEGIN omitted —
+        it conflicts when other writers are active on the same connection.
+        """
         try:
             # Retire current production
             await self.conn.execute(
@@ -1205,14 +1489,47 @@ class Database:
     # Training Data
     # ------------------------------------------------------------------
 
-    async def get_training_dataset(self) -> dict[str, Any]:
-        """Load OHLCV data for model training."""
-        cursor = await self.conn.execute(
-            "SELECT symbol, timestamp, open, high, low, close, volume "
-            "FROM ohlcv WHERE interval = 'daily' ORDER BY symbol, timestamp"
-        )
+    async def get_training_dataset(
+        self, max_days: int | None = None,
+    ) -> dict[str, Any]:
+        """Load OHLCV data for model training. delivery_pct is included
+        as an optional per-bar column; falls back to None for older
+        rows imported before migration 038.
+
+        `max_days` caps history to fit RAM-constrained hosts. On a 2 GB
+        instance the full ohlcv table (~5 years × universe) OOM-kills
+        the feature-matrix builder; the default in
+        retraining.max_training_days (730) keeps peak under 1 GB.
+        """
+        if max_days is not None and max_days > 0:
+            cursor = await self.conn.execute(
+                "SELECT symbol, timestamp, open, high, low, close, volume, delivery_pct "
+                "FROM ohlcv WHERE interval = 'daily' "
+                "  AND timestamp >= date('now', ?) "
+                "ORDER BY symbol, timestamp",
+                (f"-{int(max_days)} day",),
+            )
+        else:
+            cursor = await self.conn.execute(
+                "SELECT symbol, timestamp, open, high, low, close, volume, delivery_pct "
+                "FROM ohlcv WHERE interval = 'daily' ORDER BY symbol, timestamp"
+            )
         rows = await cursor.fetchall()
         return {"bars": [dict[str, Any](row) for row in rows]}
+
+    async def get_bulk_deals_timeline(self) -> list[dict[str, Any]]:
+        """Return all bulk/block deals across history, ordered by date.
+        Used by model_retrain to build a (symbol, date) → net-count
+        index for per-sample feature lookup.
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT symbol, deal_date, buy_sell FROM bulk_deals "
+            "ORDER BY deal_date"
+        )
+        return [
+            {"symbol": r[0], "deal_date": r[1], "buy_sell": r[2]}
+            for r in await cursor.fetchall()
+        ]
 
     async def get_prediction_outcomes(self) -> list[dict[str, Any]]:
         """Load predictions with actual outcomes for retraining analysis."""
@@ -1227,6 +1544,514 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
+
+    async def get_model_drift_stats(
+        self, days: int = 30, mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Compare predicted vs realised win rate to detect model drift.
+
+        For every model_version that has scored predictions in the window,
+        groups by parent model_type (joined from model_versions) and emits:
+          - by_day: predicted_win_rate (mean confidence_score) vs
+            realised_win_rate (sum direction_correct / count) for each
+            scored_at day
+          - calibration_buckets: confidence buckets [0.5-0.6, 0.6-0.7, ...]
+            with predicted_mean vs realised_rate + sample size
+
+        A top-level warning string flags a realised win-rate drop of more
+        than 15 percentage points in the last 7 days vs the prior 7 days
+        (per model_type).
+        """
+        cutoff = (now_utc() - timedelta(days=days)).isoformat()
+        mc = " AND p.mode = ?" if mode else ""
+        mp: list[Any] = [mode] if mode else []
+
+        # Pull all scored predictions in the window joined with the model
+        # registry to get model_type. predictions.model_version may be on
+        # either the predictions row or the signals row depending on age;
+        # COALESCE picks whichever is set.
+        cursor = await self.read_conn.execute(
+            f"SELECT COALESCE(p.model_version, s.model_version) AS version, "
+            f"  mv.model_type AS model_type, "
+            f"  mv.status AS model_status, "
+            f"  substr(p.scored_at, 1, 10) AS day, "
+            f"  s.confidence_score AS confidence, "
+            f"  p.direction_correct AS correct "
+            f"FROM predictions p "
+            f"LEFT JOIN signals s ON p.signal_id = s.id "
+            f"LEFT JOIN model_versions mv "
+            f"  ON mv.version = COALESCE(p.model_version, s.model_version) "
+            f"WHERE p.actual_price IS NOT NULL "
+            f"  AND p.scored_at IS NOT NULL "
+            f"  AND p.scored_at >= ? "
+            f"  AND p.direction_correct IS NOT NULL{mc}",
+            [cutoff, *mp],
+        )
+        rows = await cursor.fetchall()
+
+        # Group by model_type → version → (day_rows, all_rows)
+        by_type: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            mt = r["model_type"]
+            if not mt:
+                # Unmapped version (e.g. retired model purged from
+                # model_versions). Skip — we can't classify it.
+                continue
+            entry = by_type.setdefault(mt, {
+                "model_type": mt,
+                "version": r["version"],
+                "is_production": (r["model_status"] == "production"),
+                "_days": {},
+                "_all": [],
+            })
+            # Always keep the most recent production version as the
+            # representative version for the model_type.
+            if r["model_status"] == "production":
+                entry["version"] = r["version"]
+                entry["is_production"] = True
+            day = r["day"]
+            if not day:
+                continue
+            day_bucket = entry["_days"].setdefault(
+                day, {"conf_sum": 0.0, "conf_n": 0, "correct": 0, "n": 0},
+            )
+            conf = r["confidence"]
+            if conf is not None:
+                day_bucket["conf_sum"] += float(conf)
+                day_bucket["conf_n"] += 1
+            day_bucket["correct"] += int(r["correct"] or 0)
+            day_bucket["n"] += 1
+            entry["_all"].append({
+                "confidence": float(conf) if conf is not None else None,
+                "correct": int(r["correct"] or 0),
+                "day": day,
+            })
+
+        bucket_edges = [
+            (0.5, 0.6, "0.50-0.60"),
+            (0.6, 0.7, "0.60-0.70"),
+            (0.7, 0.8, "0.70-0.80"),
+            (0.8, 0.9, "0.80-0.90"),
+            (0.9, 1.0001, "0.90-1.00"),
+        ]
+
+        warnings: list[str] = []
+        model_versions: list[dict[str, Any]] = []
+        for mt, entry in by_type.items():
+            # Build by_day list sorted ascending.
+            by_day = []
+            for day in sorted(entry["_days"].keys()):
+                d = entry["_days"][day]
+                predicted = (
+                    d["conf_sum"] / d["conf_n"] if d["conf_n"] > 0 else None
+                )
+                realised = d["correct"] / d["n"] if d["n"] > 0 else 0.0
+                by_day.append({
+                    "date": day,
+                    "predicted_win_rate": (
+                        round(predicted, 4) if predicted is not None else None
+                    ),
+                    "realised_win_rate": round(realised, 4),
+                    "sample_size": d["n"],
+                })
+
+            # Calibration buckets over the full window.
+            calibration_buckets = []
+            for lo, hi, label in bucket_edges:
+                items = [
+                    a for a in entry["_all"]
+                    if a["confidence"] is not None
+                    and lo <= a["confidence"] < hi
+                ]
+                if not items:
+                    calibration_buckets.append({
+                        "bucket": label,
+                        "predicted_mean": None,
+                        "realised_rate": None,
+                        "samples": 0,
+                    })
+                    continue
+                pred_mean = sum(i["confidence"] for i in items) / len(items)
+                real_rate = sum(i["correct"] for i in items) / len(items)
+                calibration_buckets.append({
+                    "bucket": label,
+                    "predicted_mean": round(pred_mean, 4),
+                    "realised_rate": round(real_rate, 4),
+                    "samples": len(items),
+                })
+
+            # Drift detection: realised win-rate last 7d vs prior 7d.
+            now_d = now_utc().date()
+            recent_correct = recent_n = prior_correct = prior_n = 0
+            for a in entry["_all"]:
+                try:
+                    d = datetime.fromisoformat(a["day"]).date()
+                except (TypeError, ValueError):
+                    continue
+                age = (now_d - d).days
+                if 0 <= age < 7:
+                    recent_correct += a["correct"]
+                    recent_n += 1
+                elif 7 <= age < 14:
+                    prior_correct += a["correct"]
+                    prior_n += 1
+            if recent_n >= 5 and prior_n >= 5:
+                recent_rate = recent_correct / recent_n
+                prior_rate = prior_correct / prior_n
+                drop = prior_rate - recent_rate
+                if drop > 0.15:
+                    warnings.append(
+                        f"{mt} model realised win-rate dropped "
+                        f"{int(round(drop * 100))}% in last 7 days "
+                        f"({int(round(prior_rate * 100))}% -> "
+                        f"{int(round(recent_rate * 100))}%)"
+                    )
+
+            model_versions.append({
+                "model_type": mt,
+                "version": entry["version"],
+                "is_production": entry["is_production"],
+                "by_day": by_day,
+                "calibration_buckets": calibration_buckets,
+            })
+
+        # Stable ordering: intraday first, then swing, then anything else.
+        order = {"intraday": 0, "swing": 1}
+        model_versions.sort(key=lambda m: (order.get(m["model_type"], 99), m["model_type"]))
+
+        return {
+            "model_versions": model_versions,
+            "warning": "; ".join(warnings) if warnings else None,
+        }
+
+    async def get_fii_dii_timeline(self, days: int = 30) -> list[dict[str, Any]]:
+        """Return the last `days` rows of FII/DII flows ordered by
+        date ascending (so the dashboard line chart can plot directly).
+        Values are in ₹ crore as published by NSE.
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT date, fii_buy, fii_sell, fii_net, dii_buy, dii_sell, dii_net "
+            "FROM fii_dii_daily "
+            "WHERE date >= date('now', ?) "
+            "ORDER BY date",
+            (f"-{int(days)} day",),
+        )
+        return [
+            {
+                "date": r[0],
+                "fii_buy": float(r[1] or 0),
+                "fii_sell": float(r[2] or 0),
+                "fii_net": float(r[3] or 0),
+                "dii_buy": float(r[4] or 0),
+                "dii_sell": float(r[5] or 0),
+                "dii_net": float(r[6] or 0),
+            }
+            for r in await cursor.fetchall()
+        ]
+
+    async def get_bulk_deals_list(
+        self, days: int = 30, symbol: str | None = None, limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Recent bulk/block deals for the dashboard table. Filtered
+        to the last `days` calendar days and optionally to a single
+        symbol. Ordered most-recent-first.
+        """
+        params: list[Any] = [f"-{int(days)} day"]
+        sym_clause = ""
+        if symbol:
+            sym_clause = " AND symbol = ?"
+            params.append(symbol)
+        params.append(int(limit))
+        cursor = await self.read_conn.execute(
+            "SELECT deal_date, symbol, deal_type, client_name, buy_sell, "
+            "       quantity, trade_price "
+            "FROM bulk_deals "
+            "WHERE deal_date >= date('now', ?)" + sym_clause +
+            " ORDER BY deal_date DESC, symbol "
+            "LIMIT ?",
+            params,
+        )
+        return [
+            {
+                "deal_date": r[0],
+                "symbol": r[1],
+                "deal_type": r[2],
+                "client_name": r[3],
+                "buy_sell": r[4],
+                "quantity": r[5],
+                "trade_price": r[6],
+            }
+            for r in await cursor.fetchall()
+        ]
+
+    async def get_fii_dii_timeline_summary(
+        self, days: int = 30,
+    ) -> dict[str, Any]:
+        """Quick aggregates for the dashboard header pills."""
+        timeline = await self.get_fii_dii_timeline(days)
+        if not timeline:
+            return {
+                "days_covered": 0,
+                "fii_net_total": 0.0,
+                "dii_net_total": 0.0,
+                "fii_net_today": None,
+                "dii_net_today": None,
+            }
+        last = timeline[-1]
+        return {
+            "days_covered": len(timeline),
+            "fii_net_total": round(sum(r["fii_net"] for r in timeline), 2),
+            "dii_net_total": round(sum(r["dii_net"] for r in timeline), 2),
+            "fii_net_today": last["fii_net"],
+            "dii_net_today": last["dii_net"],
+        }
+
+    async def upsert_bulk_deals(
+        self, deals: list[dict[str, Any]], deal_date: str | None = None,
+    ) -> int:
+        """Persist bulk/block deals. `deal_date` defaults to today (IST).
+        Returns the number of new rows inserted (duplicates ignored via
+        unique constraint).
+
+        Skips rows where every payload field beyond symbol is empty.
+        Without this guard, a schema change at NSE that renames the
+        client_name / buy_sell / quantity / trade_price keys would
+        produce one symbol-only row per heartbeat, with the unique
+        constraint not catching the dupes (SQLite treats NULL ≠ NULL).
+        """
+        if not deals:
+            return 0
+        ts = deal_date or now_ist().strftime("%Y-%m-%d")
+        before = (await (await self.conn.execute(
+            "SELECT COUNT(*) FROM bulk_deals WHERE deal_date = ?", (ts,),
+        )).fetchone())[0]
+        skipped_empty = 0
+        for d in deals:
+            sym = str(d.get("symbol") or "").strip()
+            if not sym:
+                continue
+            client_raw = d.get("client_name")
+            bs_raw = d.get("buy_sell")
+            qty_raw = d.get("quantity")
+            price_raw = d.get("trade_price")
+            client = str(client_raw or "").strip()
+            bs = str(bs_raw or "").strip()
+            qty_val = int(qty_raw or 0) or None
+            price_val = float(price_raw or 0.0) or None
+            # Reject rows that are symbol-only — likely a parser-vs-API
+            # schema mismatch, not a real deal worth persisting.
+            if not client and not bs and qty_val is None and price_val is None:
+                skipped_empty += 1
+                continue
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO bulk_deals "
+                "(deal_date, symbol, deal_type, client_name, buy_sell, "
+                " quantity, trade_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ts, sym,
+                    str(d.get("deal_type") or "bulk"),
+                    client, bs, qty_val, price_val,
+                ),
+            )
+        await self.conn.commit()
+        if skipped_empty:
+            logger.warning(
+                "upsert_bulk_deals: skipped %d symbol-only rows (likely "
+                "NSE schema mismatch — only deal_type/symbol present)",
+                skipped_empty,
+            )
+        after = (await (await self.conn.execute(
+            "SELECT COUNT(*) FROM bulk_deals WHERE deal_date = ?", (ts,),
+        )).fetchone())[0]
+        return after - before
+
+    async def upsert_fii_dii(self, data: dict[str, Any]) -> bool:
+        """Persist FII/DII net flows for the day. `data` shape matches
+        NSEOfficialSource.fetch_fii_dii output: {date, fii: {...}, dii: {...}}.
+        Returns True when a row was written.
+        """
+        if not data or not data.get("date"):
+            return False
+        fii = data.get("fii") or {}
+        dii = data.get("dii") or {}
+        # Default missing values to 0.0 — INSERT OR REPLACE so the latest
+        # snapshot of the day wins (NSE refreshes mid-day).
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO fii_dii_daily "
+            "(date, fii_buy, fii_sell, fii_net, dii_buy, dii_sell, dii_net) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(data["date"]),
+                float(fii.get("buy_value") or 0.0),
+                float(fii.get("sell_value") or 0.0),
+                float(fii.get("net_value") or 0.0),
+                float(dii.get("buy_value") or 0.0),
+                float(dii.get("sell_value") or 0.0),
+                float(dii.get("net_value") or 0.0),
+            ),
+        )
+        await self.conn.commit()
+        return True
+
+    async def count_recent_bulk_deals(
+        self, symbol: str, lookback_days: int = 5,
+    ) -> dict[str, int]:
+        """Return {buy_count, sell_count} of bulk/block deal entries on
+        `symbol` within the last `lookback_days` calendar days. Used as
+        a live risk-check signal and as an ML feature.
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT buy_sell, COUNT(*) FROM bulk_deals "
+            "WHERE symbol = ? AND deal_date >= date('now', ?) "
+            "GROUP BY buy_sell",
+            (symbol, f"-{int(lookback_days)} day"),
+        )
+        out = {"buy_count": 0, "sell_count": 0}
+        for buy_sell, cnt in await cursor.fetchall():
+            if str(buy_sell).upper() == "BUY":
+                out["buy_count"] = int(cnt)
+            elif str(buy_sell).upper() == "SELL":
+                out["sell_count"] = int(cnt)
+        return out
+
+    async def get_latest_fii_dii(self) -> dict[str, float] | None:
+        """Return the most recent FII/DII row, or None if the table is
+        empty. Used by risk_check to gate signals when foreigners are
+        net sellers.
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT date, fii_buy, fii_sell, fii_net, dii_buy, dii_sell, dii_net "
+            "FROM fii_dii_daily ORDER BY date DESC LIMIT 1",
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "date": row[0],
+            "fii_buy": float(row[1] or 0),
+            "fii_sell": float(row[2] or 0),
+            "fii_net": float(row[3] or 0),
+            "dii_buy": float(row[4] or 0),
+            "dii_sell": float(row[5] or 0),
+            "dii_net": float(row[6] or 0),
+        }
+
+    async def get_symbol_sectors_map(
+        self, symbols: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Return a {symbol: sector} mapping. Prefers symbol_sectors
+        (canonical NSE Industry) and falls back to watchlist.sector
+        for user-added symbols. Symbols with no sector are omitted.
+        """
+        if symbols is not None:
+            if not symbols:
+                return {}
+            placeholders = ", ".join(["?"] * len(symbols))
+            cursor = await self.read_conn.execute(
+                f"SELECT symbol, COALESCE(sector, '') FROM symbol_sectors "
+                f"WHERE symbol IN ({placeholders})",
+                symbols,
+            )
+        else:
+            cursor = await self.read_conn.execute(
+                "SELECT symbol, COALESCE(sector, '') FROM symbol_sectors"
+            )
+        out: dict[str, str] = {}
+        for sym, sector in await cursor.fetchall():
+            if sector:
+                out[sym] = sector
+        # Watchlist fallback for any symbols missing from symbol_sectors.
+        if symbols is not None:
+            missing = [s for s in symbols if s not in out]
+            if missing:
+                placeholders = ", ".join(["?"] * len(missing))
+                cursor = await self.read_conn.execute(
+                    f"SELECT symbol, COALESCE(sector, '') FROM watchlist "
+                    f"WHERE symbol IN ({placeholders})",
+                    missing,
+                )
+                for sym, sector in await cursor.fetchall():
+                    if sector:
+                        out[sym] = sector
+        else:
+            cursor = await self.read_conn.execute(
+                "SELECT symbol, COALESCE(sector, '') FROM watchlist"
+            )
+            for sym, sector in await cursor.fetchall():
+                if sector and sym not in out:
+                    out[sym] = sector
+        return out
+
+    async def compute_live_regime(self) -> dict[str, float]:
+        """Cross-sectional regime stats over the latest two daily closes
+        of every tracked symbol. Cheap proxy for "is the broad market
+        trending or chopping right now". Heartbeats during market
+        hours have today's developing daily bar (Kite returns close =
+        current LTP), so the comparison is "today vs yesterday".
+
+        Returns: {"breadth": 0..1, "avg_return": float, "sample_size": int}.
+        breadth = fraction of symbols up vs yesterday. avg_return =
+        mean per-symbol % change. sample_size = number of symbols
+        that had two consecutive daily bars available.
+
+        Empty / single-symbol result: returns neutral {0.5, 0.0, 0}.
+        """
+        cursor = await self.read_conn.execute(
+            """
+            WITH ranked AS (
+                SELECT symbol, close,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY symbol ORDER BY timestamp DESC
+                       ) AS rn
+                FROM ohlcv
+                WHERE interval = 'daily'
+                  AND timestamp >= date('now', '-10 day')
+            )
+            SELECT
+                MAX(CASE WHEN rn = 1 THEN close END) AS latest,
+                MAX(CASE WHEN rn = 2 THEN close END) AS prev
+            FROM ranked
+            WHERE rn <= 2
+            GROUP BY symbol
+            HAVING latest > 0 AND prev > 0
+            """
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return {"breadth": 0.5, "avg_return": 0.0, "sample_size": 0}
+        returns = [(float(r[0]) - float(r[1])) / float(r[1]) for r in rows]
+        up = sum(1 for x in returns if x > 0)
+        return {
+            "breadth": up / len(returns),
+            "avg_return": sum(returns) / len(returns),
+            "sample_size": len(returns),
+        }
+
+    async def minutes_since_last_loss_for_symbol(
+        self, symbol: str, mode: str | None = None,
+    ) -> float:
+        """Minutes since the most recent losing trade closed for this
+        symbol+mode. Returns a large sentinel (999999) when the symbol
+        has never recorded a loss in the current mode.
+        """
+        mode_clause = " AND mode = ?" if mode else ""
+        params: tuple[Any, ...] = (
+            (symbol, mode) if mode else (symbol,)
+        )
+        cursor = await self.read_conn.execute(
+            f"SELECT closed_at FROM trades "
+            f"WHERE symbol = ? AND pnl IS NOT NULL AND pnl < 0{mode_clause} "
+            f"ORDER BY closed_at DESC LIMIT 1",
+            params,
+        )
+        row = await cursor.fetchone()
+        if not row or not row[0]:
+            return 999999.0
+        last_loss_time = datetime.fromisoformat(row[0])
+        if last_loss_time.tzinfo is None:
+            last_loss_time = last_loss_time.replace(tzinfo=IST)
+        now = datetime.now(IST)
+        return (now - last_loss_time).total_seconds() / 60
 
     async def get_feedback_data(self, lookback_days: int = 14) -> dict[str, dict[str, float]]:
         """Get per-symbol feedback stats from recent predictions, dry runs, and trades.
@@ -1325,6 +2150,9 @@ class Database:
                 n = len(trades)
                 fb["trade_count"] = float(n)
                 fb["trade_win_rate"] = sum(1 for t in trades if (t["pnl"] or 0) > 0) / n
+                fb["trade_loss_count"] = float(
+                    sum(1 for t in trades if (t["pnl"] or 0) < 0),
+                )
                 pnls = [t["pnl"] for t in trades if t["pnl"] is not None]
                 fb["trade_avg_pnl"] = sum(pnls) / len(pnls) if pnls else 0.0
                 slips = [t["slippage_pct"] for t in trades]
@@ -1449,6 +2277,18 @@ class Database:
         all_time_pnl = row[0] if row else 0
         total_capital = initial_capital + all_time_pnl
 
+        # All-time charges from realized_costs_json — used to display gross
+        # PnL alongside net. Rows without the breakdown (legacy or never
+        # captured) contribute 0, so gross collapses to net in those cases.
+        cursor = await self.conn.execute(
+            f"SELECT COALESCE(SUM(CAST(json_extract(realized_costs_json, '$.total') AS REAL)), 0) "
+            f"FROM trades WHERE pnl IS NOT NULL "
+            f"AND realized_costs_json IS NOT NULL{mode_clause}",
+            mode_params,
+        )
+        row = await cursor.fetchone()
+        all_time_charges = row[0] if row else 0
+
         if total_capital > 0:
             for pos in positions:
                 symbol = pos.get("symbol", "")
@@ -1481,6 +2321,18 @@ class Database:
         daily_pnl = row[0] if row else 0
         daily_pnl_pct = daily_pnl / total_capital if total_capital > 0 else 0
 
+        # Daily charges (sum of realized_costs_json.total) — lets the dashboard
+        # show gross alongside net. Trades closed before this column was added,
+        # or with the field unset, contribute 0; in that case net == gross.
+        cursor = await self.conn.execute(
+            f"SELECT COALESCE(SUM(CAST(json_extract(realized_costs_json, '$.total') AS REAL)), 0) "
+            f"FROM trades WHERE closed_at >= ? AND pnl IS NOT NULL "
+            f"AND realized_costs_json IS NOT NULL{mode_clause}",
+            [today_start, *mode_params],
+        )
+        row = await cursor.fetchone()
+        daily_charges = row[0] if row else 0
+
         # Weekly realized PnL (since configured reset day at market open)
         _day_map = {
             "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
@@ -1498,6 +2350,14 @@ class Database:
         )
         row = await cursor.fetchone()
         weekly_pnl = row[0] if row else 0
+        cursor = await self.conn.execute(
+            f"SELECT COALESCE(SUM(CAST(json_extract(realized_costs_json, '$.total') AS REAL)), 0) "
+            f"FROM trades WHERE closed_at >= ? AND pnl IS NOT NULL "
+            f"AND realized_costs_json IS NOT NULL{mode_clause}",
+            [week_start.isoformat(), *mode_params],
+        )
+        row = await cursor.fetchone()
+        weekly_charges = row[0] if row else 0
         weekly_pnl_pct = weekly_pnl / total_capital if total_capital > 0 else 0
 
         # Pending trade value (app-side block: trades waiting for user approval)
@@ -1559,7 +2419,9 @@ class Database:
             "daily_pnl_pct": daily_pnl_pct,
             "weekly_pnl_pct": weekly_pnl_pct,
             "daily_pnl": round(float(daily_pnl), 2),
+            "daily_charges": round(float(daily_charges), 2),
             "weekly_pnl": round(float(weekly_pnl), 2),
+            "weekly_charges": round(float(weekly_charges), 2),
             "trades_today": trades_today,
             "minutes_since_last_loss": minutes_since_last_loss,
             # Broker-synced breakdown
@@ -1574,6 +2436,7 @@ class Database:
             "total_portfolio_value": round(total_portfolio_value, 2),
             "total_pnl": round(total_pnl_amount, 2),
             "all_time_realized_pnl": round(float(all_time_pnl), 2),
+            "all_time_charges": round(float(all_time_charges), 2),
         }
 
     # ------------------------------------------------------------------
@@ -1581,9 +2444,21 @@ class Database:
     # ------------------------------------------------------------------
 
     async def get_stock_sector(self, symbol: str) -> str | None:
-        """Get sector for a symbol from watchlist."""
+        """Get sector for a symbol.
+
+        Prefers the canonical `symbol_sectors` lookup (populated from the
+        NSE Industry column by ingest-universe). Falls back to watchlist
+        when not present — the user can manually set sector via the
+        user-watchlist endpoints, and that override should still apply.
+        """
         cursor = await self.conn.execute(
-            "SELECT sector FROM watchlist WHERE symbol = ?", (symbol,)
+            "SELECT sector FROM symbol_sectors WHERE symbol = ?", (symbol.upper(),),
+        )
+        row = await cursor.fetchone()
+        if row and row[0]:
+            return row[0]
+        cursor = await self.conn.execute(
+            "SELECT sector FROM watchlist WHERE symbol = ?", (symbol,),
         )
         row = await cursor.fetchone()
         return row[0] if row and row[0] else None
@@ -1617,11 +2492,20 @@ class Database:
     # ------------------------------------------------------------------
 
     async def get_sector_rotation(self) -> dict[str, Any]:
-        """Get sector rotation data from watchlist scores."""
+        """Get sector rotation data from watchlist scores.
+
+        Sector is resolved via COALESCE(symbol_sectors, watchlist) so it
+        works even when watchlist rows lack their own sector value (which
+        is the common case now that ingest-universe is the source of truth).
+        """
         cursor = await self.conn.execute(
-            "SELECT sector, AVG(composite_score) as avg_score, COUNT(*) as count "
-            "FROM watchlist WHERE sector IS NOT NULL "
-            "GROUP BY sector ORDER BY avg_score DESC"
+            "SELECT COALESCE(ss.sector, w.sector) as sector, "
+            "AVG(w.composite_score) as avg_score, COUNT(*) as count "
+            "FROM watchlist w "
+            "LEFT JOIN symbol_sectors ss ON w.symbol = ss.symbol "
+            "WHERE COALESCE(ss.sector, w.sector) IS NOT NULL "
+            "GROUP BY COALESCE(ss.sector, w.sector) "
+            "ORDER BY avg_score DESC"
         )
         rows = await cursor.fetchall()
         if not rows:
@@ -1685,6 +2569,59 @@ class Database:
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
+
+    async def get_signal_class_counts(
+        self, days: int = 7, mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Count signals per type (BUY/SELL/HOLD) in the last `days`.
+
+        Returns:
+          {
+            "BUY": int, "SELL": int, "HOLD": int, "total": int,
+            "by_day": [{"date": "YYYY-MM-DD", "BUY": int, ...}, ...],
+          }
+
+        Used by drift-watch (alert on a class going extinct) and the
+        Dashboard signal-distribution widget. Mode-scoped when
+        `mode` is provided so paper- and live-mode signals don't pool.
+        """
+        from datetime import timedelta as _td
+
+        cutoff = (now_utc() - _td(days=days)).isoformat()
+        params: list[Any] = [cutoff]
+        mode_clause = ""
+        if mode:
+            mode_clause = " AND mode = ?"
+            params.append(mode)
+
+        cur = await self.read_conn.execute(
+            f"SELECT signal_type, DATE(created_at) AS d, COUNT(*) "
+            f"FROM signals WHERE created_at >= ?{mode_clause} "
+            f"GROUP BY signal_type, d ORDER BY d ASC",
+            tuple(params),
+        )
+        rows = await cur.fetchall()
+
+        totals = {"BUY": 0, "SELL": 0, "HOLD": 0}
+        per_day: dict[str, dict[str, int]] = {}
+        for sig_type, d, count in rows:
+            key = (sig_type or "").upper()
+            if key not in totals:
+                continue
+            totals[key] += int(count)
+            per_day.setdefault(d, {"BUY": 0, "SELL": 0, "HOLD": 0})
+            per_day[d][key] = int(count)
+        by_day = [
+            {"date": d, **counts}
+            for d, counts in sorted(per_day.items())
+        ]
+        return {
+            "BUY": totals["BUY"],
+            "SELL": totals["SELL"],
+            "HOLD": totals["HOLD"],
+            "total": sum(totals.values()),
+            "by_day": by_day,
+        }
 
     async def get_latest_sentiment(self, symbol: str) -> dict[str, Any] | None:
         """Get latest sentiment for a symbol as dict[str, Any] (for LLM review context)."""
@@ -1792,21 +2729,29 @@ class Database:
         )
 
     async def close_position(
-        self, position_id: int | str, exit_price: float, pnl: float
+        self,
+        position_id: int | str,
+        exit_price: float,
+        pnl: float,
+        realized_costs: dict[str, Any] | None = None,
     ) -> None:
-        """Close a position with exit price and realized PnL.
+        """Close a position with exit price, realized PnL, and an optional
+        breakdown of the actual charges applied (brokerage/stt/other/total
+        plus a `source` of "broker" or "estimate").
 
-        Uses a savepoint to ensure the trade update and audit log
-        are committed atomically — no half-closed positions.
+        Uses a savepoint to ensure the trade update and audit log are
+        committed atomically — no half-closed positions.
         """
         ts_now = now_utc().isoformat()
         pos_id = str(position_id)
+        costs_json = json.dumps(realized_costs) if realized_costs else None
         await self.conn.execute("SAVEPOINT close_position")
         try:
             await self.conn.execute(
-                "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, closed_at = ? "
+                "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, "
+                "closed_at = ?, realized_costs_json = COALESCE(?, realized_costs_json) "
                 "WHERE trade_id = ?",
-                (exit_price, pnl, ts_now, pos_id),
+                (exit_price, pnl, ts_now, costs_json, pos_id),
             )
             await self.conn.execute(
                 "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
@@ -1816,6 +2761,13 @@ class Database:
                     json.dumps({"trade_id": pos_id, "exit_price": exit_price}),
                     json.dumps({"pnl": pnl}),
                 ),
+            )
+            # Per-trade sentinels in system_state (e.g. partial_booked_{id})
+            # outlive the position they describe and have no TTL — clean
+            # them up here so system_state doesn't grow monotonically.
+            await self.conn.execute(
+                "DELETE FROM system_state WHERE key = ?",
+                (f"partial_booked_{pos_id}",),
             )
             await self.conn.execute("RELEASE SAVEPOINT close_position")
             await self.conn.commit()
@@ -1888,6 +2840,7 @@ class Database:
         pred_id = f"SP-{uuid.uuid4().hex[:8]}"
         ts_now = now_utc().isoformat()
         symbol = prediction.get("symbol")
+        mode = prediction.get("mode", "paper")
 
         from yolovest.models.schemas import _parse_holding_period
 
@@ -1902,17 +2855,19 @@ class Database:
             await self.conn.execute(
                 "INSERT INTO predictions (prediction_id, symbol, signal_id, trade_id, created_at, "
                 "prediction_end_time, actual_price, direction_correct, target_hit, "
-                "actual_pnl_pct, is_shadow, model_version) "
-                "VALUES (?, ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?)",
-                (pred_id, symbol, ts_now, end_time.isoformat(), prediction.get("model_version")),
+                "actual_pnl_pct, is_shadow, model_version, mode) "
+                "VALUES (?, ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?, ?)",
+                (pred_id, symbol, ts_now, end_time.isoformat(),
+                 prediction.get("model_version"), mode),
             )
         else:
             await self.conn.execute(
                 "INSERT INTO predictions (prediction_id, signal_id, trade_id, created_at, "
                 "prediction_end_time, actual_price, direction_correct, target_hit, "
-                "actual_pnl_pct, is_shadow, model_version) "
-                "VALUES (?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?)",
-                (pred_id, ts_now, end_time.isoformat(), prediction.get("model_version")),
+                "actual_pnl_pct, is_shadow, model_version, mode) "
+                "VALUES (?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 1, ?, ?)",
+                (pred_id, ts_now, end_time.isoformat(),
+                 prediction.get("model_version"), mode),
             )
 
         # Also link to the latest signal for this symbol (best-effort)
@@ -2103,6 +3058,151 @@ class Database:
         rows = await cursor.fetchall()
         return {"items": [dict[str, Any](r) for r in rows], "total": total}
 
+    async def set_trade_gtt(self, trade_id: str, gtt_id: int | None) -> None:
+        """Attach (or clear) the broker GTT trigger id on an open trade."""
+        await self.conn.execute(
+            "UPDATE trades SET gtt_id = ? WHERE trade_id = ?",
+            (gtt_id, trade_id),
+        )
+        await self.conn.commit()
+
+    async def find_trade_by_order_id(
+        self, order_id: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Find an open trade that has this order_id attached to any of
+        its order columns (entry, SL, target). Returns (trade, leg)
+        where leg is "entry", "sl", or "target". Returns (None, None) if
+        nothing matches.
+
+        Used by the postback handler to route broker-side order updates
+        to the right business logic.
+        """
+        for leg, column in (
+            ("entry", "order_id"),
+            ("sl", "sl_order_id"),
+            ("target", "target_order_id"),
+        ):
+            cursor = await self.read_conn.execute(
+                f"SELECT * FROM trades WHERE {column} = ? LIMIT 1",
+                (str(order_id),),
+            )
+            row = await cursor.fetchone()
+            if row:
+                return dict[str, Any](row), leg
+        return None, None
+
+    async def log_gtt_event(
+        self,
+        *,
+        trade_id: str | None,
+        gtt_id: int | None,
+        symbol: str | None,
+        event_type: str,
+        status: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Append a row to the GTT audit log. Idempotent / cheap — used
+        from every GTT lifecycle site (place, modify, delete, reconcile,
+        rejected_placement) so post-mortems have a single source of truth.
+
+        Failure is swallowed; audit gaps shouldn't break the calling
+        trading path.
+        """
+        try:
+            await self.conn.execute(
+                "INSERT INTO gtt_events "
+                "(trade_id, gtt_id, symbol, event_type, status, details_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    trade_id,
+                    int(gtt_id) if gtt_id is not None else None,
+                    symbol,
+                    event_type,
+                    status,
+                    json.dumps(details) if details else None,
+                ),
+            )
+            await self.conn.commit()
+        except Exception:
+            logger.debug("log_gtt_event failed", exc_info=True)
+
+    async def get_gtt_events_for_trade(
+        self, trade_id: str, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return the GTT audit trail for a single trade, newest first."""
+        cursor = await self.read_conn.execute(
+            "SELECT id, timestamp_utc, trade_id, gtt_id, symbol, "
+            "event_type, status, details_json "
+            "FROM gtt_events WHERE trade_id = ? "
+            "ORDER BY timestamp_utc DESC LIMIT ?",
+            (trade_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict[str, Any](r) for r in rows]
+
+    async def set_trade_gtt_status(
+        self, trade_id: str, status: str | None,
+    ) -> None:
+        """Update the cached GTT lifecycle status (active / triggered /
+        cancelled / rejected / expired / disabled / deleted).
+
+        Used by position-monitor's reconciler to detect GTTs that no
+        longer protect the position so client-side detection can take
+        over.
+        """
+        await self.conn.execute(
+            "UPDATE trades SET gtt_status = ? WHERE trade_id = ?",
+            (status, trade_id),
+        )
+        await self.conn.commit()
+
+    async def set_trade_product(
+        self, trade_id: str, product: str,
+    ) -> None:
+        """Update the product (MIS / CNC) on a trade after a broker-side
+        position conversion. Used by `/api/positions/{trade_id}/convert`.
+        """
+        await self.conn.execute(
+            "UPDATE trades SET product = ? WHERE trade_id = ?",
+            (product, trade_id),
+        )
+        await self.conn.commit()
+
+    async def set_trade_target_order_id(
+        self, trade_id: str, target_order_id: str | None,
+    ) -> None:
+        """Attach (or clear) the broker target-LIMIT order id on a MIS trade.
+
+        MIS positions can't use GTT, so trade-execute places a LIMIT order
+        at target alongside the SL. Position-monitor enforces OCO semantics
+        by cancelling whichever side hasn't filled when the other does.
+        """
+        await self.conn.execute(
+            "UPDATE trades SET target_order_id = ? WHERE trade_id = ?",
+            (target_order_id, trade_id),
+        )
+        await self.conn.commit()
+
+    async def set_trade_sl_order_id(
+        self, trade_id: str, sl_order_id: str | None,
+    ) -> None:
+        """Update the SL order id on a trade — used when position-monitor
+        cancels and re-places SL (e.g. trailing) or clears it after the
+        target LIMIT fills."""
+        await self.conn.execute(
+            "UPDATE trades SET sl_order_id = ? WHERE trade_id = ?",
+            (sl_order_id, trade_id),
+        )
+        await self.conn.commit()
+
+    async def get_trade(self, trade_id: str) -> dict[str, Any] | None:
+        """Fetch a single trade row by id (any status)."""
+        cursor = await self.read_conn.execute(
+            "SELECT * FROM trades WHERE trade_id = ?", (trade_id,),
+        )
+        row = await cursor.fetchone()
+        return dict[str, Any](row) if row else None
+
     async def score_prediction(
         self,
         prediction_id: str,
@@ -2114,7 +3214,8 @@ class Database:
         """Update a prediction with actual outcome."""
         await self.conn.execute(
             "UPDATE predictions SET actual_price = ?, direction_correct = ?, "
-            "target_hit = ?, actual_pnl_pct = ? WHERE prediction_id = ?",
+            "target_hit = ?, actual_pnl_pct = ?, scored_at = datetime('now') "
+            "WHERE prediction_id = ?",
             (
                 actual_price,
                 1 if direction_correct else 0,
@@ -2684,14 +3785,19 @@ class Database:
     # ------------------------------------------------------------------
 
     async def insert_pending_trade(self, signal: dict[str, Any]) -> int:
-        """Queue a trade signal for manual approval. Returns the pending trade ID."""
+        """Queue a trade signal for manual approval. Returns the pending trade ID.
+
+        Caller should set `mode` on the signal dict so bulk-delete and
+        per-mode listings can scope correctly.
+        """
         import json
         ts_now = now_utc().isoformat()
         cursor = await self.conn.execute(
             "INSERT INTO pending_trades "
             "(symbol, signal_type, entry_price, target_price, stop_loss_price, "
-            "position_size, confidence_score, model_version, product, signal_data, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "position_size, confidence_score, model_version, product, signal_data, "
+            "mode, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 signal.get("symbol"),
                 signal.get("signal_type"),
@@ -2703,6 +3809,7 @@ class Database:
                 signal.get("model_version"),
                 signal.get("product", "MIS"),
                 json.dumps(signal),
+                signal.get("mode", "paper"),
                 ts_now,
             ),
         )
@@ -2796,6 +3903,16 @@ class Database:
             )
         await self.conn.commit()
 
+        if decision == "rejected":
+            # Reflect the rejection on the originating signal row so the
+            # Today's Recommendations panel updates.
+            try:
+                await self.update_signal_disposition(
+                    row["symbol"], "rejected", f"rejected by {decided_by}",
+                )
+            except Exception:
+                pass
+
         if decision == "approved":
             signal_data = row["signal_data"]
             signal = json.loads(signal_data) if signal_data else dict[str, Any](row)
@@ -2836,13 +3953,25 @@ class Database:
         """Expire pending trades older than max_age_minutes.
 
         Uses both ISO format (2026-04-09T06:00:00+00:00) and SQLite format
-        (2026-04-09 06:00:00) for comparison to handle legacy rows.
+        (2026-04-09 06:00:00) for comparison to handle legacy rows. Also
+        flips the originating signals' disposition to 'expired' so the
+        Today's Recommendations panel doesn't show them as still pending.
         """
         from datetime import timedelta
         cutoff_dt = now_utc() - timedelta(minutes=max_age_minutes)
         # Compare against both formats to handle legacy rows with SQLite datetime('now')
         cutoff_iso = cutoff_dt.isoformat()
         cutoff_sql = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Collect symbols about to be expired before we UPDATE — needed so
+        # we can update the corresponding signal disposition rows.
+        cur = await self.conn.execute(
+            "SELECT symbol FROM pending_trades "
+            "WHERE status = 'pending' AND (created_at < ? OR created_at < ?)",
+            (cutoff_iso, cutoff_sql),
+        )
+        expiring_symbols = [r[0] for r in await cur.fetchall()]
+
         cursor = await self.conn.execute(
             "UPDATE pending_trades SET status = 'expired' "
             "WHERE status = 'pending' AND ("
@@ -2851,15 +3980,43 @@ class Database:
             (cutoff_iso, cutoff_sql),
         )
         await self.conn.commit()
+
+        for sym in expiring_symbols:
+            try:
+                await self.update_signal_disposition(
+                    sym, "expired", "pending trade auto-expired",
+                )
+            except Exception:
+                pass
+
         return cursor.rowcount
 
     # ------------------------------------------------------------------
     # Storage Stats & Manual Cleanup
     # ------------------------------------------------------------------
 
-    async def get_storage_stats(self) -> dict[str, Any]:
-        """Get row counts and date ranges for all major tables."""
+    # Cache TTL for storage stats. Stats are advisory — exact freshness
+    # isn't required and the queries are expensive on populated DBs.
+    _STORAGE_STATS_TTL_SEC: float = 60.0
+
+    async def get_storage_stats(self, force_refresh: bool = False) -> dict[str, Any]:
+        """Get row counts and date ranges for all major tables.
+
+        Cached for `_STORAGE_STATS_TTL_SEC` so repeated dashboard
+        polls don't re-scan multi-million-row tables. Pass
+        force_refresh=True after a destructive operation (cleanup,
+        bulk delete, restore) to invalidate the cache.
+        """
         import os
+        import time as _time
+
+        now = _time.monotonic()
+        if (
+            not force_refresh
+            and self._storage_stats_cache is not None
+            and (now - self._storage_stats_cache_at) < self._STORAGE_STATS_TTL_SEC
+        ):
+            return self._storage_stats_cache
 
         tables = {
             "ohlcv": {"ts_col": "timestamp"},
@@ -2910,7 +4067,16 @@ class Database:
         except OSError:
             stats["_db_file"] = {"db_bytes": 0, "wal_bytes": 0, "total_bytes": 0}
 
+        self._storage_stats_cache = stats
+        self._storage_stats_cache_at = now
         return stats
+
+    def invalidate_storage_stats_cache(self) -> None:
+        """Drop the cached storage stats so the next call recomputes
+        from scratch. Called after destructive operations.
+        """
+        self._storage_stats_cache = None
+        self._storage_stats_cache_at = 0.0
 
     async def cleanup_table(self, table: str, older_than_days: int) -> int:
         """Delete rows older than N days from a specific table. Returns rows deleted."""
@@ -2941,8 +4107,43 @@ class Database:
     # Symbol Quarantine (auto-block after repeated fetch failures)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_transient_fetch_error(error: str) -> bool:
+        """Recognise temporary infrastructure failures that shouldn't
+        count toward the 3-strike quarantine threshold. A 30-min Kite
+        outage with a heartbeat retrying every 15min was previously
+        enough to mass-quarantine the entire universe even though no
+        symbol was actually broken.
+        """
+        if not error:
+            return False
+        msg = error.lower()
+        transient_markers = (
+            "too many requests", "rate limit", "429",
+            "timeout", "timed out",
+            "connection reset", "connection refused", "connection aborted",
+            "temporarily unavailable", "service unavailable",
+            "unreachable", "network is",
+            "ssl", "tls",
+            "http 5",  # 500, 502, 503, 504 — server-side, retry-safe
+            " 502", " 503", " 504",
+        )
+        return any(marker in msg for marker in transient_markers)
+
     async def record_fetch_failure(self, symbol: str, error: str) -> bool:
-        """Record a data fetch failure. Returns True if symbol is now quarantined."""
+        """Record a data fetch failure. Returns True if symbol is now quarantined.
+
+        Transient errors (rate limit, timeouts, 5xx, SSL/network) are
+        logged but don't bump the counter — quarantining a symbol
+        because Zerodha had a 5-minute outage is exactly the kind of
+        silent-fragility this counter is meant to avoid.
+        """
+        if self._is_transient_fetch_error(error):
+            logger.info(
+                "Skipping quarantine counter for %s — transient error: %s",
+                symbol, error,
+            )
+            return False
         row = await self.conn.execute(
             "SELECT consecutive_failures FROM quarantined_symbols WHERE symbol = ?",
             (symbol,),
@@ -3050,6 +4251,47 @@ class Database:
         )
         rows = await cursor.fetchall()
         return {r[0]: r[1] for r in rows}
+
+    async def resolve_symbols_with_replacements(
+        self, symbols: list[str],
+    ) -> list[str]:
+        """Apply quarantine policy to a raw symbol list.
+
+        Used by ingest skills so user-configured swaps actually take effect
+        and quarantined symbols don't leak into the pipeline.
+
+        Policy:
+          - Symbol is not quarantined → keep as-is.
+          - Symbol is quarantined AND has a replacement → use the
+            replacement (e.g. ZOMATO -> ETERNAL after the corporate rename).
+          - Symbol is quarantined WITHOUT a replacement → drop entirely.
+            (Quarantine means data fetch failed 3+ times. Without a
+            user-supplied replacement, the symbol shouldn't appear in any
+            downstream operation.)
+
+        Output is deduplicated while preserving input order.
+        """
+        repl = await self.get_quarantine_replacements()
+        quarantined = await self.get_all_quarantined_symbol_set()
+        seen: set[str] = set()
+        out: list[str] = []
+        for s in symbols:
+            if s in quarantined:
+                target = repl.get(s)
+                if not target:
+                    # Quarantined and no replacement → drop
+                    continue
+                # Quarantined with replacement → swap
+                if target in seen:
+                    continue
+                seen.add(target)
+                out.append(target)
+            else:
+                if s in seen:
+                    continue
+                seen.add(s)
+                out.append(s)
+        return out
 
     # ------------------------------------------------------------------
     # Dry-Run Signal Preview
@@ -3160,35 +4402,55 @@ class Database:
         For each signal, fetch the next trading day's OHLCV and compare.
         Uses date-only comparison to avoid timestamp format mismatches
         (dry-run created_at has time, OHLCV timestamp may not).
+
+        Scoring waits for the next *trading day's* daily bar to exist.
+        Three outcomes possible per signal:
+          - scored: found and compared
+          - same_day: the dry-run was created today (IST) — too early
+          - not_found: previous-day dry-run but next-day OHLCV missing
+            (most often: today's daily bar hasn't been ingested yet)
         """
         signals = await self.get_dry_run_signals(run_id)
         if not signals:
             return {"scored": 0, "not_found": 0}
 
-        today = now_utc().strftime("%Y-%m-%d")
+        # Compare in IST so a late-evening-IST dry-run (which is the next
+        # UTC day) is still recognised as "same trading day" and treated
+        # as too-recent-to-score.
+        today_ist = now_ist().strftime("%Y-%m-%d")
         already_scored = 0
         scored = 0
         not_found = 0
         same_day = 0
+        unfound: list[dict[str, Any]] = []
 
         for sig in signals:
             if sig.get("scored_at"):
                 already_scored += 1
                 continue
 
-            # Extract date-only from created_at (e.g. "2026-03-29T10:30:00" → "2026-03-29")
-            created_date = str(sig["created_at"])[:10]
+            # created_at is stored as SQLite datetime('now') (UTC) e.g.
+            # "2026-05-15 05:11:30". Convert to IST trading day before
+            # comparing.
+            raw_created = str(sig["created_at"])
+            try:
+                # Parse with assumed UTC if no tzinfo present.
+                ts = datetime.fromisoformat(raw_created.replace(" ", "T"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                created_date = ts.astimezone(IST).strftime("%Y-%m-%d")
+            except Exception:
+                created_date = raw_created[:10]
 
-            # Check if this signal was created today — next-day data won't exist yet
-            if created_date >= today:
+            if created_date >= today_ist:
                 same_day += 1
                 continue
 
             # Get the next day's OHLCV after the dry-run date.
             # Use SUBSTR to compare date portions only, avoiding time format issues.
             cursor = await self.read_conn.execute(
-                "SELECT open, high, low, close FROM ohlcv "
-                "WHERE symbol = ? AND interval = 'daily' "
+                "SELECT open, high, low, close, SUBSTR(timestamp, 1, 10) AS d "
+                "FROM ohlcv WHERE symbol = ? AND interval = 'daily' "
                 "AND SUBSTR(timestamp, 1, 10) > ? "
                 "ORDER BY timestamp ASC LIMIT 1",
                 (sig["symbol"], created_date),
@@ -3196,6 +4458,10 @@ class Database:
             row = await cursor.fetchone()
             if not row:
                 not_found += 1
+                unfound.append({
+                    "symbol": sig["symbol"],
+                    "created_date": created_date,
+                })
                 continue
 
             actual_open = row[0]
@@ -3239,69 +4505,107 @@ class Database:
                 "Signals generated today cannot be scored yet — "
                 "next trading day's data is needed. Try again tomorrow."
             )
+        if not_found > 0 and not same_day:
+            # Tell the user exactly what's missing. Most common cause:
+            # today's daily bar hasn't landed in OHLCV yet — daily bars
+            # from jugaad / yfinance arrive after market close.
+            sample = ", ".join(
+                f"{u['symbol']} (created {u['created_date']})"
+                for u in unfound[:5]
+            )
+            if len(unfound) > 5:
+                sample += f", +{len(unfound) - 5} more"
+            result["unfound"] = unfound
+            result["message"] = (
+                "Next-day OHLCV not yet in DB for these symbols: "
+                + sample
+                + ". Daily bars are usually ingested after market close "
+                "(~3:30 PM IST); try again later today or tomorrow."
+            )
+            logger.info(
+                "score_dry_run %s: %d signals could not be scored — %s",
+                run_id, not_found, sample,
+            )
         return result
 
     async def bulk_delete(self, group: str) -> dict[str, int]:
         """Delete a group of related data. Returns {table: rows_deleted}.
 
         Groups:
-        - paper: all paper mode trades, signals, predictions, pending trades
-        - live: all live mode trades, signals, predictions, pending trades
+        - paper / live: trades + predictions + signals + pending_trades for that mode
         - dry_runs: all dry run results
-        - predictions: all predictions and scoreboard
-        - signals: all signals
+        - predictions / signals / pending_trades: clears the table across all modes
+
+        Foreign-key safety: predictions.signal_id REFERENCES signals(id)
+        and predictions.trade_id REFERENCES trades(trade_id) — both
+        without ON DELETE CASCADE. With PRAGMA foreign_keys=ON,
+        deleting a signal that has a linked prediction would raise
+        SQLITE_CONSTRAINT_FOREIGNKEY and the row would survive. We
+        delete predictions FIRST in any path that touches signals
+        or trades.
         """
         deleted: dict[str, int] = {}
 
+        async def _delete(table: str, where: str = "", params: tuple = ()) -> int:
+            try:
+                if where:
+                    cursor = await self.conn.execute(
+                        f"DELETE FROM {table} WHERE {where}", params,  # noqa: S608
+                    )
+                else:
+                    cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
+                return cursor.rowcount
+            except Exception:
+                logger.warning(
+                    "bulk_delete: DELETE from %s failed",
+                    table, exc_info=True,
+                )
+                return 0
+
         if group in ("paper", "live"):
             mode = group
-            for table, col in [
-                ("trades", "mode"), ("predictions", "mode"),
-                ("signals", None), ("pending_trades", None),
-            ]:
-                try:
-                    if col:
-                        cursor = await self.conn.execute(
-                            f"DELETE FROM {table} WHERE {col} = ?", (mode,),  # noqa: S608
-                        )
-                    else:
-                        # signals/pending_trades don't have mode — delete by date match with trades
-                        cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
-                    deleted[table] = cursor.rowcount
-                except Exception:
-                    deleted[table] = 0
-            # Also clean up related data
+            # Predictions reference signals + trades; drop first.
+            deleted["predictions"] = await _delete(
+                "predictions", "mode = ?", (mode,),
+            )
+            deleted["signals"] = await _delete("signals", "mode = ?", (mode,))
+            deleted["pending_trades"] = await _delete(
+                "pending_trades", "mode = ?", (mode,),
+            )
+            deleted["trades"] = await _delete("trades", "mode = ?", (mode,))
+            # llm_reviews for paper-mode trades only (live trades keep audit trail)
             if group == "paper":
-                try:
-                    cursor = await self.conn.execute(
-                        "DELETE FROM llm_reviews WHERE trade_id IN "
-                        "(SELECT symbol FROM trades WHERE mode = 'paper')"
-                    )
-                    deleted["llm_reviews"] = cursor.rowcount
-                except Exception:
-                    deleted["llm_reviews"] = 0
+                deleted["llm_reviews"] = await _delete(
+                    "llm_reviews",
+                    "trade_id IN (SELECT symbol FROM trades WHERE mode = 'paper')",
+                )
 
         elif group == "dry_runs":
-            try:
-                cursor = await self.conn.execute("DELETE FROM dry_run_results")
-                deleted["dry_run_results"] = cursor.rowcount
-            except Exception:
-                deleted["dry_run_results"] = 0
+            deleted["dry_run_results"] = await _delete("dry_run_results")
 
         elif group == "predictions":
-            for table in ["predictions", "prediction_scoreboard", "failure_analyses"]:
-                try:
-                    cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
-                    deleted[table] = cursor.rowcount
-                except Exception:
-                    deleted[table] = 0
+            for table in ("predictions", "prediction_scoreboard", "failure_analyses"):
+                deleted[table] = await _delete(table)
 
         elif group == "signals":
+            # Drop predictions referencing any signal first (FK-safe),
+            # then signals. We NULL signal_id rather than deleting the
+            # prediction so model-drift / scored-outcome history
+            # survives the wipe.
             try:
-                cursor = await self.conn.execute("DELETE FROM signals")
-                deleted["signals"] = cursor.rowcount
+                await self.conn.execute(
+                    "UPDATE predictions SET signal_id = NULL "
+                    "WHERE signal_id IS NOT NULL"
+                )
             except Exception:
-                deleted["signals"] = 0
+                logger.warning(
+                    "bulk_delete: failed to null predictions.signal_id",
+                    exc_info=True,
+                )
+            deleted["signals"] = await _delete("signals")
+
+        elif group == "pending_trades":
+            deleted["pending_trades"] = await _delete("pending_trades")
 
         else:
             raise ValueError(f"Unknown group: {group}")
@@ -3465,6 +4769,34 @@ class Database:
                 "created_at": datetime.fromtimestamp(stat.st_mtime, tz=IST).isoformat(),
             })
         return backups
+
+    async def delete_backup(self, backup_dir: str, filename: str) -> dict[str, Any]:
+        """Delete a single backup file. Validates the name belongs to the
+        backup directory and matches the standard yolovest_*.db pattern so
+        a crafted path can't escape into other parts of the filesystem.
+        """
+        backup_path = Path(backup_dir).resolve()
+        if not backup_path.is_dir():
+            raise ValueError(f"Backup directory does not exist: {backup_dir}")
+
+        # Disallow path components entirely — filename only.
+        if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
+            raise ValueError(f"Invalid backup filename: {filename!r}")
+        if not (filename.startswith("yolovest_") and filename.endswith(".db")):
+            raise ValueError(
+                f"Refusing to delete {filename!r}: not a recognised backup file",
+            )
+
+        target = (backup_path / filename).resolve()
+        # Resolved path must still live inside backup_dir.
+        if backup_path not in target.parents:
+            raise ValueError(f"Path escape attempt: {filename!r}")
+        if not target.is_file():
+            raise FileNotFoundError(f"Backup not found: {filename}")
+
+        size_bytes = target.stat().st_size
+        target.unlink()
+        return {"filename": filename, "size_bytes": size_bytes}
 
     # ------------------------------------------------------------------
     # Slippage Stats

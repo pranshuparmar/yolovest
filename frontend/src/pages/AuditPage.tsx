@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useAudit, useServerLogs } from "../hooks/queries";
 import { CSVExportButton } from "../components/CSVExportButton";
+import { Pagination } from "../components/Pagination";
 import { parseUTC, getTimezone } from "../utils/datetime";
 import clsx from "clsx";
 
@@ -8,11 +9,15 @@ function AuditTab() {
   const [actionType, setActionType] = useState<string | undefined>(undefined);
   const [limit, setLimit] = useState(50);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [page, setPage] = useState(0);
+  const pageSize = 20;
 
   const { data, isLoading } = useAudit({
     limit,
     action_type: actionType,
   });
+  const totalRows = data?.length ?? 0;
+  const paged = data?.slice(page * pageSize, (page + 1) * pageSize) ?? [];
 
   return (
     <div className="space-y-4">
@@ -24,7 +29,7 @@ function AuditTab() {
           <input
             type="text"
             value={actionType || ""}
-            onChange={(e) => setActionType(e.target.value || undefined)}
+            onChange={(e) => { setActionType(e.target.value || undefined); setPage(0); }}
             placeholder="Filter..."
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 w-full sm:w-40"
           />
@@ -33,7 +38,7 @@ function AuditTab() {
           <label className="block text-xs text-gray-500 mb-1">Limit</label>
           <select
             value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
+            onChange={(e) => { setLimit(Number(e.target.value)); setPage(0); }}
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100"
           >
             <option value={50}>50</option>
@@ -55,7 +60,7 @@ function AuditTab() {
           <p className="text-gray-500 text-sm py-4">No audit entries</p>
         ) : (
           <div className="space-y-1">
-            {data.map((entry) => (
+            {paged.map((entry) => (
               <div key={entry.id} className="border-b border-gray-800/50">
                 <button
                   onClick={() =>
@@ -116,6 +121,12 @@ function AuditTab() {
             ))}
           </div>
         )}
+        <Pagination
+          total={totalRows}
+          page={page}
+          pageSize={pageSize}
+          onPageChange={setPage}
+        />
       </div>
     </div>
   );

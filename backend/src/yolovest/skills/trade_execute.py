@@ -32,14 +32,18 @@ from yolovest.timezone import now_ist
 logger = logging.getLogger(__name__)
 
 
-def _signal_dedup_key(signal: dict[str, Any]) -> str:
+def _signal_dedup_key(signal: dict[str, Any], mode: str = "paper") -> str:
     """Generate a dedup key for a signal to prevent duplicate order placement.
 
-    Key components: symbol + signal_type + date + entry_price (rounded).
-    If the process crashes after placing a broker order but before recording
-    the trade, the same signal re-entering this skill will be detected.
+    Key components: mode + symbol + signal_type + date + entry_price.
+    Mode is part of the key so a paper test in the morning doesn't
+    block a live execution of the same setup that afternoon (or vice
+    versa). If the process crashes after placing a broker order but
+    before recording the trade, the same signal re-entering this
+    skill in the same mode will still be detected.
     """
     parts = (
+        mode,
         signal["symbol"],
         signal["signal_type"],
         now_ist().strftime("%Y-%m-%d"),
@@ -209,7 +213,7 @@ class TradeExecuteSkill(SkillBase):
 
         # Idempotency check: prevent duplicate orders on crash/restart.
         # Uses agent_memory with a TTL to track in-flight executions.
-        dedup_key = _signal_dedup_key(signal)
+        dedup_key = _signal_dedup_key(signal, mode=self.ctx.config.mode)
         if self.ctx.memory:
             existing = await self.ctx.memory.get("trade_dedup", dedup_key)
             if existing:
@@ -269,6 +273,7 @@ class TradeExecuteSkill(SkillBase):
                         order_type="LIMIT",
                         price=order_price,
                         product=product,
+                        tag="yv-entry-l1",
                     )
 
                     # Wait for first leg to fill
@@ -286,6 +291,7 @@ class TradeExecuteSkill(SkillBase):
                             quantity=leg1_qty,
                             order_type="MARKET",
                             product=product,
+                            tag="yv-entry-l1",
                         )
                         await asyncio.sleep(1)
                         leg1_status = await self.ctx.broker.get_order_status(leg1_order_id)
@@ -309,6 +315,7 @@ class TradeExecuteSkill(SkillBase):
                         order_type="LIMIT",
                         price=leg2_price,
                         product=product,
+                        tag="yv-entry-l2",
                     )
 
                     # Wait for second leg fill within order_timeout
@@ -348,6 +355,7 @@ class TradeExecuteSkill(SkillBase):
                         order_type="SL-M",
                         trigger_price=signal["stop_loss_price"],
                         product=product,
+                        tag="yv-sl",
                     )
 
                     slippage = abs(fill_price - signal["entry_price"])
@@ -407,6 +415,7 @@ class TradeExecuteSkill(SkillBase):
                         order_type="LIMIT",
                         price=order_price,
                         product=product,
+                        tag="yv-entry",
                     )
 
                     # Place stop-loss order
@@ -417,6 +426,7 @@ class TradeExecuteSkill(SkillBase):
                         order_type="SL-M",
                         trigger_price=signal["stop_loss_price"],
                         product=product,
+                        tag="yv-sl",
                     )
 
                     # Track order status, handle partial fills
@@ -449,6 +459,7 @@ class TradeExecuteSkill(SkillBase):
                                     quantity=signal["position_size"],
                                     order_type="MARKET",
                                     product=product,
+                                    tag="yv-entry",
                                 )
                                 await asyncio.sleep(1)
                                 order_status = await self.ctx.broker.get_order_status(order_id)
@@ -463,6 +474,7 @@ class TradeExecuteSkill(SkillBase):
                                     order_type="SL-M",
                                     trigger_price=signal["stop_loss_price"],
                                     product=product,
+                                    tag="yv-sl",
                                 )
 
                     actual_qty = filled_qty if filled_qty > 0 else signal["position_size"]
@@ -510,6 +522,16 @@ class TradeExecuteSkill(SkillBase):
 
                 trade_id = await self.ctx.db.insert_trade(trade)
                 trade["trade_id"] = trade_id
+
+                # For CNC trades, attach a broker-side OCO GTT for target +
+                # stoploss. Kite only allows GTT on CNC — MIS positions
+                # get a resting LIMIT order at target instead, with
+                # position-monitor enforcing OCO across SL and target.
+                if product == "CNC":
+                    await self._attach_oco_gtt(trade)
+                elif product == "MIS":
+                    await self._attach_mis_target_limit(trade)
+
                 await self.ctx.notify.send_trade_alert(trade)
                 await self.broadcast("trade_executed", {
                     "symbol": trade["symbol"],
@@ -544,33 +566,20 @@ class TradeExecuteSkill(SkillBase):
                 )
                 # CRITICAL: Before retrying, check if the "failed" order actually
                 # went through on the broker. Zerodha sometimes returns errors
-                # AFTER placing the order, causing duplicate orders on retry.
-                if attempt < cfg.max_order_retries and self.ctx.config.mode == "live":
-                    try:
-                        recent_orders = await asyncio.to_thread(self.ctx.broker._kite.orders)
-                        symbol_orders = [
-                            o for o in (recent_orders or [])
-                            if o.get("tradingsymbol") == signal["symbol"]
-                            and o.get("status") in ("COMPLETE", "OPEN", "TRIGGER PENDING")
-                            and o.get("transaction_type") == ("BUY" if signal["signal_type"] == "BUY" else "SELL")
-                        ]
-                        # Check for orders placed in the last 2 minutes
-                        from datetime import datetime, timedelta
-                        cutoff = datetime.now() - timedelta(minutes=2)
-                        recent = [
-                            o for o in symbol_orders
-                            if o.get("order_timestamp") and o["order_timestamp"] > cutoff
-                        ]
-                        if recent:
-                            logger.error(
-                                "trade-execute: ABORT RETRY — found %d recent %s orders for %s on broker "
-                                "despite error. The 'failed' order likely executed. Not retrying.",
-                                len(recent), signal["signal_type"], signal["symbol"],
-                            )
-                            break
-                    except Exception:
-                        logger.debug("Could not check broker orders before retry", exc_info=True)
+                # AFTER placing the order — if we retry naively we'd create
+                # a duplicate. Worse, if the broker order succeeded and we
+                # simply skip retry, the calling code sees success=False and
+                # leaves the pending trade un-reconciled while the actual
+                # position exists on Kite. Reconcile instead: adopt the
+                # surviving order as our trade record.
+                if self.ctx.config.mode == "live":
+                    recovered = await self._find_recently_placed_order(signal)
+                    if recovered is not None:
+                        return await self._reconcile_recovered_order(
+                            signal, recovered, product, last_error,
+                        )
 
+                if attempt < cfg.max_order_retries and self.ctx.config.mode == "live":
                     delay = cfg.retry_base_delay_sec * (2**attempt)
                     await asyncio.sleep(delay)
 
@@ -585,6 +594,304 @@ class TradeExecuteSkill(SkillBase):
             skill_name=self.name,
             error=f"Order failed after {cfg.max_order_retries + 1} attempts: {last_error}",
         )
+
+    async def _find_recently_placed_order(
+        self, signal: dict[str, Any], window_minutes: int = 2,
+    ) -> dict[str, Any] | None:
+        """Return the most recent matching broker order for this signal,
+        or None if no candidate exists.
+
+        Matches by tradingsymbol + transaction_type + recent timestamp.
+        Prefers COMPLETE > OPEN > TRIGGER PENDING.
+        """
+        try:
+            recent_orders = await asyncio.to_thread(self.ctx.broker._kite.orders)
+        except Exception:
+            logger.debug("Could not list broker orders for reconciliation", exc_info=True)
+            return None
+
+        want_side = "BUY" if signal["signal_type"] == "BUY" else "SELL"
+        from datetime import datetime, timedelta
+        cutoff = datetime.now() - timedelta(minutes=window_minutes)
+
+        candidates = []
+        for o in recent_orders or []:
+            if o.get("tradingsymbol") != signal["symbol"]:
+                continue
+            if o.get("transaction_type") != want_side:
+                continue
+            if o.get("status") not in ("COMPLETE", "OPEN", "TRIGGER PENDING"):
+                continue
+            ts = o.get("order_timestamp")
+            if ts and ts > cutoff:
+                candidates.append(o)
+
+        if not candidates:
+            return None
+
+        # Prefer COMPLETE, then most recent
+        status_rank = {"COMPLETE": 0, "OPEN": 1, "TRIGGER PENDING": 2}
+        candidates.sort(key=lambda o: (
+            status_rank.get(o.get("status"), 99),
+            -(o["order_timestamp"].timestamp() if o.get("order_timestamp") else 0),
+        ))
+        return candidates[0]
+
+    async def _reconcile_recovered_order(
+        self,
+        signal: dict[str, Any],
+        order: dict[str, Any],
+        product: str,
+        last_error: Exception | None,
+    ) -> SkillResult:
+        """Adopt a broker order that was placed despite our place_order call
+        raising — record it as a successful trade so the pending queue
+        doesn't get stuck and the position is tracked.
+
+        SL order is NOT auto-placed here even if the original SL-leg failed;
+        position-monitor will detect the unmanaged position and either set
+        SL via its trailing logic or surface it for manual intervention.
+        """
+        symbol = signal["symbol"]
+        order_id = str(order.get("order_id") or "")
+        fill_price = float(order.get("average_price") or signal["entry_price"] or 0)
+        actual_qty = int(order.get("filled_quantity") or signal["position_size"])
+        slippage = abs(fill_price - signal["entry_price"])
+
+        logger.warning(
+            "trade-execute: RECONCILED %s %s — broker order %s status=%s qty=%d fill=%.2f "
+            "(place_order raised %s, but order actually went through)",
+            signal["signal_type"], symbol, order_id, order.get("status"),
+            actual_qty, fill_price, type(last_error).__name__ if last_error else "n/a",
+        )
+
+        trade = {
+            "symbol": symbol,
+            "signal_type": signal["signal_type"],
+            "entry_price": signal["entry_price"],
+            "fill_price": fill_price,
+            "quantity": actual_qty,
+            "stop_loss_price": signal["stop_loss_price"],
+            "target_price": signal["target_price"],
+            "order_id": order_id,
+            "sl_order_id": None,  # SL leg not separately tracked on reconcile
+            "product": product,
+            "status": "open",
+            "mode": "live",
+            "slippage": slippage,
+            "origin": "system",
+        }
+        trade_id = await self.ctx.db.insert_trade(trade)
+        trade["trade_id"] = trade_id
+        try:
+            await self.ctx.notify.send_trade_alert(trade)
+        except Exception:
+            logger.debug("Failed to notify on reconciled trade", exc_info=True)
+        try:
+            await self.ctx.notify.send(
+                f"⚠️ Reconciled {signal['signal_type']} {symbol} — entry filled at "
+                f"₹{fill_price} but SL leg failed. position-monitor will manage SL.",
+                alert_type="errors",
+            )
+        except Exception:
+            logger.debug("Failed to send reconcile alert", exc_info=True)
+
+        return SkillResult(
+            success=True,
+            skill_name=self.name,
+            data={"trade": trade, "mode": "live", "reconciled": True},
+        )
+
+    # Zerodha caps active GTTs at 50 per account. When we're within
+    # this margin, skip new GTT placement and fall back to client-side
+    # detection so the position still gets exit coverage.
+    _GTT_SLOT_WARN_THRESHOLD = 45
+
+    @staticmethod
+    def _validate_gtt_params(
+        exit_side: str,
+        sl_trig: float,
+        tgt_trig: float,
+        last_price: float,
+        quantity: int,
+    ) -> str | None:
+        """Pre-flight validation for an OCO GTT. Returns an error message
+        if the parameters are nonsense, None if they're OK. Catches the
+        common bugs (SL on wrong side, target on wrong side, crossed
+        legs, zero qty) before we waste an API call on something Kite
+        will reject anyway."""
+        if quantity <= 0:
+            return "quantity must be positive"
+        if sl_trig <= 0 or tgt_trig <= 0 or last_price <= 0:
+            return "prices must be positive"
+        if exit_side == "SELL":  # closing a long
+            if sl_trig >= last_price:
+                return f"long-exit SL trigger {sl_trig:.2f} must be < LTP {last_price:.2f}"
+            if tgt_trig <= last_price:
+                return f"long-exit target trigger {tgt_trig:.2f} must be > LTP {last_price:.2f}"
+        else:  # closing a short
+            if sl_trig <= last_price:
+                return f"short-exit SL trigger {sl_trig:.2f} must be > LTP {last_price:.2f}"
+            if tgt_trig >= last_price:
+                return f"short-exit target trigger {tgt_trig:.2f} must be < LTP {last_price:.2f}"
+        if sl_trig == tgt_trig:
+            return "SL and target triggers cannot be equal"
+        return None
+
+    async def _attach_oco_gtt(self, trade: dict[str, Any]) -> None:
+        """Place a two-leg OCO GTT (stoploss + target) for a freshly-filled
+        CNC trade. Records the broker's trigger_id on the trade row.
+
+        GTT failure is non-fatal — the trade itself succeeded; position-
+        monitor's client-side detection still provides exit coverage.
+        """
+        broker = self.ctx.broker
+        if not hasattr(broker, "place_oco_gtt"):
+            return
+
+        symbol = trade["symbol"]
+        side = trade["signal_type"]
+        # Exit side is the opposite of the entry side
+        exit_side = "SELL" if side == "BUY" else "BUY"
+
+        sl_trig = float(trade["stop_loss_price"])
+        tgt_trig = float(trade["target_price"])
+        last_price = float(trade.get("fill_price") or trade["entry_price"])
+        qty = int(trade["quantity"])
+
+        # Pre-flight validation — fail fast on obvious nonsense rather
+        # than firing an API call we know Kite will reject.
+        err = self._validate_gtt_params(exit_side, sl_trig, tgt_trig, last_price, qty)
+        if err:
+            logger.warning(
+                "trade-execute: GTT params invalid for %s: %s — "
+                "skipping GTT, client-side detection active",
+                trade.get("trade_id"), err,
+            )
+            await self.ctx.db.log_gtt_event(
+                trade_id=trade.get("trade_id"), gtt_id=None, symbol=symbol,
+                event_type="rejected_placement",
+                details={"reason": err, "stage": "validation"},
+            )
+            return
+
+        # Slot-cap check — Zerodha allows ≤50 active GTTs per account.
+        # When near the cap, skip placement (client-side exit takes over)
+        # and notify so the user can clean up stale GTTs.
+        if hasattr(broker, "get_gtts"):
+            try:
+                gtts = await broker.get_gtts()
+                active = sum(
+                    1 for g in (gtts or [])
+                    if (g.get("status") or "").lower() == "active"
+                )
+                if active >= self._GTT_SLOT_WARN_THRESHOLD:
+                    logger.warning(
+                        "trade-execute: %d active GTTs at broker (cap 50) — "
+                        "skipping new GTT for %s; client-side exit detection active",
+                        active, trade.get("trade_id"),
+                    )
+                    await self.ctx.db.log_gtt_event(
+                        trade_id=trade.get("trade_id"), gtt_id=None, symbol=symbol,
+                        event_type="rejected_placement",
+                        details={"reason": "slot_cap", "active_gtts": active},
+                    )
+                    return
+            except Exception:
+                logger.debug("Slot-cap probe failed; proceeding with GTT", exc_info=True)
+
+        # Limit price for each leg sits past the trigger so the resulting
+        # LIMIT order fills reliably once the trigger fires.
+        buffer = 0.005  # 0.5%
+        if exit_side == "SELL":  # closing a long
+            sl_limit = sl_trig * (1 - buffer)
+            tgt_limit = tgt_trig * (1 - buffer * 0.5)
+        else:  # closing a short
+            sl_limit = sl_trig * (1 + buffer)
+            tgt_limit = tgt_trig * (1 + buffer * 0.5)
+
+        try:
+            gtt_id = await broker.place_oco_gtt(
+                symbol=symbol,
+                side=exit_side,
+                quantity=qty,
+                stoploss_trigger=sl_trig,
+                stoploss_limit=sl_limit,
+                target_trigger=tgt_trig,
+                target_limit=tgt_limit,
+                last_price=last_price,
+            )
+        except Exception as e:
+            logger.warning(
+                "trade-execute: GTT attach failed for %s (entry succeeded; "
+                "client-side exit detection still active): %s",
+                trade.get("trade_id"), e,
+            )
+            await self.ctx.db.log_gtt_event(
+                trade_id=trade.get("trade_id"), gtt_id=None, symbol=symbol,
+                event_type="rejected_placement",
+                details={"reason": "broker_error", "error": str(e)},
+            )
+            return
+
+        if gtt_id:
+            trade["gtt_id"] = gtt_id
+            try:
+                await self.ctx.db.set_trade_gtt(trade["trade_id"], gtt_id)
+            except Exception:
+                logger.debug("Failed to persist gtt_id", exc_info=True)
+            await self.ctx.db.log_gtt_event(
+                trade_id=trade.get("trade_id"), gtt_id=gtt_id, symbol=symbol,
+                event_type="placed", status="active",
+                details={
+                    "side": exit_side, "quantity": qty,
+                    "sl_trigger": sl_trig, "target_trigger": tgt_trig,
+                    "sl_limit": sl_limit, "target_limit": tgt_limit,
+                },
+            )
+
+    async def _attach_mis_target_limit(self, trade: dict[str, Any]) -> None:
+        """Place a resting LIMIT order at target for a freshly-filled MIS
+        trade. Kite doesn't allow GTT on MIS, so we DIY an OCO: this LIMIT
+        sits on the book; position-monitor cancels the SL when it fills,
+        and cancels this when the SL fills.
+
+        Failure is non-fatal — the trade itself succeeded; position-monitor
+        falls back to client-side target detection (with the 0.15% buffer).
+        """
+        exit_side = "SELL" if trade["signal_type"] == "BUY" else "BUY"
+        target_price = float(trade["target_price"])
+        qty = int(trade["quantity"])
+        try:
+            target_order_id = await self.ctx.broker.place_order(
+                symbol=trade["symbol"],
+                side=exit_side,
+                quantity=qty,
+                order_type="LIMIT",
+                price=target_price,
+                product="MIS",
+                tag="yv-tgt",
+            )
+        except Exception as e:
+            logger.warning(
+                "trade-execute: target LIMIT attach failed for %s (entry "
+                "succeeded; heartbeat target detection still active): %s",
+                trade.get("trade_id"), e,
+            )
+            return
+
+        if target_order_id:
+            trade["target_order_id"] = target_order_id
+            try:
+                await self.ctx.db.set_trade_target_order_id(
+                    trade["trade_id"], target_order_id,
+                )
+            except Exception:
+                logger.debug("Failed to persist target_order_id", exc_info=True)
+            logger.info(
+                "trade-execute: MIS target LIMIT placed for %s @ %.2f (order=%s)",
+                trade["symbol"], target_price, target_order_id,
+            )
 
     async def _verify_fill(self, order_id: str, timeout_sec: int = 5) -> str:
         """Poll order status until it reaches a terminal state.

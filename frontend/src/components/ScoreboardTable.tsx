@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ScoreboardEntry } from "../types/api";
 import clsx from "clsx";
+import { SymbolLink } from "./SymbolLink";
 
 function pct(v: number | null) {
   if (v === null) return "\u2014";
@@ -73,7 +74,10 @@ export function ScoreboardTable({ entries }: { entries: ScoreboardEntry[] }) {
               >
                 <td className="py-2 pr-4">
                   {e.group_key.startsWith("symbol:") ? (
-                    <span className="text-emerald-400">{e.group_key.replace("symbol:", "")}</span>
+                    <SymbolLink
+                      symbol={e.group_key.replace("symbol:", "")}
+                      className="text-emerald-400"
+                    />
                   ) : e.group_key.startsWith("model:") ? (
                     <span className="text-blue-400 font-mono text-xs">{e.group_key.replace("model:", "")}</span>
                   ) : (

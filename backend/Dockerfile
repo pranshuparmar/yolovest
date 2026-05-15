@@ -47,7 +47,7 @@ ENV TZ=Asia/Kolkata
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s \
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 --start-period=180s \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')" || exit 1
 
 ENTRYPOINT ["python", "-m", "yolovest.main"]

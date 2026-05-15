@@ -158,20 +158,63 @@ def _holdings_value(holdings: list[dict[str, Any]]) -> float:
 
 
 def _extract_available_cash(margins: dict[str, Any]) -> float:
-    """Extract free trading cash (not deployed) from Kite margins."""
+    """Extract free trading cash (not deployed) from Kite margins.
+
+    Kite's equity.available.cash is the OPENING balance — it doesn't
+    reflect intraday utilisation. equity.available.live_balance (and
+    equity.net) is the truly-available figure after deducting margin
+    used by open MIS/CO positions. Prefer those; fall back to
+    `cash − utilised.debits` so the result is honest even on older
+    Kite payload shapes.
+    """
     equity = margins.get("equity", {})
     if isinstance(equity, dict):
+        # Top-level `net` is Kite's authoritative "available right now".
+        net = equity.get("net")
+        if net is not None:
+            try:
+                return float(net)
+            except (TypeError, ValueError):
+                pass
+
         avail = equity.get("available", {})
+        used = equity.get("utilised", {})
         if isinstance(avail, dict):
-            for k in ("cash", "live_balance", "adhoc_margin", "opening_balance"):
+            # Prefer live_balance / adhoc_margin (post-deduction values).
+            for k in ("live_balance", "adhoc_margin"):
                 v = avail.get(k)
                 if v is not None:
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        pass
+            # Fall back: opening cash minus utilised debits.
+            cash = avail.get("cash")
+            if cash is not None:
+                try:
+                    used_debits = 0.0
+                    if isinstance(used, dict):
+                        used_debits = float(used.get("debits") or used.get("net") or 0.0)
+                    return float(cash) - used_debits
+                except (TypeError, ValueError):
+                    pass
+            # Last resort: opening balance.
+            v = avail.get("opening_balance")
+            if v is not None:
+                try:
                     return float(v)
+                except (TypeError, ValueError):
+                    pass
+
+    # Legacy/non-Kite shape
     avail = margins.get("available", {})
     if isinstance(avail, dict):
         v = avail.get("cash") or avail.get("live_balance")
         if v is not None:
-            return float(v)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
     return 0.0
 
 
@@ -242,6 +285,134 @@ async def _compute_capital_breakdown(broker: Any) -> dict[str, float]:
         + breakdown["holdings_current"]
     )
     return breakdown
+
+
+async def _apply_order_postback(
+    ctx: AppContext, order_id: str, status: str, body: dict[str, Any],
+) -> None:
+    """Route a Zerodha postback to the matching trade row and act on it.
+
+    Terminal statuses (COMPLETE / CANCELLED / REJECTED) handled here so
+    trade-row state updates within seconds of the broker event rather
+    than waiting for the next position-monitor heartbeat. Polling is
+    still authoritative — this is a latency optimisation, not a
+    replacement for `kite.orders()` reconciliation.
+    """
+    trade, leg = await ctx.db.find_trade_by_order_id(order_id)
+    if not trade:
+        # Could be a GTT-triggered order (we don't track that order_id
+        # locally — ghost recovery cleans up the position when broker
+        # qty hits zero) or an order placed outside the system. Log and
+        # move on; ghost recovery is the safety net.
+        logger.info(
+            "Postback for order=%s status=%s — no matching local trade",
+            order_id, status,
+        )
+        return
+
+    symbol = trade.get("symbol")
+    trade_id = trade.get("trade_id")
+    log_prefix = f"Postback {symbol} {trade_id} {leg}={order_id}"
+
+    if leg == "entry":
+        # Entry-leg lifecycle
+        if status == "REJECTED":
+            logger.warning("%s: entry REJECTED — marking trade failed", log_prefix)
+            # Late-rejection cleanup. _verify_fill cancels the SL/target
+            # legs inline when the entry rejects during synchronous
+            # placement, but if Zerodha returned COMPLETE (or we hit the
+            # verify timeout) and the exchange flips to REJECTED seconds
+            # later, the cancel sweep here is the only protection
+            # against orphaned resting orders. An armed SL-M on a
+            # nonexistent position would fire on a downward move and
+            # create an unintended short.
+            for leg_name, oid in (
+                ("sl", trade.get("sl_order_id")),
+                ("target", trade.get("target_order_id")),
+            ):
+                if not oid:
+                    continue
+                try:
+                    await ctx.broker.cancel_order(oid)
+                    logger.info(
+                        "%s: cancelled orphan %s order %s after entry REJECTED",
+                        log_prefix, leg_name, oid,
+                    )
+                except Exception:
+                    logger.warning(
+                        "%s: failed to cancel orphan %s order %s",
+                        log_prefix, leg_name, oid, exc_info=True,
+                    )
+            try:
+                await ctx.db.conn.execute(
+                    "UPDATE trades SET status = 'failed', "
+                    "sl_order_id = NULL, target_order_id = NULL "
+                    "WHERE trade_id = ?",
+                    (trade_id,),
+                )
+                await ctx.db.conn.commit()
+            except Exception:
+                logger.exception("%s: failed to mark trade failed", log_prefix)
+            await ctx.notify.send(
+                f"Trade entry REJECTED: {symbol} ({order_id})\n"
+                f"Reason: {body.get('status_message') or 'see Zerodha'}",
+                alert_type="errors",
+            )
+        elif status == "COMPLETE":
+            # Most entries already get marked filled by verify_fill at
+            # placement time; the postback may arrive after we've moved
+            # on. Update fill_price + slippage if not already set.
+            try:
+                fill_price = float(body.get("average_price") or 0)
+            except (TypeError, ValueError):
+                fill_price = 0.0
+            if fill_price > 0 and not trade.get("fill_price"):
+                slippage = abs(fill_price - float(trade.get("entry_price") or 0))
+                await ctx.db.conn.execute(
+                    "UPDATE trades SET fill_price = ?, slippage = ?, status = 'open' "
+                    "WHERE trade_id = ? AND fill_price IS NULL",
+                    (fill_price, slippage, trade_id),
+                )
+                await ctx.db.conn.commit()
+                logger.info("%s: filled @ %.2f (slippage %.2f)", log_prefix, fill_price, slippage)
+        elif status == "CANCELLED":
+            # Usually expected — we cancelled it ourselves on retry/timeout.
+            logger.info("%s: entry CANCELLED", log_prefix)
+
+    elif leg == "sl":
+        if status == "COMPLETE":
+            # Broker-side SL fired — position is closed at broker. Cancel
+            # any resting target leg so it doesn't try to sell on a now-
+            # empty position. Ghost recovery (next heartbeat) closes the
+            # DB row with the actual fill price.
+            target_oid = trade.get("target_order_id")
+            if target_oid:
+                try:
+                    await ctx.broker.cancel_order(target_oid)
+                    await ctx.db.set_trade_target_order_id(trade_id, None)
+                except Exception:
+                    logger.debug("%s: target cancel after SL fill failed", log_prefix, exc_info=True)
+            logger.info("%s: SL fired — broker exit registered, ghost recovery will close DB row", log_prefix)
+        elif status == "REJECTED":
+            logger.warning("%s: SL order REJECTED — position is unprotected!", log_prefix)
+            await ctx.notify.send(
+                f"WARNING: SL order REJECTED for {symbol} ({order_id})\n"
+                f"Position is UNPROTECTED. Reason: {body.get('status_message') or 'see Zerodha'}",
+                alert_type="errors",
+            )
+
+    elif leg == "target":
+        if status == "COMPLETE":
+            # Target LIMIT filled — same shape as SL fill: cancel the
+            # other leg, let ghost recovery close the row.
+            sl_oid = trade.get("sl_order_id")
+            if sl_oid:
+                try:
+                    await ctx.broker.cancel_order(sl_oid)
+                    await ctx.db.set_trade_sl_order_id(trade_id, None)
+                except Exception:
+                    logger.debug("%s: SL cancel after target fill failed", log_prefix, exc_info=True)
+            logger.info("%s: target LIMIT filled — broker exit registered", log_prefix)
 
 
 async def _compute_total_capital(broker: Any) -> float:
@@ -460,13 +631,14 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         If broker is authenticated, syncs available funds from Zerodha.
         """
-        # Sync capital breakdown (cash + utilised + holdings) if authenticated
+        # Refresh live capital breakdown (cash + utilised + holdings) on every read.
+        # initial_capital is the deposited baseline — set once at bootstrap and via
+        # explicit /api/capital or /api/capital/sync; never overwritten here.
         try:
             if await ctx.broker.is_authenticated():
                 bd = await _compute_capital_breakdown(ctx.broker)
                 if bd["total"] > 0:
                     import json as _json
-                    await ctx.db.set_system_state("initial_capital", str(bd["total"]))
                     await ctx.db.set_system_state("capital_breakdown", _json.dumps(bd))
                     logger.info("Portfolio: synced broker capital ₹%.2f (cash=%.2f, used=%.2f, hold=%.2f)",
                                 bd["total"], bd["available_cash"], bd["utilised_margin"], bd["holdings_current"])
@@ -513,6 +685,208 @@ def create_app(ctx: AppContext) -> FastAPI:
     ) -> list[dict[str, Any]]:
         """Current open positions."""
         return await ctx.db.get_open_positions(mode=mode or ctx.config.mode)
+
+    @app.post("/api/positions/{trade_id}/close")
+    async def close_position(
+        trade_id: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Immediately exit a single open position at market.
+
+        Flow:
+          1. Cancel any attached SL order at broker.
+          2. Delete any attached GTT at broker (so it doesn't fire later).
+          3. Place a MARKET exit order in the opposite direction.
+          4. Close the trade row with realised PnL.
+
+        Live mode places a real order via the broker; paper mode simulates
+        the exit using current LTP. Bypasses the normal manual-approval
+        queue — the action is user-initiated and explicit.
+        """
+        trade = await ctx.db.get_trade(trade_id)
+        if not trade:
+            raise HTTPException(status_code=404, detail=f"No trade with id={trade_id}")
+        if trade.get("status") != "open":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trade {trade_id} status is {trade.get('status')!r}; nothing to close",
+            )
+
+        symbol = trade["symbol"]
+        qty = int(trade["quantity"])
+        exit_side = "SELL" if trade["signal_type"] == "BUY" else "BUY"
+        product = trade.get("product", "MIS")
+
+        # Cancel any open SL / target (MIS LIMIT) orders so the exit isn't
+        # double-placed and dangling orders don't fire after we've closed.
+        for oid_key, label in (("sl_order_id", "SL"), ("target_order_id", "target")):
+            oid = trade.get(oid_key)
+            if not oid:
+                continue
+            try:
+                await ctx.broker.cancel_order(oid)
+            except Exception:
+                logger.debug(
+                    "close_position: %s cancel failed (already executed?)",
+                    label, exc_info=True,
+                )
+
+        # Delete attached GTT (CNC only — MIS has no GTT)
+        gtt_id = trade.get("gtt_id")
+        if gtt_id and hasattr(ctx.broker, "delete_gtt"):
+            try:
+                await ctx.broker.delete_gtt(int(gtt_id))
+                await ctx.db.set_trade_gtt(trade_id, None)
+                await ctx.db.log_gtt_event(
+                    trade_id=trade_id, gtt_id=int(gtt_id), symbol=symbol,
+                    event_type="deleted", status="deleted",
+                    details={"reason": "manual_close"},
+                )
+            except Exception:
+                logger.warning("close_position: delete_gtt %s failed", gtt_id, exc_info=True)
+
+        # Place market exit
+        try:
+            exit_order_id = await ctx.broker.place_order(
+                symbol=symbol,
+                side=exit_side,
+                quantity=qty,
+                order_type="MARKET",
+                product=product,
+                tag="yv-close",
+            )
+        except Exception as e:
+            logger.exception("close_position: place exit order failed for %s", trade_id)
+            raise HTTPException(status_code=502, detail=f"Broker rejected exit order: {e}")
+
+        # Wait briefly for fill, fall back to LTP-based estimate
+        exit_price = None
+        for _ in range(10):
+            try:
+                status = await ctx.broker.get_order_status(exit_order_id)
+                exit_price = status.get("average_price")
+                if exit_price and exit_price > 0:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+        if not exit_price or exit_price <= 0:
+            try:
+                exit_price = await ctx.market_data.get_ltp(symbol)
+            except Exception:
+                exit_price = float(trade.get("fill_price") or trade.get("entry_price") or 0)
+
+        entry = float(trade.get("fill_price") or trade["entry_price"])
+        gross_pnl = (
+            (exit_price - entry) * qty if trade["signal_type"] == "BUY"
+            else (entry - exit_price) * qty
+        )
+        from yolovest.costs import resolve_round_trip_costs
+        costs, _src, breakdown = await resolve_round_trip_costs(
+            ctx.broker, symbol=symbol, signal_type=trade["signal_type"],
+            entry_price=entry, exit_price=float(exit_price), quantity=qty,
+            product=product, cost_config=ctx.config.transaction_costs,
+        )
+        pnl = round(gross_pnl - costs, 2)
+
+        await ctx.db.close_position(
+            trade_id, float(exit_price), pnl, realized_costs=breakdown,
+        )
+
+        try:
+            await ctx.notify.send(
+                f"Manual close: {symbol} x{qty} @ ₹{exit_price:.2f} "
+                f"(entry ₹{entry:.2f}) — PnL ₹{pnl:+,.2f}",
+                alert_type="trade_exit",
+            )
+        except Exception:
+            logger.debug("close_position: notify failed", exc_info=True)
+
+        logger.info(
+            "close_position: %s %s qty=%d exit=%.2f pnl=%.2f (order=%s)",
+            exit_side, symbol, qty, exit_price, pnl, exit_order_id,
+        )
+
+        return {
+            "status": "closed",
+            "trade_id": trade_id,
+            "exit_price": float(exit_price),
+            "pnl": pnl,
+            "exit_order_id": exit_order_id,
+        }
+
+    @app.post("/api/positions/{trade_id}/convert")
+    async def convert_position(
+        trade_id: str,
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Convert an open MIS position to CNC (or back). Promotes a
+        winning intraday trade to delivery so it survives the 3:15 PM
+        auto-square-off. Caller must ensure sufficient delivery margin
+        is available — broker rejection bubbles up as 502.
+        """
+        trade = await ctx.db.get_trade(trade_id)
+        if not trade:
+            raise HTTPException(status_code=404, detail="Trade not found")
+        if trade.get("status") != "open":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trade is not open (status={trade.get('status')})",
+            )
+
+        current = trade.get("product", "MIS")
+        target = (body.get("to_product") or "").upper()
+        if target not in ("MIS", "CNC"):
+            raise HTTPException(status_code=400, detail="to_product must be MIS or CNC")
+        if current == target:
+            return {"status": "noop", "product": current}
+
+        ok = await ctx.broker.convert_position(
+            symbol=trade["symbol"],
+            quantity=int(trade["quantity"]),
+            from_product=current,
+            to_product=target,
+            side=trade["signal_type"],
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Broker rejected {current}->{target} conversion",
+            )
+
+        await ctx.db.set_trade_product(trade_id, target)
+        try:
+            await ctx.notify.send(
+                f"Position converted: {trade['symbol']} {current} -> {target}",
+                alert_type="trade_exit",
+            )
+        except Exception:
+            logger.debug("convert_position: notify failed", exc_info=True)
+
+        # If we just promoted MIS -> CNC and the trade had MIS broker-side
+        # OCO orders (resting LIMIT target + SL), those are now stale —
+        # they're product-specific. Cancel both; the user can re-attach a
+        # GTT manually or let the next heartbeat see it as CNC and place
+        # one automatically via the existing _attach_oco_gtt path on a
+        # future code path. For now we leave attach to manual / next-day.
+        if current == "MIS" and target == "CNC":
+            for oid_key in ("sl_order_id", "target_order_id"):
+                oid = trade.get(oid_key)
+                if not oid:
+                    continue
+                try:
+                    await ctx.broker.cancel_order(oid)
+                except Exception:
+                    logger.debug("convert_position: %s cancel failed", oid_key, exc_info=True)
+
+        logger.info(
+            "convert_position: %s %s -> %s qty=%d",
+            trade["symbol"], current, target, trade["quantity"],
+        )
+        return {"status": "converted", "trade_id": trade_id, "product": target}
+
 
     # Track whether we've already sent a broker-expired Telegram alert this session
     # to avoid spamming on every page load / auto-refresh.
@@ -823,6 +1197,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 product=product,
                 price=float(price) if price else None,
                 trigger_price=float(trigger_price) if trigger_price else None,
+                tag="yv-manual",
             )
 
             # Record trade in DB
@@ -922,24 +1297,76 @@ def create_app(ctx: AppContext) -> FastAPI:
         trade_id: str, user: str = Depends(verify_credentials)
     ) -> dict[str, Any]:
         """Full reasoning chain for a trade: signal → risk → LLM → execution → outcome."""
+        import json as _json
+
         from yolovest.costs import compute_transaction_cost_breakdown
 
         detail = await ctx.db.get_trade_detail(trade_id)
         if not detail:
             raise HTTPException(status_code=404, detail="Trade not found")
 
-        # Compute cost breakdown for display
-        fill = detail.get("fill_price") or detail.get("entry_price", 0)
-        exit_p = detail.get("exit_price") or detail.get("target_price") or fill
-        qty = detail.get("quantity") or 0
-        product = detail.get("product") or "MIS"
-        if fill and qty:
-            detail["cost_breakdown"] = compute_transaction_cost_breakdown(
-                fill, exit_p, qty, product=product,
-                cost_config=ctx.config.transaction_costs,
-            )
+        # Prefer the breakdown captured at close time (broker contract-note when
+        # available, config-based estimate otherwise); else compute a live
+        # estimate from fill/exit so open trades still see something useful.
+        stored = detail.get("realized_costs_json")
+        if stored:
+            try:
+                detail["cost_breakdown"] = _json.loads(stored)
+            except (ValueError, TypeError):
+                detail["cost_breakdown"] = None
+        if not detail.get("cost_breakdown"):
+            fill = detail.get("fill_price") or detail.get("entry_price", 0)
+            exit_p = detail.get("exit_price") or detail.get("target_price") or fill
+            qty = detail.get("quantity") or 0
+            product = detail.get("product") or "MIS"
+            if fill and qty:
+                bd = compute_transaction_cost_breakdown(
+                    fill, exit_p, qty, product=product,
+                    cost_config=ctx.config.transaction_costs,
+                )
+                bd["source"] = "estimate"
+                detail["cost_breakdown"] = bd
+
+        # GTT lifecycle audit trail — placed, modified, deleted, status
+        # changes. Empty for trades that never had a GTT (e.g. MIS).
+        try:
+            detail["gtt_events"] = await ctx.db.get_gtt_events_for_trade(trade_id)
+        except Exception:
+            detail["gtt_events"] = []
 
         return detail
+
+    @app.get("/api/trades/{trade_id}/order-detail")
+    async def get_trade_order_detail(
+        trade_id: str, _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Broker-side order history + per-fill records for each order id
+        attached to a trade (entry / SL / target). Read-only — fetches
+        live from Kite each call, no local cache.
+
+        Useful for forensic review of slippage, partial fills, and the
+        exact state-transition timeline a broker order went through.
+        """
+        trade = await ctx.db.get_trade(trade_id)
+        if not trade:
+            raise HTTPException(status_code=404, detail="Trade not found")
+
+        result: dict[str, Any] = {"trade_id": trade_id, "legs": {}}
+        for leg, oid in (
+            ("entry", trade.get("order_id")),
+            ("sl", trade.get("sl_order_id")),
+            ("target", trade.get("target_order_id")),
+        ):
+            if not oid:
+                continue
+            history = await ctx.broker.get_order_history(str(oid))
+            fills = await ctx.broker.get_order_trades(str(oid))
+            result["legs"][leg] = {
+                "order_id": oid,
+                "history": history,
+                "fills": fills,
+            }
+        return result
 
     # ------------------------------------------------------------------
     # Predictions & Scoreboard
@@ -1061,6 +1488,57 @@ def create_app(ctx: AppContext) -> FastAPI:
     ) -> dict[str, Any]:
         """LLM review accuracy vs actual trade outcomes."""
         return await ctx.db.get_llm_review_accuracy(days=days, mode=ctx.config.mode)
+
+    @app.get("/api/model-drift")
+    async def get_model_drift(
+        days: int = Query(30, ge=1, le=365),
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Model drift dashboard: predicted vs realised win rate per model.
+
+        Detects when the ML model's calibration is decaying so retraining
+        can be triggered before live performance silently degrades.
+        """
+        return await ctx.db.get_model_drift_stats(days=days, mode=ctx.config.mode)
+
+    @app.get("/api/signal-class-distribution")
+    async def get_signal_class_distribution(
+        days: int = Query(7, ge=1, le=90),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """BUY/HOLD/SELL signal counts over the last N days (mode-scoped).
+
+        Surfaces the same data the drift-watch class-collapse alert
+        runs against, so the dashboard can render a visible
+        early-warning widget even when no alert has fired yet.
+        """
+        return await ctx.db.get_signal_class_counts(
+            days=days, mode=ctx.config.mode,
+        )
+
+    @app.get("/api/institutional-flows")
+    async def get_institutional_flows(
+        days: int = Query(30, ge=1, le=180),
+        bulk_limit: int = Query(200, ge=1, le=2000),
+        symbol: str | None = Query(None),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Combined FII/DII timeline + recent bulk/block deals.
+
+        FII/DII values are in ₹ crore. Bulk-deal rows are NSE
+        verbatim — same data the institutional-flow risk-check
+        multiplier reads at signal-evaluation time.
+        """
+        timeline = await ctx.db.get_fii_dii_timeline(days)
+        summary = await ctx.db.get_fii_dii_timeline_summary(days)
+        deals = await ctx.db.get_bulk_deals_list(
+            days=days, symbol=symbol, limit=bulk_limit,
+        )
+        return {
+            "fii_dii_timeline": timeline,
+            "fii_dii_summary": summary,
+            "bulk_deals": deals,
+        }
 
     @app.get("/api/audit")
     async def get_audit_log(
@@ -1231,20 +1709,69 @@ def create_app(ctx: AppContext) -> FastAPI:
             return RedirectResponse(url="/integrations?zerodha_auth=failed")
 
     @app.post("/api/auth/zerodha/postback")
-    async def zerodha_postback(body: dict[str, Any]) -> dict[str, str]:
-        """Zerodha order postback — receives order status updates.
+    async def zerodha_postback(request: Request) -> dict[str, str]:
+        """Zerodha order postback. Fires on every order status change
+        (COMPLETE / CANCELLED / REJECTED / partial-fill UPDATE).
 
-        No auth required (called by Zerodha servers).
-        Logs the update and broadcasts to WebSocket clients.
+        Two things happen:
+          1. Checksum verification — SHA-256(order_id + order_timestamp +
+             api_secret) must match the body's checksum field. Without
+             this, anyone who knows the endpoint URL could spoof updates
+             at our dashboard clients.
+          2. Business logic — for terminal states (COMPLETE, CANCELLED,
+             REJECTED) we route the update to _apply_order_postback,
+             which updates the matching trade row immediately rather
+             than waiting for the next 15-min heartbeat reconciliation.
         """
-        order_id = body.get("order_id", "unknown")
-        order_status = body.get("status", "unknown")
-        logger.info("Zerodha postback: order=%s status=%s", order_id, order_status)
+        import hashlib
+        import json as _json
+
+        raw = await request.body()
+        try:
+            body = _json.loads(raw or b"{}")
+        except (ValueError, TypeError):
+            logger.warning("Zerodha postback: invalid JSON body")
+            raise HTTPException(status_code=400, detail="invalid body")
+
+        order_id = str(body.get("order_id") or "")
+        order_timestamp = str(body.get("order_timestamp") or "")
+        received_checksum = body.get("checksum") or ""
+
+        api_secret_val = ctx.config.broker.api_secret.get_secret_value() \
+            if ctx.config.broker.api_secret else ""
+        if api_secret_val and order_id and order_timestamp:
+            expected = hashlib.sha256(
+                f"{order_id}{order_timestamp}{api_secret_val}".encode(),
+            ).hexdigest()
+            if not secrets.compare_digest(expected, str(received_checksum)):
+                logger.warning(
+                    "Zerodha postback: checksum mismatch for order=%s "
+                    "(possibly spoofed) — rejecting", order_id,
+                )
+                raise HTTPException(status_code=401, detail="invalid checksum")
+        else:
+            # Mode where checksum can't be computed (paper / dev). Log
+            # but accept so local testing isn't blocked.
+            logger.debug(
+                "Zerodha postback: skipping checksum (api_secret/order_id/timestamp missing)",
+            )
+
+        status_str = (body.get("status") or "").upper()
+        logger.info("Zerodha postback: order=%s status=%s", order_id, status_str)
+
+        if status_str in ("COMPLETE", "CANCELLED", "REJECTED"):
+            try:
+                await _apply_order_postback(ctx, order_id, status_str, body)
+            except Exception:
+                logger.exception(
+                    "Zerodha postback: business-logic failed for order=%s",
+                    order_id,
+                )
 
         try:
             await broadcast_ws("order_update", {
                 "order_id": order_id,
-                "status": order_status,
+                "status": status_str,
                 "symbol": body.get("tradingsymbol"),
                 "transaction_type": body.get("transaction_type"),
             })
@@ -1677,6 +2204,12 @@ def create_app(ctx: AppContext) -> FastAPI:
     ) -> dict[str, Any]:
         """System state including kill switch, degraded features, and auto-approvals."""
         kill_switch = await ctx.db.is_kill_switch_active()
+        # Which command activated the pause? pause / stop / kill. Empty
+        # string when kill switch is inactive or when the value is
+        # missing (older installs that pre-date kill_switch_mode).
+        kill_switch_mode = (
+            (await ctx.db.get_system_state("kill_switch_mode")) or ""
+        ) if kill_switch else ""
         orchestrator_state = await ctx.db.get_system_state("orchestrator")
 
         # Build degraded mode report: which features are running with fallbacks
@@ -1754,6 +2287,7 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         return {
             "kill_switch_active": kill_switch,
+            "kill_switch_mode": kill_switch_mode,
             "orchestrator": orchestrator_state,
             "mode": ctx.config.mode,
             "degraded_features": degraded,
@@ -1767,25 +2301,112 @@ def create_app(ctx: AppContext) -> FastAPI:
     # Symbol Deep-Dive (Feature #3)
     # ------------------------------------------------------------------
 
+    @app.get("/api/symbol/{symbol}/context")
+    async def get_symbol_context(
+        symbol: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Symbol detail-page extras: quarantine status, recent bulk
+        deals, average delivery %, latest signal + top-5 attribution.
+        Composed in one round-trip so the page doesn't fire N queries
+        on load.
+        """
+        sym = symbol.upper()
+        try:
+            quarantined = await ctx.db.get_quarantined_symbols()
+        except Exception:
+            quarantined = []
+        q_entry = next(
+            (q for q in quarantined if q.get("symbol", "").upper() == sym), None,
+        )
+        try:
+            bulk = await ctx.db.get_bulk_deals_list(days=30, symbol=sym, limit=20)
+        except Exception:
+            bulk = []
+        try:
+            delivery_avg = await ctx.db.get_recent_delivery_pct(sym, lookback_days=5)
+        except Exception:
+            delivery_avg = None
+
+        # Latest signal + TreeSHAP top-5 attribution. Mode-scoped so
+        # paper-mode signals don't leak into a live view.
+        latest_signal: dict[str, Any] | None = None
+        try:
+            cur = await ctx.db.read_conn.execute(
+                "SELECT signal_type, confidence_score, attribution_json, "
+                "disposition, created_at "
+                "FROM signals WHERE symbol = ? AND mode = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (sym, ctx.config.mode),
+            )
+            row = await cur.fetchone()
+            if row:
+                import json as _json
+
+                attribution: list[dict[str, Any]] = []
+                if row[2]:
+                    try:
+                        parsed = _json.loads(row[2])
+                        if isinstance(parsed, list):
+                            attribution = parsed[:5]
+                    except Exception:
+                        attribution = []
+                latest_signal = {
+                    "signal_type": row[0],
+                    "confidence_score": row[1],
+                    "disposition": row[3],
+                    "created_at": row[4],
+                    "attribution": attribution,
+                }
+        except Exception:
+            logger.debug("symbol context: latest_signal lookup failed", exc_info=True)
+
+        return {
+            "quarantine": q_entry,
+            "recent_bulk_deals": bulk,
+            "delivery_pct_avg_5d": delivery_avg,
+            "latest_signal": latest_signal,
+        }
+
     @app.get("/api/symbol/{symbol}/ohlcv")
     async def get_symbol_ohlcv(
         symbol: str,
         days: int = Query(60, ge=1, le=365),
-        interval: str = Query("1d"),
-        user: str = Depends(verify_credentials),
+        interval: str = Query("daily"),
+        _user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
-        """OHLCV bars for a symbol."""
-        bars = await ctx.db.get_ohlcv(symbol.upper(), interval, days)
+        """OHLCV bars for a symbol with delivery_pct overlay. The DB
+        stores daily bars under the canonical interval "daily"
+        (matching ingester / market-scan conventions); "1d" / "1day"
+        are normalised so older frontend builds still work.
+        """
+        from datetime import timedelta
+        from yolovest.timezone import now_ist
+        iv = interval.lower()
+        if iv in ("1d", "1day", "day"):
+            iv = "daily"
+        # Direct query so we can include delivery_pct alongside the
+        # standard OHLCV columns without round-tripping through
+        # OHLCVBar (which doesn't have a delivery_pct field).
+        cutoff = (now_ist() - timedelta(days=days)).isoformat()
+        cursor = await ctx.db.read_conn.execute(
+            "SELECT timestamp, open, high, low, close, volume, delivery_pct "
+            "FROM ohlcv WHERE symbol = ? AND interval = ? AND timestamp >= ? "
+            "ORDER BY timestamp",
+            (symbol.upper(), iv, cutoff),
+        )
+        rows = await cursor.fetchall()
         return [
             {
-                "timestamp": b.timestamp.isoformat(),
-                "open": b.open,
-                "high": b.high,
-                "low": b.low,
-                "close": b.close,
-                "volume": b.volume,
+                "timestamp": r[0],
+                "open": r[1],
+                "high": r[2],
+                "low": r[3],
+                "close": r[4],
+                "volume": r[5],
+                "delivery_pct": r[6],
             }
-            for b in bars
+            for r in rows
         ]
 
     @app.get("/api/symbol/{symbol}/trades")
@@ -2058,6 +2679,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             # VACUUM to reclaim disk space after large deletes
             if deleted > 100:
                 await ctx.db.conn.execute("VACUUM")
+            ctx.db.invalidate_storage_stats_cache()
             return {"success": True, "table": table, "rows_deleted": deleted}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
@@ -2085,6 +2707,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         from yolovest.config import _MODE_HOLDING_DAYS, _MODE_HOLDING_PERIODS
         from yolovest.costs import compute_transaction_costs
         from yolovest.data.features import IndicatorConfig, compute_features
+        from yolovest.skills.generate_signals import _format_class_probs
         from yolovest.strategy.holding_period import adjust_sell_for_holdings, decide_holding_period, interpolate_atr_multipliers
         from yolovest.timezone import IST
 
@@ -2293,7 +2916,10 @@ def create_app(ctx: AppContext) -> FastAPI:
                         "reason": "hold_signal",
                         "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
                     })
-                    logger.info("Dry-run: HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
+                    logger.info(
+                        "Dry-run: HOLD signal for %s (%s)",
+                        symbol, _format_class_probs(prediction),
+                    )
                     continue
 
                 threshold = (
@@ -2308,8 +2934,9 @@ def create_app(ctx: AppContext) -> FastAPI:
                         "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {threshold}",
                     })
                     logger.info(
-                        "Dry-run: Low confidence for %s: %s @ %.2f < %.2f",
+                        "Dry-run: Low confidence for %s: %s @ %.2f < %.2f (%s)",
                         symbol, prediction.signal_type, prediction.confidence, threshold,
+                        _format_class_probs(prediction),
                     )
                     continue
 
@@ -2343,6 +2970,12 @@ def create_app(ctx: AppContext) -> FastAPI:
                 )
 
                 filter_counts["passed"] += 1
+                logger.info(
+                    "Dry-run: PASSED %s for %s @ %.2f (%s)",
+                    prediction.signal_type, symbol,
+                    prediction.confidence,
+                    _format_class_probs(prediction),
+                )
                 signals_out.append({
                     "symbol": symbol,
                     "signal_type": prediction.signal_type,
@@ -2492,6 +3125,39 @@ def create_app(ctx: AppContext) -> FastAPI:
             "replacement": replacement,
         }
 
+    @app.get("/api/rotation-cooldown")
+    async def get_rotation_cooldown(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """List symbols currently held in rotation cooldown + the
+        active threshold / window for the user to gauge how aggressive
+        the screening rotation is.
+        """
+        cfg = ctx.config.scanning
+        symbols = await ctx.db.get_rotation_cooldown_symbols()
+        return {
+            "enabled": cfg.rotation_enabled,
+            "no_signal_threshold": cfg.rotation_no_signal_threshold,
+            "cooldown_hours": cfg.rotation_cooldown_hours,
+            "symbols": sorted(symbols),
+            "count": len(symbols),
+        }
+
+    @app.post("/api/rotation-cooldown/clear")
+    async def clear_rotation_cooldown(
+        symbol: str | None = Query(None, description="Clear one symbol; omit for all"),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """One-shot reset of rotation cooldown so market-scan reconsiders
+        the affected symbols on the next run. Omit `symbol` to clear all.
+        """
+        cleared = await ctx.db.clear_rotation_cooldown(symbol)
+        logger.info(
+            "Rotation cooldown cleared: %s (%d rows)",
+            symbol or "ALL", cleared,
+        )
+        return {"success": True, "cleared": cleared, "symbol": symbol}
+
     def _model_dir() -> str:
         return getattr(ctx.config.strategy, "model_dir", "./models")
 
@@ -2517,6 +3183,22 @@ def create_app(ctx: AppContext) -> FastAPI:
         result = await ctx.db.restore_backup(
             backup_dir, filename, model_dir=_model_dir(),
         )
+        ctx.db.invalidate_storage_stats_cache()
+        return {"success": True, **result}
+
+    @app.delete("/api/backups/{filename}")
+    async def delete_backup(
+        filename: str, _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete a single backup file. Returns the freed size in bytes."""
+        backup_dir = ctx.config.database.backup_dir
+        try:
+            result = await ctx.db.delete_backup(backup_dir, filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        logger.info("Deleted backup %s (%d bytes)", filename, result["size_bytes"])
         return {"success": True, **result}
 
     @app.post("/api/bulk-delete/{group}")
@@ -2529,6 +3211,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             deleted = await ctx.db.bulk_delete(group)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        ctx.db.invalidate_storage_stats_cache()
         total = sum(deleted.values())
         logger.info("Bulk delete [%s]: %d rows", group, total)
         return {"success": True, "group": group, "deleted": deleted, "total": total}
@@ -2537,6 +3220,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def reset_all_data(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
         """Delete ALL data from all tables and model artifacts. Schema is preserved."""
         deleted = await ctx.db.reset_all_data()
+        ctx.db.invalidate_storage_stats_cache()
         total = sum(deleted.values())
         # Also clean up all model artifacts
         model_cleanup = await ctx.db.cleanup_orphaned_models(_model_dir())
@@ -2567,11 +3251,17 @@ def create_app(ctx: AppContext) -> FastAPI:
         _user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
         """Get all trades awaiting manual approval."""
-        # Expire stale pending trades — use generous timeout so trades
-        # survive server restarts and user away periods
-        expired = await ctx.db.expire_pending_trades(max_age_minutes=480)  # 8 hours (full trading day)
+        # Defensive sweep — heartbeat already runs this each cycle, but
+        # the UI render happens to be a convenient backstop if the
+        # heartbeat is paused or wedged.
+        expiry_min = ctx.config.execution.pending_expiry_minutes
+        expired = await ctx.db.expire_pending_trades(max_age_minutes=expiry_min)
         if expired:
-            logger.info("Expired %d stale pending trades (>8h old)", expired)
+            logger.info("Expired %d stale pending trades (>%dmin old)", expired, expiry_min)
+            try:
+                await broadcast_ws("pending_expired", {"count": expired})
+            except Exception:
+                logger.debug("pending_expired broadcast failed", exc_info=True)
         return await ctx.db.get_pending_trades()
 
     @app.post("/api/clear-signals")
@@ -2581,6 +3271,37 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Clear today's signals and pending trades to allow signal regeneration."""
         result = await ctx.db.clear_todays_signals()
         return {"success": True, **result}
+
+    @app.post("/api/kill-switch/{command}")
+    async def kill_switch(
+        command: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Stop / kill / resume trading from the dashboard.
+
+        - stop: cancel pending orders + pause; positions untouched.
+        - kill: cancel pending orders + square off every position + pause.
+        - resume: clear the pause flag.
+
+        Mirrors the /stop /kill /resume Telegram commands. The generic
+        /api/skills/{name}/run endpoint can't carry a command parameter,
+        so this is a dedicated surface.
+        """
+        if command not in {"pause", "stop", "kill", "resume"}:
+            raise HTTPException(
+                status_code=400,
+                detail="command must be one of: pause, stop, kill, resume",
+            )
+        from yolovest.skills.kill_switch import KillSwitchSkill
+
+        skill = KillSwitchSkill(ctx)
+        result = await skill.execute(command=command)
+        return {
+            "success": result.success,
+            "command": command,
+            "data": result.data or {},
+            "error": result.error,
+        }
 
     @app.post("/api/pending-trades/{trade_id}/approve")
     async def approve_pending_trade(
@@ -2615,6 +3336,24 @@ def create_app(ctx: AppContext) -> FastAPI:
                 trade_id, trade.get("signal_type"), trade.get("symbol"),
                 exec_mode, trade.get("order_id", "N/A"), trade.get("trade_id", "N/A"),
             )
+            # Mark the originating signal as executed so Today's
+            # Recommendations stops showing it as AWAITING APPROVAL.
+            # Auto-mode path does this in orchestrator._run_signal; the
+            # manual approve flow has to do it here.
+            try:
+                await ctx.db.update_signal_disposition(
+                    signal.get("symbol", ""), "executed",
+                    f"trade_id={trade.get('trade_id') or trade.get('order_id')}",
+                    position_size=int(trade.get("quantity") or 0) or None,
+                )
+            except Exception:
+                logger.debug("Failed to mark signal executed", exc_info=True)
+            try:
+                await broadcast_ws("pending_approved", {
+                    "trade_id": trade_id, "symbol": signal.get("symbol"),
+                })
+            except Exception:
+                logger.debug("pending_approved broadcast failed", exc_info=True)
             return {"success": True, "trade": trade, "mode": exec_mode}
         logger.error(
             "Trade #%d execution failed: %s", trade_id, result.error,
@@ -2664,6 +3403,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         """Reject a pending trade."""
         await ctx.db.decide_pending_trade(trade_id, "rejected", "dashboard")
         logger.info("Rejected pending trade #%d", trade_id)
+        try:
+            await broadcast_ws("pending_rejected", {"trade_id": trade_id})
+        except Exception:
+            logger.debug("pending_rejected broadcast failed", exc_info=True)
         return {"success": True}
 
     @app.post("/api/change-password")

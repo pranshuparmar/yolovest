@@ -8,6 +8,8 @@ export function StatusBadge() {
     return <span className="text-xs text-gray-500">Loading...</span>;
   }
 
+  // The kill-switch state lives in <KillSwitchControl /> (rendered in the
+  // header). Keeping a duplicate red badge here would just be noise.
   return (
     <div className="flex items-center gap-3">
       <span

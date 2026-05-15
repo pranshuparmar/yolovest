@@ -84,13 +84,19 @@ class MarketDataConfig(BaseModel):
     daily_fallback: str = "yfinance"
     intraday_provider: str = "tvdatafeed"
     kite_data_enabled: bool = False  # enable Kite Connect as data provider
+    # KiteTicker WebSocket for sub-second LTP cache. Requires the paid
+    # Kite data plan and a valid access token. Position-monitor uses
+    # the cached price first, falling back to REST when stale or
+    # missing. Off by default — opt-in until tested in the user's env.
+    kite_websocket_enabled: bool = False
     news_enabled: bool = True  # fetch news from MoneyControl, ET Markets, LiveMint
     scrapers_enabled: bool = True  # fetch from Screener.in, Trendlyne, Google Finance, NSE, economic calendar
     bhavcopy_dir: str = "./data/bhavcopy"
     cache_ttl_minutes: int = 15
     stale_threshold_minutes: int = 30
     sentiment_ttl_hours: int = 48  # sentiment older than this is ignored in scanning
-    backfill_days: int = 1095  # days of history to fetch in backfill-data skill (~3 years)
+    backfill_days: int = 1095  # daily-bar history window for backfill-data and ingest-universe
+    intraday_backfill_days: int = 365  # 5-minute-bar history window for backfill-intraday
 
 
 class HeartbeatConfig(BaseModel):
@@ -122,7 +128,7 @@ class ScanningWeights(BaseModel):
 
 
 class ScanningConfig(BaseModel):
-    universe: str = "nifty500"  # "nifty500", "nifty50", "all"
+    universe: str = "nifty500"  # "nifty50" | "nifty100" | "nifty200" | "nifty500"
     universe_cron: str = "30 8 * * 1-5"  # daily 8:30 AM IST on weekdays
     seed_symbols: list[str] = Field(
         default_factory=lambda: ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
@@ -130,11 +136,21 @@ class ScanningConfig(BaseModel):
     shortlist_size: int = 500
     min_avg_daily_volume: int = 500_000
     weights: ScanningWeights = Field(default_factory=ScanningWeights)
-    # Watchlist rotation: evict symbols that produce no actionable signal for N
-    # consecutive heartbeats, apply a cooldown so market-scan doesn't re-add them.
-    rotation_enabled: bool = True
-    rotation_no_signal_threshold: int = Field(default=8, ge=1, le=100)
-    rotation_cooldown_hours: int = Field(default=48, ge=1, le=72)
+    # Watchlist rotation: evict symbols that fail to produce an actionable
+    # signal for N consecutive *heartbeats with model evaluation*, then
+    # apply a cooldown so market-scan doesn't immediately re-add them.
+    # Default disabled — the threshold + cooldown defaults below are
+    # safe values for opt-in users, but the feature is fundamentally a
+    # foot-gun on broad universes: a 500-stock screener legitimately
+    # produces no signal for most symbols most heartbeats, so any
+    # aggressive cooldown ends up benching the whole universe within
+    # a few hours. Re-enable only if you understand the trade-off.
+    rotation_enabled: bool = False
+    # Days (not heartbeats) of consecutive no-signal before benching.
+    # 1 trading day ≈ 26 market-hours heartbeats — was 8, which is
+    # 2 hours, far too aggressive.
+    rotation_no_signal_threshold: int = Field(default=50, ge=1, le=500)
+    rotation_cooldown_hours: int = Field(default=12, ge=1, le=72)
 
 
 class IndicatorsConfig(BaseModel):
@@ -163,7 +179,7 @@ class HoldingPeriodConfig(BaseModel):
     """
 
     intraday: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=0.75, stop_loss=0.5),
+        default_factory=lambda: ATRMultipliers(target=0.6, stop_loss=0.3),
     )
     short_swing: ATRMultipliers = Field(
         default_factory=lambda: ATRMultipliers(target=1.5, stop_loss=0.75),
@@ -281,6 +297,155 @@ class CorrelationLimitConfig(BaseModel):
     lookback_days: int = Field(default=60, ge=20, le=252)
 
 
+class DepthGateConfig(BaseModel):
+    """Order-flow depth gate using Kite quote depth.
+
+    Imbalance = (total_buy_qty - total_sell_qty) / (total_buy_qty +
+    total_sell_qty). Ranges -1 (all sell pressure) to +1 (all buy
+    pressure). Rejects when the book strongly opposes the signal.
+
+    Requires market_data.kite_data_enabled — only the paid feed exposes
+    total_buy_quantity / total_sell_quantity. Off by default; enable
+    once you've watched a few sessions to confirm the thresholds match
+    your universe's typical book depth.
+    """
+
+    enabled: bool = False
+    min_imbalance_for_buy: float = Field(default=-0.30, ge=-1.0, le=0.0)
+    max_imbalance_for_sell: float = Field(default=0.30, ge=0.0, le=1.0)
+
+
+class LiquidityGateConfig(BaseModel):
+    """Pre-trade liquidity gate using Kite top-5 depth.
+
+    Refuses orders whose size would consume more than `max_pct_of_top5`
+    of the relevant side of the book. Protects against being your own
+    slippage on thinly-traded names — the broker would happily fill
+    you, but at the cost of walking through multiple price levels.
+    Requires market_data.kite_data_enabled (non-Kite providers don't
+    return per-level depth quantities).
+    """
+
+    enabled: bool = False
+    max_pct_of_top5: float = Field(default=0.10, gt=0, le=1.0)
+
+
+class ExitTweaksConfig(BaseModel):
+    """Auxiliary exit conditions for client-side-managed positions.
+
+    These run alongside the standard target/SL geometry. Currently
+    only apply to positions without a broker-side GTT or MIS OCO
+    pair (adopted positions, paper trades, edge cases where OCO
+    placement failed). Broker-managed exits handle their own
+    lifecycle; extending these conditions to MIS OCO / GTT positions
+    would require cancelling broker orders and is left for a later
+    iteration.
+    """
+
+    # Time-stop: intraday positions still open after this many minutes
+    # of zero / negligible target progress get exited at market.
+    # Captures the "chop trade" failure mode where the setup neither
+    # works nor breaks, just stalls.
+    time_stop_enabled: bool = False
+    intraday_stop_after_min: int = Field(default=180, ge=30, le=375)
+    intraday_stop_progress_threshold: float = Field(default=0.30, ge=0, le=1)
+
+    # Volume-exhaustion exit: when the most recent 5-min bar's volume
+    # collapses below `min_volume_ratio` × average of the previous
+    # `lookback_bars`, and the position is in modest profit
+    # (0.5R - 2R), exit. Reads "trend is dying" before SL has a
+    # chance to take back the gains.
+    volume_exit_enabled: bool = False
+    volume_exit_lookback_bars: int = Field(default=12, ge=3, le=60)
+    volume_exit_min_ratio: float = Field(default=0.30, gt=0, le=1.0)
+
+    # Trailing-SL tightening near target. Step-up curve: once target
+    # progress hits `tighten_start_at_target_pct`, the trailing-SL
+    # step shrinks by `tighten_step_decay` per bucket of
+    # `tighten_step_size` progress, floored at `tighten_min_multiplier`.
+    # Defaults give a gradual ramp — first tightening at 50% target
+    # progress, fully floored at 100%.
+    #
+    # Default curve:
+    #   progress  multiplier
+    #   < 0.50    1.00 (full step, no tighten)
+    #   0.50      0.85
+    #   0.60      0.70
+    #   0.70      0.55
+    #   0.80      0.40
+    #   0.90      0.25
+    #   >= 1.00   0.20 (floor)
+    #
+    # Increase tighten_step_decay or lower tighten_min_multiplier for
+    # an aggressive lock-in; raise tighten_start_at_target_pct for
+    # wider trades that need room to breathe. Applies to both
+    # client-side and GTT-managed trailing SL paths.
+    tighten_trailing_enabled: bool = True
+    tighten_start_at_target_pct: float = Field(default=0.50, ge=0.3, le=0.95)
+    tighten_step_size: float = Field(default=0.10, ge=0.05, le=0.50)
+    tighten_step_decay: float = Field(default=0.15, ge=0.05, le=0.50)
+    tighten_min_multiplier: float = Field(default=0.20, gt=0, le=1.0)
+
+
+class InstitutionalFlowConfig(BaseModel):
+    """Conviction-sizing tweak based on NSE institutional flow data.
+
+    Reads two free-of-cost data points the system was already
+    fetching but discarding:
+
+    - Bulk/block deals: institutional accumulation (BUY > SELL) or
+      distribution (SELL > BUY) on the candidate symbol in the last
+      `bulk_deal_lookback_days`.
+    - FII net flow: today's foreign institutional buy minus sell.
+      Positive = foreigners net buying, negative = net selling.
+
+    When the signal direction agrees with the flow direction, the
+    position size is scaled up by `bulk_deal_size_multiplier` (or
+    `fii_aligned_size_multiplier` respectively). When it strongly
+    opposes, size is scaled down by 1/multiplier. Both checks are
+    independent and multiplicative.
+
+    Off by default. Enable when you've watched a few sessions of
+    institutional-flow logs and are happy with the calibration.
+    """
+
+    enabled: bool = False
+    bulk_deal_lookback_days: int = Field(default=5, ge=1, le=30)
+    # Multiplier applied when bulk deals strongly agree with signal
+    # direction (e.g. BUY signal + at least 2 net BUY bulk deals).
+    bulk_deal_size_multiplier: float = Field(default=1.20, ge=1.0, le=2.0)
+    # FII regime threshold (₹ crore). Above + reads as buying-day
+    # supporting BUYs; below − reads as selling-day supporting SELLs.
+    fii_net_threshold_cr: float = Field(default=500.0, ge=0)
+    fii_aligned_size_multiplier: float = Field(default=1.15, ge=1.0, le=2.0)
+
+
+class RegimeGateConfig(BaseModel):
+    """Cross-sectional market-regime gate.
+
+    Computes universe breadth (fraction of symbols up on the day) live
+    and refuses new positions when the regime opposes the signal
+    direction. BUY signals are blocked when breadth is below
+    `min_breadth_for_buy` (broad market is red), SELL signals are
+    blocked when breadth is above `max_breadth_for_sell` (broad market
+    is green). When breadth is strongly bullish (above
+    `bullish_breadth_threshold`), BUY position size is scaled by
+    `bullish_size_multiplier`. Mirror for strong bearish on SELL.
+
+    Most "bad days" share one thing: the broad market is moving
+    against the trade. This is the cheap, cross-sectional signal that
+    catches it without needing a NIFTY ingest.
+    """
+
+    enabled: bool = False
+    min_breadth_for_buy: float = Field(default=0.40, ge=0.0, le=1.0)
+    max_breadth_for_sell: float = Field(default=0.60, ge=0.0, le=1.0)
+    bullish_breadth_threshold: float = Field(default=0.65, ge=0.5, le=1.0)
+    bearish_breadth_threshold: float = Field(default=0.35, ge=0.0, le=0.5)
+    bullish_size_multiplier: float = Field(default=1.20, ge=1.0, le=2.0)
+    bearish_size_multiplier: float = Field(default=1.20, ge=1.0, le=2.0)
+
+
 class ReentryConfig(BaseModel):
     """Smart re-entry — allow re-entering after SL hit if conditions improve."""
 
@@ -301,6 +466,26 @@ class StrategyConfig(BaseModel):
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     min_training_samples: int = 200
     market_regime: MarketRegimeConfig = Field(default_factory=MarketRegimeConfig)
+    # Apply inverse-frequency class weights at training time so a
+    # rare class (e.g. BUY under path-aware 2:1 R/R labelling) isn't
+    # buried by the majority class. Multiplies into the existing
+    # feedback-driven sample weights. Default-on because zero-BUY
+    # output is a failure mode users will hit on first deploy without
+    # it; disable if you ever want the unbalanced classifier back.
+    class_balance_enabled: bool = True
+    # Refuse to save a model when any of {BUY, HOLD, SELL} accounts for
+    # less than this fraction of training labels. Catches the
+    # "BUY is functionally extinct in the data" failure mode at train
+    # time instead of letting a sterile model reach production.
+    # Set to 0 to disable the guard.
+    class_balance_min_pct: float = Field(default=3.0, ge=0.0, le=33.0)
+    # After saving a fresh model, run inference on the most recent
+    # in-training samples and verify all three classes win argmax at
+    # least once. Belt-and-braces for cases where label balance is
+    # fine but the model still never predicts a class (calibration
+    # collapse, feature dominance). Default-on. Cheap (one matmul on
+    # ~hundreds of samples). Disable if you trust the train-time guard.
+    post_train_class_check_enabled: bool = True
 
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "StrategyConfig":
@@ -317,6 +502,25 @@ class RiskConfig(BaseModel):
     max_portfolio_exposure_pct: float = Field(default=0.60, gt=0, le=1)
     max_open_positions: int = Field(default=10, ge=1)
     max_single_stock_pct: float = Field(default=0.25, gt=0, le=1)
+    # Per-signal allocation cap, applied AFTER max_single_stock_pct.
+    # Distinct from max_single_stock_pct in intent:
+    #   - max_single_stock_pct is a safety cap (don't have 1/4 of capital
+    #     in one name even if it's a great trade).
+    #   - max_pct_per_signal is a pacing cap (don't blow the daily
+    #     exposure budget on the first heartbeat of the day).
+    # Default 0.10 means a 60% portfolio cap fits ~6 trades before
+    # binding, instead of just 2-3 at the looser single-stock cap.
+    # Set equal to max_single_stock_pct to disable.
+    max_pct_per_signal: float = Field(default=0.10, gt=0, le=1)
+    # Scale the per-signal allocation by ML confidence. At 1.0 (default
+    # off, equal to max_pct_per_signal), every passing signal gets the
+    # full slot. With confidence_scaling on, a signal at confidence =
+    # base_threshold gets `min_factor` of the cap and a signal at 0.95+
+    # gets 100% — so a 0.95-conviction setup occupies twice the room
+    # of a 0.75-just-cleared-threshold one. Keeps high-conviction
+    # trades from being throttled by the same cap as marginal ones.
+    confidence_scaled_sizing_enabled: bool = True
+    confidence_scaled_min_factor: float = Field(default=0.5, gt=0, le=1)
     daily_loss_limit_pct: float = Field(default=0.03, gt=0, lt=1)
     weekly_loss_limit_pct: float = Field(default=0.05, gt=0, lt=1)
     weekly_loss_sizing_reduction: float = Field(default=0.50, gt=0, le=1)
@@ -324,25 +528,45 @@ class RiskConfig(BaseModel):
     trailing_sl_enabled: bool = True
     trailing_sl_trigger_multiple: float = Field(default=1.5, gt=0)
     trailing_sl_step_pct: float = Field(default=0.01, gt=0, lt=1)
+    # Early-exit buffer applied to the target check. Heartbeats run every
+    # 15 min, so a price that gets within this percentage of target but
+    # never quite touches it would otherwise wait a full cycle (and may
+    # reverse). 0.0015 = 0.15% which catches a ~15 paisa gap on a ₹100
+    # stock or ₹0.75 on a ₹500 stock.
+    target_early_exit_pct: float = Field(default=0.0015, ge=0, lt=0.05)
     llm_review_enabled: bool = True
     llm_fallback_to_rules: bool = True
     max_same_sector_positions: int = Field(default=1, ge=1)
     kill_switch_enabled: bool = True
-    min_confidence_score: float = Field(default=0.65, ge=0, le=1)  # legacy fallback
     min_confidence_buy: float = Field(default=0.60, ge=0, le=1)
     min_confidence_sell: float = Field(default=0.75, ge=0, le=1)
     skip_sell_on_holdings: bool = True  # position-monitor handles exits; no SELL on held symbols
     max_trades_per_day: int = Field(default=5, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
+    # Risk-rejected signals get re-evaluated each heartbeat (most
+    # reasons — exposure, drift, depth, correlation, cooldown — are
+    # transient). This caps how many times a chronically-rejected
+    # symbol may regenerate per day before we give up on it.
+    max_risk_rejected_retries_per_day: int = Field(default=5, ge=1, le=20)
     symbol_cooldown_days: int = Field(default=1, ge=0)
     symbol_repeat_lookback_days: int = Field(default=5, ge=0)
     symbol_repeat_min_confidence: float = Field(default=0.80, ge=0, le=1)
-    margin_usage_enabled: bool = False  # when False, position value capped by available cash (no leverage)
+    # When True, ask the broker for the real margin requirement via
+    # kite.order_margins per signal — catches insufficient-funds /
+    # special-margin failures that notional-only sizing misses. Default
+    # True for live autonomous safety; flip off if the broker calls
+    # are too slow or the test stack doesn't support estimate_margin.
+    margin_usage_enabled: bool = True
     weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
     holding_expiry: HoldingExpiryConfig = Field(default_factory=HoldingExpiryConfig)
     partial_profit: PartialProfitConfig = Field(default_factory=PartialProfitConfig)
     conviction_sizing: ConvictionSizingConfig = Field(default_factory=ConvictionSizingConfig)
     correlation_limit: CorrelationLimitConfig = Field(default_factory=CorrelationLimitConfig)
+    depth_gate: DepthGateConfig = Field(default_factory=DepthGateConfig)
+    liquidity_gate: LiquidityGateConfig = Field(default_factory=LiquidityGateConfig)
+    regime_gate: RegimeGateConfig = Field(default_factory=RegimeGateConfig)
+    institutional_flow: InstitutionalFlowConfig = Field(default_factory=InstitutionalFlowConfig)
+    exit_tweaks: ExitTweaksConfig = Field(default_factory=ExitTweaksConfig)
     reentry: ReentryConfig = Field(default_factory=ReentryConfig)
 
 
@@ -395,6 +619,10 @@ class ExecutionConfig(BaseModel):
     price_drift_max_pct: float = Field(default=0.02, gt=0, lt=1)
     transaction_mode: Literal["auto", "manual"] = "auto"  # manual = require approval before execution
     rejection_cooldown_hours: int = Field(default=48, ge=0, le=168)  # skip re-queuing a rejected trade
+    # Pending trade auto-expiry. Heartbeat sweeps anything older than
+    # this before running risk-check so abandoned approvals don't
+    # silently lock max_open_positions / max_trades_per_day budgets.
+    pending_expiry_minutes: int = Field(default=30, ge=1, le=1440)
 
 
 class TransactionCostConfig(BaseModel):
@@ -426,6 +654,12 @@ class RetrainingConfig(BaseModel):
     shadow_mode_days: int = 7
     shadow_min_predictions: int = 10
     retired_model_cleanup_days: int = 30
+    # Cap training history to fit in available RAM. On a 2 GB instance,
+    # 5 years × ~500 symbols ≈ 911K bars OOM-kills the process during
+    # feature-matrix construction. 730 days × 500 symbols ≈ 365K bars
+    # fits comfortably under 2 GB. Raise on hosts with more memory if
+    # you want the model to see deeper history.
+    max_training_days: int = Field(default=730, ge=90, le=3650)
 
 
 class ReportsConfig(BaseModel):

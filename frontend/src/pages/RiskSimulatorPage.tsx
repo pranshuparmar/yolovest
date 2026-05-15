@@ -1,18 +1,44 @@
-import { useState } from "react";
-import { useRiskSimulator } from "../hooks/queries";
+import { useEffect, useState } from "react";
+import { useConfig, useRiskSimulator } from "../hooks/queries";
 import clsx from "clsx";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
+function asNumber(v: unknown, fallback: number): number {
+  const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
+  return Number.isFinite(n) ? n : fallback;
+}
+
 export function RiskSimulatorPage() {
-  const [maxExposure, setMaxExposure] = useState(0.4);
-  const [maxSingleStock, setMaxSingleStock] = useState(0.1);
+  const { data: config } = useConfig();
+  // Defaults match config defaults; useEffect below overrides with the
+  // user's live values once the config fetch resolves. Without this the
+  // simulator runs against tighter-than-real caps and shows everything
+  // as "skipped".
+  const [maxExposure, setMaxExposure] = useState(0.6);
+  const [maxSingleStock, setMaxSingleStock] = useState(0.25);
   const [maxPositions, setMaxPositions] = useState(10);
   const [initialCapital, setInitialCapital] = useState(100000);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [configApplied, setConfigApplied] = useState(false);
+
+  useEffect(() => {
+    if (configApplied || !config?.sections) return;
+    const risk = config.sections.risk;
+    const capital = config.sections.capital;
+    if (risk) {
+      setMaxExposure(asNumber(risk.max_portfolio_exposure_pct, 0.6));
+      setMaxSingleStock(asNumber(risk.max_single_stock_pct, 0.25));
+      setMaxPositions(Math.round(asNumber(risk.max_open_positions, 10)));
+    }
+    if (capital) {
+      setInitialCapital(Math.round(asNumber(capital.initial_amount, 100000)));
+    }
+    setConfigApplied(true);
+  }, [config, configApplied]);
 
   const simulate = useRiskSimulator();
 

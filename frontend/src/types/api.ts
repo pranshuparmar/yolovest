@@ -19,7 +19,9 @@ export interface PortfolioState {
   daily_pnl_pct: number;
   weekly_pnl_pct: number;
   daily_pnl: number;
+  daily_charges: number;
   weekly_pnl: number;
+  weekly_charges: number;
   trades_today: number;
   minutes_since_last_loss: number;
   // Broker-synced capital breakdown
@@ -34,6 +36,7 @@ export interface PortfolioState {
   total_portfolio_value: number;
   total_pnl: number;
   all_time_realized_pnl: number;
+  all_time_charges: number;
 }
 
 export interface Trade {
@@ -47,6 +50,10 @@ export interface Trade {
   target_price: number;
   order_id: string | null;
   sl_order_id: string | null;
+  target_order_id: string | null;
+  gtt_id: number | null;
+  gtt_status: string | null;
+  origin: "system" | "adopted" | null;
   product: "MIS" | "CNC";
   mode: "paper" | "live";
   status: string;
@@ -63,6 +70,61 @@ export interface CostBreakdown {
   stt: number;
   other_charges: number;
   total: number;
+  source?: "broker" | "estimate" | "contract_note";
+}
+
+export interface BrokerOrderHistoryRow {
+  order_id: string;
+  status: string;
+  status_message?: string | null;
+  order_timestamp?: string;
+  exchange_timestamp?: string;
+  average_price?: number;
+  filled_quantity?: number;
+  pending_quantity?: number;
+  quantity?: number;
+  price?: number;
+  trigger_price?: number;
+  order_type?: string;
+  transaction_type?: string;
+  product?: string;
+  tag?: string;
+}
+
+export interface BrokerOrderTradeRow {
+  trade_id?: string;
+  order_id?: string;
+  fill_timestamp?: string;
+  exchange_timestamp?: string;
+  quantity: number;
+  average_price: number;
+  transaction_type?: string;
+}
+
+export interface TradeOrderDetailLeg {
+  order_id: string;
+  history: BrokerOrderHistoryRow[];
+  fills: BrokerOrderTradeRow[];
+}
+
+export interface TradeOrderDetail {
+  trade_id: string;
+  legs: {
+    entry?: TradeOrderDetailLeg;
+    sl?: TradeOrderDetailLeg;
+    target?: TradeOrderDetailLeg;
+  };
+}
+
+export interface GttEvent {
+  id: number;
+  timestamp_utc: string;
+  trade_id: string | null;
+  gtt_id: number | null;
+  symbol: string | null;
+  event_type: string;
+  status: string | null;
+  details_json: string | null;
 }
 
 export interface LLMReview {
@@ -85,7 +147,14 @@ export interface Signal {
   confidence_score: number;
   model_version: string;
   features_snapshot: string | null;
+  attribution_json: string | null;
   created_at: string;
+}
+
+export interface FeatureAttribution {
+  feature: string;
+  value: number;
+  contribution: number;
 }
 
 export interface Prediction {
@@ -117,6 +186,7 @@ export interface TradeDetail extends Trade {
   signal: Signal | null;
   audit_trail: AuditEntry[];
   cost_breakdown?: CostBreakdown;
+  gtt_events?: GttEvent[];
 }
 
 export interface EquityCurvePoint {
@@ -214,6 +284,8 @@ export type SignalDisposition =
   | "llm_rejected"
   | "awaiting_approval"
   | "executed"
+  | "expired"
+  | "rejected"
   | "recently_rejected_dedup";
 
 export interface Recommendation {
@@ -232,6 +304,7 @@ export interface Recommendation {
 }
 
 export interface GeminiStatus {
+  enabled: boolean;
   configured: boolean;
   connected: boolean;
   model: string;
@@ -373,6 +446,8 @@ export interface DegradedFeature {
 
 export interface SystemState {
   kill_switch_active: boolean;
+  /** Which command activated the pause: pause / stop / kill. "" when inactive. */
+  kill_switch_mode?: "pause" | "stop" | "kill" | "";
   orchestrator: string | null;
   mode: "paper" | "live";
   degraded_features?: DegradedFeature[];
@@ -396,6 +471,7 @@ export interface OHLCVBar {
   low: number;
   close: number;
   volume: number;
+  delivery_pct?: number | null;
 }
 
 export interface StrategyPerformance {
@@ -417,6 +493,98 @@ export interface PerformanceRow {
   losses: number;
   total_pnl: number;
   avg_pnl: number;
+}
+
+export interface ModelDriftDayPoint {
+  date: string;
+  predicted_win_rate: number | null;
+  realised_win_rate: number;
+  sample_size: number;
+}
+
+export interface ModelDriftCalibrationBucket {
+  bucket: string;
+  predicted_mean: number | null;
+  realised_rate: number | null;
+  samples: number;
+}
+
+export interface ModelDriftVersion {
+  model_type: string;
+  version: string;
+  is_production: boolean;
+  by_day: ModelDriftDayPoint[];
+  calibration_buckets: ModelDriftCalibrationBucket[];
+}
+
+export interface ModelDrift {
+  model_versions: ModelDriftVersion[];
+  warning: string | null;
+}
+
+export interface FiiDiiDayPoint {
+  date: string;
+  fii_buy: number;
+  fii_sell: number;
+  fii_net: number;
+  dii_buy: number;
+  dii_sell: number;
+  dii_net: number;
+}
+
+export interface FiiDiiSummary {
+  days_covered: number;
+  fii_net_total: number;
+  dii_net_total: number;
+  fii_net_today: number | null;
+  dii_net_today: number | null;
+}
+
+export interface BulkDealRow {
+  deal_date: string;
+  symbol: string;
+  deal_type: string;
+  client_name: string | null;
+  buy_sell: string | null;
+  quantity: number | null;
+  trade_price: number | null;
+}
+
+export interface InstitutionalFlows {
+  fii_dii_timeline: FiiDiiDayPoint[];
+  fii_dii_summary: FiiDiiSummary;
+  bulk_deals: BulkDealRow[];
+}
+
+export interface QuarantineEntry {
+  symbol: string;
+  consecutive_failures: number;
+  last_error: string | null;
+  quarantined_at: string | null;
+  replacement_symbol: string | null;
+}
+
+export interface SymbolContext {
+  quarantine: QuarantineEntry | null;
+  recent_bulk_deals: BulkDealRow[];
+  delivery_pct_avg_5d: number | null;
+  latest_signal: SymbolLatestSignal | null;
+}
+
+export interface SymbolLatestSignal {
+  signal_type: string;
+  confidence_score: number | null;
+  disposition: string | null;
+  created_at: string;
+  attribution: { feature: string; contribution: number }[];
+}
+
+export interface RotationCooldown {
+  enabled: boolean;
+  no_signal_threshold: number;
+  cooldown_hours: number;
+  symbols: string[];
+  count: number;
 }
 
 export interface ExecutionQuality {
@@ -624,4 +792,19 @@ export interface ConfigUpdateResult {
   status: string;
   updated: string[];
   sections: Record<string, Record<string, unknown>>;
+}
+
+export interface SignalClassDay {
+  date: string;
+  BUY: number;
+  HOLD: number;
+  SELL: number;
+}
+
+export interface SignalClassDistribution {
+  BUY: number;
+  HOLD: number;
+  SELL: number;
+  total: number;
+  by_day: SignalClassDay[];
 }

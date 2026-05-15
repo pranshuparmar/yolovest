@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLockHoldings, useReviewHoldings } from "../hooks/queries";
+import { useLtpStream } from "../hooks/useLtpStream";
 import clsx from "clsx";
 import type { ManualOrder } from "../types/api";
+import { SymbolLink } from "../components/SymbolLink";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", {
@@ -187,6 +189,7 @@ function OrderForm({
 
 export function HoldingsPage() {
   const { data: response, isLoading, isError, error, refetch, isFetching } = useHoldings();
+  const ltps = useLtpStream();
   const [orderForm, setOrderForm] = useState<{
     symbol?: string;
     side?: "BUY" | "SELL";
@@ -293,7 +296,9 @@ export function HoldingsPage() {
               <tbody>
                 {review.data.recommendations.map((r: Rec) => (
                   <tr key={r.symbol} className="border-b border-gray-800/50 hover:bg-gray-800/20">
-                    <td className="py-2 px-3 font-medium text-gray-200">{r.symbol}</td>
+                    <td className="py-2 px-3 font-medium text-gray-200">
+                      <SymbolLink symbol={r.symbol} className="text-gray-200" />
+                    </td>
                     <td className="py-2 px-3 text-center">
                       <span className={clsx("px-1.5 py-0.5 rounded text-xs font-medium", {
                         "bg-red-900/40 text-red-400": r.action === "SELL" || r.action === "SHORT",
@@ -452,10 +457,14 @@ export function HoldingsPage() {
               </thead>
               <tbody>
                 {holdings.map((h) => {
-                  const pnl = (h.last_price - h.average_price) * h.quantity;
+                  // Prefer live WebSocket LTP; fall back to last_price
+                  // from the REST snapshot. PnL recalculates as ticks
+                  // arrive so the column stays current without a refetch.
+                  const ltp = ltps.get(h.tradingsymbol) ?? h.last_price;
+                  const pnl = (ltp - h.average_price) * h.quantity;
                   const pnlPct =
                     h.average_price > 0
-                      ? ((h.last_price - h.average_price) / h.average_price) * 100
+                      ? ((ltp - h.average_price) / h.average_price) * 100
                       : 0;
 
                   return (
@@ -467,8 +476,8 @@ export function HoldingsPage() {
                         <input type="checkbox" checked={selected.has(h.tradingsymbol)} onChange={() => toggleSelect(h.tradingsymbol)} className="rounded bg-gray-800 border-gray-600" />
                       </td>
                       <td className="py-2.5 px-3">
-                        <span className="font-medium text-gray-200">
-                          {h.tradingsymbol}
+                        <span className="font-medium">
+                          <SymbolLink symbol={h.tradingsymbol} className="text-gray-200" />
                         </span>
                         <span className="text-xs text-gray-600 ml-1">
                           {h.exchange}
@@ -480,8 +489,8 @@ export function HoldingsPage() {
                       <td className="py-2.5 px-3 text-right text-gray-400">
                         {fmtInr(h.average_price)}
                       </td>
-                      <td className="py-2.5 px-3 text-right text-gray-300">
-                        {fmtInr(h.last_price)}
+                      <td className="py-2.5 px-3 text-right text-gray-300 font-mono">
+                        {fmtInr(ltp)}
                       </td>
                       <td
                         className={clsx(

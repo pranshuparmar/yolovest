@@ -39,6 +39,17 @@ _EXPENSIVE_BUDGET_SEC = 90
 # Per-source timeout for individual fetches within the expensive phase.
 _PER_SOURCE_TIMEOUT_SEC = 30
 
+# Max symbols to refresh per heartbeat for the two slow per-symbol scrapers.
+# Screener.in self-throttles at ~2s/symbol; Trendlyne at ~2.5s/symbol (API +
+# HTML fallback). With a 30s per-source budget that means ~12-14 symbols max
+# before the timeout fires. Fundamentals/technicals also only change at
+# quarterly result announcements, so a 24h cache + small per-cycle slice is
+# fine — the watchlist is filled in over a handful of heartbeats and then
+# stays warm.
+_FUNDAMENTALS_PER_CYCLE = 10
+_TECHNICALS_PER_CYCLE = 10
+_FUNDAMENTALS_CACHE_HOURS = 24
+
 
 class IngestDataSkill(SkillBase):
     name = "ingest-data"
@@ -81,14 +92,61 @@ class IngestDataSkill(SkillBase):
         a watchlist, ingest-data targets those shortlisted symbols for the
         expensive deep pass (news, sentiment, fundamentals). On a fresh install
         before the first scan, falls back to seed_symbols.
+
+        Quarantine replacements are applied before returning.
         """
         try:
             watchlist = await self.ctx.db.get_combined_watchlist()
             if watchlist:
-                return [s["symbol"] for s in watchlist]
+                base = [s["symbol"] for s in watchlist]
+                return await self.ctx.db.resolve_symbols_with_replacements(base)
         except Exception:
             pass
-        return self.ctx.config.scanning.seed_symbols
+        return await self.ctx.db.resolve_symbols_with_replacements(
+            list(self.ctx.config.scanning.seed_symbols),
+        )
+
+    async def _select_priority_symbols(self, limit: int = 15) -> list[str]:
+        """Symbols worth spending NSE's per-symbol rate budget on.
+
+        Composition (in order, deduped):
+          1. Open positions — we need to know about corporate actions on
+             stocks we currently hold (splits, bonuses, dividends).
+          2. Top N from the algorithmic watchlist by composite_score —
+             these are the most likely signal candidates.
+
+        Capped at `limit` to keep total NSE calls bounded. Falls back to
+        seed_symbols only if both sources are empty (truly fresh install).
+        """
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        try:
+            for pos in await self.ctx.db.get_open_positions(mode=self.ctx.config.mode):
+                sym = pos.get("symbol") if isinstance(pos, dict) else getattr(pos, "symbol", None)
+                if sym and sym not in seen:
+                    seen.add(sym)
+                    ordered.append(sym)
+        except Exception:
+            logger.debug("ingest-data: could not read open positions", exc_info=True)
+
+        try:
+            for row in await self.ctx.db.get_watchlist():
+                sym = row.get("symbol")
+                if sym and sym not in seen:
+                    seen.add(sym)
+                    ordered.append(sym)
+                if len(ordered) >= limit:
+                    break
+        except Exception:
+            logger.debug("ingest-data: could not read watchlist", exc_info=True)
+
+        if not ordered:
+            return await self.ctx.db.resolve_symbols_with_replacements(
+                list(self.ctx.config.scanning.seed_symbols),
+            )
+
+        return await self.ctx.db.resolve_symbols_with_replacements(ordered[:limit])
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         symbols = kwargs.get("symbols") or await self._get_active_symbols()
@@ -300,26 +358,42 @@ class IngestDataSkill(SkillBase):
         result: dict[str, Any] = {}
 
         try:
-            # Bulk/block deals
+            # Bulk/block deals — persist so risk-check + ML features can
+            # see institutional accumulation/distribution signals.
             try:
                 deals = await nse.fetch_bulk_deals()
                 if deals:
                     result["bulk_deals"] = deals
-                    logger.info("NSE: fetched %d bulk/block deals", len(deals))
+                    inserted = await self.ctx.db.upsert_bulk_deals(deals)
+                    logger.info(
+                        "NSE: fetched %d bulk/block deals (%d new)",
+                        len(deals), inserted,
+                    )
             except Exception as e:
                 logger.warning("NSE bulk deals fetch failed: %s", e)
 
-            # FII/DII activity
+            # FII/DII activity — persist so risk-check can gate on
+            # foreign net selling days.
             try:
                 fii_dii = await nse.fetch_fii_dii()
                 if fii_dii:
                     result["fii_dii"] = fii_dii
-                    logger.info("NSE: fetched FII/DII data")
+                    wrote = await self.ctx.db.upsert_fii_dii(fii_dii)
+                    if wrote:
+                        logger.info(
+                            "NSE: persisted FII/DII for %s (fii_net=%.1f, dii_net=%.1f)",
+                            fii_dii.get("date"),
+                            (fii_dii.get("fii") or {}).get("net_value", 0.0),
+                            (fii_dii.get("dii") or {}).get("net_value", 0.0),
+                        )
             except Exception as e:
                 logger.warning("NSE FII/DII fetch failed: %s", e)
 
-            # Corporate actions + delivery data per symbol
-            symbols = self.ctx.config.scanning.seed_symbols
+            # Corporate actions + delivery data for the symbols that matter:
+            # open positions (corp actions directly affect what we hold) plus
+            # the top watchlist names by composite score. Capped at 15 to
+            # respect NSE's aggressive per-symbol rate limits.
+            symbols = await self._select_priority_symbols(limit=15)
             for symbol in symbols:
                 try:
                     actions = await nse.fetch_corp_actions(symbol)
@@ -332,6 +406,9 @@ class IngestDataSkill(SkillBase):
                     delivery = await nse.fetch_delivery_data(symbol)
                     if delivery is not None:
                         result.setdefault("delivery_data", {})[symbol] = delivery
+                        # Persist on today's daily bar so risk-check and
+                        # ML features can read recent delivery quality.
+                        await self.ctx.db.update_delivery_pct(symbol, delivery)
                 except Exception as e:
                     logger.debug("NSE delivery data for %s failed: %s", symbol, e)
         finally:
@@ -394,37 +471,77 @@ class IngestDataSkill(SkillBase):
             await source.close()
 
     async def _fetch_fundamentals(self, symbols: list[str]) -> int:
-        """Fetch fundamental data from Screener.in."""
+        """Fetch fundamental data from Screener.in.
+
+        Refreshes only stale-or-missing rows, capped to a small slice per
+        heartbeat so we never blow the per-source ingest budget. The
+        cooperative refresh fills the watchlist over a handful of cycles.
+        """
         from yolovest.data.screener import ScreenerScraper
+
+        try:
+            stale = await self.ctx.db.get_stale_fundamentals_symbols(
+                symbols, max_age_hours=_FUNDAMENTALS_CACHE_HOURS,
+            )
+        except Exception:
+            logger.debug("ingest-data: stale-fundamentals lookup failed", exc_info=True)
+            stale = list(symbols)
+        targets = stale[:_FUNDAMENTALS_PER_CYCLE]
+        if not targets:
+            logger.debug("ingest-data: all watched fundamentals fresh, skipping Screener.in")
+            return 0
 
         scraper = ScreenerScraper()
         count = 0
         try:
-            batch = await scraper.fetch_batch(symbols)
+            batch = await scraper.fetch_batch(targets)
             for symbol, data in batch.items():
                 await self.ctx.db.upsert_fundamentals(symbol, data)
                 count += 1
             if count:
-                logger.info("Fundamentals updated for %d symbols via Screener.in", count)
+                logger.info(
+                    "Fundamentals updated for %d/%d symbols via Screener.in (queue=%d)",
+                    count, len(targets), len(stale),
+                )
         finally:
             await scraper.close()
         return count
 
     async def _fetch_technicals(self, symbols: list[str]) -> int:
-        """Fetch technical screener data from Trendlyne."""
+        """Fetch technical screener data from Trendlyne.
+
+        Uses the same stale-row + per-cycle-cap strategy as fundamentals;
+        Trendlyne data is upserted into the same `fundamentals` table so
+        a single freshness window covers both scrapers.
+        """
         from yolovest.data.trendlyne import TrendlyneScraper
+
+        try:
+            stale = await self.ctx.db.get_stale_fundamentals_symbols(
+                symbols, max_age_hours=_FUNDAMENTALS_CACHE_HOURS,
+            )
+        except Exception:
+            logger.debug("ingest-data: stale-fundamentals lookup failed", exc_info=True)
+            stale = list(symbols)
+        targets = stale[:_TECHNICALS_PER_CYCLE]
+        if not targets:
+            logger.debug("ingest-data: all watched technicals fresh, skipping Trendlyne")
+            return 0
 
         scraper = TrendlyneScraper()
         count = 0
         try:
-            batch = await scraper.fetch_batch(symbols)
+            batch = await scraper.fetch_batch(targets)
             for symbol, data in batch.items():
                 # Store technical signals alongside fundamentals
                 # Trendlyne data enriches the fundamentals table
                 await self.ctx.db.upsert_fundamentals(symbol, data)
                 count += 1
             if count:
-                logger.info("Technicals updated for %d symbols via Trendlyne", count)
+                logger.info(
+                    "Technicals updated for %d/%d symbols via Trendlyne (queue=%d)",
+                    count, len(targets), len(stale),
+                )
         finally:
             await scraper.close()
         return count

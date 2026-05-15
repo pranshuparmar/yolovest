@@ -1,16 +1,21 @@
 """Transaction cost computation for Indian equity trades.
 
 Covers: brokerage, STT (Securities Transaction Tax), stamp duty, GST,
-and exchange transaction charges. Rates are configurable via
-config.transaction_costs for different brokers.
+and exchange transaction charges. Prefers actual charges from the
+broker's contract-note API when available; falls back to a
+config-driven estimate.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from yolovest.broker.base import BrokerBase
     from yolovest.config import TransactionCostConfig
+
+logger = logging.getLogger(__name__)
 
 
 def compute_transaction_costs(
@@ -95,3 +100,75 @@ def compute_transaction_cost_breakdown(
         "other_charges": other,
         "total": round(brokerage + stt + other, 2),
     }
+
+
+async def resolve_round_trip_costs(
+    broker: BrokerBase | None,
+    *,
+    symbol: str,
+    signal_type: str,
+    entry_price: float,
+    exit_price: float,
+    quantity: int,
+    product: str,
+    exchange: str = "NSE",
+    cost_config: TransactionCostConfig | None = None,
+) -> tuple[float, str, dict[str, float]]:
+    """Return (total_costs, source, breakdown) for a round-trip trade.
+
+    `source` is "broker" (from contract-note API) or "estimate" (config-based).
+    `breakdown` carries `brokerage`, `stt`, `other_charges`, `total`, plus
+    `source` — same shape regardless of which path produced it, so it can be
+    stored verbatim alongside the trade.
+    """
+    entry_side = signal_type.upper()
+    exit_side = "SELL" if entry_side == "BUY" else "BUY"
+    legs: list[dict[str, Any]] = [
+        {
+            "exchange": exchange,
+            "tradingsymbol": symbol,
+            "transaction_type": entry_side,
+            "variety": "regular",
+            "product": product,
+            "order_type": "MARKET",
+            "quantity": int(quantity),
+            "average_price": float(entry_price),
+        },
+        {
+            "exchange": exchange,
+            "tradingsymbol": symbol,
+            "transaction_type": exit_side,
+            "variety": "regular",
+            "product": product,
+            "order_type": "MARKET",
+            "quantity": int(quantity),
+            "average_price": float(exit_price),
+        },
+    ]
+
+    if broker is not None:
+        try:
+            actual = await broker.compute_charges(legs)
+        except Exception as e:
+            logger.debug("broker.compute_charges raised: %s", e)
+            actual = None
+        if actual and len(actual) == 2:
+            brokerage = round(actual[0]["brokerage"] + actual[1]["brokerage"], 2)
+            stt = round(actual[0]["stt"] + actual[1]["stt"], 2)
+            other = round(actual[0]["other_charges"] + actual[1]["other_charges"], 2)
+            total = round(actual[0]["total"] + actual[1]["total"], 2)
+            breakdown = {
+                "brokerage": brokerage,
+                "stt": stt,
+                "other_charges": other,
+                "total": total,
+                "source": "broker",
+            }
+            return total, "broker", breakdown
+
+    fallback = compute_transaction_cost_breakdown(
+        entry_price, exit_price, quantity, product=product,
+        cost_config=cost_config,
+    )
+    fallback["source"] = "estimate"
+    return fallback["total"], "estimate", fallback

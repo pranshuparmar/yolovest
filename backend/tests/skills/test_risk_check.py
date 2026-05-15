@@ -143,6 +143,81 @@ class TestRiskCheckRejections:
         assert not result.data["approved"]
         assert "exposure" in result.data["rejection_reason"].lower()
 
+    async def test_pending_count_in_max_trades_per_day(
+        self, risk_skill, base_signal, healthy_portfolio,
+    ):
+        """Regression: max_trades_per_day must count pending+executed.
+        Previously only counted executed; a single heartbeat that emitted
+        N signals (all with trades_today=0) would queue all N and the
+        user could approve past the daily cap."""
+        risk_skill.ctx.config.execution.transaction_mode = "manual"
+        risk_skill.ctx.config.risk.max_trades_per_day = 2
+
+        healthy_portfolio["trades_today"] = 0
+        risk_skill.ctx.db.get_portfolio_state = AsyncMock(return_value=healthy_portfolio)
+        risk_skill.ctx.market_hours.is_order_window = lambda: True
+        # 2 pending awaiting approval already
+        risk_skill.ctx.db.get_pending_trades = AsyncMock(return_value=[
+            {"symbol": "A", "entry_price": 100, "position_size": 1},
+            {"symbol": "B", "entry_price": 100, "position_size": 1},
+        ])
+
+        result = await risk_skill.execute(signal=base_signal)
+
+        assert not result.data["approved"]
+        reason = result.data["rejection_reason"].lower()
+        assert "max trades/day" in reason
+        assert "pending" in reason
+
+    async def test_pending_notional_counts_toward_exposure_cap(
+        self, risk_skill, base_signal, healthy_portfolio,
+    ):
+        """In manual mode, queued pending trades must count toward the
+        portfolio exposure cap. Otherwise the cap is leaky: open=0, pending
+        could be 100% of capital, and the gate still passes."""
+        # Manual mode is what triggers pending fetch
+        risk_skill.ctx.config.execution.transaction_mode = "manual"
+
+        # Open positions only at 10% — by themselves not over the 60% cap
+        healthy_portfolio["exposure_pct"] = 0.10
+        healthy_portfolio["total_capital"] = 100_000
+        risk_skill.ctx.db.get_portfolio_state = AsyncMock(return_value=healthy_portfolio)
+        risk_skill.ctx.market_hours.is_order_window = lambda: True
+
+        # Pending notional adds another ~55% (3 × ~18.3k) — total ~65% > 60% cap
+        risk_skill.ctx.db.get_pending_trades = AsyncMock(return_value=[
+            {"symbol": "A", "entry_price": 1830.0, "position_size": 10},
+            {"symbol": "B", "entry_price": 1830.0, "position_size": 10},
+            {"symbol": "C", "entry_price": 1830.0, "position_size": 10},
+        ])
+
+        result = await risk_skill.execute(signal=base_signal)
+
+        assert not result.data["approved"]
+        reason = result.data["rejection_reason"].lower()
+        assert "exposure" in reason
+        # The new message should call out the open vs pending split
+        assert "pending" in reason
+
+    async def test_pending_notional_ignored_in_auto_mode(
+        self, risk_skill, base_signal, healthy_portfolio,
+    ):
+        """Auto mode doesn't queue pending trades — exposure check should
+        only consider open positions in that path."""
+        risk_skill.ctx.config.execution.transaction_mode = "auto"
+        healthy_portfolio["exposure_pct"] = 0.10
+        risk_skill.ctx.db.get_portfolio_state = AsyncMock(return_value=healthy_portfolio)
+        risk_skill.ctx.market_hours.is_order_window = lambda: True
+        # Even if pending exists (shouldn't in auto, but defensive):
+        risk_skill.ctx.db.get_pending_trades = AsyncMock(return_value=[
+            {"symbol": "A", "entry_price": 1830.0, "position_size": 100},
+        ])
+
+        result = await risk_skill.execute(signal=base_signal)
+
+        # 10% open + 0 pending (auto mode skips pending fetch) -> approved
+        assert result.data["approved"]
+
     async def test_reject_single_stock_exposure(self, risk_skill, base_signal, healthy_portfolio):
         healthy_portfolio["stock_exposures"] = {"RELIANCE": 0.30}  # exceeds 25%
         risk_skill.ctx.db.get_portfolio_state = AsyncMock(return_value=healthy_portfolio)

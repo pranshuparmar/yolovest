@@ -88,6 +88,7 @@ class ZerodhaBroker(BrokerBase):
         db: Any = None,
         kite_data_enabled: bool = False,
         market_data: Any = None,
+        rate_limiter: Any = None,
     ) -> None:
         self._api_key = api_key
         self._api_secret = api_secret
@@ -105,8 +106,12 @@ class ZerodhaBroker(BrokerBase):
         # and only re-verify via API when the token is expected to be expired.
         # This avoids a kite.profile() call on every heartbeat/page load.
         self._auth_cache_valid_until: float = 0.0
-        # Rate limiter: 8 concurrent to stay under Kite's 10 req/s
-        self._rate_limiter = asyncio.Semaphore(8)
+        # Shared rate limiter for Kite API calls. Accepts an injected
+        # instance so it can be shared with KiteDataProvider.
+        if rate_limiter is None:
+            from yolovest.broker.kite_rate_limiter import KiteRateLimiter
+            rate_limiter = KiteRateLimiter(calls_per_second=10.0, concurrency=8)
+        self._rate_limiter = rate_limiter
         # Circuit breaker: trip after 5 consecutive API failures, 30s cooldown
         self._circuit_breaker = BrokerCircuitBreaker(
             failure_threshold=5, cooldown_sec=30.0,
@@ -253,6 +258,7 @@ class ZerodhaBroker(BrokerBase):
         product: str,
         price: float | None = None,
         trigger_price: float | None = None,
+        tag: str | None = None,
     ) -> str:
         if self._mode == "paper":
             return self._paper_place_order(
@@ -260,7 +266,7 @@ class ZerodhaBroker(BrokerBase):
             )
 
         return await self._live_place_order(
-            symbol, side, quantity, order_type, product, price, trigger_price
+            symbol, side, quantity, order_type, product, price, trigger_price, tag,
         )
 
     def _paper_place_order(
@@ -346,6 +352,11 @@ class ZerodhaBroker(BrokerBase):
         logger.warning("All LTP sources failed for %s MARKET→LIMIT conversion", symbol)
         return 0.0
 
+    @staticmethod
+    def _tick_round(price: float, tick: float = 0.05) -> float:
+        """Snap a price to the instrument's tick grid (NSE equity default 0.05)."""
+        return round(round(price / tick) * tick, 2)
+
     async def _live_place_order(
         self,
         symbol: str,
@@ -355,12 +366,18 @@ class ZerodhaBroker(BrokerBase):
         product: str,
         price: float | None,
         trigger_price: float | None,
+        tag: str | None = None,
     ) -> str:
         """Place order via Kite API with retry.
 
-        Zerodha no longer allows MARKET orders without market protection
-        via API. All MARKET orders are auto-converted to LIMIT at LTP
-        with a small buffer to ensure fill.
+        Kite rejects MARKET and SL-M orders that don't carry a
+        `market_protection` value. We always convert MARKET → LIMIT (at
+        LTP ± buffer) and SL-M → SL (at trigger ± buffer) — those carry
+        explicit prices and need no protection. For the rare path where
+        conversion can't happen (LTP unavailable for MARKET, or trigger
+        missing for SL-M), the residual MARKET/SL-M is sent with
+        `market_protection=-1`, which asks Zerodha to apply the
+        exchange-defined protection band.
         """
         if self._kite is None:
             raise RuntimeError("Not authenticated")
@@ -371,18 +388,53 @@ class ZerodhaBroker(BrokerBase):
             ltp = await self._fetch_ltp_for_limit(symbol)
             if ltp and ltp > 0:
                 buffer = 0.005 if self._kite_data_enabled else 0.01
-                tick = 0.05
                 if side == "BUY":
                     raw = ltp * (1 + buffer)
-                    price = round(round(raw / tick) * tick, 2)
+                    price = self._tick_round(raw)
                 else:
                     raw = ltp * (1 - buffer)
-                    price = round(round(raw / tick) * tick, 2)
+                    price = self._tick_round(raw)
                 order_type = "LIMIT"
                 logger.info(
                     "MARKET→LIMIT conversion: %s %s LTP=%.2f → price=%.2f",
                     side, symbol, ltp, price,
                 )
+            else:
+                logger.warning(
+                    "MARKET→LIMIT conversion: no LTP for %s — falling back "
+                    "to MARKET with market_protection=-1 (exchange-defined)",
+                    symbol,
+                )
+
+        # Convert SL-M → SL (Zerodha disabled SL-M for retail API; it errors
+        # with "Market orders without market protection are not allowed").
+        # SL is a stop-loss with a limit price: the order rests at the
+        # exchange and converts to a LIMIT order when trigger_price is hit.
+        # We set the limit slightly past the trigger so the order is highly
+        # likely to fill once triggered.
+        if order_type == "SL-M" and trigger_price is not None:
+            buffer = 0.005  # 0.5% past trigger for fill probability
+            if side == "SELL":
+                # SL on a long position — trigger fires when price drops; we
+                # want to sell on the way down, so limit price BELOW trigger.
+                price = trigger_price * (1 - buffer)
+            else:
+                # SL on a short position — trigger fires on the way up.
+                price = trigger_price * (1 + buffer)
+            order_type = "SL"
+            logger.info(
+                "SL-M→SL conversion: %s %s trigger=%.2f → limit=%.2f",
+                side, symbol, trigger_price, price,
+            )
+
+        # Final tick alignment — Kite rejects any price/trigger that isn't a
+        # multiple of the instrument's tick size. NSE equity is 0.05 by
+        # default; values computed from ATR, percentages, or model outputs
+        # rarely land on the tick grid.
+        if price is not None:
+            price = self._tick_round(price)
+        if trigger_price is not None:
+            trigger_price = self._tick_round(trigger_price)
 
         kite_side = "BUY" if side == "BUY" else "SELL"
         params: dict[str, Any] = {
@@ -397,6 +449,16 @@ class ZerodhaBroker(BrokerBase):
             params["price"] = price
         if trigger_price is not None:
             params["trigger_price"] = trigger_price
+        # Any residual MARKET or SL-M must carry market_protection or Kite
+        # rejects the order. -1 instructs Zerodha to apply the exchange's
+        # own protection band (typically ~3% on equity cash).
+        if order_type in ("MARKET", "SL-M"):
+            params["market_protection"] = -1
+        # Tag flows back through orders() and postbacks so we can tell
+        # which skill / code path placed any given order. Kite enforces
+        # ≤20 chars; we truncate defensively.
+        if tag:
+            params["tag"] = tag[:20]
 
         return str(await self._retry_api_call(
             lambda: self._kite.place_order(variety="regular", **params)
@@ -511,6 +573,353 @@ class ZerodhaBroker(BrokerBase):
 
         await self._retry_api_call(_modify)
         return True
+
+    # ------------------------------------------------------------------
+    # GTT (Good Till Triggered) orders
+    # ------------------------------------------------------------------
+    #
+    # GTT orders sit at the broker until a trigger price is hit, then
+    # place a real order. The two-leg "OCO" variant places a stoploss
+    # leg AND a target leg simultaneously; firing one cancels the other.
+    # Only CNC (delivery) is supported by Zerodha — MIS positions can't
+    # use GTT and continue to rely on client-side detection.
+
+    async def place_oco_gtt(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        stoploss_trigger: float,
+        stoploss_limit: float,
+        target_trigger: float,
+        target_limit: float,
+        last_price: float,
+    ) -> int:
+        """Place a two-leg OCO GTT for an existing position.
+
+        `side` is the EXIT side — "SELL" closes a long, "BUY" closes a short.
+
+        Returns the GTT trigger_id assigned by the broker (use this with
+        delete_gtt / modify_gtt).
+        """
+        if self._mode == "paper":
+            logger.info(
+                "[PAPER] place_oco_gtt %s %s qty=%d sl=%.2f→%.2f target=%.2f→%.2f",
+                side, symbol, quantity, stoploss_trigger, stoploss_limit,
+                target_trigger, target_limit,
+            )
+            return 0
+        if self._kite is None:
+            raise RuntimeError("Not authenticated")
+
+        kite_side = "BUY" if side == "BUY" else "SELL"
+        st_trig = self._tick_round(stoploss_trigger)
+        st_lim = self._tick_round(stoploss_limit)
+        tg_trig = self._tick_round(target_trigger)
+        tg_lim = self._tick_round(target_limit)
+
+        legs = [
+            {
+                "transaction_type": kite_side,
+                "quantity": quantity,
+                "order_type": "LIMIT",
+                "price": st_lim,
+                "product": "CNC",
+            },
+            {
+                "transaction_type": kite_side,
+                "quantity": quantity,
+                "order_type": "LIMIT",
+                "price": tg_lim,
+                "product": "CNC",
+            },
+        ]
+
+        def _place() -> dict[str, Any]:
+            return self._kite.place_gtt(
+                trigger_type=self._kite.GTT_TYPE_OCO,
+                tradingsymbol=symbol,
+                exchange="NSE",
+                trigger_values=[st_trig, tg_trig],
+                last_price=float(self._tick_round(last_price)),
+                orders=legs,
+            )
+
+        result = await self._retry_api_call(_place)
+        trigger_id = int(result.get("trigger_id") or 0)
+        logger.info(
+            "GTT placed: %s %s qty=%d trigger_id=%d (sl_trig=%.2f sl_lim=%.2f "
+            "tgt_trig=%.2f tgt_lim=%.2f)",
+            kite_side, symbol, quantity, trigger_id,
+            st_trig, st_lim, tg_trig, tg_lim,
+        )
+        return trigger_id
+
+    async def modify_gtt(
+        self,
+        gtt_id: int,
+        symbol: str,
+        side: str,
+        quantity: int,
+        stoploss_trigger: float,
+        stoploss_limit: float,
+        target_trigger: float,
+        target_limit: float,
+        last_price: float,
+    ) -> bool:
+        """Modify an existing two-leg OCO GTT. Kite's modify_gtt requires
+        re-supplying BOTH legs in full (you can't update only one side),
+        so the signature mirrors place_oco_gtt with the trigger_id added.
+
+        Returns True on success; raises on hard failure. Paper mode is
+        a no-op.
+        """
+        if self._mode == "paper":
+            logger.info(
+                "[PAPER] modify_gtt %d %s qty=%d sl=%.2f→%.2f target=%.2f→%.2f",
+                gtt_id, symbol, quantity, stoploss_trigger, stoploss_limit,
+                target_trigger, target_limit,
+            )
+            return True
+        if self._kite is None:
+            raise RuntimeError("Not authenticated")
+
+        kite_side = "BUY" if side == "BUY" else "SELL"
+        st_trig = self._tick_round(stoploss_trigger)
+        st_lim = self._tick_round(stoploss_limit)
+        tg_trig = self._tick_round(target_trigger)
+        tg_lim = self._tick_round(target_limit)
+
+        legs = [
+            {
+                "transaction_type": kite_side,
+                "quantity": quantity,
+                "order_type": "LIMIT",
+                "price": st_lim,
+                "product": "CNC",
+            },
+            {
+                "transaction_type": kite_side,
+                "quantity": quantity,
+                "order_type": "LIMIT",
+                "price": tg_lim,
+                "product": "CNC",
+            },
+        ]
+
+        def _modify() -> dict[str, Any]:
+            return self._kite.modify_gtt(
+                trigger_id=int(gtt_id),
+                trigger_type=self._kite.GTT_TYPE_OCO,
+                tradingsymbol=symbol,
+                exchange="NSE",
+                trigger_values=[st_trig, tg_trig],
+                last_price=float(self._tick_round(last_price)),
+                orders=legs,
+            )
+
+        await self._retry_api_call(_modify)
+        logger.info(
+            "GTT modified: %d %s qty=%d sl_trig=%.2f sl_lim=%.2f "
+            "tgt_trig=%.2f tgt_lim=%.2f",
+            gtt_id, symbol, quantity, st_trig, st_lim, tg_trig, tg_lim,
+        )
+        return True
+
+    async def delete_gtt(self, gtt_id: int) -> bool:
+        """Delete a GTT by trigger_id. Idempotent — already-deleted /
+        already-fired GTTs return True silently."""
+        if self._mode == "paper":
+            logger.info("[PAPER] delete_gtt %s", gtt_id)
+            return True
+        if self._kite is None or not gtt_id:
+            return False
+
+        try:
+            async with self._rate_limiter:
+                await asyncio.to_thread(self._kite.delete_gtt, trigger_id=gtt_id)
+            return True
+        except Exception as e:
+            msg = str(e).lower()
+            if "not found" in msg or "already" in msg:
+                return True
+            logger.warning("delete_gtt failed for %s: %s", gtt_id, e)
+            return False
+
+    async def get_gtts(self) -> list[dict[str, Any]]:
+        """List active GTTs at the broker."""
+        if self._mode == "paper" or self._kite is None:
+            return []
+        try:
+            async with self._rate_limiter:
+                return list(await asyncio.to_thread(self._kite.get_gtts))
+        except Exception as e:
+            logger.debug("get_gtts failed: %s", e)
+            return []
+
+    # ------------------------------------------------------------------
+    # Executed trades (for ghost-position recovery)
+    # ------------------------------------------------------------------
+
+    async def convert_position(
+        self,
+        symbol: str,
+        quantity: int,
+        from_product: str,
+        to_product: str,
+        side: str = "BUY",
+    ) -> bool:
+        """Convert open position via kite.convert_position.
+        Paper mode is a no-op returning True so test paths still flow.
+        """
+        if self._mode == "paper":
+            logger.info(
+                "[PAPER] convert_position %s qty=%d %s -> %s",
+                symbol, quantity, from_product, to_product,
+            )
+            return True
+        if self._kite is None:
+            raise RuntimeError("Not authenticated")
+
+        kite_side = "BUY" if side.upper() == "BUY" else "SELL"
+
+        def _convert() -> Any:
+            return self._kite.convert_position(
+                tradingsymbol=symbol,
+                exchange="NSE",
+                transaction_type=kite_side,
+                position_type="day",
+                quantity=int(quantity),
+                old_product=from_product,
+                new_product=to_product,
+            )
+
+        try:
+            await self._retry_api_call(_convert)
+            logger.info(
+                "convert_position: %s qty=%d %s -> %s OK",
+                symbol, quantity, from_product, to_product,
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "convert_position failed for %s (%s -> %s): %s",
+                symbol, from_product, to_product, e,
+            )
+            return False
+
+    async def estimate_margin(
+        self, legs: list[dict[str, Any]],
+    ) -> dict[str, float] | None:
+        """Pre-trade margin via kite.order_margins. Falls back to None
+        when paper/offline so the caller uses the naive notional check.
+        """
+        if self._mode == "paper" or self._kite is None or not legs:
+            return None
+        try:
+            async with self._rate_limiter:
+                resp = await asyncio.to_thread(self._kite.order_margins, legs)
+        except Exception as e:
+            logger.debug("kite.order_margins failed: %s", e)
+            return None
+        if not isinstance(resp, list) or not resp:
+            return None
+        total = 0.0
+        for leg in resp:
+            try:
+                total += float(leg.get("total") or 0.0)
+            except (TypeError, ValueError):
+                continue
+        # Return the broker's per-leg list under "legs" plus the rolled-up
+        # `total` so callers can choose granularity.
+        return {"total": round(total, 2), "legs": resp}  # type: ignore[dict-item]
+
+    async def get_order_history(self, order_id: str) -> list[dict[str, Any]]:
+        """State-transition timeline for a single order via kite.order_history."""
+        if self._mode == "paper" or self._kite is None or not order_id:
+            return []
+        try:
+            async with self._rate_limiter:
+                rows = await asyncio.to_thread(
+                    self._kite.order_history, order_id,
+                )
+            return list(rows or [])
+        except Exception as e:
+            logger.debug("kite.order_history(%s) failed: %s", order_id, e)
+            return []
+
+    async def get_order_trades(self, order_id: str) -> list[dict[str, Any]]:
+        """Per-fill records for a single order via kite.order_trades."""
+        if self._mode == "paper" or self._kite is None or not order_id:
+            return []
+        try:
+            async with self._rate_limiter:
+                rows = await asyncio.to_thread(
+                    self._kite.order_trades, order_id,
+                )
+            return list(rows or [])
+        except Exception as e:
+            logger.debug("kite.order_trades(%s) failed: %s", order_id, e)
+            return []
+
+    async def get_executed_trades(self) -> list[dict[str, Any]]:
+        """Today's executed trades from Kite. Empty in paper or when offline."""
+        if self._mode == "paper" or self._kite is None:
+            return []
+        try:
+            async with self._rate_limiter:
+                trades = await asyncio.to_thread(self._kite.trades)
+            return list(trades or [])
+        except Exception as e:
+            logger.debug("kite.trades failed: %s", e)
+            return []
+
+    # ------------------------------------------------------------------
+    # Charges (virtual contract note)
+    # ------------------------------------------------------------------
+
+    async def compute_charges(
+        self, legs: list[dict[str, Any]]
+    ) -> list[dict[str, float]] | None:
+        """Fetch actual charges per leg from Kite's /charges/orders endpoint.
+
+        Returns None in paper mode, when not authenticated, or if the SDK
+        rejects the request — caller then falls back to the config estimate.
+        """
+        if self._mode == "paper" or self._kite is None or not legs:
+            return None
+        try:
+            async with self._rate_limiter:
+                resp = await asyncio.to_thread(
+                    self._kite.get_virtual_contract_note, legs,
+                )
+        except Exception as e:
+            logger.debug("get_virtual_contract_note failed: %s", e)
+            return None
+
+        if not isinstance(resp, list) or len(resp) != len(legs):
+            return None
+
+        out: list[dict[str, float]] = []
+        for entry in resp:
+            charges = (entry or {}).get("charges") or {}
+            brokerage = float(charges.get("brokerage") or 0.0)
+            stt = float(charges.get("transaction_tax") or 0.0)
+            gst_total = float((charges.get("gst") or {}).get("total") or 0.0)
+            other = (
+                float(charges.get("exchange_turnover_charge") or 0.0)
+                + float(charges.get("sebi_turnover_charge") or 0.0)
+                + float(charges.get("stamp_duty") or 0.0)
+                + gst_total
+            )
+            total = float(charges.get("total") or (brokerage + stt + other))
+            out.append({
+                "brokerage": round(brokerage, 2),
+                "stt": round(stt, 2),
+                "other_charges": round(other, 2),
+                "total": round(total, 2),
+            })
+        return out
 
     # ------------------------------------------------------------------
     # Retry Helper

@@ -1,6 +1,6 @@
 services:
   nginx-proxy:
-    image: nginxproxy/nginx-proxy
+    image: nginxproxy/nginx-proxy:1.10.1
     container_name: nginx-proxy
     restart: always
     networks:
@@ -8,15 +8,29 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    # Defensive symlink heal before nginx boots. Documented in
+    # docs/tls-recovery.md.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - /heal-cert-symlinks.sh && exec /app/docker-entrypoint.sh forego start -r
     volumes:
       - /var/run/docker.sock:/tmp/docker.sock:ro
       - certs:/etc/nginx/certs
       - vhost:/etc/nginx/vhost.d
       - html:/usr/share/nginx/html
       - ./nginx/custom.conf:/etc/nginx/conf.d/zz-custom.conf:ro
+      - ./nginx/heal-cert-symlinks.sh:/heal-cert-symlinks.sh:ro
+      - ./nginx/tls-healthcheck.sh:/tls-healthcheck.sh:ro
+    healthcheck:
+      test: ["CMD", "/tls-healthcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   letsencrypt:
-    image: nginxproxy/acme-companion
+    image: nginxproxy/acme-companion:2.6.3
     container_name: letsencrypt
     restart: always
     networks:
@@ -30,6 +44,39 @@ services:
       - certs:/etc/nginx/certs
       - vhost:/etc/nginx/vhost.d
       - html:/usr/share/nginx/html
+
+  cert-backup:
+    image: alpine:3
+    container_name: yolovest-cert-backup
+    restart: unless-stopped
+    networks:
+      - yolovest
+    depends_on:
+      - letsencrypt
+    environment:
+      - INTERVAL_SEC=86400
+      - RETENTION_DAYS=14
+    volumes:
+      - certs:/source:ro
+      - ./backups/certs:/backup
+      - ./scripts/cert-backup-loop.sh:/loop.sh:ro
+    entrypoint: ["/bin/sh", "/loop.sh"]
+
+  cert-heal:
+    image: alpine:3
+    container_name: yolovest-cert-heal
+    restart: unless-stopped
+    networks:
+      - yolovest
+    depends_on:
+      - letsencrypt
+    environment:
+      - INTERVAL_SEC=15
+    volumes:
+      - certs:/etc/nginx/certs
+      - ./nginx/heal-cert-symlinks.sh:/heal-cert-symlinks.sh:ro
+      - ./nginx/cert-heal-loop.sh:/loop.sh:ro
+    entrypoint: ["/bin/sh", "/loop.sh"]
 
   backend:
     build: ./backend
@@ -51,10 +98,17 @@ services:
       - TZ=Asia/Kolkata
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # First cold boot runs migrations, builds the broker / market-data /
+      # LLM stack, restores the Kite session, and warms the rate limiter
+      # before the FastAPI server binds. ML model deserialization
+      # (production + any accumulated shadow models) used to be in
+      # this critical path too but now runs in a background task. The
+      # generous start_period covers swap-fault-in on memory-pressured
+      # small hosts without slowing failure detection once the app is up.
+      start_period: 180s
     deploy:
       resources:
         limits:

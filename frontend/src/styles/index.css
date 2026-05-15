@@ -74,8 +74,27 @@ html.light .border-amber-800 {
   border-color: rgba(154, 103, 0, 0.4);
 }
 
-html.light .border-red-900\/50 {
+html.light .border-red-900\/50,
+html.light .border-red-800\/50 {
   border-color: rgba(207, 34, 46, 0.25);
+}
+
+html.light .border-amber-700\/50,
+html.light .border-amber-800\/30 {
+  border-color: rgba(154, 103, 0, 0.25);
+}
+
+html.light .border-blue-800\/30,
+html.light .border-blue-800\/50 {
+  border-color: rgba(9, 105, 218, 0.25);
+}
+
+html.light .border-gray-800\/30 {
+  border-color: rgba(208, 215, 222, 0.5);
+}
+
+html.light .border-purple-800\/50 {
+  border-color: rgba(130, 80, 223, 0.25);
 }
 
 /* ---- Text colors ---- */
@@ -161,6 +180,17 @@ html.light .bg-emerald-900\/20 {
   background-color: rgba(26, 127, 55, 0.06);
 }
 
+html.light .bg-emerald-900\/50,
+html.light .bg-emerald-800\/60,
+html.light .bg-emerald-800\/50,
+html.light .bg-emerald-700\/80 {
+  background-color: rgba(26, 127, 55, 0.12);
+}
+
+html.light .bg-emerald-900\/10 {
+  background-color: rgba(26, 127, 55, 0.04);
+}
+
 html.light .bg-red-900\/40 {
   background-color: rgba(207, 34, 46, 0.08);
 }
@@ -169,7 +199,8 @@ html.light .bg-red-900\/30 {
   background-color: rgba(207, 34, 46, 0.07);
 }
 
-html.light .bg-red-900\/20 {
+html.light .bg-red-900\/20,
+html.light .bg-red-950\/20 {
   background-color: rgba(207, 34, 46, 0.06);
 }
 
@@ -177,12 +208,30 @@ html.light .bg-red-900\/60 {
   background-color: rgba(207, 34, 46, 0.12);
 }
 
+html.light .bg-red-900\/50,
+html.light .bg-red-800\/50,
+html.light .bg-red-700\/80 {
+  background-color: rgba(207, 34, 46, 0.1);
+}
+
 html.light .bg-amber-900\/40 {
   background-color: rgba(154, 103, 0, 0.08);
 }
 
-html.light .bg-amber-900\/20 {
+html.light .bg-amber-900\/20,
+html.light .bg-amber-950\/20 {
   background-color: rgba(154, 103, 0, 0.06);
+}
+
+html.light .bg-amber-900\/30 {
+  background-color: rgba(154, 103, 0, 0.07);
+}
+
+html.light .bg-amber-900\/50,
+html.light .bg-amber-900\/60,
+html.light .bg-amber-800\/50,
+html.light .bg-amber-700\/50 {
+  background-color: rgba(154, 103, 0, 0.1);
 }
 
 html.light .bg-blue-900\/40 {
@@ -193,12 +242,49 @@ html.light .bg-blue-900\/30 {
   background-color: rgba(9, 105, 218, 0.06);
 }
 
+html.light .bg-blue-900\/20 {
+  background-color: rgba(9, 105, 218, 0.05);
+}
+
+html.light .bg-blue-900\/50 {
+  background-color: rgba(9, 105, 218, 0.1);
+}
+
 html.light .bg-purple-900\/40 {
   background-color: rgba(130, 80, 223, 0.08);
 }
 
+html.light .bg-purple-900\/20 {
+  background-color: rgba(130, 80, 223, 0.06);
+}
+
 html.light .bg-cyan-900\/40 {
   background-color: rgba(27, 124, 131, 0.08);
+}
+
+html.light .bg-orange-900\/50 {
+  background-color: rgba(188, 76, 0, 0.1);
+}
+
+/* Sticky table headers + subtle gray panels */
+html.light .bg-gray-900\/90 {
+  background-color: rgba(255, 255, 255, 0.95);
+}
+
+html.light .bg-gray-800\/20 {
+  background-color: rgba(246, 248, 250, 0.4);
+}
+
+html.light .bg-gray-800\/40 {
+  background-color: rgba(246, 248, 250, 0.55);
+}
+
+html.light .bg-gray-800\/60 {
+  background-color: rgba(234, 238, 242, 0.7);
+}
+
+html.light .bg-gray-700\/50 {
+  background-color: rgba(208, 215, 222, 0.5);
 }
 
 /* ---- Solid colored buttons ---- */

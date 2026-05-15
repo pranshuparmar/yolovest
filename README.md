@@ -11,15 +11,17 @@ YoloVest is a fully autonomous AI-driven stock trading platform for the Indian m
 ## What It Does
 
 - **Autonomous trading pipeline** — Every 15 minutes during market hours: fetches data, scans the market, generates ML signals, runs risk checks, optionally gets LLM approval, and executes trades
-- **ML signal generation** — XGBoost models with probability calibration, walk-forward backtesting, and automatic weekly retraining
+- **ML signal generation** — XGBoost models with probability calibration, **real-PnL walk-forward backtesting** (simulates each fold-test prediction through actual transaction costs, sizing, and slippage — not a synthetic payoff), and automatic weekly retraining
 - **Shadow A/B testing** — New models run in shadow mode alongside production for 7 days before promotion, based on real market performance
 - **LLM trade review** — Optional Google Gemini gate that approves, rejects, or resizes trades with full reasoning
-- **Multi-source market data** — jugaad-data (primary), yfinance (fallback), tvDatafeed (intraday), with automatic failover
+- **Multi-source market data** — Kite paid plan (when enabled, primary for both daily and intraday) with free-provider fallback chain (jugaad-data, yfinance, tvDatafeed). Optional **KiteTicker WebSocket** gives sub-second LTP for instant target/SL detection on the heartbeat cycle.
 - **News sentiment** — Aggregates from MoneyControl, ET Markets, LiveMint, NSE, and Google Finance with Gemini-powered sentiment scoring
-- **Full risk management** — Position sizing, exposure caps, daily/weekly circuit breakers, trailing stop-loss, kill switch, symbol cooldowns, correlation limits
-- **Transaction cost modeling** — Brokerage, STT, stamp duty, exchange fees, and GST deducted from all PnL calculations in both paper and live modes
+- **Full risk management** — Position sizing (via Kite's pre-trade `order_margins` when leverage is on, falling back to notional), exposure caps, daily/weekly circuit breakers, trailing stop-loss, kill switch, symbol cooldowns, sector caps, correlation limits
+- **Broker-side exit enforcement** — Two-leg OCO GTT for CNC trades (target + SL placed at the broker after entry fills; ghost-recovery closes the local row when one fires); resting target LIMIT + SL for MIS (Zerodha doesn't allow GTT on intraday — this is the OCO equivalent). Position-monitor reconciles GTT state every heartbeat so user-cancelled / rejected / expired GTTs fall back to client-side detection automatically.
+- **Real transaction costs** — When the broker is authenticated, realized PnL on close uses Kite's actual contract-note charges (`POST /charges/orders`). Falls back to a config-based estimate on paper / offline. Same breakdown is stored on the trade row so the detail view shows actuals rather than recomputing on every page load.
+- **Signed postbacks with business logic** — `/api/auth/zerodha/postback` verifies `SHA-256(order_id + order_timestamp + api_secret)` and drives real trade-row updates (entry COMPLETE backfills fill_price; SL/target COMPLETE cancels the other leg; entry/SL REJECTED alerts you immediately) so trade state stays current between heartbeats.
 - **Self-learning loop** — Tracks predictions, scores them against actual outcomes, feeds failures back into retraining
-- **Web dashboard** — 20+ pages covering portfolio, trades, positions, ML models, dry-run previews, risk simulation, analytics, reports, settings
+- **Web dashboard** — 20+ pages covering portfolio, trades (with broker order history + GTT lifecycle audit), positions, ML models, dry-run previews, risk simulation, analytics, reports, settings
 - **Telegram bot** — Real-time alerts, portfolio status, kill switch control, trade approval/rejection, daily Kite re-authentication
 - **Dry-run previews** — Generate signals without executing them to see what the system would do today
 
@@ -187,9 +189,35 @@ External services can be independently enabled or disabled:
 | Gemini LLM | `llm.enabled` | `false` | Sentiment analysis, trade review, failure analysis |
 | News sources | `market_data.news_enabled` | `true` | MoneyControl, ET Markets, LiveMint RSS feeds |
 | Scrapers | `market_data.scrapers_enabled` | `true` | Screener.in, Trendlyne, Google Finance, NSE filings |
-| Kite data plan | `market_data.kite_data_enabled` | `false` | Paid Kite Connect historical data API |
+| Kite data plan | `market_data.kite_data_enabled` | `false` | Paid Kite Connect historical data API (preferred over free providers when on) |
+| KiteTicker WebSocket | `market_data.kite_websocket_enabled` | `false` | Sub-second LTP cache; position-monitor reads from it before falling back to REST |
 | Telegram | `notifications.telegram.enabled` | `false` | Telegram bot and notifications |
 | LLM review gate | `risk.llm_review_enabled` | `true` | Gemini trade approval (falls back to rules-only if LLM disabled) |
+| Trailing SL | `risk.trailing_sl_enabled` | `true` | Raises SL as profit accrues — works for both client-side SL orders and broker-side GTT (via `kite.modify_gtt`) |
+| Margin / leverage | `risk.margin_usage_enabled` | `false` | When on, risk-check sizes positions against Kite's `order_margins` instead of full notional |
+
+### Broker Integration (Zerodha Kite)
+
+The Kite integration goes well beyond `place_order` — every part of the
+order lifecycle is wired so trade state stays consistent between the
+broker and the local database.
+
+| Surface | What's wired |
+|---|---|
+| **Order placement** | MARKET → LIMIT auto-conversion at LTP ± buffer (Kite rejects raw MARKET via API now). SL-M → SL with a 0.5% past-trigger limit. Universal tick rounding (NSE 0.05). Every order carries a `tag` (`yv-entry`, `yv-sl`, `yv-tgt`, `yv-sqoff`, `yv-close`, `yv-partial`, etc.) so the placer is visible in `kite.orders()`. Residual MARKET/SL-M orders carry `market_protection=-1` to satisfy Kite's new requirement. |
+| **CNC OCO GTT** | Two-leg target + SL GTT placed at the broker on entry fill. Pre-flight validates SL/target sides; slot-cap (≥45 active GTTs out of 50) skips placement and falls back to client-side. Reconciler each heartbeat detects user-cancelled / rejected / expired / vanished GTTs and clears `gtt_id` locally so client-side detection resumes. Status badge on trade detail. |
+| **MIS OCO** | Kite doesn't allow GTT on MIS, so trade-execute places a resting LIMIT at target alongside the SL. Position-monitor enforces OCO: when one fills, the other is cancelled. Same ghost-recovery path closes the local row. |
+| **Trailing SL** | When profit ≥ `trailing_sl_trigger_multiple × risk`, the SL leg is raised in place — `kite.modify_gtt` for CNC, `kite.modify_order` for plain SL orders. |
+| **Partial profit booking** | Books a fraction of the position at an intermediate target. GTT is resized to the remaining quantity so subsequent fires aren't rejected for over-qty. |
+| **Square-off / kill switch** | Cancels SL + target orders and deletes attached GTT before the market exit. Kill switch additionally sweeps orphan GTTs (live at broker but with no matching open local trade). |
+| **`convert_position`** | `POST /api/positions/{trade_id}/convert` promotes winning MIS to CNC before square-off; cancels stale MIS-side OCO orders since they're product-specific. |
+| **Postback handler** | Verifies `SHA-256(order_id + order_timestamp + api_secret)` against the payload's `checksum` — rejects 401 on mismatch. Drives real trade-row updates: entry REJECTED → mark failed + alert; entry COMPLETE → backfill fill_price / slippage; SL or target COMPLETE → cancel the other leg; SL REJECTED → loud alert (position unprotected). |
+| **Real transaction costs** | On close, `compute_charges` calls `kite.get_virtual_contract_note` for actual brokerage / STT / GST / exchange / SEBI / stamp. Stored on `trades.realized_costs_json`; trade detail page shows the breakdown with a source badge (`Contract note` / `Broker actuals` / `Estimate`). |
+| **Pre-trade margin** | `risk.margin_usage_enabled=true` switches sizing from `entry × qty ≤ available_cash` to Kite's `order_margins` total — gives the real MIS leverage and includes broker-side charges. |
+| **WebSocket** | Optional `KiteTicker` runs in threaded mode with auto-reconnect. Position-monitor subscribes to open-position symbols and reads the cached LTP (max 5s freshness) before falling back to REST. Order-update text frames are *not* bridged — HTTP postbacks with signature verification already cover that. |
+| **Audit trail** | Every GTT lifecycle event (placed / modified / deleted / status_change / rejected_placement) is logged to `gtt_events` with a `details_json` payload; trade detail page renders the per-trade history. Same goes for broker order history + per-fill records via `kite.order_history` / `kite.order_trades`, surfaced behind a "Fetch from broker" toggle on the trade detail page. |
+
+---
 
 ### How Config Impacts Trades
 
@@ -198,10 +226,11 @@ The settings you change directly affect trading behavior:
 - **`risk.max_open_positions`** — Limits how many stocks you hold simultaneously. Lower = more conservative.
 - **`risk.max_portfolio_exposure_pct`** — Caps total capital deployed. At 0.60, the system never invests more than 60% of capital.
 - **`risk.daily_loss_limit_pct`** — Circuit breaker. At 0.03, if you lose 3% of capital in a day, all new trades stop.
-- **`risk.min_confidence_score`** — ML confidence threshold. At 0.65, only signals with 65%+ model confidence are considered. Higher = fewer but more selective trades.
+- **`risk.min_confidence_buy` / `risk.min_confidence_sell`** — Per-direction ML confidence gates (defaults 0.60 / 0.75). Higher = fewer, more selective trades. SELL is typically tighter than BUY because exit signals carry less asymmetric upside.
 - **`scanning.shortlist_size`** — How many stocks are evaluated each cycle. Larger shortlists find more opportunities but take longer.
 - **`strategy.mode`** — Controls holding period preference: `intraday` (MIS, auto-squared at EOD), `short_term`, `balanced`, or `long_term` (CNC, held overnight).
 - **`execution.paper_slippage_pct`** — Simulated slippage in paper mode. Set higher (e.g., 0.3%) for more conservative backtests.
+- **`risk.target_early_exit_pct`** — How close LTP must get to target before client-side detection exits (default 0.15%). Heartbeats run every 15 min; a price that gets within a paisa of target but never quite prints there would otherwise wait a full cycle. Set to 0 for exact-target behaviour.
 - **`risk.llm_review_enabled`** — When on, every signal goes through Gemini for a second opinion. Gemini can APPROVE, REJECT, or RESIZE the trade.
 
 ---
@@ -267,7 +296,7 @@ Kill switch state persists across restarts.
 | **Dashboard** | Portfolio overview, equity curve, today's PnL, quick stats |
 | **Positions** | Open positions with real-time unrealized P&L |
 | **Trades** | Trade history with full execution details |
-| **Trade Detail** | Complete reasoning chain for a single trade (signal, risk check, LLM review, execution) |
+| **Trade Detail** | Complete reasoning chain for a single trade (signal → risk → LLM → execution → outcome), broker order IDs, GTT lifecycle audit, broker order history on demand, transaction-cost breakdown with source badge, gross/net/% PnL |
 | **Watchlist** | Sector rotation view, shortlisted symbols |
 | **Holdings** | Brokerage account holdings (from Zerodha) |
 | **News** | Sentiment-scored articles from all sources |

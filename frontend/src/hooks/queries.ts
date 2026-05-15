@@ -36,6 +36,19 @@ export function usePositions() {
   });
 }
 
+export function useClosePosition() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (tradeId: string) => api.closePosition(tradeId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["trades", "today"] });
+      qc.invalidateQueries({ queryKey: ["portfolio"] });
+      qc.invalidateQueries({ queryKey: ["system-state"] });
+    },
+  });
+}
+
 export function usePnlCalendar(days = 90) {
   return useQuery({
     queryKey: ["pnl-calendar", days],
@@ -134,6 +147,16 @@ export function useTradeDetail(tradeId: string) {
     queryKey: ["trade", tradeId],
     queryFn: () => api.tradeDetail(tradeId),
     enabled: !!tradeId,
+  });
+}
+
+export function useTradeOrderDetail(tradeId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["trade", tradeId, "order-detail"],
+    queryFn: () => api.tradeOrderDetail(tradeId),
+    enabled: !!tradeId && enabled,
+    // Live broker call — don't aggressively refetch.
+    staleTime: 30_000,
   });
 }
 
@@ -516,6 +539,34 @@ export function useSymbolPredictions(symbol: string) {
   });
 }
 
+export function useSymbolContext(symbol: string) {
+  return useQuery({
+    queryKey: ["symbol-context", symbol],
+    queryFn: () => api.symbolContext(symbol),
+    enabled: !!symbol,
+    staleTime: 60_000,
+  });
+}
+
+export function useRotationCooldown() {
+  return useQuery({
+    queryKey: ["rotation-cooldown"],
+    queryFn: api.rotationCooldown,
+    staleTime: 60_000,
+  });
+}
+
+export function useClearRotationCooldown() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (symbol?: string) => api.clearRotationCooldown(symbol),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["rotation-cooldown"] });
+      qc.invalidateQueries({ queryKey: ["watchlist"] });
+    },
+  });
+}
+
 // Feature #5
 export function useStrategyPerformance() {
   return useQuery({
@@ -530,6 +581,32 @@ export function useExecutionQuality(days = 30) {
   return useQuery({
     queryKey: ["execution-quality", days],
     queryFn: () => api.executionQuality(days),
+    staleTime: 60_000,
+  });
+}
+
+export function useModelDrift(days = 30) {
+  return useQuery({
+    queryKey: ["model-drift", days],
+    queryFn: () => api.modelDrift(days),
+    staleTime: 60_000,
+  });
+}
+
+export function useSignalClassDistribution(days = 7) {
+  return useQuery({
+    queryKey: ["signal-class-distribution", days],
+    queryFn: () => api.signalClassDistribution(days),
+    staleTime: 60_000,
+  });
+}
+
+export function useInstitutionalFlows(params?: {
+  days?: number; bulk_limit?: number; symbol?: string;
+}) {
+  return useQuery({
+    queryKey: ["institutional-flows", params],
+    queryFn: () => api.institutionalFlows(params),
     staleTime: 60_000,
   });
 }
@@ -594,7 +671,25 @@ export function useCleanupTable() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.cleanupTable,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["storage-stats"] }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+      // Cleanup is per-table — bust the caches that read from that
+      // table so the page reflects the deletion without a hard refresh.
+      const tableInvalidations: Record<string, string[][]> = {
+        predictions: [
+          ["predictions"], ["weekly", "predictions"], ["recommendations"],
+          ["model-drift"], ["signal-class-distribution"],
+        ],
+        ohlcv: [["ohlcv"]],
+        news_articles: [["news"], ["news-articles"]],
+        economic_events: [["economic-events"], ["economic-calendar"]],
+        audit_log: [["audit"], ["audit-log"]],
+      };
+      const keys = tableInvalidations[vars.table] || [];
+      for (const key of keys) {
+        qc.invalidateQueries({ queryKey: key });
+      }
+    },
   });
 }
 
@@ -623,6 +718,14 @@ export function useRestoreBackup() {
       qc.invalidateQueries({ queryKey: ["storage-stats"] });
       qc.invalidateQueries({ queryKey: ["ml-models"] });
     },
+  });
+}
+
+export function useDeleteBackup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (filename: string) => api.deleteBackup(filename),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["backups"] }),
   });
 }
 
@@ -711,6 +814,25 @@ export function useClearTodaysSignals() {
       qc.invalidateQueries({ queryKey: ["signals"] });
       qc.invalidateQueries({ queryKey: ["trades"] });
       qc.invalidateQueries({ queryKey: ["system-status"] });
+      qc.invalidateQueries({ queryKey: ["recommendations"] });
+      qc.invalidateQueries({ queryKey: ["signal-class-distribution"] });
+    },
+  });
+}
+
+export function useKillSwitch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (command: "pause" | "stop" | "kill" | "resume") => api.killSwitch(command),
+    onSuccess: () => {
+      // Kill-switch flips system_state.kill_switch and (for "kill") closes
+      // every open position + cancels pending orders, so flush everything
+      // that could be downstream of those.
+      qc.invalidateQueries({ queryKey: ["system-state"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["pending-trades"] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+      qc.invalidateQueries({ queryKey: ["health"] });
     },
   });
 }

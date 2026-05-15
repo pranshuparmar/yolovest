@@ -5,14 +5,18 @@ import {
   useBackups,
   useCreateBackup,
   useRestoreBackup,
+  useDeleteBackup,
   useResetAllData,
   useQuarantinedSymbols,
   useUnquarantineSymbol,
   useSetReplacementSymbol,
   useBulkDelete,
+  useRotationCooldown,
+  useClearRotationCooldown,
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
+import { SymbolLink } from "../components/SymbolLink";
 
 const TABLE_INFO: Record<string, { label: string; description: string; defaultDays: number }> = {
   ohlcv: { label: "OHLCV Candles", description: "Daily and intraday price bars", defaultDays: 730 },
@@ -183,11 +187,12 @@ function ReplacementInput({ symbol, current }: { symbol: string; current: string
 }
 
 const BULK_GROUPS = [
-  { id: "paper", label: "Paper Mode Data", description: "All paper trades, predictions, signals, pending trades", color: "amber" },
-  { id: "live", label: "Live Mode Data", description: "All live trades, predictions, signals, pending trades", color: "red" },
+  { id: "paper", label: "Paper Mode Data", description: "Paper-mode trades, predictions, signals, and pending approvals", color: "amber" },
+  { id: "live", label: "Live Mode Data", description: "Live-mode trades, predictions, signals, and pending approvals", color: "red" },
   { id: "dry_runs", label: "Dry Runs", description: "All dry run signal previews", color: "amber" },
-  { id: "predictions", label: "Predictions", description: "All predictions, scoreboard, and failure analyses", color: "amber" },
-  { id: "signals", label: "Signals", description: "All generated signals (today's dedup will reset)", color: "amber" },
+  { id: "predictions", label: "Predictions — All Modes", description: "All predictions, scoreboard, and failure analyses across both paper and live", color: "amber" },
+  { id: "signals", label: "Signals — All Modes", description: "All generated signals across both paper and live (today's dedup will reset)", color: "amber" },
+  { id: "pending_trades", label: "Pending Trades — All Modes", description: "All queued pending approvals across both paper and live", color: "amber" },
 ] as const;
 
 function BulkDeleteSection() {
@@ -232,6 +237,99 @@ function BulkDeleteSection() {
   );
 }
 
+function RotationCooldownSection() {
+  const { data, isLoading } = useRotationCooldown();
+  const clear = useClearRotationCooldown();
+  const [confirming, setConfirming] = useState(false);
+
+  const handleClearAll = () => {
+    if (!confirming) {
+      setConfirming(true);
+      return;
+    }
+    clear.mutate(undefined, { onSettled: () => setConfirming(false) });
+  };
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-800 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-300">Rotation Cooldown</h3>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Symbols benched by market-scan after consecutive no-signal
+            heartbeats. Resetting forces them back into the scoring pool
+            on the next market-scan.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {confirming && (
+            <button
+              onClick={() => setConfirming(false)}
+              className="text-xs text-gray-500 hover:text-gray-300"
+            >
+              Cancel
+            </button>
+          )}
+          <button
+            onClick={handleClearAll}
+            disabled={clear.isPending || (data?.count ?? 0) === 0}
+            className={`px-3 py-1 rounded text-sm font-medium disabled:opacity-40 transition-colors whitespace-nowrap ${
+              confirming
+                ? "bg-red-600 hover:bg-red-700 text-white"
+                : "bg-gray-700 hover:bg-gray-600 text-gray-200"
+            }`}
+          >
+            {clear.isPending
+              ? "Clearing..."
+              : confirming
+                ? "Confirm Clear All"
+                : "Clear All"}
+          </button>
+        </div>
+      </div>
+      {isLoading ? (
+        <div className="h-20 m-4 animate-pulse bg-gray-800 rounded" />
+      ) : !data ? (
+        <div className="px-4 py-6 text-center text-sm text-gray-500">—</div>
+      ) : (
+        <div className="px-4 py-3 space-y-3">
+          <div className="flex flex-wrap items-center gap-4 text-xs text-gray-500">
+            <span>
+              Status:{" "}
+              <span className={data.enabled ? "text-emerald-400" : "text-gray-400"}>
+                {data.enabled ? "enabled" : "disabled"}
+              </span>
+            </span>
+            <span>
+              Threshold:{" "}
+              <span className="text-gray-300 font-mono">
+                {data.no_signal_threshold}
+              </span>{" "}
+              heartbeats
+            </span>
+            <span>
+              Cooldown:{" "}
+              <span className="text-gray-300 font-mono">
+                {data.cooldown_hours}h
+              </span>
+            </span>
+            <span>
+              In cooldown:{" "}
+              <span className="text-gray-300 font-mono">{data.count}</span>{" "}
+              symbol{data.count === 1 ? "" : "s"}
+            </span>
+          </div>
+          {data.count > 0 && (
+            <div className="text-xs text-gray-400 leading-relaxed max-h-32 overflow-y-auto font-mono">
+              {data.symbols.join(", ")}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function QuarantinedSymbolsSection() {
   const { data: symbols, isLoading } = useQuarantinedSymbols();
   const unquarantine = useUnquarantineSymbol();
@@ -266,7 +364,9 @@ function QuarantinedSymbolsSection() {
             <tbody>
               {symbols.map((s) => (
                 <tr key={s.symbol} className="border-b border-gray-800 hover:bg-gray-800/30">
-                  <td className="py-2 px-4 font-medium text-gray-200">{s.symbol}</td>
+                  <td className="py-2 px-4 font-medium text-gray-200">
+                    <SymbolLink symbol={s.symbol} className="text-gray-200" />
+                  </td>
                   <td className="py-2 px-4 text-right text-red-400">{s.consecutive_failures}</td>
                   <td className="py-2 px-4">
                     <ReplacementInput symbol={s.symbol} current={s.replacement_symbol} />
@@ -306,15 +406,17 @@ function QuarantinedSymbolsSection() {
 }
 
 export function DataManagementPage() {
-  const { data, isLoading, error } = useStorageStats();
+  const { data, isLoading: storageLoading, error: storageError } = useStorageStats();
   const { data: backups } = useBackups();
   const cleanup = useCleanupTable();
   const createBackup = useCreateBackup();
   const restoreBackup = useRestoreBackup();
+  const deleteBackup = useDeleteBackup();
   const resetAll = useResetAllData();
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [resetStep, setResetStep] = useState<"idle" | "warn" | "confirm">("idle");
   const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
   const handleCleanup = (table: string, days: number) => {
     cleanup.mutate(
@@ -360,32 +462,16 @@ export function DataManagementPage() {
     });
   };
 
-  if (isLoading) {
-    return (
-      <div className="space-y-4 p-6">
-        <div className="h-8 w-48 animate-pulse bg-gray-800 rounded" />
-        <div className="h-64 animate-pulse bg-gray-800 rounded" />
-      </div>
-    );
-  }
-
-  if (error || !data) {
-    return (
-      <div className="p-6">
-        <div className="bg-red-900/20 border border-red-800 rounded-lg p-4 text-red-400">
-          Failed to load storage stats.
-        </div>
-      </div>
-    );
-  }
-
-  const dbFile = data._db_file;
+  // Storage stats is the slowest query on the page (COUNT(*) per table).
+  // Render the rest of the page immediately so backups, quarantine and
+  // bulk-delete are usable while the counts trickle in.
+  const dbFile = data?._db_file;
   const cleanableTables = Object.keys(TABLE_INFO);
-
-  // Read-only tables (trades, agent_memory)
-  const readOnlyTables = Object.entries(data)
-    .filter(([k]) => !cleanableTables.includes(k) && k !== "_db_file")
-    .map(([k, v]) => ({ name: k, stats: v as TableStats }));
+  const readOnlyTables = data
+    ? Object.entries(data)
+        .filter(([k]) => !cleanableTables.includes(k) && k !== "_db_file")
+        .map(([k, v]) => ({ name: k, stats: v as TableStats }))
+    : [];
 
   return (
     <div className="space-y-6">
@@ -401,19 +487,25 @@ export function DataManagementPage() {
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
           <div className="text-xs text-gray-500 uppercase tracking-wide">Database Size</div>
           <div className="text-2xl font-bold text-gray-100 mt-1">
-            {formatBytes(dbFile.db_bytes)}
+            {dbFile ? formatBytes(dbFile.db_bytes) : (
+              <span className="inline-block h-7 w-24 animate-pulse bg-gray-800 rounded" />
+            )}
           </div>
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
           <div className="text-xs text-gray-500 uppercase tracking-wide">WAL Size</div>
           <div className="text-2xl font-bold text-gray-100 mt-1">
-            {formatBytes(dbFile.wal_bytes)}
+            {dbFile ? formatBytes(dbFile.wal_bytes) : (
+              <span className="inline-block h-7 w-24 animate-pulse bg-gray-800 rounded" />
+            )}
           </div>
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
           <div className="text-xs text-gray-500 uppercase tracking-wide">Total on Disk</div>
           <div className="text-2xl font-bold text-emerald-400 mt-1">
-            {formatBytes(dbFile.total_bytes)}
+            {dbFile ? formatBytes(dbFile.total_bytes) : (
+              <span className="inline-block h-7 w-24 animate-pulse bg-gray-800 rounded" />
+            )}
           </div>
         </div>
       </div>
@@ -479,7 +571,7 @@ export function DataManagementPage() {
                           disabled={restoreBackup.isPending}
                           className="px-2 py-0.5 rounded text-xs font-medium bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50"
                         >
-                          {restoreBackup.isPending ? "Restoring..." : "Confirm"}
+                          {restoreBackup.isPending ? "Restoring..." : "Confirm Restore"}
                         </button>
                         <button
                           onClick={() => setRestoreConfirm(null)}
@@ -488,13 +580,46 @@ export function DataManagementPage() {
                           Cancel
                         </button>
                       </div>
+                    ) : deleteConfirm === b.filename ? (
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => {
+                            deleteBackup.mutate(b.filename, {
+                              onSuccess: (result) => {
+                                setLastResult(
+                                  `Deleted ${result.filename} (${formatBytes(result.size_bytes)} freed)`,
+                                );
+                                setDeleteConfirm(null);
+                              },
+                            });
+                          }}
+                          disabled={deleteBackup.isPending}
+                          className="px-2 py-0.5 rounded text-xs font-medium bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
+                        >
+                          {deleteBackup.isPending ? "Deleting..." : "Confirm Delete"}
+                        </button>
+                        <button
+                          onClick={() => setDeleteConfirm(null)}
+                          className="text-xs text-gray-500 hover:text-gray-300"
+                        >
+                          Cancel
+                        </button>
+                      </div>
                     ) : (
-                      <button
-                        onClick={() => setRestoreConfirm(b.filename)}
-                        className="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
-                      >
-                        Restore
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => { setRestoreConfirm(b.filename); setDeleteConfirm(null); }}
+                          className="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+                        >
+                          Restore
+                        </button>
+                        <button
+                          onClick={() => { setDeleteConfirm(b.filename); setRestoreConfirm(null); }}
+                          className="px-2 py-0.5 rounded text-xs font-medium bg-gray-800 hover:bg-red-900/40 text-gray-400 hover:text-red-400 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -514,34 +639,42 @@ export function DataManagementPage() {
         <div className="px-4 py-3 border-b border-gray-800">
           <h3 className="text-sm font-semibold text-gray-300">Storage by Table</h3>
         </div>
-        <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
-              <th className="py-2 px-4 text-left">Table</th>
-              <th className="py-2 px-4 text-right">Rows</th>
-              <th className="py-2 px-4 text-center">Oldest</th>
-              <th className="py-2 px-4 text-center">Newest</th>
-              <th className="py-2 px-4 text-left">Cleanup</th>
-            </tr>
-          </thead>
-          <tbody>
-            {cleanableTables.map((table) => {
-              const stats = data[table] as TableStats;
-              if (!stats) return null;
-              return (
-                <TableRow
-                  key={table}
-                  table={table}
-                  stats={stats}
-                  onCleanup={handleCleanup}
-                  cleanupLoading={cleanup.isPending}
-                />
-              );
-            })}
-          </tbody>
-        </table>
-        </div>
+        {storageLoading ? (
+          <div className="h-40 m-4 animate-pulse bg-gray-800 rounded" />
+        ) : storageError || !data ? (
+          <div className="px-4 py-6 text-sm text-red-400">
+            Failed to load storage stats.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                <th className="py-2 px-4 text-left">Table</th>
+                <th className="py-2 px-4 text-right">Rows</th>
+                <th className="py-2 px-4 text-center">Oldest</th>
+                <th className="py-2 px-4 text-center">Newest</th>
+                <th className="py-2 px-4 text-left">Cleanup</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cleanableTables.map((table) => {
+                const stats = data[table] as TableStats;
+                if (!stats) return null;
+                return (
+                  <TableRow
+                    key={table}
+                    table={table}
+                    stats={stats}
+                    onCleanup={handleCleanup}
+                    cleanupLoading={cleanup.isPending}
+                  />
+                );
+              })}
+            </tbody>
+          </table>
+          </div>
+        )}
       </div>
 
       {/* Read-only Tables */}
@@ -582,6 +715,8 @@ export function DataManagementPage() {
       )}
 
       {/* Quarantined Symbols */}
+      <RotationCooldownSection />
+
       <QuarantinedSymbolsSection />
 
       {/* Bulk Delete */}

@@ -22,7 +22,7 @@ import asyncio
 import logging
 from typing import Any
 
-from yolovest.costs import compute_transaction_costs
+from yolovest.costs import resolve_round_trip_costs
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 logger = logging.getLogger(__name__)
@@ -41,8 +41,86 @@ class PositionMonitorSkill(SkillBase):
         from yolovest.timezone import now_ist
 
         cfg = self.ctx.config.risk
-        local_positions = await self.ctx.db.get_open_positions()
+        # Scope to the current mode so paper rows never run through
+        # live-broker code paths (and vice versa). Without this filter
+        # _check_partial_profit_booking would happily call
+        # broker.place_order against a paper trade after a mode toggle.
+        local_positions = await self.ctx.db.get_open_positions(
+            mode=self.ctx.config.mode,
+        )
         broker_positions = await self.ctx.broker.get_positions()
+
+        # KiteTicker subscription set: open positions + holdings +
+        # watchlist + user_watchlist. The ticker broadcasts throttled
+        # tick_update events for every subscribed symbol, which the
+        # dashboard's useLtpStream hook consumes to render live LTP +
+        # move% on Positions / Holdings / Watchlist / Trades / Symbol
+        # pages. Subscription is idempotent (already-subscribed tokens
+        # are skipped inside the ticker) so re-running every heartbeat
+        # is cheap. Cap watchlist at 50 so we don't subscribe to the
+        # full 500-stock scan universe.
+        ticker = getattr(self.ctx, "ticker", None)
+        if ticker is not None:
+            symbols_to_subscribe: set[str] = set()
+            symbols_to_subscribe.update(p["symbol"] for p in local_positions)
+            for bp in broker_positions:
+                sym = bp.get("tradingsymbol") or bp.get("symbol")
+                if sym:
+                    symbols_to_subscribe.add(sym)
+            try:
+                holdings = await self.ctx.broker.get_holdings()
+                for h in holdings or []:
+                    sym = h.get("tradingsymbol") or h.get("symbol")
+                    if sym:
+                        symbols_to_subscribe.add(sym)
+            except Exception:
+                logger.debug("ticker subscribe: get_holdings failed", exc_info=True)
+            try:
+                wl = await self.ctx.db.get_watchlist()
+                for w in (wl or [])[:50]:
+                    if w.get("symbol"):
+                        symbols_to_subscribe.add(w["symbol"])
+            except Exception:
+                logger.debug("ticker subscribe: get_watchlist failed", exc_info=True)
+            try:
+                uw = await self.ctx.db.get_user_watchlist()
+                for u in uw or []:
+                    if u.get("symbol"):
+                        symbols_to_subscribe.add(u["symbol"])
+            except Exception:
+                logger.debug("ticker subscribe: get_user_watchlist failed", exc_info=True)
+            # Today's signals + pending-trade symbols. Catches the case
+            # where generate-signals was triggered manually (outside the
+            # heartbeat) and produced symbols that aren't in the watchlist
+            # — without this the RecommendationsPanel + PendingTradesBanner
+            # would render a blank LTP column until the next heartbeat.
+            try:
+                for r in await self.ctx.db.get_todays_recommendations():
+                    sym = r.get("symbol")
+                    if sym:
+                        symbols_to_subscribe.add(sym)
+            except Exception:
+                logger.debug("ticker subscribe: today's signals failed", exc_info=True)
+            try:
+                for p in await self.ctx.db.get_pending_trades():
+                    sym = p.get("symbol")
+                    if sym:
+                        symbols_to_subscribe.add(sym)
+            except Exception:
+                logger.debug("ticker subscribe: pending trades failed", exc_info=True)
+            if symbols_to_subscribe:
+                try:
+                    await ticker.subscribe(sorted(symbols_to_subscribe))
+                except Exception:
+                    logger.debug("ticker subscribe failed", exc_info=True)
+
+        # Reconcile gtt_id / gtt_status against the broker's GTT list.
+        # Cleared GTTs (user-cancelled on Kite web, rejected at trigger
+        # time, expired, etc.) get their gtt_id wiped from the local row
+        # so the downstream loop falls back to client-side detection
+        # rather than assuming the broker is still protecting the
+        # position. Mutates local_positions in place.
+        await self._reconcile_gtts(local_positions)
 
         discrepancies = self._reconcile(local_positions, broker_positions)
 
@@ -88,7 +166,9 @@ class PositionMonitorSkill(SkillBase):
                 )
                 continue
 
-            entry = pos["entry_price"]
+            # PnL math uses the actual broker fill price, not the signal's
+            # entry_price — otherwise recorded slippage gets silently erased.
+            entry = float(pos.get("fill_price") or pos["entry_price"])
             sl = pos["stop_loss_price"]
             target = pos["target_price"]
             risk_per_share = abs(entry - sl)
@@ -112,9 +192,93 @@ class PositionMonitorSkill(SkillBase):
                 )
                 continue
 
-            # Target hit?
-            if (pos["signal_type"] == "BUY" and current_price >= target) or (
-                pos["signal_type"] == "SELL" and current_price <= target
+            # If a broker-side GTT is attached, exit enforcement is at the
+            # broker. Skip client-side target/SL detection so we don't
+            # double-place an exit order. We still trail the SL by
+            # modifying the GTT itself when the trailing condition fires,
+            # so winning positions ratchet up their breakeven floor.
+            # The ghost-position reconciler catches the case where the
+            # GTT fires and the broker position vanishes.
+            if pos.get("gtt_id"):
+                if cfg.trailing_sl_enabled and risk_per_share > 0:
+                    await self._maybe_trail_gtt_sl(
+                        pos, entry, sl, current_price, risk_per_share,
+                    )
+                await self.ctx.db.update_unrealized_pnl(
+                    pos["trade_id"], current_price,
+                )
+                continue
+
+            # For MIS trades with broker-side OCO orders (resting target
+            # LIMIT + SL), broker is in charge of the exit. We just keep
+            # OCO honest — cancel the surviving leg when one fills — and
+            # skip client-side target/SL detection. Client-side only fires
+            # for trades where the broker LIMIT never got placed (e.g.
+            # historical rows, or LIMIT placement failed at entry time).
+            #
+            # Trailing still applies — we lift the broker-side SL order
+            # in place via modify_sl_order so the position locks in
+            # gains as price moves toward target.
+            if pos.get("target_order_id") and pos.get("sl_order_id"):
+                await self._enforce_mis_oco(pos)
+                if cfg.trailing_sl_enabled and risk_per_share > 0:
+                    await self._maybe_trail_mis_sl(
+                        pos, entry, sl, current_price, risk_per_share, target,
+                    )
+                await self.ctx.db.update_unrealized_pnl(
+                    pos["trade_id"], current_price,
+                )
+                continue
+
+            # Auxiliary exits — time-stop / volume-exhaustion. Only fire
+            # for client-side managed positions (no broker GTT, no MIS
+            # OCO pair). Broker-managed exits keep their own lifecycle;
+            # extending these conditions there would need cancel + market
+            # exit and is left for later.
+            aux_exit = await self._check_auxiliary_exits(
+                pos, current_price, entry, target,
+            )
+            if aux_exit:
+                qty = pos.get("quantity", 0)
+                product = pos.get("product", "MIS")
+                if pos["signal_type"] == "BUY":
+                    gross_pnl = (current_price - entry) * qty
+                else:
+                    gross_pnl = (entry - current_price) * qty
+                costs, _src, breakdown = await resolve_round_trip_costs(
+                    self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                    entry_price=entry, exit_price=current_price, quantity=qty,
+                    product=product, cost_config=self.ctx.config.transaction_costs,
+                )
+                pnl = round(gross_pnl - costs, 2)
+                if self.ctx.config.execution.transaction_mode == "manual":
+                    await self._queue_exit_for_approval(
+                        pos, current_price, pnl, aux_exit,
+                    )
+                else:
+                    await self.ctx.db.close_position(
+                        pos["trade_id"], current_price, pnl,
+                        realized_costs=breakdown,
+                    )
+                expiry_actions.append({
+                    "action": "closed", "symbol": symbol, "reason": aux_exit,
+                    "days_held": 0, "expected_days": 0, "pnl": pnl,
+                })
+                logger.info(
+                    "position-monitor: AUX EXIT %s [%s] — exit=%.2f pnl=₹%.2f",
+                    symbol, aux_exit, current_price, pnl,
+                )
+                continue
+
+            # Target hit (with early-exit buffer). Heartbeats are 15 min
+            # apart; a price that's within `target_early_exit_pct` of target
+            # but never quite touches it would otherwise wait a full cycle
+            # and risk reversing.
+            buf = self.ctx.config.risk.target_early_exit_pct
+            buy_trigger = target * (1 - buf)
+            sell_trigger = target * (1 + buf)
+            if (pos["signal_type"] == "BUY" and current_price >= buy_trigger) or (
+                pos["signal_type"] == "SELL" and current_price <= sell_trigger
             ):
                 qty = pos.get("quantity", 0)
                 if pos["signal_type"] == "BUY":
@@ -122,9 +286,10 @@ class PositionMonitorSkill(SkillBase):
                 else:
                     gross_pnl = (entry - current_price) * qty
                 product = pos.get("product", "MIS")
-                costs = compute_transaction_costs(
-                    entry, current_price, qty, product=product,
-                    cost_config=self.ctx.config.transaction_costs,
+                costs, src, breakdown = await resolve_round_trip_costs(
+                    self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                    entry_price=entry, exit_price=current_price, quantity=qty,
+                    product=product, cost_config=self.ctx.config.transaction_costs,
                 )
                 pnl = round(gross_pnl - costs, 2)
 
@@ -133,11 +298,13 @@ class PositionMonitorSkill(SkillBase):
                         pos, current_price, pnl, "target_hit",
                     )
                 else:
-                    await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+                    await self.ctx.db.close_position(
+                        pos["trade_id"], current_price, pnl, realized_costs=breakdown,
+                    )
                 targets_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
-                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
-                    symbol, current_price, pnl, costs,
+                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f src=%s)",
+                    symbol, current_price, pnl, costs, src,
                 )
                 continue
 
@@ -151,9 +318,10 @@ class PositionMonitorSkill(SkillBase):
                 else:
                     gross_pnl = (entry - current_price) * qty
                 product = pos.get("product", "MIS")
-                costs = compute_transaction_costs(
-                    entry, current_price, qty, product=product,
-                    cost_config=self.ctx.config.transaction_costs,
+                costs, src, breakdown = await resolve_round_trip_costs(
+                    self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                    entry_price=entry, exit_price=current_price, quantity=qty,
+                    product=product, cost_config=self.ctx.config.transaction_costs,
                 )
                 pnl = round(gross_pnl - costs, 2)
 
@@ -162,11 +330,13 @@ class PositionMonitorSkill(SkillBase):
                         pos, current_price, pnl, "stop_loss_hit",
                     )
                 else:
-                    await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+                    await self.ctx.db.close_position(
+                        pos["trade_id"], current_price, pnl, realized_costs=breakdown,
+                    )
                 stops_hit.append({"symbol": symbol, "pnl": pnl})
                 logger.info(
-                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f)",
-                    symbol, current_price, pnl, costs,
+                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f src=%s)",
+                    symbol, current_price, pnl, costs, src,
                 )
                 continue
 
@@ -179,8 +349,19 @@ class PositionMonitorSkill(SkillBase):
                 profit_multiple = profit / risk_per_share
 
                 if profit_multiple >= cfg.trailing_sl_trigger_multiple:
-                    # Calculate new trailing SL
-                    step = current_price * cfg.trailing_sl_step_pct
+                    # Calculate new trailing SL. Tighten the step when
+                    # we're already close to target so a final pullback
+                    # can't surrender the gain.
+                    step_pct = cfg.trailing_sl_step_pct
+                    tweaks = cfg.exit_tweaks
+                    if tweaks.tighten_trailing_enabled:
+                        target_progress = self._target_progress_pct(
+                            pos["signal_type"], entry, target, current_price,
+                        )
+                        step_pct *= self._trailing_step_multiplier(
+                            target_progress, tweaks,
+                        )
+                    step = current_price * step_pct
                     if pos["signal_type"] == "BUY":
                         new_sl = max(entry, current_price - step)  # at least breakeven
                     else:
@@ -290,8 +471,18 @@ class PositionMonitorSkill(SkillBase):
     ) -> float | None:
         """Fetch LTP with exponential backoff retries.
 
-        Returns the price on success, or None if all retries exhausted.
+        Prefers the KiteTicker cached price (sub-second, fresh within
+        5s) when available — that's the killer-feature payoff of the
+        WebSocket integration. Falls back to the REST market_data path
+        if the ticker isn't running, the cache is stale, or the symbol
+        was never subscribed.
         """
+        ticker = getattr(self.ctx, "ticker", None)
+        if ticker is not None:
+            cached = ticker.get_ltp(symbol)
+            if cached and cached > 0:
+                return cached
+
         for attempt in range(max_retries):
             try:
                 price = await self.ctx.market_data.get_ltp(symbol)
@@ -377,6 +568,15 @@ class PositionMonitorSkill(SkillBase):
 
         recovered: list[str] = []
 
+        # Pull today's broker trades once so each ghost can recover its actual
+        # exit fill instead of falling back to LTP (which drifts after the
+        # close fires server-side or the user exits manually on Kite web).
+        try:
+            broker_trades = await self.ctx.broker.get_executed_trades()
+        except Exception as e:
+            logger.debug("get_executed_trades failed: %s", e)
+            broker_trades = []
+
         for pos in local_positions:
             if pos.get("mode") == "paper":
                 continue
@@ -391,18 +591,27 @@ class PositionMonitorSkill(SkillBase):
             if not is_ghost:
                 continue
 
-            # Determine exit price: use LTP as best estimate
-            exit_price = await self._get_ltp_with_retry(symbol)
+            # Resolve exit price in priority order:
+            #   1. average price of the closing fills from kite.trades()
+            #   2. live LTP (drifts but better than entry)
+            #   3. recorded stop-loss price (last-resort, when broker offline)
+            exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
+            exit_price, exit_source = self._find_closing_fill_price(
+                broker_trades, symbol, exit_side, pos.get("quantity", 0),
+            )
             if exit_price is None:
-                # Fallback: use stop-loss price (conservative estimate for
-                # broker-side SL triggers, which is the most common cause)
+                exit_price = await self._get_ltp_with_retry(symbol)
+                exit_source = "ltp"
+            if exit_price is None:
                 exit_price = pos["stop_loss_price"]
+                exit_source = "sl_price"
                 logger.warning(
-                    "Ghost position %s: LTP unavailable, using SL price %.2f as exit estimate",
+                    "Ghost position %s: broker trades + LTP unavailable, "
+                    "using SL price %.2f as exit estimate",
                     symbol, exit_price,
                 )
 
-            entry = pos["entry_price"]
+            entry = float(pos.get("fill_price") or pos["entry_price"])
             qty = pos.get("quantity", 0)
             if pos["signal_type"] == "BUY":
                 gross_pnl = (exit_price - entry) * qty
@@ -410,19 +619,59 @@ class PositionMonitorSkill(SkillBase):
                 gross_pnl = (entry - exit_price) * qty
 
             product = pos.get("product", "MIS")
-            costs = compute_transaction_costs(
-                entry, exit_price, qty, product=product,
-                cost_config=self.ctx.config.transaction_costs,
+            costs, _src, breakdown = await resolve_round_trip_costs(
+                self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                entry_price=entry, exit_price=exit_price, quantity=qty,
+                product=product, cost_config=self.ctx.config.transaction_costs,
             )
             pnl = round(gross_pnl - costs, 2)
 
-            await self.ctx.db.close_position(pos["trade_id"], exit_price, pnl)
+            await self.ctx.db.close_position(
+                pos["trade_id"], exit_price, pnl, realized_costs=breakdown,
+            )
             recovered.append(symbol)
 
+            # Cancel any still-open broker exit legs. When the broker's
+            # SL fires server-side, Kite SHOULD postback the SL COMPLETE
+            # so our postback handler cancels the resting target LIMIT
+            # — but Kite postbacks are best-effort with no retry, and
+            # when one is dropped the target stays open at the broker
+            # ready to fire on a price spike. Same risk in reverse if
+            # the target LIMIT fills and the postback is lost. Issue a
+            # cancel here as a backstop; broker treats
+            # already-cancelled / already-filled orders as no-op so
+            # double-cancelling is harmless.
+            for oid_key, label in (
+                ("target_order_id", "target"),
+                ("sl_order_id", "SL"),
+            ):
+                oid = pos.get(oid_key)
+                if not oid:
+                    continue
+                try:
+                    await self.ctx.broker.cancel_order(str(oid))
+                    if oid_key == "target_order_id":
+                        await self.ctx.db.set_trade_target_order_id(
+                            pos["trade_id"], None,
+                        )
+                    else:
+                        await self.ctx.db.set_trade_sl_order_id(
+                            pos["trade_id"], None,
+                        )
+                    logger.info(
+                        "Ghost recovery: cancelled dangling %s order %s for %s",
+                        label, oid, symbol,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Ghost recovery: cancel %s %s for %s failed: %s",
+                        label, oid, symbol, e,
+                    )
+
             logger.warning(
-                "GHOST POSITION RECOVERED: %s — closed in DB with exit=%.2f pnl=₹%.2f "
-                "(position was closed on broker but still open locally)",
-                symbol, exit_price, pnl,
+                "GHOST POSITION RECOVERED: %s — closed in DB with exit=%.2f "
+                "(source=%s) pnl=₹%.2f",
+                symbol, exit_price, exit_source, pnl,
             )
 
             await self.ctx.notify.send_exit_alert(
@@ -546,7 +795,7 @@ class PositionMonitorSkill(SkillBase):
         symbol = pos.get("symbol", "?")
         qty = pos.get("quantity", 0)
         product = pos.get("product", "CNC")
-        entry = pos.get("entry_price", 0)
+        entry = float(pos.get("fill_price") or pos.get("entry_price") or 0)
         exit_side = "SELL" if pos["signal_type"] == "BUY" else "BUY"
 
         existing = await self.ctx.db.get_pending_trade_by_symbol(symbol)
@@ -567,6 +816,7 @@ class PositionMonitorSkill(SkillBase):
             "confidence_score": 1.0,
             "product": product,
             "model_version": f"exit_{reason}",
+            "mode": self.ctx.config.mode,
         }
         pending_id = await self.ctx.db.insert_pending_trade(signal)
         invested = round(qty * entry, 2)
@@ -606,17 +856,471 @@ class PositionMonitorSkill(SkillBase):
         else:
             gross_pnl = (entry - current_price) * qty
         product = pos.get("product", "MIS")
-        costs = compute_transaction_costs(
-            entry, current_price, qty, product=product,
-            cost_config=self.ctx.config.transaction_costs,
+        costs, _src, breakdown = await resolve_round_trip_costs(
+            self.ctx.broker, symbol=pos["symbol"], signal_type=pos["signal_type"],
+            entry_price=entry, exit_price=current_price, quantity=qty,
+            product=product, cost_config=self.ctx.config.transaction_costs,
         )
         pnl = round(gross_pnl - costs, 2)
 
         if self.ctx.config.execution.transaction_mode == "manual":
             await self._queue_exit_for_approval(pos, current_price, pnl, "holding_expiry")
         else:
-            await self.ctx.db.close_position(pos["trade_id"], current_price, pnl)
+            await self.ctx.db.close_position(
+                pos["trade_id"], current_price, pnl, realized_costs=breakdown,
+            )
         return pnl
+
+    @staticmethod
+    def _find_closing_fill_price(
+        broker_trades: list[dict[str, Any]],
+        symbol: str,
+        side: str,
+        quantity: int,
+    ) -> tuple[float | None, str]:
+        """Return the volume-weighted fill price of the side-matching trades
+        for `symbol`, or (None, "no_match") if nothing fits.
+
+        Matches all trades for the symbol whose transaction_type equals `side`
+        and sums them up. If the total filled quantity matches `quantity` we
+        return the VWAP and source "broker_trades_exact"; if it differs we
+        still return the VWAP but flag the source so logs can pick up partial
+        or extra fills.
+        """
+        matches: list[tuple[float, float]] = []  # (qty, avg_price)
+        for tr in broker_trades:
+            sym = tr.get("tradingsymbol") or tr.get("symbol", "")
+            ttype = (tr.get("transaction_type") or "").upper()
+            if sym != symbol or ttype != side.upper():
+                continue
+            try:
+                q = float(tr.get("quantity") or 0)
+                p = float(tr.get("average_price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if q > 0 and p > 0:
+                matches.append((q, p))
+        if not matches:
+            return None, "no_match"
+        total_qty = sum(q for q, _ in matches)
+        if total_qty <= 0:
+            return None, "no_match"
+        vwap = sum(q * p for q, p in matches) / total_qty
+        source = (
+            "broker_trades_exact" if int(total_qty) == int(quantity)
+            else "broker_trades_partial"
+        )
+        return round(vwap, 2), source
+
+    # Kite GTT lifecycle states that mean "still protecting the position":
+    _GTT_LIVE_STATES = {"active", "scheduled"}
+    # States that mean "no longer protecting — fall back to client side":
+    _GTT_DEAD_STATES = {
+        "triggered", "cancelled", "rejected", "expired", "disabled", "deleted",
+    }
+
+    async def _reconcile_gtts(self, positions: list[dict[str, Any]]) -> None:
+        """For each open position with a `gtt_id`, look up the GTT at the
+        broker and update `gtt_status`. Wipe `gtt_id` when the GTT is no
+        longer in a state that protects the position so the rest of the
+        monitor loop falls back to client-side detection.
+
+        Mutates `positions` in place so downstream checks see the
+        post-reconcile state without another DB read.
+        """
+        attached = [p for p in positions if p.get("gtt_id")]
+        if not attached:
+            return
+        try:
+            gtts = await self.ctx.broker.get_gtts()
+        except Exception as e:
+            logger.debug("GTT reconcile: get_gtts failed: %s", e)
+            return
+
+        # Index by trigger_id for O(1) lookup
+        by_id: dict[int, dict[str, Any]] = {}
+        for g in gtts or []:
+            try:
+                by_id[int(g.get("id") or g.get("trigger_id") or 0)] = g
+            except (TypeError, ValueError):
+                continue
+
+        for pos in attached:
+            try:
+                gid = int(pos["gtt_id"])
+            except (TypeError, ValueError):
+                continue
+            g = by_id.get(gid)
+            if g is None:
+                # GTT vanished entirely — broker forgot it or it was deleted
+                # outside our system. Clear locally so client-side takes over.
+                status = "missing"
+                clear_id = True
+            else:
+                status = (g.get("status") or "").lower() or "unknown"
+                clear_id = status in self._GTT_DEAD_STATES
+
+            # Always cache the latest status so the UI badge stays fresh
+            if pos.get("gtt_status") != status:
+                try:
+                    await self.ctx.db.set_trade_gtt_status(pos["trade_id"], status)
+                except Exception:
+                    logger.debug("set_trade_gtt_status failed", exc_info=True)
+                await self.ctx.db.log_gtt_event(
+                    trade_id=pos["trade_id"], gtt_id=gid, symbol=pos.get("symbol"),
+                    event_type="status_change", status=status,
+                    details={"previous": pos.get("gtt_status")},
+                )
+                pos["gtt_status"] = status
+
+            if clear_id:
+                logger.warning(
+                    "GTT reconcile: trade %s GTT %d now '%s' — clearing "
+                    "gtt_id so client-side exit detection resumes",
+                    pos["trade_id"], gid, status,
+                )
+                try:
+                    await self.ctx.db.set_trade_gtt(pos["trade_id"], None)
+                except Exception:
+                    logger.debug("set_trade_gtt(None) failed", exc_info=True)
+                pos["gtt_id"] = None
+
+    async def _maybe_trail_gtt_sl(
+        self,
+        pos: dict[str, Any],
+        entry: float,
+        current_sl: float,
+        current_price: float,
+        risk_per_share: float,
+    ) -> None:
+        """If the position has a broker-side GTT and the trailing-SL
+        condition is met, modify the GTT to raise the stoploss leg.
+
+        Without this, GTT-attached positions silently skip trailing
+        because the previous trailing path called `modify_sl_order`,
+        which only works on plain SL orders, not GTT legs.
+        """
+        cfg = self.ctx.config.risk
+        gtt_id = pos.get("gtt_id")
+        if not (gtt_id and hasattr(self.ctx.broker, "modify_gtt")):
+            return
+
+        signal_type = pos["signal_type"]
+        if signal_type == "BUY":
+            profit = current_price - entry
+        else:
+            profit = entry - current_price
+        profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0
+        if profit_multiple < cfg.trailing_sl_trigger_multiple:
+            return
+
+        # Mirror the client-side trailing-SL tightening near target.
+        step_pct = cfg.trailing_sl_step_pct
+        tweaks = cfg.exit_tweaks
+        if tweaks.tighten_trailing_enabled:
+            target_progress = self._target_progress_pct(
+                signal_type, entry, float(pos.get("target_price") or 0.0),
+                current_price,
+            )
+            step_pct *= self._trailing_step_multiplier(target_progress, tweaks)
+        step = current_price * step_pct
+        if signal_type == "BUY":
+            new_sl = max(entry, current_price - step)  # at least breakeven
+        else:
+            new_sl = min(entry, current_price + step)
+
+        if not self._is_better_sl(signal_type, new_sl, current_sl):
+            return
+
+        # Re-supply both legs (Kite's modify_gtt requires it). Target
+        # stays at original; only SL trigger / SL limit move.
+        exit_side = "SELL" if signal_type == "BUY" else "BUY"
+        tgt = float(pos["target_price"])
+        buf = 0.005
+        if exit_side == "SELL":
+            sl_limit = new_sl * (1 - buf)
+            tgt_limit = tgt * (1 - buf * 0.5)
+        else:
+            sl_limit = new_sl * (1 + buf)
+            tgt_limit = tgt * (1 + buf * 0.5)
+
+        try:
+            await self.ctx.broker.modify_gtt(
+                gtt_id=int(gtt_id),
+                symbol=pos["symbol"],
+                side=exit_side,
+                quantity=int(pos["quantity"]),
+                stoploss_trigger=new_sl,
+                stoploss_limit=sl_limit,
+                target_trigger=tgt,
+                target_limit=tgt_limit,
+                last_price=float(current_price),
+            )
+            await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+            await self.ctx.db.log_gtt_event(
+                trade_id=pos["trade_id"], gtt_id=int(gtt_id),
+                symbol=pos.get("symbol"),
+                event_type="modified", status="active",
+                details={
+                    "reason": "trailing_sl",
+                    "sl_trigger": new_sl, "sl_limit": sl_limit,
+                    "target_trigger": tgt, "target_limit": tgt_limit,
+                    "profit_multiple": round(profit_multiple, 3),
+                },
+            )
+            logger.info(
+                "trailing SL via GTT: %s SL %.2f → %.2f (profit %.2fR, gtt=%d)",
+                pos["symbol"], current_sl, new_sl, profit_multiple, gtt_id,
+            )
+        except Exception:
+            logger.exception(
+                "trailing SL via GTT failed for %s (gtt=%d)",
+                pos["symbol"], gtt_id,
+            )
+
+    async def _maybe_trail_mis_sl(
+        self,
+        pos: dict[str, Any],
+        entry: float,
+        current_sl: float,
+        current_price: float,
+        risk_per_share: float,
+        target: float,
+    ) -> None:
+        """If a MIS position has a broker-side SL order and the
+        trailing condition is met, lift the SL trigger via
+        modify_sl_order (same order_id; trigger lifted in place).
+
+        Mirrors the client-side trailing path and the GTT path so
+        MIS OCO positions get the same lock-in behaviour. Without
+        this the broker-side SL stays at the original level forever
+        and a near-target pullback can wipe out the gains.
+        """
+        cfg = self.ctx.config.risk
+        sl_oid = pos.get("sl_order_id")
+        if not sl_oid:
+            return
+        signal_type = pos["signal_type"]
+        if signal_type == "BUY":
+            profit = current_price - entry
+        else:
+            profit = entry - current_price
+        profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0
+        if profit_multiple < cfg.trailing_sl_trigger_multiple:
+            return
+
+        step_pct = cfg.trailing_sl_step_pct
+        tweaks = cfg.exit_tweaks
+        if tweaks.tighten_trailing_enabled:
+            target_progress = self._target_progress_pct(
+                signal_type, entry, target, current_price,
+            )
+            step_pct *= self._trailing_step_multiplier(target_progress, tweaks)
+        step = current_price * step_pct
+        if signal_type == "BUY":
+            new_sl = max(entry, current_price - step)  # at least breakeven
+        else:
+            new_sl = min(entry, current_price + step)
+
+        if not self._is_better_sl(signal_type, new_sl, current_sl):
+            return
+
+        try:
+            await self.ctx.broker.modify_sl_order(sl_oid, new_sl)
+            await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+            logger.info(
+                "trailing SL via MIS modify: %s SL %.2f → %.2f (profit %.2fR)",
+                pos.get("symbol"), current_sl, new_sl, profit_multiple,
+            )
+        except Exception:
+            logger.exception(
+                "trailing SL via MIS modify failed for %s (sl_order_id=%s)",
+                pos.get("symbol"), sl_oid,
+            )
+
+    async def _enforce_mis_oco(self, pos: dict[str, Any]) -> None:
+        """Keep MIS OCO honest: when one of the two broker-side exit orders
+        (target LIMIT or SL) fills, cancel the other.
+
+        DB-side close happens via ghost-position reconciliation on the
+        next cycle — once the broker position vanishes, that path picks
+        the actual fill price from `kite.trades()` and closes the row.
+        """
+        target_oid = pos.get("target_order_id")
+        sl_oid = pos.get("sl_order_id")
+        try:
+            target_status = await self.ctx.broker.get_order_status(target_oid)
+            sl_status = await self.ctx.broker.get_order_status(sl_oid)
+        except Exception as e:
+            logger.debug("OCO status fetch failed for %s: %s", pos.get("symbol"), e)
+            return
+
+        def is_filled(s: dict[str, Any]) -> bool:
+            return (s.get("status") or "").upper() in {"COMPLETE", "FILLED"}
+
+        target_filled = is_filled(target_status)
+        sl_filled = is_filled(sl_status)
+
+        if target_filled and not sl_filled:
+            try:
+                await self.ctx.broker.cancel_order(sl_oid)
+            except Exception as e:
+                logger.warning("OCO: failed to cancel SL %s: %s", sl_oid, e)
+            await self.ctx.db.set_trade_sl_order_id(pos["trade_id"], None)
+            logger.info(
+                "OCO: target filled for %s — cancelled SL %s",
+                pos.get("symbol"), sl_oid,
+            )
+            return
+
+        if sl_filled and not target_filled:
+            try:
+                await self.ctx.broker.cancel_order(target_oid)
+            except Exception as e:
+                logger.warning("OCO: failed to cancel target %s: %s", target_oid, e)
+            await self.ctx.db.set_trade_target_order_id(pos["trade_id"], None)
+            logger.info(
+                "OCO: SL filled for %s — cancelled target LIMIT %s",
+                pos.get("symbol"), target_oid,
+            )
+            return
+
+        if target_filled and sl_filled:
+            # Both filled in the same window (violent reversal). Nothing
+            # to cancel; ghost recovery will close the DB row next cycle.
+            # Log it so a post-mortem doesn't look at the trade and ask
+            # "where did the OCO cancel go?".
+            logger.info(
+                "OCO: both legs filled for %s in same window — no cancel needed",
+                pos.get("symbol"),
+            )
+
+    @staticmethod
+    def _trailing_step_multiplier(progress: float, cfg: Any) -> float:
+        """Step-up curve. progress < start → 1.0 (no tighten). At
+        start, first bucket of decay applies; every step_size of
+        additional progress applies another bucket. Floored at
+        min_multiplier so the SL doesn't crawl to zero.
+        """
+        if not cfg.tighten_trailing_enabled:
+            return 1.0
+        if progress < cfg.tighten_start_at_target_pct:
+            return 1.0
+        excess = progress - cfg.tighten_start_at_target_pct
+        # +1 so bucket 1 applies at the start threshold (some tighten
+        # at the trigger, rather than zero). 1e-9 epsilon to avoid
+        # floating-point drift at exact 0.10 multiples (without it,
+        # 0.60 - 0.50 = 0.0999... and floors to bucket 1 instead of 2).
+        buckets = int(excess / cfg.tighten_step_size + 1e-9) + 1
+        return max(
+            cfg.tighten_min_multiplier,
+            1.0 - buckets * cfg.tighten_step_decay,
+        )
+
+    @staticmethod
+    def _target_progress_pct(
+        signal_type: str, entry: float, target: float, current_price: float,
+    ) -> float:
+        """Fraction of the entry-to-target distance already covered, in
+        [0, 1]+. Returns 0 if target is unset or geometry is invalid.
+        Goes >1 when current_price has already crossed target.
+        """
+        if target <= 0 or entry <= 0:
+            return 0.0
+        total = abs(target - entry)
+        if total <= 0:
+            return 0.0
+        if signal_type == "BUY":
+            covered = current_price - entry
+        else:
+            covered = entry - current_price
+        return max(0.0, covered / total)
+
+    async def _check_auxiliary_exits(
+        self,
+        pos: dict[str, Any],
+        current_price: float,
+        entry: float,
+        target: float,
+    ) -> str | None:
+        """Return a reason string when a time-stop or volume-exhaustion
+        exit should fire, else None. Only fires for client-side
+        managed positions (no GTT, no MIS OCO pair).
+
+        Time-stop: intraday positions that have been open longer than
+        `intraday_stop_after_min` without crossing
+        `intraday_stop_progress_threshold` of target progress get
+        exited at market.
+
+        Volume-exhaustion: when the last 5-min bar's volume drops below
+        `volume_exit_min_ratio` × average of the previous N bars AND
+        the position is in 0.5R-2R profit (the "trend is dying" zone),
+        exit at market.
+        """
+        if pos.get("gtt_id") or (
+            pos.get("target_order_id") and pos.get("sl_order_id")
+        ):
+            return None
+        tweaks = self.ctx.config.risk.exit_tweaks
+        if not tweaks.time_stop_enabled and not tweaks.volume_exit_enabled:
+            return None
+
+        signal_type = pos.get("signal_type", "BUY")
+        progress = self._target_progress_pct(
+            signal_type, entry, target, current_price,
+        )
+
+        # Time-stop: intraday only — swing rows already have
+        # holding-expiry covering them.
+        if (
+            tweaks.time_stop_enabled
+            and pos.get("expected_holding_period") == "intraday"
+        ):
+            from datetime import datetime as _dt
+            from yolovest.timezone import IST as _IST, now_ist as _now_ist
+            created_at_str = pos.get("created_at") or ""
+            try:
+                created_at = _dt.fromisoformat(str(created_at_str))
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=_IST)
+                age_min = (
+                    _now_ist() - created_at.astimezone(_IST)
+                ).total_seconds() / 60
+                if (
+                    age_min >= tweaks.intraday_stop_after_min
+                    and progress < tweaks.intraday_stop_progress_threshold
+                ):
+                    return "time_stop"
+            except (ValueError, TypeError):
+                logger.debug("time-stop: bad created_at on %s",
+                             pos.get("symbol"), exc_info=True)
+
+        # Volume-exhaustion: last 5-min bar volume vs lookback average.
+        if tweaks.volume_exit_enabled:
+            sl = float(pos.get("stop_loss_price") or 0)
+            risk_per_share = abs(entry - sl)
+            if risk_per_share > 0:
+                if signal_type == "BUY":
+                    profit_R = (current_price - entry) / risk_per_share
+                else:
+                    profit_R = (entry - current_price) / risk_per_share
+                if 0.5 <= profit_R <= 2.0:
+                    try:
+                        bars = await self.ctx.db.get_ohlcv(
+                            pos["symbol"], "5minute", days=1,
+                        )
+                    except Exception:
+                        bars = []
+                    needed = tweaks.volume_exit_lookback_bars + 1
+                    if len(bars) >= needed:
+                        latest = bars[-1]
+                        history = bars[-needed:-1]
+                        avg_vol = sum(b.volume for b in history) / len(history)
+                        if avg_vol > 0:
+                            ratio = latest.volume / avg_vol
+                            if ratio < tweaks.volume_exit_min_ratio:
+                                return "volume_exhaustion"
+        return None
 
     def _is_better_sl(self, signal_type: str, new_sl: float, current_sl: float) -> bool:
         """Check if new SL is tighter (more protective) than current."""
@@ -647,7 +1351,7 @@ class PositionMonitorSkill(SkillBase):
         if already_booked:
             return False
 
-        entry = pos["entry_price"]
+        entry = float(pos.get("fill_price") or pos["entry_price"])
         target = pos["target_price"]
         signal_type = pos["signal_type"]
 
@@ -685,6 +1389,7 @@ class PositionMonitorSkill(SkillBase):
                     price=current_price,
                     order_type="MARKET",
                     product=pos.get("product", "MIS"),
+                    tag="yv-partial",
                 )
             else:
                 await self.ctx.broker.place_order(
@@ -694,6 +1399,7 @@ class PositionMonitorSkill(SkillBase):
                     price=current_price,
                     order_type="MARKET",
                     product=pos.get("product", "MIS"),
+                    tag="yv-partial",
                 )
         except Exception:
             logger.exception(
@@ -703,6 +1409,7 @@ class PositionMonitorSkill(SkillBase):
             return False
 
         # Move SL to breakeven if configured
+        remaining_qty = qty - close_qty
         if cfg.move_sl_to_breakeven:
             try:
                 sl_order_id = pos.get("sl_order_id")
@@ -712,6 +1419,55 @@ class PositionMonitorSkill(SkillBase):
             except Exception:
                 logger.exception(
                     "position-monitor: Failed to move SL to breakeven for %s",
+                    pos["symbol"],
+                )
+
+        # If a broker-side OCO GTT protects this CNC position, resize it
+        # to match the remaining quantity. Without this, when either leg
+        # fires Kite will reject the order because we no longer have the
+        # original qty. SL trigger moves to breakeven too when configured.
+        gtt_id = pos.get("gtt_id")
+        if gtt_id and remaining_qty > 0 and hasattr(self.ctx.broker, "modify_gtt"):
+            exit_side = "SELL" if signal_type == "BUY" else "BUY"
+            new_sl = entry if cfg.move_sl_to_breakeven else float(pos["stop_loss_price"])
+            tgt = float(pos["target_price"])
+            limit_buf = 0.005
+            if exit_side == "SELL":
+                sl_limit = new_sl * (1 - limit_buf)
+                tgt_limit = tgt * (1 - limit_buf * 0.5)
+            else:
+                sl_limit = new_sl * (1 + limit_buf)
+                tgt_limit = tgt * (1 + limit_buf * 0.5)
+            try:
+                await self.ctx.broker.modify_gtt(
+                    gtt_id=int(gtt_id),
+                    symbol=pos["symbol"],
+                    side=exit_side,
+                    quantity=int(remaining_qty),
+                    stoploss_trigger=new_sl,
+                    stoploss_limit=sl_limit,
+                    target_trigger=tgt,
+                    target_limit=tgt_limit,
+                    last_price=float(current_price),
+                )
+                await self.ctx.db.log_gtt_event(
+                    trade_id=pos["trade_id"], gtt_id=int(gtt_id),
+                    symbol=pos["symbol"],
+                    event_type="modified", status="active",
+                    details={
+                        "reason": "partial_booking_resize",
+                        "quantity": remaining_qty,
+                        "sl_trigger": new_sl, "sl_limit": sl_limit,
+                        "target_trigger": tgt, "target_limit": tgt_limit,
+                    },
+                )
+                logger.info(
+                    "position-monitor: resized GTT %d for %s to qty=%d (SL=%.2f)",
+                    gtt_id, pos["symbol"], remaining_qty, new_sl,
+                )
+            except Exception:
+                logger.exception(
+                    "position-monitor: GTT resize after partial booking failed for %s",
                     pos["symbol"],
                 )
 

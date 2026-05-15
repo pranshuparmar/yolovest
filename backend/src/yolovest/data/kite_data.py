@@ -12,6 +12,7 @@ Requires:
 
 import asyncio
 import logging
+import time
 from datetime import date, datetime, timedelta
 
 from yolovest.timezone import now_ist
@@ -32,6 +33,20 @@ _INTERVAL_MAP = {
     "60minute": "60minute",
 }
 
+# Kite's per-call date-range limits for historical_data().
+# Source: https://kite.trade/docs/connect/v3/historical/
+# Exceeding these returns "Date range exceeds maximum allowed".
+_KITE_MAX_DAYS_PER_CALL = {
+    "day": 2000,
+    "60minute": 400,
+    "30minute": 200,
+    "15minute": 200,
+    "10minute": 100,
+    "5minute": 100,
+    "3minute": 100,
+    "minute": 60,
+}
+
 
 class KiteDataProvider(MarketDataBase):
     """Market data provider using Kite Connect historical data API.
@@ -47,19 +62,36 @@ class KiteDataProvider(MarketDataBase):
         access_token: str | None = None,
         max_retries: int = 3,
         retry_base_delay: float = 1.0,
-        rate_limiter: asyncio.Semaphore | None = None,
+        rate_limiter: Any = None,
     ) -> None:
         self._api_key = api_key
         self._access_token = access_token
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._kite: Any = None
-        # Share rate limiter with broker to respect Kite's 10 req/s aggregate limit
-        self._rate_limiter = rate_limiter or asyncio.Semaphore(8)
-        # Lock to prevent race condition when refreshing the kite client
+        # Shared rate limiter. Pass the same instance the broker uses so
+        # quote, order, and historical calls all draw from one budget.
+        if rate_limiter is None:
+            from yolovest.broker.kite_rate_limiter import KiteRateLimiter
+            rate_limiter = KiteRateLimiter(calls_per_second=10.0, concurrency=8)
+        self._rate_limiter = rate_limiter
+        # Lock to prevent race condition when refreshing the kite client.
+        # Also used to serialize the one-shot instrument cache warm-up.
         self._init_lock = asyncio.Lock()
         # Instrument token cache: symbol -> instrument_token
         self._token_cache: dict[str, int] = {}
+        # Tracks whether _prewarm_token_cache has populated the cache from
+        # the full NSE instrument master. Cleared on set_access_token().
+        self._token_cache_warmed: bool = False
+        # Time-based throttle for historical_data. The historical endpoint
+        # has a tighter per-second limit than the general quote/order quota,
+        # and a semaphore alone doesn't enforce inter-call spacing.
+        self._historical_lock = asyncio.Lock()
+        self._historical_last_call: float = 0.0
+        # Minimum interval between historical fetches.
+        self._historical_min_interval_sec: float = 0.4
+        # Back-off interval applied after a 429 response.
+        self._historical_cooldown_sec: float = 10.0
 
     def set_access_token(self, token: str) -> None:
         """Update the access token after daily re-authentication.
@@ -70,6 +102,7 @@ class KiteDataProvider(MarketDataBase):
         self._access_token = token
         self._kite = None  # _get_kite() will re-create with new token
         self._token_cache.clear()  # instrument tokens may change across sessions
+        self._token_cache_warmed = False
 
     def _get_kite(self) -> Any:
         """Lazy-init Kite Connect client.
@@ -89,37 +122,61 @@ class KiteDataProvider(MarketDataBase):
 
     _INDEX_SYMBOLS = {"NIFTY 50", "NIFTY BANK", "NIFTY IT", "NIFTY NEXT 50"}
 
+    async def _prewarm_token_cache(self) -> None:
+        """Fetch the NSE instrument master once and cache every
+        tradingsymbol -> instrument_token mapping.
+
+        Without this, every cache miss in _get_instrument_token would
+        re-download the full instrument master (~5k entries, multi-MB),
+        making bulk operations like ingest-universe N+1 expensive AND
+        burning through the Kite rate-limit budget.
+        """
+        kite = self._get_kite()
+        async with self._rate_limiter:
+            instruments = await asyncio.to_thread(kite.instruments, "NSE")
+        for inst in instruments:
+            sym = inst.get("tradingsymbol")
+            token = inst.get("instrument_token")
+            if sym and token and sym not in self._token_cache:
+                self._token_cache[sym] = token
+        self._token_cache_warmed = True
+        logger.info(
+            "Kite instrument cache warmed: %d tradingsymbols indexed",
+            len(self._token_cache),
+        )
+
+    async def get_instrument_token(self, symbol: str) -> int | None:
+        """Public alias for the cached symbol → token lookup. Returns
+        None on failure (the private form raises) — convenient for
+        consumers like KiteTickerClient that want a soft miss."""
+        try:
+            return await self._get_instrument_token(symbol)
+        except Exception:
+            return None
+
     async def _get_instrument_token(self, symbol: str) -> int:
         """Resolve NSE symbol to Kite instrument token.
 
-        Handles both regular NSE stocks and NSE indices (NIFTY 50, etc.).
-        Caches results to avoid repeated API calls.
+        Pre-warms the full instrument master on first miss, then serves
+        all subsequent lookups from memory. Handles both regular NSE
+        stocks and NSE indices (NIFTY 50, etc.).
         """
         if symbol in self._token_cache:
             return self._token_cache[symbol]
 
-        kite = self._get_kite()
+        # First miss — populate cache from a single instruments() call.
+        # Use the init_lock so concurrent first-misses don't all download.
+        async with self._init_lock:
+            if symbol not in self._token_cache and not getattr(
+                self, "_token_cache_warmed", False,
+            ):
+                await self._prewarm_token_cache()
 
-        # Index symbols live on a separate "indices" exchange in Kite
+        if symbol in self._token_cache:
+            return self._token_cache[symbol]
+
         if symbol in self._INDEX_SYMBOLS:
-            instruments = await asyncio.to_thread(kite.instruments, "NSE")
-            for inst in instruments:
-                if inst["tradingsymbol"] == symbol and inst["instrument_type"] == "EQ":
-                    self._token_cache[symbol] = inst["instrument_token"]
-                    return inst["instrument_token"]
-            # Fallback: try with "INDICES" segment (Kite uses instrument_type)
-            for inst in instruments:
-                if inst["tradingsymbol"] == symbol:
-                    self._token_cache[symbol] = inst["instrument_token"]
-                    return inst["instrument_token"]
             raise ValueError(f"Index instrument token not found for {symbol}")
-
-        instruments = await asyncio.to_thread(kite.instruments, "NSE")
-        for inst in instruments:
-            if inst["tradingsymbol"] == symbol:
-                self._token_cache[symbol] = inst["instrument_token"]
-                return inst["instrument_token"]
-
         raise ValueError(f"Instrument token not found for {symbol}")
 
     async def get_ohlcv(
@@ -127,7 +184,9 @@ class KiteDataProvider(MarketDataBase):
     ) -> list[OHLCVBar]:
         """Fetch OHLCV via Kite historical_data API.
 
-        Supports daily and intraday intervals.
+        Supports daily and intraday intervals. Automatically paginates
+        when the requested window exceeds Kite's per-interval limit
+        (see _KITE_MAX_DAYS_PER_CALL).
         """
         kite_interval = _INTERVAL_MAP.get(interval)
         if kite_interval is None:
@@ -140,10 +199,23 @@ class KiteDataProvider(MarketDataBase):
         end_date = now_ist().date()
         start_date = end_date - timedelta(days=days)
 
-        bars = await self._fetch_historical(
-            instrument_token, kite_interval, start_date, end_date
-        )
-        return bars
+        max_days = _KITE_MAX_DAYS_PER_CALL.get(kite_interval, 30)
+        if days <= max_days:
+            return await self._fetch_historical(
+                instrument_token, kite_interval, start_date, end_date,
+            )
+
+        # Window exceeds Kite's per-call limit — chunk it.
+        all_bars: list[OHLCVBar] = []
+        chunk_start = start_date
+        while chunk_start <= end_date:
+            chunk_end = min(chunk_start + timedelta(days=max_days - 1), end_date)
+            chunk = await self._fetch_historical(
+                instrument_token, kite_interval, chunk_start, chunk_end,
+            )
+            all_bars.extend(chunk)
+            chunk_start = chunk_end + timedelta(days=1)
+        return all_bars
 
     async def _fetch_historical(
         self,
@@ -152,12 +224,19 @@ class KiteDataProvider(MarketDataBase):
         start: date,
         end: date,
     ) -> list[OHLCVBar]:
-        """Fetch historical data with retry logic."""
+        """Fetch historical data with retry logic and rate limiting.
+
+        Enforces a minimum interval between calls (time-based throttle)
+        in addition to the semaphore. When Kite returns 429 ("Too many
+        requests"), back off for self._historical_cooldown_sec before
+        the next attempt to let the server-side rate window reset.
+        """
         kite = self._get_kite()
         last_error: Exception | None = None
 
         for attempt in range(self._max_retries):
             try:
+                await self._throttle_historical()
                 async with self._rate_limiter:
                     data = await asyncio.to_thread(
                         kite.historical_data,
@@ -181,15 +260,45 @@ class KiteDataProvider(MarketDataBase):
             except Exception as e:
                 last_error = e
                 if attempt < self._max_retries - 1:
-                    delay = self._retry_base_delay * (2 ** attempt)
-                    logger.warning(
-                        "Kite historical fetch failed (attempt %d/%d), "
-                        "retrying in %.1fs: %s",
-                        attempt + 1, self._max_retries, delay, e,
-                    )
+                    if self._is_rate_limit_error(e):
+                        # Hard back-off: server-side window needs time to
+                        # clear. Don't double-tap with a tight retry.
+                        delay = self._historical_cooldown_sec
+                        logger.warning(
+                            "Kite historical rate-limited (attempt %d/%d), "
+                            "cooling down %.1fs: %s",
+                            attempt + 1, self._max_retries, delay, e,
+                        )
+                    else:
+                        delay = self._retry_base_delay * (2 ** attempt)
+                        logger.warning(
+                            "Kite historical fetch failed (attempt %d/%d), "
+                            "retrying in %.1fs: %s",
+                            attempt + 1, self._max_retries, delay, e,
+                        )
                     await asyncio.sleep(delay)
 
         raise last_error  # type: ignore[misc]
+
+    async def _throttle_historical(self) -> None:
+        """Ensure at least _historical_min_interval_sec since the last call."""
+        async with self._historical_lock:
+            now = time.monotonic()
+            elapsed = now - self._historical_last_call
+            wait = self._historical_min_interval_sec - elapsed
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._historical_last_call = time.monotonic()
+
+    @staticmethod
+    def _is_rate_limit_error(exc: Exception) -> bool:
+        """Detect Kite's 'Too many requests' response across error types."""
+        msg = str(exc).lower()
+        return (
+            "too many requests" in msg
+            or "rate limit" in msg
+            or "429" in msg
+        )
 
     async def get_quote(self, symbol: str) -> dict[str, Any]:
         """Get real-time quote via Kite API."""
@@ -210,16 +319,35 @@ class KiteDataProvider(MarketDataBase):
             buy_depth = depth.get("buy") or []
             sell_depth = depth.get("sell") or []
 
+            # Aggregate top-5 levels into single quantities. The full
+            # total_buy_quantity / total_sell_quantity from the quote
+            # body cover the entire book; the top-5 sums proxy "what's
+            # close to the touch and likely to clear within the
+            # session". Order-flow features the OHLCV-only feature set
+            # can't see.
+            top5_buy_qty = sum(int(l.get("quantity") or 0) for l in buy_depth[:5])
+            top5_sell_qty = sum(int(l.get("quantity") or 0) for l in sell_depth[:5])
+
+            ohlc = quote.get("ohlc", {}) or {}
             return {
                 "ltp": ltp,
                 "volume": quote.get("volume", 0),
                 "timestamp": quote.get("timestamp", now_ist().isoformat()),
-                "open": quote.get("ohlc", {}).get("open"),
-                "high": quote.get("ohlc", {}).get("high"),
-                "low": quote.get("ohlc", {}).get("low"),
-                "close": quote.get("ohlc", {}).get("close"),
+                "open": ohlc.get("open"),
+                "high": ohlc.get("high"),
+                "low": ohlc.get("low"),
+                "close": ohlc.get("close"),  # previous close
+                "average_price": quote.get("average_price"),
+                "upper_circuit": quote.get("upper_circuit_limit"),
+                "lower_circuit": quote.get("lower_circuit_limit"),
                 "bid": buy_depth[0].get("price") if buy_depth else None,
                 "ask": sell_depth[0].get("price") if sell_depth else None,
+                "depth": depth,
+                "total_buy_quantity": int(quote.get("buy_quantity") or 0),
+                "total_sell_quantity": int(quote.get("sell_quantity") or 0),
+                "top5_buy_qty": top5_buy_qty,
+                "top5_sell_qty": top5_sell_qty,
+                "last_quantity": int(quote.get("last_quantity") or 0),
             }
         except Exception as e:
             logger.warning("Kite quote failed for %s: %s", symbol, e)

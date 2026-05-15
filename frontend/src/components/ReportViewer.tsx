@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Report } from "../types/api";
 import clsx from "clsx";
+import { SymbolLink } from "./SymbolLink";
 
 function fmt(n: number, decimals = 0) {
   return n.toLocaleString("en-IN", {
@@ -146,7 +147,8 @@ function WeeklyReportContent({ content }: { content: Record<string, unknown> }) 
         <div>
           <span className="text-gray-500">Best Trade</span>
           <p className="text-emerald-400 font-medium">
-            {String(best.symbol)} +{fmt(Number(best.pnl || 0), 2)}
+            <SymbolLink symbol={String(best.symbol)} className="text-emerald-400" />
+            {" "}+{fmt(Number(best.pnl || 0), 2)}
           </p>
         </div>
       )}
@@ -154,7 +156,8 @@ function WeeklyReportContent({ content }: { content: Record<string, unknown> }) 
         <div>
           <span className="text-gray-500">Worst Trade</span>
           <p className="text-red-400 font-medium">
-            {String(worst.symbol)} {fmt(Number(worst.pnl || 0), 2)}
+            <SymbolLink symbol={String(worst.symbol)} className="text-red-400" />
+            {" "}{fmt(Number(worst.pnl || 0), 2)}
           </p>
         </div>
       )}

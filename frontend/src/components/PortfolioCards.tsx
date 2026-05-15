@@ -120,16 +120,30 @@ export function PortfolioCards() {
           label="Today's PnL"
           value={`${signed(data.daily_pnl, 0)}`}
           color={pnlColor(data.daily_pnl)}
-          subtitle={`${signed(data.daily_pnl_pct * 100, 2)}%`}
+          subtitle={
+            data.daily_charges > 0
+              ? `${signed(data.daily_pnl_pct * 100, 2)}% · Gross ${signed(
+                  data.daily_pnl + data.daily_charges,
+                  0,
+                )}`
+              : `${signed(data.daily_pnl_pct * 100, 2)}%`
+          }
         />
         <Card
           label="Total PnL"
           value={`${signed(data.total_pnl, 0)}`}
           color={pnlColor(data.total_pnl)}
-          subtitle={`Realized ${signed(data.all_time_realized_pnl, 0)} · Unrealized ${signed(
-            data.holdings_unrealized_pnl,
-            0,
-          )}`}
+          subtitle={
+            data.all_time_charges > 0
+              ? `Realized ${signed(data.all_time_realized_pnl, 0)} (gross ${signed(
+                  data.all_time_realized_pnl + data.all_time_charges,
+                  0,
+                )}) · Unrealized ${signed(data.holdings_unrealized_pnl, 0)}`
+              : `Realized ${signed(data.all_time_realized_pnl, 0)} · Unrealized ${signed(
+                  data.holdings_unrealized_pnl,
+                  0,
+                )}`
+          }
         />
         <Card
           label="Open Positions"

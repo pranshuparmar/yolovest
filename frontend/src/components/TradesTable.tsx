@@ -2,6 +2,8 @@ import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import type { Trade } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
+import { useLtpStream } from "../hooks/useLtpStream";
+import { SymbolLink } from "./SymbolLink";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", {
@@ -18,6 +20,8 @@ export function TradesTable({
   compact?: boolean;
 }) {
   const navigate = useNavigate();
+  // Live LTP — useful for OPEN rows. Closed rows show — instead.
+  const ltps = useLtpStream();
 
   if (trades.length === 0) {
     return <p className="text-gray-500 text-sm py-4">No trades found</p>;
@@ -32,6 +36,8 @@ export function TradesTable({
             <th className="pb-2 pr-4">Type</th>
             <th className="pb-2 pr-4">Entry</th>
             {!compact && <th className="pb-2 pr-4">Fill</th>}
+            <th className="pb-2 pr-4">Exit</th>
+            <th className="pb-2 pr-4">LTP</th>
             <th className="pb-2 pr-4">Qty</th>
             {!compact && <th className="pb-2 pr-4">Product</th>}
             <th className="pb-2 pr-4">Status</th>
@@ -46,7 +52,9 @@ export function TradesTable({
               onClick={() => navigate(`/trades/${t.trade_id}`)}
               className="border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer"
             >
-              <td className="py-2 pr-4 font-medium">{t.symbol}</td>
+              <td className="py-2 pr-4 font-medium">
+                <SymbolLink symbol={t.symbol} />
+              </td>
               <td className="py-2 pr-4">
                 <span
                   className={clsx(
@@ -61,6 +69,15 @@ export function TradesTable({
               </td>
               <td className="py-2 pr-4">{fmt(t.entry_price)}</td>
               {!compact && <td className="py-2 pr-4">{fmt(t.fill_price)}</td>}
+              <td className="py-2 pr-4">
+                {t.exit_price !== null ? fmt(t.exit_price) : <span className="text-gray-500">—</span>}
+              </td>
+              <td className="py-2 pr-4 font-mono">
+                {(() => {
+                  const ltp = ltps.get(t.symbol);
+                  return ltp ? fmt(ltp) : <span className="text-gray-600">—</span>;
+                })()}
+              </td>
               <td className="py-2 pr-4">{t.quantity}</td>
               {!compact && <td className="py-2 pr-4 text-gray-400">{t.product}</td>}
               <td className="py-2 pr-4">
@@ -76,7 +93,22 @@ export function TradesTable({
                       : "text-gray-500"
                 )}
               >
-                {t.pnl !== null ? `₹${fmt(t.pnl)}` : "—"}
+                {t.pnl !== null ? (
+                  <>
+                    <div>₹{fmt(t.pnl)}</div>
+                    {t.exit_price !== null && (
+                      <div className="text-[10px] text-gray-500 leading-tight">
+                        Gross ₹{fmt(
+                          (t.signal_type === "BUY"
+                            ? (t.exit_price - t.fill_price)
+                            : (t.fill_price - t.exit_price)) * t.quantity,
+                        )}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  "—"
+                )}
               </td>
               <td className="py-2 text-gray-500 text-xs whitespace-nowrap">
                 {parseUTC(t.created_at).toLocaleDateString("en-IN", {

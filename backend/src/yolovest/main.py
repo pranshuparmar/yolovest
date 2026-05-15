@@ -217,7 +217,9 @@ def _build_db(config: AppConfig) -> Database | _StubDB:
     return Database(config.database.path)
 
 
-def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
+def _build_broker(
+    config: AppConfig, rate_limiter: Any = None,
+) -> ZerodhaBroker | _StubBroker:
     """Build broker — real if API keys set, stub otherwise."""
     api_key = config.broker.api_key.get_secret_value()
     api_secret = config.broker.api_secret.get_secret_value()
@@ -230,6 +232,7 @@ def _build_broker(config: AppConfig) -> ZerodhaBroker | _StubBroker:
             max_retries=config.execution.max_order_retries,
             retry_base_delay=float(config.execution.retry_base_delay_sec),
             kite_data_enabled=config.market_data.kite_data_enabled,
+            rate_limiter=rate_limiter,
         )
     return _StubBroker()
 
@@ -244,7 +247,9 @@ def _build_llm(config: AppConfig) -> GeminiLLM | _StubLLM:
     return _StubLLM()
 
 
-def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketData:
+def _build_market_data(
+    config: AppConfig, rate_limiter: Any = None,
+) -> MarketDataIngester | _StubMarketData:
     """Build market data ingester with provider fallback chain.
 
     If kite_data_enabled is True and broker API keys are set, Kite Connect
@@ -261,15 +266,8 @@ def _build_market_data(config: AppConfig) -> MarketDataIngester | _StubMarketDat
             try:
                 from yolovest.data.kite_data import KiteDataProvider
 
-                # Share rate limiter with broker to stay under Kite's 10 req/s
-                broker_limiter = None
-                try:
-                    from yolovest.broker.zerodha import ZerodhaBroker
-                    broker_limiter = ZerodhaBroker._shared_rate_limiter
-                except (ImportError, AttributeError):
-                    pass
                 kite_provider = KiteDataProvider(
-                    api_key=kite_key, rate_limiter=broker_limiter,
+                    api_key=kite_key, rate_limiter=rate_limiter,
                 )
                 daily_providers.append(kite_provider)
                 logger.info("Kite Connect data provider enabled as primary")
@@ -345,10 +343,13 @@ def _build_news_aggregator(config: AppConfig) -> Any:
         return None
 
 
-def build_context(config: AppConfig) -> AppContext:
+def build_context(config: AppConfig, db: Any = None) -> AppContext:
     """Build the application context with real implementations where configured.
 
     Falls back to stubs when API keys or providers are not configured.
+    If `db` is provided, it's used directly (allowing the caller to load DB
+    config values before broker/market_data are constructed). Otherwise a
+    fresh DB instance is built from config.
     """
     from typing import cast
 
@@ -360,10 +361,15 @@ def build_context(config: AppConfig) -> AppContext:
         NotifierProtocol,
     )
 
-    db = _build_db(config)
-    broker = _build_broker(config)
+    if db is None:
+        db = _build_db(config)
+    # Shared Kite rate limiter — broker and KiteDataProvider use the same
+    # instance so all Kite calls draw from one combined budget.
+    from yolovest.broker.kite_rate_limiter import KiteRateLimiter
+    kite_rate_limiter = KiteRateLimiter(calls_per_second=10.0, concurrency=8)
+    broker = _build_broker(config, rate_limiter=kite_rate_limiter)
     # Pass DB to broker for token persistence (if real broker)
-    market_data = _build_market_data(config)
+    market_data = _build_market_data(config, rate_limiter=kite_rate_limiter)
     if isinstance(broker, ZerodhaBroker):
         broker._db = db
         broker._market_data = market_data
@@ -441,34 +447,29 @@ async def async_main(args: argparse.Namespace) -> None:
     if args.mode is not None:
         config.mode = args.mode
 
-    logger.info("YoloVest starting in %s mode", config.mode)
-
-    # Build context
-    ctx = build_context(config)
-
-    # Initialize database if real (not stub)
-    if isinstance(ctx.db, Database):
-        await ctx.db.initialize()
-
-        # Populate or load DB-editable config
+    # Initialize DB and load persisted config BEFORE building broker/market_data.
+    # Without this, toggles like kite_data_enabled stored in the DB would not
+    # take effect until restart (the ingester/broker chain is frozen at build).
+    db = _build_db(config)
+    if isinstance(db, Database):
+        await db.initialize()
         try:
-            if await ctx.db.is_config_empty():
+            if await db.is_config_empty():
                 defaults = get_db_editable_defaults()
-                await ctx.db.set_config_bulk(defaults)
+                await db.set_config_bulk(defaults)
                 logger.info("Populated %d config defaults into DB", len(defaults))
             else:
-                db_values = await ctx.db.get_all_config()
-                ctx.config = apply_db_config(ctx.config, db_values)
-                config = ctx.config  # update local ref for downstream use
-                ctx.market_hours = MarketHoursChecker(ctx.config)
-                if hasattr(ctx.notify, "_config"):
-                    ctx.notify._config = ctx.config
-                # Sync broker mode from DB config
-                if hasattr(ctx.broker, "_mode"):
-                    ctx.broker._mode = ctx.config.mode
+                db_values = await db.get_all_config()
+                config = apply_db_config(config, db_values)
                 logger.info("Loaded %d config values from DB", len(db_values))
         except Exception:
             logger.warning("Failed to load config from DB, using file defaults", exc_info=True)
+
+    # Log effective mode AFTER DB config has been applied
+    logger.info("YoloVest starting in %s mode", config.mode)
+
+    # Build context with the now-effective config and the pre-built DB
+    ctx = build_context(config, db=db)
 
     # Log effective config (after DB overrides are applied)
     logger.info(
@@ -492,20 +493,139 @@ async def async_main(args: argparse.Namespace) -> None:
         # Sync Kite data provider with broker's access token
         _sync_kite_data_token(ctx)
 
-        # Sync capital from Zerodha if session was restored
-        if restored:
+        # KiteTicker WebSocket — gated behind a flag because it requires
+        # the paid Kite data plan. When enabled, position-monitor reads
+        # the sub-second LTP cache before falling back to REST.
+        if (
+            restored
+            and ctx.config.market_data.kite_websocket_enabled
+            and ctx.broker._access_token  # noqa: SLF001 — needed to start ticker
+        ):
             try:
-                margins = await ctx.broker.get_margins()
-                if margins:
-                    from yolovest.dashboard.app import _extract_broker_capital
-                    broker_capital = _extract_broker_capital(margins)
-                    if broker_capital > 0:
-                        await ctx.db.set_system_state("initial_capital", str(broker_capital))
-                        logger.info("Synced capital from Zerodha: %.2f", broker_capital)
-            except Exception as e:
-                logger.info("Could not sync capital from Zerodha: %s", e)
+                from yolovest.broker.kite_ticker import KiteTickerClient
+                # Find the KiteDataProvider in the ingester chain for token
+                # resolution. The ticker only needs the provider to translate
+                # NSE symbols → integer instrument tokens via
+                # `kite.instruments("NSE")` — it does NOT need the paid
+                # historical data plan. So if `kite_data_enabled` is off but
+                # `kite_websocket_enabled` is on, stand up a standalone
+                # KiteDataProvider just for token lookup.
+                kite_provider = None
+                ingester = getattr(ctx.market_data, "providers", None)
+                if ingester:
+                    for p in ingester:
+                        if type(p).__name__ == "KiteDataProvider":
+                            kite_provider = p
+                            break
+                if kite_provider is None:
+                    try:
+                        from yolovest.broker.kite_rate_limiter import KiteRateLimiter
+                        from yolovest.data.kite_data import KiteDataProvider
 
-    # Sync initial capital from config → DB (so portfolio reads the configured value)
+                        # Local rate limiter — token lookup is one-shot per
+                        # symbol with a process-wide cache, so dedicated
+                        # limits are fine.
+                        kite_provider = KiteDataProvider(
+                            api_key=ctx.config.broker.api_key.get_secret_value(),
+                            rate_limiter=KiteRateLimiter(
+                                calls_per_second=10.0, concurrency=4,
+                            ),
+                        )
+                        # Share the broker's access token so the standalone
+                        # provider can call /instruments without a separate
+                        # login. _sync_kite_data_token only walks the
+                        # ingester chain, so we set this directly.
+                        kite_provider.set_access_token(
+                            ctx.broker._access_token,  # noqa: SLF001
+                        )
+                        logger.info(
+                            "Built standalone KiteDataProvider for ticker "
+                            "(kite_data_enabled=False)",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to build standalone KiteDataProvider for ticker",
+                        )
+                        kite_provider = None
+                if kite_provider is not None:
+                    # Bridge KiteTicker's on_order_update frames into the
+                    # same business logic the HTTP postback handler runs.
+                    # WebSocket is the primary push channel — more reliable
+                    # than HTTP postbacks (which Kite docs explicitly say
+                    # are best-effort with no retry). Postback handler
+                    # stays wired as a backup; ghost recovery is the
+                    # last-resort 15-min reconciler. Idempotent: if both
+                    # channels deliver the same event, the second hit is
+                    # a no-op (broker treats already-cancelled orders as
+                    # no-op, and the DB updates are themselves idempotent).
+                    from yolovest.dashboard.app import (
+                        _apply_order_postback,
+                        broadcast_ws,
+                    )
+
+                    async def _ticker_order_update(order: dict) -> None:
+                        order_id = str(order.get("order_id") or "")
+                        status = (order.get("status") or "").upper()
+                        if not order_id or status not in (
+                            "COMPLETE", "CANCELLED", "REJECTED",
+                        ):
+                            return
+                        try:
+                            await _apply_order_postback(ctx, order_id, status, order)
+                        except Exception:
+                            logger.exception(
+                                "ticker order_update handler failed for %s",
+                                order_id,
+                            )
+
+                    async def _ticker_tick_broadcast(tick: dict) -> None:
+                        # Throttled in KiteTickerClient itself — this is
+                        # already at most one call per symbol per second.
+                        try:
+                            await broadcast_ws("tick_update", tick)
+                        except Exception:
+                            logger.debug("tick broadcast failed", exc_info=True)
+
+                    ticker = KiteTickerClient(
+                        api_key=ctx.config.broker.api_key.get_secret_value(),
+                        access_token=ctx.broker._access_token,  # noqa: SLF001
+                        kite_data_provider=kite_provider,
+                        order_update_callback=_ticker_order_update,
+                        tick_broadcast_callback=_ticker_tick_broadcast,
+                    )
+                    await ticker.start()
+                    ctx.ticker = ticker
+                    logger.info(
+                        "KiteTicker started — sub-second LTP cache + real-time order updates active",
+                    )
+                else:
+                    logger.warning(
+                        "kite_websocket_enabled but no KiteDataProvider in ingester chain",
+                    )
+            except Exception:
+                logger.exception("KiteTicker startup failed; continuing without it")
+
+        # First-time bootstrap: if no baseline exists yet, seed it from the
+        # broker's current funds (cash + utilised). Subsequent restarts must
+        # not overwrite it — the baseline is what the user deposited, and
+        # total_capital = initial_capital + all_time_realized_pnl depends on
+        # it staying constant. Use /api/capital or /api/capital/sync to reset.
+        if restored:
+            existing = await ctx.db.get_system_state("initial_capital")
+            if not existing:
+                try:
+                    margins = await ctx.broker.get_margins()
+                    if margins:
+                        from yolovest.dashboard.app import _extract_broker_capital
+                        broker_capital = _extract_broker_capital(margins)
+                        if broker_capital > 0:
+                            await ctx.db.set_system_state("initial_capital", str(broker_capital))
+                            logger.info("Seeded initial capital from Zerodha: %.2f", broker_capital)
+                except Exception as e:
+                    logger.info("Could not seed initial capital from Zerodha: %s", e)
+
+    # Fallback bootstrap: if neither broker nor any prior run has set a
+    # baseline, take it from the config's capital.initial_amount.
     if isinstance(ctx.db, Database):
         existing = await ctx.db.get_system_state("initial_capital")
         if not existing:
@@ -514,39 +634,15 @@ async def async_main(args: argparse.Namespace) -> None:
             )
             logger.info("Set initial capital to %.0f from config", ctx.config.capital.initial_amount)
 
-    # Load production ML models from disk (if any exist)
-    if ctx.ml is not None:
-        for model_type in ("intraday", "swing"):
-            try:
-                await ctx.ml.load_model(model_type)
-                logger.info("Loaded production %s model at startup", model_type)
-            except FileNotFoundError:
-                logger.info("No saved %s model found, will be available after model-retrain", model_type)
-            except Exception as e:
-                logger.warning("Failed to load %s model at startup: %s", model_type, e)
-
-        # Load shadow models (if any are in shadow status in DB)
-        try:
-            shadow_models = await ctx.db.get_all_shadow_models()
-            for shadow in shadow_models:
-                try:
-                    await ctx.ml.load_shadow_model(
-                        shadow["model_type"], shadow["version"],
-                    )
-                except FileNotFoundError:
-                    # .pkl file missing — revert to retired
-                    logger.warning(
-                        "Shadow %s model %s has no .pkl file — reverting to retired",
-                        shadow["model_type"], shadow["version"],
-                    )
-                    await ctx.db.retire_model(shadow["model_type"], shadow["version"])
-                except Exception as e:
-                    logger.warning(
-                        "Failed to load shadow %s model %s: %s",
-                        shadow["model_type"], shadow["version"], e,
-                    )
-        except Exception:
-            logger.warning("Failed to load shadow models", exc_info=True)
+    # ML model loading happens in a background task started AFTER the
+    # dashboard is up — see `_load_ml_models_background` below. Loading
+    # pickled XGBoost models can take 30–60 s when shadow models have
+    # accumulated, and on a memory-pressured small host the
+    # deserialization stalls long enough that the docker healthcheck
+    # times out before /api/health binds. Delaying the load lets the
+    # FastAPI server come up first; the orchestrator's first heartbeat
+    # is gated by an `await asyncio.sleep(2)` so models almost always
+    # finish loading before the first inference is needed anyway.
 
     # Build orchestrator (skills are instantiated internally)
     orchestrator = HeartbeatOrchestrator(ctx)
@@ -663,6 +759,14 @@ async def async_main(args: argparse.Namespace) -> None:
     # Start dashboard
     dashboard_task = asyncio.create_task(_start_dashboard(ctx))
 
+    # Start ML model loading as a background task so /api/health binds
+    # without waiting for pickle deserialization (see note ~120 lines
+    # above). Models are loaded sequentially inside the task so they
+    # don't compete for memory on small hosts.
+    ml_load_task: asyncio.Task[None] | None = None
+    if ctx.ml is not None:
+        ml_load_task = asyncio.create_task(_load_ml_models_background(ctx))
+
     # Start CRON scheduler as background task
     cron_task = asyncio.create_task(_start_cron_scheduler(cron_scheduler))
 
@@ -692,6 +796,11 @@ async def async_main(args: argparse.Namespace) -> None:
         cron_task.cancel()
         watchdog.stop()
         watchdog_task.cancel()
+        if ctx.ticker is not None:
+            try:
+                await ctx.ticker.stop()
+            except Exception:
+                logger.debug("ticker stop failed", exc_info=True)
 
         # 2. Cancel telegram task to interrupt the long-poll HTTP request,
         #    then call stop() to cleanly shut down the updater.
@@ -737,6 +846,53 @@ async def _start_telegram(bot: Any) -> None:
         await bot.start()
     except Exception:
         logger.exception("Telegram bot failed to start")
+
+
+async def _load_ml_models_background(ctx: AppContext) -> None:
+    """Load production + shadow ML models in a background task so the
+    /api/health endpoint binds before pickle deserialization stalls
+    the event loop. Loading is sequential to avoid memory spikes from
+    multiple XGBoost models being unpickled in parallel.
+
+    Models that aren't loaded yet when generate-signals runs will
+    cause the skill to fall back to "no model available"; the
+    orchestrator's first heartbeat is gated by a 2-second sleep so
+    this is unlikely in practice, but if a shadow has dozens of MB
+    of trees and a host is under memory pressure, it's possible.
+    """
+    if ctx.ml is None:
+        return
+    for model_type in ("intraday", "swing"):
+        try:
+            await ctx.ml.load_model(model_type)
+            logger.info("Loaded production %s model at startup", model_type)
+        except FileNotFoundError:
+            logger.info(
+                "No saved %s model found, will be available after model-retrain",
+                model_type,
+            )
+        except Exception as e:
+            logger.warning("Failed to load %s model at startup: %s", model_type, e)
+    try:
+        shadow_models = await ctx.db.get_all_shadow_models()
+        for shadow in shadow_models:
+            try:
+                await ctx.ml.load_shadow_model(
+                    shadow["model_type"], shadow["version"],
+                )
+            except FileNotFoundError:
+                logger.warning(
+                    "Shadow %s model %s has no .pkl file — reverting to retired",
+                    shadow["model_type"], shadow["version"],
+                )
+                await ctx.db.retire_model(shadow["model_type"], shadow["version"])
+            except Exception as e:
+                logger.warning(
+                    "Failed to load shadow %s model %s: %s",
+                    shadow["model_type"], shadow["version"], e,
+                )
+    except Exception:
+        logger.warning("Failed to load shadow models", exc_info=True)
 
 
 async def _start_cron_scheduler(scheduler: CronScheduler) -> None:

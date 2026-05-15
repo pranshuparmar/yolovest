@@ -29,6 +29,7 @@ class BrokerBase(ABC):
         product: str,  # "MIS" or "CNC"
         price: float | None = None,
         trigger_price: float | None = None,
+        tag: str | None = None,  # ≤20 chars, flows back via orders() and postbacks
     ) -> str:
         """Place an order and return the order ID."""
         ...
@@ -74,6 +75,76 @@ class BrokerBase(ABC):
     async def get_holdings(self) -> list[dict[str, Any]]:
         """Get all CNC holdings from the broker (delivery stocks held overnight)."""
         ...
+
+    async def convert_position(
+        self,
+        symbol: str,
+        quantity: int,
+        from_product: str,
+        to_product: str,
+        side: str = "BUY",
+    ) -> bool:
+        """Convert an existing open position between product types (e.g.
+        MIS → CNC, taking delivery of intraday shares before square-off).
+        Returns True on success; default implementation is a no-op
+        returning False.
+
+        Zerodha allows MIS → CNC and CNC → MIS for equity. Margin
+        requirements change between products; the caller must have
+        already verified the new requirement fits available margin.
+        """
+        return False
+
+    async def estimate_margin(
+        self, legs: list[dict[str, Any]],
+    ) -> dict[str, float] | None:
+        """Return the broker's canonical margin estimate for a proposed
+        order (or basket of orders). Each leg dict has: exchange,
+        tradingsymbol, transaction_type, variety, product, order_type,
+        quantity, price (and trigger_price for SL).
+
+        Result dict carries at minimum `total` (margin required across
+        all legs) plus a `charges` sub-dict on a per-leg basis when the
+        broker returns one. Returning None signals the caller to fall
+        back to a naive `entry × qty` notional check.
+        """
+        return None
+
+    async def get_order_history(self, order_id: str) -> list[dict[str, Any]]:
+        """Return the state-transition timeline of a single order
+        (placed → modified → triggered → complete, with timestamps and
+        broker-side notes). Empty list when unavailable."""
+        return []
+
+    async def get_order_trades(self, order_id: str) -> list[dict[str, Any]]:
+        """Return individual fill records for a single order — important
+        when partial fills compose the full quantity. Empty list when
+        unavailable."""
+        return []
+
+    async def get_executed_trades(self) -> list[dict[str, Any]]:
+        """Return today's executed trades from the broker.
+
+        Each entry should carry at minimum: tradingsymbol, transaction_type
+        ("BUY"/"SELL"), quantity, average_price, exchange, fill_timestamp.
+        Used by ghost-position reconciliation to recover the actual broker
+        fill price when a position is closed outside the system. Default
+        implementation returns an empty list — callers must tolerate it.
+        """
+        return []
+
+    async def compute_charges(
+        self, legs: list[dict[str, Any]]
+    ) -> list[dict[str, float]] | None:
+        """Return actual per-leg charges from the broker, or None if unsupported.
+
+        Each input leg is a dict with: exchange, tradingsymbol, transaction_type,
+        variety, product, order_type, quantity, average_price. Returns a list of
+        charges breakdowns in the same order — each dict carries `brokerage`,
+        `stt`, `other_charges`, `total`. Returning None lets callers fall back
+        to a config-based estimate (e.g. paper mode, broker offline).
+        """
+        return None
 
     def get_login_url(self) -> str:
         """Get the broker login URL for daily re-authentication."""

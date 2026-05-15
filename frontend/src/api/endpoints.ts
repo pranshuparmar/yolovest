@@ -4,6 +4,7 @@ import type {
   PortfolioState,
   Trade,
   TradeDetail,
+  TradeOrderDetail,
   EquityCurvePoint,
   PnlCalendarDay,
   WatchlistItem,
@@ -32,6 +33,11 @@ import type {
   OHLCVBar,
   StrategyPerformance,
   ExecutionQuality,
+  ModelDrift,
+  SignalClassDistribution,
+  InstitutionalFlows,
+  SymbolContext,
+  RotationCooldown,
   CorrelationData,
   PriceAlert,
   RiskSimParams,
@@ -57,6 +63,12 @@ export const api = {
   portfolio: () => apiFetch<PortfolioState>("/api/portfolio"),
 
   positions: () => apiFetch<Trade[]>("/api/positions"),
+
+  closePosition: (tradeId: string) =>
+    apiFetch<{ status: string; trade_id: string; exit_price: number; pnl: number; exit_order_id: string }>(
+      `/api/positions/${encodeURIComponent(tradeId)}/close`,
+      { method: "POST" },
+    ),
 
   tradesToday: () => apiFetch<Trade[]>("/api/trades/today"),
 
@@ -85,6 +97,9 @@ export const api = {
 
   tradeDetail: (tradeId: string) =>
     apiFetch<TradeDetail>(`/api/trades/${tradeId}`),
+
+  tradeOrderDetail: (tradeId: string) =>
+    apiFetch<TradeOrderDetail>(`/api/trades/${tradeId}/order-detail`),
 
   deleteTrade: (tradeId: string) =>
     apiFetch<{ success: boolean; trade_id: string }>(`/api/trades/${tradeId}`, { method: "DELETE" }),
@@ -300,6 +315,20 @@ export const api = {
   symbolPredictions: (symbol: string) =>
     apiFetch<PredictionDetail[]>(`/api/symbol/${symbol}/predictions`),
 
+  symbolContext: (symbol: string) =>
+    apiFetch<SymbolContext>(`/api/symbol/${symbol}/context`),
+
+  rotationCooldown: () =>
+    apiFetch<RotationCooldown>("/api/rotation-cooldown"),
+
+  clearRotationCooldown: (symbol?: string) => {
+    const qs = symbol ? `?symbol=${encodeURIComponent(symbol)}` : "";
+    return apiFetch<{ success: boolean; cleared: number; symbol: string | null }>(
+      `/api/rotation-cooldown/clear${qs}`,
+      { method: "POST" },
+    );
+  },
+
   // Feature #5
   strategyPerformance: () =>
     apiFetch<StrategyPerformance>("/api/strategy-performance"),
@@ -307,6 +336,27 @@ export const api = {
   // Feature #8
   executionQuality: (days = 30) =>
     apiFetch<ExecutionQuality>(`/api/execution-quality?days=${days}`),
+
+  modelDrift: (days = 30) =>
+    apiFetch<ModelDrift>(`/api/model-drift?days=${days}`),
+
+  signalClassDistribution: (days = 7) =>
+    apiFetch<SignalClassDistribution>(
+      `/api/signal-class-distribution?days=${days}`,
+    ),
+
+  institutionalFlows: (params?: {
+    days?: number; bulk_limit?: number; symbol?: string;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.days) q.set("days", String(params.days));
+    if (params?.bulk_limit) q.set("bulk_limit", String(params.bulk_limit));
+    if (params?.symbol) q.set("symbol", params.symbol);
+    const qs = q.toString();
+    return apiFetch<InstitutionalFlows>(
+      `/api/institutional-flows${qs ? "?" + qs : ""}`,
+    );
+  },
 
   // Feature #7
   correlations: (days = 60) =>
@@ -352,6 +402,12 @@ export const api = {
       { method: "POST" },
     ),
 
+  deleteBackup: (filename: string) =>
+    apiFetch<{ success: boolean; filename: string; size_bytes: number }>(
+      `/api/backups/${filename}`,
+      { method: "DELETE" },
+    ),
+
   changePassword: (newPassword: string) =>
     apiFetch<{ success: boolean }>("/api/change-password", {
       method: "POST",
@@ -386,6 +442,12 @@ export const api = {
 
   clearTodaysSignals: () =>
     apiFetch<{ success: boolean; signals_deleted: number; pending_deleted: number }>("/api/clear-signals", { method: "POST" }),
+
+  killSwitch: (command: "pause" | "stop" | "kill" | "resume") =>
+    apiFetch<{ success: boolean; command: string; data: Record<string, unknown>; error: string | null }>(
+      `/api/kill-switch/${command}`,
+      { method: "POST" },
+    ),
 
   bulkDelete: (group: string) =>
     apiFetch<{ success: boolean; group: string; deleted: Record<string, number>; total: number }>(

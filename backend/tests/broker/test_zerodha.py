@@ -1,5 +1,7 @@
 """Tests for ZerodhaBroker — paper mode and mocked live mode."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from yolovest.broker.zerodha import ZerodhaBroker
@@ -109,3 +111,203 @@ class TestPaperMode:
         assert id1 != id2
         positions = await paper_broker.get_positions()
         assert len(positions) == 2
+
+    async def test_compute_charges_returns_none_in_paper(self, paper_broker):
+        result = await paper_broker.compute_charges([
+            {"exchange": "NSE", "tradingsymbol": "RELIANCE",
+             "transaction_type": "BUY", "variety": "regular",
+             "product": "MIS", "order_type": "MARKET",
+             "quantity": 1, "average_price": 2500.0},
+        ])
+        assert result is None
+
+
+class TestComputeChargesLive:
+    """Live-mode compute_charges with a mocked Kite client."""
+
+    @pytest.fixture
+    def live_broker(self):
+        return ZerodhaBroker(api_key="test", api_secret="test", mode="live")
+
+    async def test_maps_kite_charges_block(self, live_broker):
+        live_broker._kite = MagicMock()
+        live_broker._kite.get_virtual_contract_note = MagicMock(return_value=[
+            {
+                "type": "equity",
+                "total": 22.30,
+                "charges": {
+                    "transaction_tax": 1.50,
+                    "transaction_tax_type": "stt",
+                    "exchange_turnover_charge": 0.30,
+                    "sebi_turnover_charge": 0.05,
+                    "brokerage": 20.0,
+                    "stamp_duty": 0.10,
+                    "gst": {"igst": 0.0, "cgst": 0.18, "sgst": 0.17, "total": 0.35},
+                    "total": 22.30,
+                },
+            },
+            {
+                "type": "equity",
+                "total": 27.10,
+                "charges": {
+                    "transaction_tax": 6.30,
+                    "transaction_tax_type": "stt",
+                    "exchange_turnover_charge": 0.30,
+                    "sebi_turnover_charge": 0.05,
+                    "brokerage": 20.0,
+                    "stamp_duty": 0.10,
+                    "gst": {"total": 0.35},
+                    "total": 27.10,
+                },
+            },
+        ])
+
+        legs = [
+            {"exchange": "NSE", "tradingsymbol": "RELIANCE",
+             "transaction_type": "BUY", "variety": "regular",
+             "product": "MIS", "order_type": "MARKET",
+             "quantity": 10, "average_price": 2500.0},
+            {"exchange": "NSE", "tradingsymbol": "RELIANCE",
+             "transaction_type": "SELL", "variety": "regular",
+             "product": "MIS", "order_type": "MARKET",
+             "quantity": 10, "average_price": 2510.0},
+        ]
+        result = await live_broker.compute_charges(legs)
+
+        assert result is not None
+        assert len(result) == 2
+        assert result[0]["brokerage"] == 20.0
+        assert result[0]["stt"] == 1.50
+        # other = exchange + sebi + stamp + gst.total = 0.30 + 0.05 + 0.10 + 0.35
+        assert result[0]["other_charges"] == pytest.approx(0.80)
+        assert result[0]["total"] == 22.30
+        assert result[1]["stt"] == 6.30
+        assert result[1]["total"] == 27.10
+
+        # Verify the legs got forwarded verbatim
+        live_broker._kite.get_virtual_contract_note.assert_called_once_with(legs)
+
+    async def test_returns_none_when_kite_raises(self, live_broker):
+        live_broker._kite = MagicMock()
+        live_broker._kite.get_virtual_contract_note = MagicMock(
+            side_effect=RuntimeError("Kite API error")
+        )
+        result = await live_broker.compute_charges([
+            {"exchange": "NSE", "tradingsymbol": "RELIANCE",
+             "transaction_type": "BUY", "variety": "regular",
+             "product": "MIS", "order_type": "MARKET",
+             "quantity": 1, "average_price": 2500.0},
+        ])
+        assert result is None
+
+    async def test_returns_none_when_kite_response_count_mismatches(self, live_broker):
+        live_broker._kite = MagicMock()
+        live_broker._kite.get_virtual_contract_note = MagicMock(return_value=[
+            {"charges": {"total": 22.30}},  # only one back, two sent
+        ])
+        result = await live_broker.compute_charges([
+            {"exchange": "NSE", "tradingsymbol": "X", "transaction_type": "BUY",
+             "variety": "regular", "product": "MIS", "order_type": "MARKET",
+             "quantity": 1, "average_price": 100.0},
+            {"exchange": "NSE", "tradingsymbol": "X", "transaction_type": "SELL",
+             "variety": "regular", "product": "MIS", "order_type": "MARKET",
+             "quantity": 1, "average_price": 101.0},
+        ])
+        assert result is None
+
+    async def test_returns_none_when_no_legs(self, live_broker):
+        live_broker._kite = MagicMock()
+        result = await live_broker.compute_charges([])
+        assert result is None
+        live_broker._kite.get_virtual_contract_note.assert_not_called()
+
+
+class TestMarketProtection:
+    """Kite rejects MARKET / SL-M orders without market_protection. We
+    convert away from both, but residual cases must carry the parameter."""
+
+    @pytest.fixture
+    def live_broker(self):
+        b = ZerodhaBroker(api_key="test", api_secret="test", mode="live")
+        b._kite = MagicMock()
+        b._kite.place_order = MagicMock(return_value="ORD-RESIDUAL")
+        # Patch _retry_api_call to invoke fn directly so we can inspect kwargs.
+        async def _direct(fn):
+            return fn()
+        b._retry_api_call = _direct  # type: ignore[assignment]
+        return b
+
+    async def test_market_with_ltp_converts_to_limit_no_protection(self, live_broker):
+        async def _ltp(_symbol):
+            return 100.0
+        live_broker._fetch_ltp_for_limit = _ltp  # type: ignore[assignment]
+
+        await live_broker._live_place_order(
+            symbol="RELIANCE", side="BUY", quantity=1,
+            order_type="MARKET", product="MIS",
+            price=None, trigger_price=None,
+        )
+
+        kwargs = live_broker._kite.place_order.call_args.kwargs
+        assert kwargs["order_type"] == "LIMIT"
+        assert "market_protection" not in kwargs
+
+    async def test_market_without_ltp_keeps_market_with_protection(self, live_broker):
+        async def _no_ltp(_symbol):
+            return None
+        live_broker._fetch_ltp_for_limit = _no_ltp  # type: ignore[assignment]
+
+        await live_broker._live_place_order(
+            symbol="RELIANCE", side="BUY", quantity=1,
+            order_type="MARKET", product="MIS",
+            price=None, trigger_price=None,
+        )
+
+        kwargs = live_broker._kite.place_order.call_args.kwargs
+        assert kwargs["order_type"] == "MARKET"
+        assert kwargs["market_protection"] == -1
+
+    async def test_slm_with_trigger_converts_to_sl_no_protection(self, live_broker):
+        async def _ltp(_s):
+            return 100.0
+        live_broker._fetch_ltp_for_limit = _ltp  # type: ignore[assignment]
+
+        await live_broker._live_place_order(
+            symbol="RELIANCE", side="SELL", quantity=1,
+            order_type="SL-M", product="MIS",
+            price=None, trigger_price=95.0,
+        )
+
+        kwargs = live_broker._kite.place_order.call_args.kwargs
+        assert kwargs["order_type"] == "SL"
+        assert "market_protection" not in kwargs
+
+    async def test_slm_without_trigger_keeps_slm_with_protection(self, live_broker):
+        async def _ltp(_s):
+            return 100.0
+        live_broker._fetch_ltp_for_limit = _ltp  # type: ignore[assignment]
+
+        await live_broker._live_place_order(
+            symbol="RELIANCE", side="SELL", quantity=1,
+            order_type="SL-M", product="MIS",
+            price=None, trigger_price=None,  # no trigger → conversion skipped
+        )
+
+        kwargs = live_broker._kite.place_order.call_args.kwargs
+        assert kwargs["order_type"] == "SL-M"
+        assert kwargs["market_protection"] == -1
+
+    async def test_limit_never_gets_protection(self, live_broker):
+        async def _ltp(_s):
+            return 100.0
+        live_broker._fetch_ltp_for_limit = _ltp  # type: ignore[assignment]
+
+        await live_broker._live_place_order(
+            symbol="RELIANCE", side="BUY", quantity=1,
+            order_type="LIMIT", product="MIS",
+            price=99.95, trigger_price=None,
+        )
+
+        kwargs = live_broker._kite.place_order.call_args.kwargs
+        assert kwargs["order_type"] == "LIMIT"
+        assert "market_protection" not in kwargs

@@ -8,7 +8,8 @@ Flow:
 2. For each watchlist stock, compute features
 3. Run appropriate ML model
 4. Generate signal with required fields
-5. Filter: only emit signals where confidence >= risk.min_confidence_score
+5. Filter: only emit signals where confidence >= per-direction threshold
+   (risk.min_confidence_buy for BUY, risk.min_confidence_sell for SELL)
 6. Emit signals as events for risk-check skill to consume
 """
 
@@ -23,6 +24,24 @@ from yolovest.timezone import IST, now_ist
 logger = logging.getLogger(__name__)
 
 
+def _format_class_probs(prediction: Any) -> str:
+    """Render a prediction's per-class probability vector for logs.
+
+    Falls back to single-confidence form when the model didn't expose
+    its class_probabilities (older shadow models, defensive paths).
+    """
+    probs = getattr(prediction, "class_probabilities", None)
+    if not probs:
+        return f"confidence {getattr(prediction, 'confidence', 0):.2f}"
+    # Stable ordering with BUY first so a "zero BUYs" pattern is
+    # impossible to miss in a long log block.
+    return " ".join(
+        f"{label}={probs[label]:.2f}"
+        for label in ("BUY", "HOLD", "SELL")
+        if label in probs
+    )
+
+
 class GenerateSignalsSkill(SkillBase):
     name = "generate-signals"
     description = "Run ML models on watchlist to produce trade signals"
@@ -34,6 +53,32 @@ class GenerateSignalsSkill(SkillBase):
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         watchlist = await self.ctx.db.get_combined_watchlist()
+        # Apply quarantine policy to watchlist entries:
+        #   - Quarantined + replacement → rewrite the entry's symbol
+        #     to the replacement (preserves its composite scores).
+        #   - Quarantined + no replacement → drop the entry.
+        #   - Active symbol → keep as-is.
+        # Algorithmic watchlist is already quarantine-clean (market-scan reads
+        # from get_nse_universe which excludes quarantined), but user_watchlist
+        # entries pinned before quarantine can otherwise leak through here.
+        repl = await self.ctx.db.get_quarantine_replacements()
+        quarantined = await self.ctx.db.get_all_quarantined_symbol_set()
+        if repl or quarantined:
+            filtered: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for w in watchlist:
+                sym = w["symbol"]
+                if sym in quarantined:
+                    target = repl.get(sym)
+                    if not target:
+                        continue  # drop
+                    w = {**w, "symbol": target}
+                    sym = target
+                if sym in seen:
+                    continue
+                seen.add(sym)
+                filtered.append(w)
+            watchlist = filtered
         signals_generated = []
         risk_cfg = self.ctx.config.risk
         min_confidence_buy = risk_cfg.min_confidence_buy
@@ -98,9 +143,12 @@ class GenerateSignalsSkill(SkillBase):
         # Load locked symbols — SELL signals for these will be skipped entirely
         locked_symbols = await self.ctx.db.get_locked_symbols()
 
-        # Skip symbols that already have a signal or open position today
+        # Skip symbols that already have a signal or open position today.
+        # Risk-rejected symbols are intentionally re-evaluated each
+        # heartbeat (capped) — most rejection reasons are transient.
         already_signaled = await self.ctx.db.get_todays_signaled_symbols(
             mode=self.ctx.config.mode,
+            risk_rejected_retry_cap=self.ctx.config.risk.max_risk_rejected_retries_per_day,
         )
         if already_signaled:
             filter_counts["already_signaled"] = 0
@@ -123,6 +171,17 @@ class GenerateSignalsSkill(SkillBase):
 
         for stock in watchlist:
             symbol = stock["symbol"]
+            # NOTE: We intentionally do NOT setdefault False here. Only
+            # paths where the ML model actually evaluated the symbol
+            # and produced no actionable signal (HOLD, low-conf,
+            # repeat-low-conf, SELL-on-holding) write to
+            # outcome_tracker. Skip-for-technical-reason paths
+            # (already_signaled, cooldown, locked, insufficient_bars,
+            # feature_computation_failed, intraday_cutoff, error)
+            # leave outcome_tracker untouched so they don't accumulate
+            # toward the rotation cooldown threshold. Previously
+            # everything skipped here counted as a miss, which
+            # benched ~80% of nifty500 within a day.
 
             if symbol in already_signaled:
                 filter_counts.setdefault("already_signaled", 0)
@@ -262,6 +321,7 @@ class GenerateSignalsSkill(SkillBase):
                                 "expected_holding_period": shadow_pred.holding_period,
                                 "model_version": shadow_pred.model_version,
                                 "entry_price": shadow_pred.entry_price,
+                                "mode": self.ctx.config.mode,
                             })
                     except Exception as e:
                         logger.debug("Shadow inference failed for %s: %s", symbol, e)
@@ -274,7 +334,11 @@ class GenerateSignalsSkill(SkillBase):
                         "symbol": symbol, "reason": "hold_signal",
                         "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
                     })
-                    logger.info("HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
+                    logger.info(
+                        "HOLD signal for %s (%s)",
+                        symbol,
+                        _format_class_probs(prediction),
+                    )
                     continue
 
                 # Skip SELL signals for locked holdings (user explicitly protected them)
@@ -353,6 +417,25 @@ class GenerateSignalsSkill(SkillBase):
                 target_price = max(target_price, 0.01)
                 stop_loss_price = max(stop_loss_price, 0.01)
 
+                # Reality-check intraday targets against today's session.
+                # ATR-based targets can sit beyond today's high (or below
+                # today's low for SELL), which means the trade needs a
+                # new session extreme to win. When the paid quote feed is
+                # active, fetch today's high/low/circuit and cap the
+                # target accordingly. Only applies to intraday holds;
+                # multi-day swing/CNC targets legitimately extend past
+                # today's range.
+                if (
+                    holding_period == "intraday"
+                    and self.ctx.config.market_data.kite_data_enabled
+                ):
+                    target_price, stop_loss_price = await self._reality_check_intraday(
+                        symbol,
+                        prediction.signal_type,
+                        target_price,
+                        stop_loss_price,
+                    )
+
                 signal = {
                     "symbol": symbol,
                     "signal_type": prediction.signal_type,
@@ -366,6 +449,17 @@ class GenerateSignalsSkill(SkillBase):
                     "confidence_score": prediction.confidence,
                     "features_snapshot": features,
                     "model_version": prediction.model_version,
+                    "attribution": (
+                        [
+                            {
+                                "feature": a.feature,
+                                "value": a.value,
+                                "contribution": a.contribution,
+                            }
+                            for a in prediction.attribution
+                        ]
+                        if prediction.attribution else None
+                    ),
                 }
 
                 if is_reentry:
@@ -403,8 +497,28 @@ class GenerateSignalsSkill(SkillBase):
 
                     filter_counts["passed"] += 1
                     outcome_tracker[symbol] = True
+                    signal.setdefault("mode", self.ctx.config.mode)
                     await self.ctx.db.insert_signal(signal)
                     signals_generated.append(signal)
+                    logger.info(
+                        "PASSED %s for %s @ %.2f (%s)",
+                        prediction.signal_type, symbol, prediction.confidence,
+                        _format_class_probs(prediction),
+                    )
+                    # Subscribe the new symbol to KiteTicker immediately
+                    # so the dashboard's RecommendationsPanel / Pending /
+                    # Positions widgets show live LTP without waiting
+                    # for the next heartbeat (position-monitor's
+                    # subscribe pass). Idempotent inside the ticker.
+                    ticker = getattr(self.ctx, "ticker", None)
+                    if ticker is not None:
+                        try:
+                            await ticker.subscribe([symbol])
+                        except Exception:
+                            logger.debug(
+                                "ticker subscribe failed for %s", symbol,
+                                exc_info=True,
+                            )
                     await self.broadcast("signal_generated", {
                         "symbol": symbol,
                         "signal_type": prediction.signal_type,
@@ -436,8 +550,9 @@ class GenerateSignalsSkill(SkillBase):
                         "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {base_threshold}",
                     })
                     logger.info(
-                        "Low confidence for %s: %s @ %.2f < %.2f",
+                        "Low confidence for %s: %s @ %.2f < %.2f (%s)",
                         symbol, prediction.signal_type, prediction.confidence, base_threshold,
+                        _format_class_probs(prediction),
                     )
 
             except Exception as e:
@@ -481,6 +596,37 @@ class GenerateSignalsSkill(SkillBase):
                 },
             },
         )
+
+    async def _reality_check_intraday(
+        self,
+        symbol: str,
+        signal_type: str,
+        target: float,
+        stop_loss: float,
+    ) -> tuple[float, float]:
+        """Cap intraday target/SL against the exchange's circuit limits
+        using a live quote from the paid Kite feed.
+
+        Failure is non-fatal — if the quote fetch errors, the original
+        target/SL are returned unchanged.
+        """
+        from yolovest.strategy.holding_period import apply_session_caps
+
+        try:
+            quote = await self.ctx.market_data.get_quote(symbol)
+        except Exception:
+            logger.debug("reality-check: quote fetch failed for %s", symbol, exc_info=True)
+            return target, stop_loss
+
+        new_target, new_sl, adjustments = apply_session_caps(
+            signal_type, target, stop_loss, quote,
+        )
+        if adjustments:
+            logger.info(
+                "reality-check %s %s: %s",
+                signal_type, symbol, "; ".join(adjustments),
+            )
+        return new_target, new_sl
 
     async def _predict_balanced(
         self,
@@ -641,7 +787,18 @@ class GenerateSignalsSkill(SkillBase):
 
             # Count bars since exit using OHLCV data
             bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=reentry_cfg.min_bars_after_exit + 5)
-            bars_after_exit = sum(1 for bar in bars if bar.timestamp > exit_dt)
+            # Different providers (jugaad / yfinance / tvdatafeed / kite)
+            # store OHLCV timestamps with mixed tz state — some naive,
+            # some aware. exit_dt is always-aware now, so normalize each
+            # bar before the > comparison to avoid TypeError.
+            bars_after_exit = sum(
+                1 for bar in bars
+                if (
+                    bar.timestamp.replace(tzinfo=IST)
+                    if bar.timestamp.tzinfo is None
+                    else bar.timestamp
+                ) > exit_dt
+            )
             if bars_after_exit < reentry_cfg.min_bars_after_exit:
                 logger.debug(
                     "Re-entry blocked for %s: only %d bars after exit (need %d)",

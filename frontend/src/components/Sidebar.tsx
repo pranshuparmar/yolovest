@@ -33,6 +33,8 @@ const groups: NavGroup[] = [
       { to: "/calendar", label: "Calendar", icon: "C" },
       { to: "/predictions", label: "Predictions", icon: "F" },
       { to: "/ml-models", label: "ML Models", icon: "M" },
+      { to: "/model-drift", label: "Model Drift", icon: "Z" },
+      { to: "/institutional-flows", label: "Inst. Flows", icon: "I" },
     ],
   },
   {

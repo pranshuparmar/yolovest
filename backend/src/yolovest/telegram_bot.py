@@ -2,7 +2,7 @@
 
 Handles:
 - Real-time trade alerts
-- Kill switch commands: /stop, /kill, /resume
+- Kill switch commands: /pause, /stop, /kill, /resume
 - Daily auth token flow: /auth <request_token>
 - Status commands: /status, /pnl, /positions
 
@@ -87,6 +87,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("pnl", self._cmd_pnl))
         self._app.add_handler(CommandHandler("positions", self._cmd_positions))
+        self._app.add_handler(CommandHandler("pause", self._cmd_pause))
         self._app.add_handler(CommandHandler("stop", self._cmd_stop))
         self._app.add_handler(CommandHandler("kill", self._cmd_kill))
         self._app.add_handler(CommandHandler("resume", self._cmd_resume))
@@ -101,6 +102,13 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("skills", self._cmd_skills))
         self._app.add_handler(CommandHandler("run", self._cmd_run_skill))
         self._app.add_handler(CommandHandler("holiday", self._cmd_holiday))
+        self._app.add_handler(CommandHandler("watch", self._cmd_watch))
+        self._app.add_handler(CommandHandler("quarantine", self._cmd_quarantine))
+        self._app.add_handler(CommandHandler("lock", self._cmd_lock))
+        self._app.add_handler(CommandHandler("unlock", self._cmd_unlock))
+        self._app.add_handler(CommandHandler("mode", self._cmd_mode))
+        self._app.add_handler(CommandHandler("symbol", self._cmd_symbol))
+        self._app.add_handler(CommandHandler("rotation", self._cmd_rotation))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
 
         logger.info("Telegram bot starting (polling)")
@@ -233,13 +241,38 @@ class TelegramBot:
             "/dashboard — Full overview\n\n"
 
             "<b>Controls</b>\n"
-            "/stop — Pause trading (kill switch)\n"
+            "/pause — Block new trades only (broker untouched)\n"
+            "/stop — Pause + cancel pending orders\n"
             "/kill — Square off everything + pause\n"
             "/resume — Resume trading\n\n"
 
             "<b>Skills</b>\n"
             "/skills — List all skills\n"
             "/run SKILL — Execute a skill\n\n"
+
+            "<b>Lists &amp; locks</b>\n"
+            "/watch — Show user watchlist\n"
+            "/watch add SYM [SYM ...] — Add symbols\n"
+            "/watch rm SYM [SYM ...] — Remove\n"
+            "/lock SYM [SYM ...] — Protect from auto-sell\n"
+            "/lock — List locked\n"
+            "/unlock SYM — Allow auto-sell again\n"
+            "/quarantine — List quarantined symbols\n"
+            "/quarantine unblock SYM — Clear quarantine\n"
+            "/quarantine replace SYM NEW — Route SYM → NEW\n\n"
+
+            "<b>Symbol info</b>\n"
+            "/symbol SYM — Price, recent trades, model attribution, bulk deals\n\n"
+
+            "<b>Rotation</b>\n"
+            "/rotation — Show count of cooldowned symbols + threshold\n"
+            "/rotation clear — Reset all cooldowns\n"
+            "/rotation clear SYM [SYM ...] — Reset specific symbols\n\n"
+
+            "<b>Mode</b>\n"
+            "/mode — Show transaction mode\n"
+            "/mode auto — Auto-execute approved signals\n"
+            "/mode manual — Require /approve per signal\n\n"
 
             "<b>Setup</b>\n"
             "/auth TOKEN — Daily Kite auth\n"
@@ -339,8 +372,22 @@ class TelegramBot:
         else:
             await update.message.reply_html("\n".join(lines))
 
+    async def _cmd_pause(self, update: Any, context: Any) -> None:
+        """Handle /pause — block new trades without touching broker state."""
+        from yolovest.skills.kill_switch import KillSwitchSkill
+
+        skill = KillSwitchSkill(self._ctx)
+        await skill.execute(command="pause")
+
+        await update.message.reply_html(
+            "<b>PAUSED</b>\n"
+            "New trades blocked. Existing orders, GTTs, and positions "
+            "are untouched.\n"
+            "Use /resume to restart."
+        )
+
     async def _cmd_stop(self, update: Any, context: Any) -> None:
-        """Handle /stop — pause trading."""
+        """Handle /stop — pause + cancel pending orders."""
         from yolovest.skills.kill_switch import KillSwitchSkill
 
         skill = KillSwitchSkill(self._ctx)
@@ -806,6 +853,23 @@ class TelegramBot:
         if result.success:
             trade = result.data.get("trade", {}) if result.data else {}
             exec_mode = result.data.get("mode", mode) if result.data else mode
+            # Mark the originating signal as executed so Today's
+            # Recommendations stops showing it as AWAITING APPROVAL.
+            try:
+                await self._ctx.db.update_signal_disposition(
+                    signal.get("symbol", ""), "executed",
+                    f"trade_id={trade.get('trade_id') or trade.get('order_id')}",
+                    position_size=int(trade.get("quantity") or 0) or None,
+                )
+            except Exception:
+                logger.debug("Failed to mark signal executed", exc_info=True)
+            try:
+                from yolovest.dashboard.app import broadcast_ws
+                await broadcast_ws("pending_approved", {
+                    "trade_id": trade_id, "symbol": signal.get("symbol"),
+                })
+            except Exception:
+                logger.debug("pending_approved broadcast failed", exc_info=True)
             msg = (
                 f"<b>Executed ({exec_mode.upper()})</b>: "
                 f"{trade.get('signal_type')} <b>{trade.get('symbol')}</b> "
@@ -855,6 +919,13 @@ class TelegramBot:
             return
 
         await self._ctx.db.decide_pending_trade(trade["id"], "rejected", "telegram")
+        try:
+            from yolovest.dashboard.app import broadcast_ws
+            await broadcast_ws("pending_rejected", {
+                "trade_id": trade["id"], "symbol": symbol,
+            })
+        except Exception:
+            logger.debug("pending_rejected broadcast failed", exc_info=True)
         await update.message.reply_text(f"Rejected {trade['signal_type']} {symbol}.")
 
     async def _cmd_trade(self, update: Any, context: Any) -> None:
@@ -1127,3 +1198,340 @@ class TelegramBot:
             "/holiday add YYYY-MM-DD HH:MM — early close\n"
             "/holiday rm YYYY-MM-DD|today|tomorrow — remove"
         )
+
+    # ------------------------------------------------------------------
+    # State-mutation commands — close the dashboard-only gaps so the
+    # bot is a complete control surface for autonomous operation.
+    # ------------------------------------------------------------------
+
+    async def _cmd_watch(self, update: Any, context: Any) -> None:
+        """/watch                  — list user watchlist
+        /watch add SYM [SYM ...]   — add one or more symbols
+        /watch rm SYM [SYM ...]    — remove
+        """
+        args = (context.args or [])
+        if not args:
+            items = await self._ctx.db.get_user_watchlist()
+            if not items:
+                await update.message.reply_text("Watchlist empty. /watch add SYM to add.")
+                return
+            syms = ", ".join(i["symbol"] for i in items)
+            await update.message.reply_html(
+                f"<b>Watchlist</b> ({len(items)})\n{syms}",
+            )
+            return
+        action = args[0].lower()
+        symbols = [s.strip().upper() for s in args[1:] if s.strip()]
+        if action not in ("add", "rm", "remove") or not symbols:
+            await update.message.reply_text(
+                "Usage:\n/watch — list\n/watch add SYM\n/watch rm SYM",
+            )
+            return
+        results: list[str] = []
+        for sym in symbols:
+            try:
+                if action == "add":
+                    await self._ctx.db.add_user_watchlist_symbol(sym, None, None)
+                    results.append(f"+ {sym}")
+                else:
+                    ok = await self._ctx.db.remove_user_watchlist_symbol(sym)
+                    results.append(f"- {sym}" if ok else f"  {sym} (not in watchlist)")
+            except Exception as e:
+                results.append(f"  {sym} failed: {e}")
+        await update.message.reply_text("\n".join(results))
+
+    async def _cmd_quarantine(self, update: Any, context: Any) -> None:
+        """/quarantine                       — list quarantined
+        /quarantine unblock SYM              — clear quarantine for SYM
+        /quarantine replace SYM REPLACEMENT  — route SYM to REPLACEMENT
+        /quarantine replace SYM clear        — clear replacement mapping
+        """
+        args = (context.args or [])
+        if not args:
+            qs = await self._ctx.db.get_quarantined_symbols()
+            if not qs:
+                await update.message.reply_text("No quarantined symbols.")
+                return
+            lines = [f"<b>Quarantined</b> ({len(qs)})"]
+            for q in qs[:20]:  # avoid massive messages
+                sym = q.get("symbol")
+                fails = q.get("consecutive_failures")
+                repl = q.get("replacement_symbol")
+                tail = f" → {repl}" if repl else ""
+                lines.append(f"  {sym} ({fails} fails){tail}")
+            if len(qs) > 20:
+                lines.append(f"  … {len(qs) - 20} more")
+            await update.message.reply_html("\n".join(lines))
+            return
+        action = args[0].lower()
+        if action == "unblock" and len(args) >= 2:
+            sym = args[1].upper()
+            ok = await self._ctx.db.unquarantine_symbol(sym)
+            await update.message.reply_text(
+                f"Unblocked {sym}" if ok else f"{sym} not quarantined",
+            )
+            return
+        if action == "replace" and len(args) >= 3:
+            sym = args[1].upper()
+            repl_raw = args[2].strip()
+            replacement: str | None = (
+                None if repl_raw.lower() == "clear" else repl_raw.upper()
+            )
+            await self._ctx.db.set_replacement_symbol(sym, replacement)
+            await update.message.reply_text(
+                f"{sym} → {replacement}" if replacement else f"{sym}: replacement cleared",
+            )
+            return
+        await update.message.reply_text(
+            "Usage:\n/quarantine — list\n"
+            "/quarantine unblock SYM\n"
+            "/quarantine replace SYM REPLACEMENT\n"
+            "/quarantine replace SYM clear",
+        )
+
+    async def _cmd_lock(self, update: Any, context: Any) -> None:
+        """/lock SYM [SYM ...] [-- notes]
+        Locked symbols are never auto-sold or auto-adopted.
+        """
+        args = (context.args or [])
+        if not args:
+            locks = await self._ctx.db.get_locked_holdings()
+            if not locks:
+                await update.message.reply_text("No locked holdings. /lock SYM to add.")
+                return
+            lines = [f"<b>Locked</b> ({len(locks)})"]
+            for l in locks[:25]:
+                note = l.get("notes")
+                lines.append(f"  {l['symbol']}" + (f" — {note}" if note else ""))
+            await update.message.reply_html("\n".join(lines))
+            return
+        symbols = [s.strip().upper() for s in args if s.strip() and not s.startswith("--")]
+        if not symbols:
+            await update.message.reply_text("Usage: /lock SYM [SYM ...]")
+            return
+        results: list[str] = []
+        for sym in symbols:
+            try:
+                await self._ctx.db.lock_symbol(sym, None)
+                results.append(f"locked {sym}")
+            except Exception as e:
+                results.append(f"{sym} failed: {e}")
+        await update.message.reply_text("\n".join(results))
+
+    async def _cmd_unlock(self, update: Any, context: Any) -> None:
+        """/unlock SYM [SYM ...]  — remove lock(s) so YoloVest can manage these again."""
+        symbols = [s.strip().upper() for s in (context.args or []) if s.strip()]
+        if not symbols:
+            await update.message.reply_text("Usage: /unlock SYM [SYM ...]")
+            return
+        results: list[str] = []
+        for sym in symbols:
+            try:
+                ok = await self._ctx.db.unlock_symbol(sym)
+                results.append(f"unlocked {sym}" if ok else f"{sym} not locked")
+            except Exception as e:
+                results.append(f"{sym} failed: {e}")
+        await update.message.reply_text("\n".join(results))
+
+    async def _cmd_mode(self, update: Any, context: Any) -> None:
+        """/mode             — show current transaction_mode
+        /mode auto           — switch to auto-execute
+        /mode manual         — switch to require-approval
+        """
+        args = (context.args or [])
+        cur = self._ctx.config.execution.transaction_mode
+        if not args:
+            await update.message.reply_html(
+                f"<b>Transaction mode:</b> {cur}\n"
+                f"Use /mode auto or /mode manual to switch.",
+            )
+            return
+        new_mode = args[0].lower()
+        if new_mode not in ("auto", "manual"):
+            await update.message.reply_text("Usage: /mode auto|manual")
+            return
+        if new_mode == cur:
+            await update.message.reply_text(f"Already in {cur} mode.")
+            return
+        # Persist + hot-apply, same shape as the dashboard PUT /api/config path.
+        try:
+            from yolovest.config import apply_db_config
+            db_values = await self._ctx.db.get_all_config()
+            db_values["execution.transaction_mode"] = new_mode
+            new_config = apply_db_config(self._ctx.config, db_values)
+            await self._ctx.db.set_config("execution.transaction_mode", new_mode)
+            self._ctx.config = new_config
+            if hasattr(self._ctx.notify, "_config"):
+                self._ctx.notify._config = self._ctx.config
+        except Exception as e:
+            await update.message.reply_text(f"Failed to switch mode: {e}")
+            return
+        await update.message.reply_html(
+            f"Transaction mode: <b>{cur}</b> → <b>{new_mode}</b>",
+        )
+
+    async def _cmd_symbol(self, update: Any, context: Any) -> None:
+        """/symbol SYM — price, recent trades, last attribution, recent bulk deals."""
+        args = (context.args or [])
+        if not args:
+            await update.message.reply_text("Usage: /symbol SYM")
+            return
+        sym = args[0].upper()
+        import json as _json
+        # Latest daily close + change vs previous close
+        try:
+            bars = await self._ctx.db.get_ohlcv(sym, "daily", days=5)
+        except Exception:
+            bars = []
+        last_close = bars[-1].close if bars else None
+        prev_close = bars[-2].close if len(bars) >= 2 else None
+        change_pct = (
+            ((last_close - prev_close) / prev_close * 100)
+            if last_close is not None and prev_close
+            else None
+        )
+        # Recent trades on this symbol (mode-scoped)
+        try:
+            trades = await self._ctx.db.get_symbol_trades(
+                sym, limit=5, mode=self._ctx.config.mode,
+            )
+        except Exception:
+            trades = []
+        # Latest signal's attribution
+        try:
+            cursor = await self._ctx.db.read_conn.execute(
+                "SELECT signal_type, confidence_score, attribution_json, created_at "
+                "FROM signals WHERE symbol = ? AND mode = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (sym, self._ctx.config.mode),
+            )
+            sig_row = await cursor.fetchone()
+        except Exception:
+            sig_row = None
+        # Bulk deals + delivery
+        try:
+            bulk = await self._ctx.db.get_bulk_deals_list(
+                days=30, symbol=sym, limit=5,
+            )
+        except Exception:
+            bulk = []
+        try:
+            delivery_avg = await self._ctx.db.get_recent_delivery_pct(sym, lookback_days=5)
+        except Exception:
+            delivery_avg = None
+        # Quarantine status
+        try:
+            qs = await self._ctx.db.get_quarantined_symbols()
+            q_entry = next((q for q in qs if q.get("symbol", "").upper() == sym), None)
+        except Exception:
+            q_entry = None
+
+        lines: list[str] = [f"<b>{sym}</b>"]
+        if last_close is not None:
+            cls_part = f"₹{_fmt_inr(last_close)}"
+            if change_pct is not None:
+                sign = "+" if change_pct >= 0 else ""
+                cls_part += f" ({sign}{change_pct:.2f}%)"
+            lines.append(cls_part)
+        if q_entry:
+            repl = q_entry.get("replacement_symbol")
+            lines.append(
+                f"⚠ QUARANTINED ({q_entry.get('consecutive_failures')} fails)"
+                + (f" → routed to {repl}" if repl else ""),
+            )
+        if delivery_avg is not None:
+            lines.append(f"Delivery (5d avg): {delivery_avg:.1f}%")
+
+        if sig_row:
+            lines.append(
+                f"\n<b>Latest signal</b>: {sig_row[0]} "
+                f"@ {(sig_row[1] or 0) * 100:.0f}% conf  ({sig_row[3][:16]})",
+            )
+            attr_raw = sig_row[2]
+            if attr_raw:
+                try:
+                    attr = _json.loads(attr_raw)
+                    for a in (attr or [])[:5]:
+                        c = float(a.get("contribution") or 0)
+                        arrow = "↑" if c >= 0 else "↓"
+                        lines.append(
+                            f"  {arrow} {a.get('feature')} ({c:+.3f})",
+                        )
+                except Exception:
+                    pass
+
+        if trades:
+            lines.append("\n<b>Recent trades</b>")
+            for t in trades:
+                pnl = t.get("pnl")
+                pnl_part = (
+                    f"₹{_fmt_inr(pnl)}" if pnl is not None else "open"
+                )
+                lines.append(
+                    f"  {t.get('signal_type', '?')} {t.get('quantity', '?')}"
+                    f" @ ₹{_fmt_inr(t.get('fill_price') or 0)} → {pnl_part}",
+                )
+
+        if bulk:
+            lines.append("\n<b>Recent bulk deals</b>")
+            for d in bulk[:5]:
+                bs = d.get("buy_sell") or "?"
+                qty = d.get("quantity")
+                client = (d.get("client_name") or "")[:32]
+                lines.append(
+                    f"  {d.get('deal_date')} {bs} {qty:,} — {client}",
+                )
+
+        await update.message.reply_html("\n".join(lines))
+
+    async def _cmd_rotation(self, update: Any, context: Any) -> None:
+        """/rotation                — show count of symbols in rotation cooldown
+        /rotation clear              — clear cooldown for all symbols
+        /rotation clear SYM [SYM]    — clear cooldown for specific symbols
+
+        Rotation cooldown sometimes accumulates faster than intended
+        (especially after a universe expansion or with aggressive
+        thresholds) and can silently bench most of the universe. This
+        is the one-shot reset.
+        """
+        args = (context.args or [])
+        cfg = self._ctx.config.scanning
+        if not args:
+            try:
+                in_cooldown = await self._ctx.db.get_rotation_cooldown_symbols()
+            except Exception as e:
+                await update.message.reply_text(f"Failed: {e}")
+                return
+            await update.message.reply_html(
+                f"<b>Rotation cooldown</b> "
+                f"({'enabled' if cfg.rotation_enabled else 'disabled'})\n"
+                f"In cooldown: {len(in_cooldown)} symbols\n"
+                f"Threshold: {cfg.rotation_no_signal_threshold} consecutive "
+                f"no-signal heartbeats\n"
+                f"Cooldown: {cfg.rotation_cooldown_hours}h\n\n"
+                "Use /rotation clear to reset all, or "
+                "/rotation clear SYM [SYM ...] to reset specific symbols.",
+            )
+            return
+        if args[0].lower() != "clear":
+            await update.message.reply_text(
+                "Usage: /rotation | /rotation clear | /rotation clear SYM",
+            )
+            return
+        symbols = [s.strip().upper() for s in args[1:] if s.strip()]
+        try:
+            if symbols:
+                total = 0
+                for sym in symbols:
+                    total += await self._ctx.db.clear_rotation_cooldown(sym)
+                await update.message.reply_text(
+                    f"Cleared rotation cooldown for {total}/{len(symbols)} symbols",
+                )
+            else:
+                n = await self._ctx.db.clear_rotation_cooldown()
+                await update.message.reply_text(
+                    f"Cleared rotation cooldown for {n} symbols",
+                )
+        except Exception as e:
+            await update.message.reply_text(f"Failed: {e}")
+

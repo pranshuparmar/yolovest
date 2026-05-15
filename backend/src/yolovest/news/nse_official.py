@@ -19,23 +19,15 @@ from typing import Any
 
 import aiohttp
 
-from yolovest.http_utils import scraper_headers
+from yolovest.http_utils import random_user_agent
 from yolovest.models.schemas import NewsArticle
 from yolovest.news.base import NewsSource
 
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.nseindia.com"
-
-
-def _nse_headers() -> dict[str, str]:
-    """NSE requires specific headers alongside a rotating User-Agent."""
-    return scraper_headers({
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": "https://www.nseindia.com/",
-        "Connection": "keep-alive",
-    })
+_WARMUP_PATH = "/market-data/live-equity-market"
+_API_REFERER = f"{_BASE_URL}/get-quotes/equity?symbol=RELIANCE"
 
 # Max 3 requests per second to NSE
 _RATE_LIMIT_DELAY = 0.34
@@ -54,6 +46,25 @@ class NSEOfficialSource(NewsSource):
         self._owns_session = session is None
         self._cookies_initialized = False
         self._cookies_failed = False  # True if cookie init failed — skip further attempts
+        # Pin one User-Agent for the lifetime of the session — NSE ties its
+        # cookies to the fingerprint of the warmup request, so swapping UA
+        # between warmup and API calls triggers the bot filter.
+        self._user_agent = random_user_agent()
+
+    def _session_default_headers(self) -> dict[str, str]:
+        # Only headers that are safe across navigation + XHR. Avoid baking
+        # Accept / Referer / Sec-Fetch-* into session defaults — those must
+        # vary per request so the homepage hit looks like a navigation and
+        # API hits look like XHR.
+        return {
+            "User-Agent": self._user_agent,
+            "Accept-Language": "en-US,en;q=0.9",
+            # Stick to gzip/deflate so we don't depend on brotli being
+            # installed in the image.
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        }
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create an aiohttp session with NSE cookies.
@@ -64,7 +75,7 @@ class NSEOfficialSource(NewsSource):
         if self._session is None:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30),
-                headers=_nse_headers(),
+                headers=self._session_default_headers(),
             )
             self._owns_session = True
 
@@ -74,25 +85,62 @@ class NSEOfficialSource(NewsSource):
         return self._session
 
     async def _initialize_cookies(self) -> None:
-        """Hit NSE homepage to obtain session cookies."""
+        """Warm up an NSE session by mimicking a real browser navigation.
+
+        Real Chrome navigates: external -> www.nseindia.com -> click into
+        a market-data page -> XHR to /api/*. The bot filter checks for
+        consistent Sec-Fetch-* metadata + cookies acquired across at
+        least two hops, so we replicate the sequence.
+        """
         if self._session is None:
             return
         try:
-            async with self._session.get(
-                _BASE_URL,
-                headers=scraper_headers({"Accept": "text/html", "Referer": "https://www.nseindia.com/"}),
-            ) as resp:
-                # We just need the cookies from the response, don't need body
+            # Hop 1: fresh navigation to the homepage. No Referer (we're
+            # arriving cold), Sec-Fetch-Site=none which is what a browser
+            # sends when you type a URL or open from a bookmark.
+            homepage_headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0",
+            }
+            async with self._session.get(_BASE_URL, headers=homepage_headers) as resp:
                 await resp.read()
-                if resp.status == 200:
-                    self._cookies_initialized = True
-                    logger.debug("NSE cookies initialized successfully")
-                else:
+                if resp.status != 200:
                     logger.warning(
                         "NSE homepage returned status %d — NSE data will be unavailable this session",
                         resp.status,
                     )
                     self._cookies_failed = True
+                    return
+
+            # Hop 2: same-origin navigation to a market-data page. This
+            # mints the deeper cookies that /api/* actually checks.
+            await asyncio.sleep(_RATE_LIMIT_DELAY)
+            warmup_headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Referer": f"{_BASE_URL}/",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-User": "?1",
+            }
+            async with self._session.get(
+                f"{_BASE_URL}{_WARMUP_PATH}", headers=warmup_headers,
+            ) as resp:
+                await resp.read()
+                if resp.status != 200:
+                    logger.warning(
+                        "NSE market-data warmup returned status %d — NSE data will be unavailable this session",
+                        resp.status,
+                    )
+                    self._cookies_failed = True
+                    return
+
+            self._cookies_initialized = True
+            logger.debug("NSE cookies initialized successfully")
         except Exception as e:
             logger.warning("Failed to initialize NSE cookies: %s — NSE data will be unavailable this session", e)
             self._cookies_failed = True
@@ -113,10 +161,18 @@ class NSEOfficialSource(NewsSource):
 
         session = await self._get_session()
         url = f"{_BASE_URL}{path}"
+        api_headers = {
+            "Accept": "*/*",
+            "Referer": _API_REFERER,
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+            "X-Requested-With": "XMLHttpRequest",
+        }
 
         try:
             await asyncio.sleep(_RATE_LIMIT_DELAY)
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, params=params, headers=api_headers) as resp:
                 if resp.status != 200:
                     logger.warning("NSE API %s returned status %d", path, resp.status)
                     return None
@@ -184,14 +240,17 @@ class NSEOfficialSource(NewsSource):
         return articles
 
     async def health_check(self) -> bool:
-        """Check if NSE API is accessible by hitting the homepage."""
+        """Check if NSE API is accessible.
+
+        Reuses the same warmup the session does on first use. If the
+        cookie handshake already failed, we don't re-try here — that
+        flag persists for the lifetime of the session.
+        """
+        if self._cookies_failed:
+            return False
         try:
-            session = await self._get_session()
-            async with session.get(
-                _BASE_URL,
-                headers=scraper_headers({"Accept": "text/html", "Referer": "https://www.nseindia.com/"}),
-            ) as resp:
-                return resp.status == 200
+            await self._get_session()
+            return self._cookies_initialized
         except Exception:
             return False
 
@@ -375,15 +434,34 @@ class NSEOfficialSource(NewsSource):
 
     @staticmethod
     def _normalize_deal(item: dict[str, Any], deal_type: str) -> dict[str, Any]:
-        """Normalize a bulk/block deal entry to a consistent dict."""
+        """Normalize a bulk/block deal entry to a consistent dict.
+
+        NSE has shipped at least two different field naming
+        conventions for this endpoint over time:
+          - lowercase camel: symbol / clientName / buySell / quantity / tradePrice
+          - prefixed upper:   BD_SYMBOL / BD_CLIENT_NAME / BD_BUY_SELL /
+                              BD_QTY_TRD / BD_TP_WATP
+        Try the candidates in order and use the first non-empty hit.
+        Without this, a schema change silently fills the table with
+        rows that have only a symbol and "block"/"bulk" type, every
+        other field empty.
+        """
+        def _first(*keys: str, default: Any = "") -> Any:
+            for k in keys:
+                v = item.get(k)
+                if v not in (None, ""):
+                    return v
+            return default
+
         return {
-            "symbol": str(item.get("symbol", "")),
+            "symbol": str(_first("symbol", "BD_SYMBOL", "tradingSymbol", default="")),
             "deal_type": deal_type,
-            "client_name": str(item.get("clientName", "")),
-            "buy_sell": str(item.get("buySell", "")),
-            "quantity": item.get("quantity") or item.get("qty"),
-            "trade_price": item.get("tradePrice")
-            or item.get("weightedAvgPrice"),
+            "client_name": str(_first("clientName", "BD_CLIENT_NAME", default="")),
+            "buy_sell": str(_first("buySell", "BD_BUY_SELL", default="")),
+            "quantity": _first("quantity", "qty", "BD_QTY_TRD", default=None),
+            "trade_price": _first(
+                "tradePrice", "weightedAvgPrice", "BD_TP_WATP", default=None,
+            ),
         }
 
     @staticmethod

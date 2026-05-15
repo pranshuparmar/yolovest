@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { SectorMap } from "../components/SectorMap";
+import { Pagination } from "../components/Pagination";
+import { SymbolLink } from "../components/SymbolLink";
 import clsx from "clsx";
 import {
   useWatchlist,
@@ -32,6 +34,16 @@ export function WatchlistPage() {
   const [newNotes, setNewNotes] = useState("");
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"user" | "algo">("user");
+  const [userPage, setUserPage] = useState(0);
+  const [algoPage, setAlgoPage] = useState(0);
+  const pageSize = 20;
+  const pagedUser = (userWatchlist ?? []).slice(
+    userPage * pageSize, (userPage + 1) * pageSize,
+  );
+  const pagedAlgo = (algoWatchlist ?? []).slice(
+    algoPage * pageSize, (algoPage + 1) * pageSize,
+  );
+  const algoOffset = algoPage * pageSize;
 
   const handleAdd = () => {
     const sym = newSymbol.trim().toUpperCase();
@@ -106,7 +118,9 @@ export function WatchlistPage() {
           <div className="mt-3 space-y-2">
             {review.data.recommendations.map((r) => (
               <div key={r.symbol} className="flex items-center gap-3 bg-gray-800/50 rounded px-3 py-2 text-sm">
-                <span className="font-medium text-gray-200 w-24">{r.symbol}</span>
+                <span className="font-medium text-gray-200 w-24">
+                  <SymbolLink symbol={r.symbol} className="text-gray-200" />
+                </span>
                 <span className={clsx("px-1.5 py-0.5 rounded text-xs font-medium", {
                   "bg-red-900/40 text-red-400": r.action === "SELL" || r.action === "SHORT",
                   "bg-emerald-900/40 text-emerald-400": r.action === "BUY" || r.action === "BUY_MORE",
@@ -267,13 +281,13 @@ export function WatchlistPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {userWatchlist.map((item) => (
+                  {pagedUser.map((item) => (
                     <tr
                       key={item.symbol}
                       className="border-b border-gray-800/50 hover:bg-gray-800/30"
                     >
                       <td className="py-2 pr-3 font-medium text-emerald-400">
-                        {item.symbol}
+                        <SymbolLink symbol={item.symbol} className="text-emerald-400" />
                       </td>
                       <td className="py-2 pr-3 text-gray-300">
                         {score(item.composite_score)}
@@ -317,6 +331,12 @@ export function WatchlistPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination
+                total={userWatchlist.length}
+                page={userPage}
+                pageSize={pageSize}
+                onPageChange={setUserPage}
+              />
             </div>
           )}
         </div>
@@ -358,7 +378,7 @@ export function WatchlistPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {algoWatchlist.map((item, idx) => {
+                  {pagedAlgo.map((item, idx) => {
                     const inUser = (userWatchlist ?? []).some((u) => u.symbol === item.symbol);
                     return (
                       <tr
@@ -369,10 +389,10 @@ export function WatchlistPage() {
                         )}
                       >
                         <td className="py-2 pr-3 text-gray-600 text-xs">
-                          {idx + 1}
+                          {algoOffset + idx + 1}
                         </td>
                         <td className="py-2 pr-3 font-medium">
-                          <span className="text-blue-400">{item.symbol}</span>
+                          <SymbolLink symbol={item.symbol} className="text-blue-400" />
                           {inUser && (
                             <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-emerald-900/30 text-emerald-500">
                               yours
@@ -407,6 +427,12 @@ export function WatchlistPage() {
                   })}
                 </tbody>
               </table>
+              <Pagination
+                total={algoWatchlist.length}
+                page={algoPage}
+                pageSize={pageSize}
+                onPageChange={setAlgoPage}
+              />
             </div>
           )}
         </div>

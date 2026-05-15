@@ -74,3 +74,54 @@ class TestQuarantineDB:
         await db.record_fetch_failure("TCS", "timeout")  # only 1 failure
         qset = await db.get_all_quarantined_symbol_set()
         assert "TCS" not in qset
+
+
+class TestResolveSymbolsWithReplacements:
+    """End-to-end behavior of the resolver used by every ingest path."""
+
+    @pytest.fixture
+    async def db(self, tmp_path):
+        d = Database(str(tmp_path / "test.db"), migrations_dir=_MIGRATIONS_DIR)
+        await d.initialize()
+        yield d
+        await d.close()
+
+    async def test_active_symbols_pass_through(self, db):
+        result = await db.resolve_symbols_with_replacements(["RELIANCE", "TCS"])
+        assert result == ["RELIANCE", "TCS"]
+
+    async def test_quarantined_without_replacement_is_dropped(self, db):
+        # Quarantine ZOMATO with no replacement
+        for _ in range(3):
+            await db.record_fetch_failure("ZOMATO", "delisted")
+        result = await db.resolve_symbols_with_replacements(
+            ["RELIANCE", "ZOMATO", "TCS"],
+        )
+        assert result == ["RELIANCE", "TCS"]
+
+    async def test_quarantined_with_replacement_is_substituted(self, db):
+        for _ in range(3):
+            await db.record_fetch_failure("ZOMATO", "delisted")
+        await db.set_replacement_symbol("ZOMATO", "ETERNAL")
+        result = await db.resolve_symbols_with_replacements(
+            ["RELIANCE", "ZOMATO", "TCS"],
+        )
+        assert result == ["RELIANCE", "ETERNAL", "TCS"]
+
+    async def test_replacement_dedupes_with_existing_active(self, db):
+        for _ in range(3):
+            await db.record_fetch_failure("ZOMATO", "delisted")
+        await db.set_replacement_symbol("ZOMATO", "ETERNAL")
+        # Both ZOMATO (renamed via repl) and a separately-listed ETERNAL appear.
+        # The output should contain ETERNAL once, not twice.
+        result = await db.resolve_symbols_with_replacements(
+            ["ETERNAL", "ZOMATO", "TCS"],
+        )
+        assert result == ["ETERNAL", "TCS"]
+
+    async def test_active_symbols_unchanged_when_no_quarantine(self, db):
+        # No quarantine state set — resolver should be a passthrough modulo dedup
+        result = await db.resolve_symbols_with_replacements(
+            ["RELIANCE", "TCS", "RELIANCE", "INFY"],
+        )
+        assert result == ["RELIANCE", "TCS", "INFY"]

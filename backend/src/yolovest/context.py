@@ -184,6 +184,10 @@ class DatabaseProtocol(Protocol):
 
     async def get_todays_signals_count(self) -> int: ...
 
+    async def get_signal_class_counts(
+        self, days: int = 7, mode: str | None = None,
+    ) -> dict[str, Any]: ...
+
     async def update_signal_disposition(
         self, symbol: str, disposition: str, reason: str | None = None
     ) -> None: ...
@@ -278,6 +282,10 @@ class DatabaseProtocol(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     async def upsert_fundamentals(self, symbol: str, data: dict[str, Any]) -> None: ...
+
+    async def get_stale_fundamentals_symbols(
+        self, symbols: list[str], max_age_hours: int = 24,
+    ) -> list[str]: ...
 
     async def get_watchlist(self) -> list[dict[str, Any]]: ...
 
@@ -496,3 +504,7 @@ class AppContext:
     ml: MLProtocol | None = None
     news_aggregator: Any = None
     memory: Any = None
+    # KiteTicker WebSocket client — populated only when
+    # market_data.kite_websocket_enabled is true and the broker is
+    # authenticated. Skills can read latest LTP via ctx.ticker.get_ltp.
+    ticker: Any = None
