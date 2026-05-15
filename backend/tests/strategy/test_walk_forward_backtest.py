@@ -10,6 +10,7 @@ from yolovest.strategy.walk_forward_backtest import (
     BarMeta,
     _size_position,
     run_walk_forward_backtest,
+    sweep_thresholds,
 )
 
 
@@ -167,3 +168,65 @@ class TestRunWalkForwardBacktest:
         # Direction-only sanity: gross profit and loss are both populated
         assert result.gross_profit > 0
         assert result.gross_loss > 0
+
+
+class TestSweepThresholds:
+    """The PnL-tuned threshold sweep should find cutoffs that filter
+    out low-conviction signals when those signals lose money."""
+
+    @staticmethod
+    def _losing_low_conf_meta() -> list[BarMeta]:
+        """30 winning high-conviction trades, 30 losing low-conviction
+        trades. A threshold that filters out the low-conviction tail
+        should beat argmax handily."""
+        # First 30 are winners (entry 100 → exit 102)
+        winners = [BarMeta("WINNER", 100.0, 102.0) for _ in range(30)]
+        # Next 30 are losers (entry 100 → exit 98)
+        losers = [BarMeta("LOSER", 100.0, 98.0) for _ in range(30)]
+        return winners + losers
+
+    @staticmethod
+    def _losing_low_conf_probas() -> list[list[float]]:
+        """Winners come with high BUY probability; losers with marginal
+        BUY (just over 0.5). A tuned threshold of, say, 0.65 only fires
+        on winners — argmax fires on both and loses money."""
+        # Winners: P(BUY)=0.80, P(HOLD)=0.15, P(SELL)=0.05
+        winners = [[0.05, 0.15, 0.80] for _ in range(30)]
+        # Losers: P(BUY)=0.55, P(HOLD)=0.40, P(SELL)=0.05
+        losers = [[0.05, 0.40, 0.55] for _ in range(30)]
+        return winners + losers
+
+    def test_picks_threshold_excluding_low_conf_losers(self):
+        bars_meta = self._losing_low_conf_meta()
+        probas = self._losing_low_conf_probas()
+        cfg = BacktestConfig(
+            initial_capital=100_000.0,
+            entry_slippage_pct=0.0,
+            risk_per_trade_pct=0.02,
+            max_single_stock_pct=0.25,
+        )
+        buy_t, sell_t, result = sweep_thresholds(probas, bars_meta, cfg)
+        # The tuned BUY threshold should be above the losers' P(BUY)=0.55
+        # so only the 0.80-conviction winners survive.
+        assert buy_t > 0.55
+        assert result.win_rate >= 0.99
+
+    def test_returns_argmax_baseline_when_no_cell_clears_min_trades(self):
+        # Tiny corpus: 2 samples, both BUYs. min_trades=10 → no cell
+        # clears the floor → function falls back to argmax.
+        bars_meta = [BarMeta("X", 100.0, 101.0), BarMeta("Y", 100.0, 99.0)]
+        probas = [[0.1, 0.2, 0.7], [0.1, 0.2, 0.7]]
+        buy_t, sell_t, result = sweep_thresholds(
+            probas, bars_meta, BacktestConfig(), min_trades=10,
+        )
+        # Fallback signature: 0.5 thresholds, baseline result computed.
+        assert buy_t == 0.5
+        assert sell_t == 0.5
+        assert result.total_trades == 2
+
+    def test_input_length_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            sweep_thresholds(
+                probas=[[0.3, 0.4, 0.3]],
+                bars_meta=[BarMeta("X", 100.0, 101.0), BarMeta("Y", 100.0, 101.0)],
+            )

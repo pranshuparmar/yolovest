@@ -390,3 +390,89 @@ def run_walk_forward_backtest(
         returns=returns,
         signals_skipped_at_cap=signals_skipped_at_cap,
     )
+
+
+_DEFAULT_THRESHOLD_GRID: tuple[float, ...] = (
+    0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80,
+)
+
+
+def sweep_thresholds(
+    probas: list[list[float]],
+    bars_meta: list[BarMeta],
+    config: BacktestConfig | None = None,
+    grid: tuple[float, ...] = _DEFAULT_THRESHOLD_GRID,
+    min_trades: int = 10,
+) -> tuple[float, float, BacktestResult]:
+    """Find the (buy_threshold, sell_threshold) pair that maximises Sharpe
+    on the walk-forward test predictions.
+
+    probas: per-sample class probability vector [P(SELL), P(HOLD), P(BUY)],
+      same length as bars_meta. Comes directly from the calibrator's
+      predict_proba on the test fold.
+
+    Sweeps a coarse 2D grid (default 9×9 = 81 evals). Each cell derives
+    preds via threshold gating:
+        BUY  if P(BUY)  >= buy_thresh  and P(BUY)  >= P(SELL)
+        SELL if P(SELL) >= sell_thresh and P(SELL) >  P(BUY)
+        else HOLD
+    runs the existing real-PnL backtest, and records Sharpe.
+
+    Returns (buy_thresh, sell_thresh, backtest_result) for the cell with
+    the best Sharpe — tiebreaker is win_rate, then total_trades. Cells
+    producing fewer than `min_trades` are ignored so an over-restrictive
+    threshold pair doesn't win by trivially having zero variance.
+
+    Falls back to (0.5, 0.5, run_walk_forward_backtest(argmax)) when no
+    grid cell clears `min_trades` (typically a model that just doesn't
+    have enough conviction on this corpus).
+    """
+    cfg = config or BacktestConfig()
+    if len(probas) != len(bars_meta):
+        raise ValueError(
+            f"probas ({len(probas)}) and bars_meta ({len(bars_meta)}) "
+            "must be the same length"
+        )
+
+    best_buy: float | None = None
+    best_sell: float | None = None
+    best_result: BacktestResult | None = None
+
+    for buy_thresh in grid:
+        for sell_thresh in grid:
+            preds: list[int] = []
+            for p in probas:
+                buy_prob = p[_LABEL_BUY] if len(p) > _LABEL_BUY else 0.0
+                sell_prob = p[_LABEL_SELL] if len(p) > _LABEL_SELL else 0.0
+                if buy_prob >= buy_thresh and buy_prob >= sell_prob:
+                    preds.append(_LABEL_BUY)
+                elif sell_prob >= sell_thresh and sell_prob > buy_prob:
+                    preds.append(_LABEL_SELL)
+                else:
+                    preds.append(_LABEL_HOLD)
+            result = run_walk_forward_backtest(preds, bars_meta, cfg)
+            if result.total_trades < min_trades:
+                continue
+            if best_result is None:
+                best_buy, best_sell, best_result = buy_thresh, sell_thresh, result
+                continue
+            # Maximise Sharpe; tiebreak on win_rate, then trade count.
+            if (
+                (result.sharpe, result.win_rate, result.total_trades)
+                > (best_result.sharpe, best_result.win_rate, best_result.total_trades)
+            ):
+                best_buy, best_sell, best_result = buy_thresh, sell_thresh, result
+
+    if best_result is None:
+        # No cell met min_trades — fall back to argmax baseline.
+        baseline_preds = [
+            _LABEL_BUY if p[_LABEL_BUY] >= p[_LABEL_SELL] and p[_LABEL_BUY] >= p[_LABEL_HOLD]
+            else _LABEL_SELL if p[_LABEL_SELL] >= p[_LABEL_HOLD]
+            else _LABEL_HOLD
+            for p in probas
+        ]
+        baseline = run_walk_forward_backtest(baseline_preds, bars_meta, cfg)
+        return 0.5, 0.5, baseline
+
+    assert best_buy is not None and best_sell is not None
+    return best_buy, best_sell, best_result

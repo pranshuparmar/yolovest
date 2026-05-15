@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Label mapping for model output
 _LABEL_MAP = {0: "SELL", 1: "HOLD", 2: "BUY"}
+_LABEL_SELL = 0
+_LABEL_HOLD = 1
+_LABEL_BUY = 2
 _MIN_TRAINING_SAMPLES_DEFAULT = 200
 
 
@@ -50,6 +53,13 @@ class XGBoostSignalModel(MLBase):
         # Feature names used during training (for consistent inference)
         self._intraday_features: list[str] | None = None
         self._swing_features: list[str] | None = None
+
+        # PnL-tuned class thresholds from the post-CV sweep. When set,
+        # _predict applies them on the calibrated probability vector
+        # instead of using argmax. None → argmax baseline (legacy
+        # models without tuning saved).
+        self._intraday_thresholds: dict[str, float] | None = None
+        self._swing_thresholds: dict[str, float] | None = None
 
         # Shadow model slots (for A/B testing against production)
         self._shadow_intraday_model: Any | None = None
@@ -119,6 +129,21 @@ class XGBoostSignalModel(MLBase):
             self._intraday_version = version
         elif model_type == "swing":
             self._swing_version = version
+
+    def _get_thresholds(self, model_type: str) -> dict[str, float] | None:
+        if model_type == "intraday":
+            return self._intraday_thresholds
+        if model_type == "swing":
+            return self._swing_thresholds
+        return None
+
+    def _set_thresholds(
+        self, model_type: str, thresholds: dict[str, float] | None,
+    ) -> None:
+        if model_type == "intraday":
+            self._intraday_thresholds = thresholds
+        elif model_type == "swing":
+            self._swing_thresholds = thresholds
 
     # ------------------------------------------------------------------
     # Prediction
@@ -359,6 +384,23 @@ class XGBoostSignalModel(MLBase):
                     symbol, raw_confidence, cal_confidence,
                 )
 
+        # Apply tuned class thresholds when the model was trained with the
+        # PnL-tuned threshold sweep. Replaces argmax with: BUY if
+        # P(BUY) >= buy_thresh AND >= P(SELL); SELL if P(SELL) >=
+        # sell_thresh AND > P(BUY); else HOLD. Legacy models without
+        # tuned thresholds keep their argmax label.
+        thresholds = self._get_thresholds(model_type)
+        if thresholds and len(chosen_probas) >= 3:
+            buy_prob = chosen_probas[_LABEL_BUY]
+            sell_prob = chosen_probas[_LABEL_SELL]
+            if buy_prob >= thresholds["buy"] and buy_prob >= sell_prob:
+                pred_label = _LABEL_BUY
+            elif sell_prob >= thresholds["sell"] and sell_prob > buy_prob:
+                pred_label = _LABEL_SELL
+            else:
+                pred_label = _LABEL_HOLD
+            confidence = chosen_probas[pred_label]
+
         signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
 
         # Use fresh LTP for entry/target/SL when available, fall back to features
@@ -567,11 +609,15 @@ class XGBoostSignalModel(MLBase):
             # the end so the metrics reflect actual costs / sizing /
             # slippage rather than the legacy +1%/-0.5% fiction.
             from yolovest.strategy.walk_forward_backtest import (
-                BacktestConfig, BarMeta, run_walk_forward_backtest,
+                BacktestConfig, BarMeta, run_walk_forward_backtest, sweep_thresholds,
             )
 
             collected_preds: list[int] = []
             collected_meta: list[BarMeta] = []
+            # Per-fold class probabilities — only used when bars_meta is
+            # provided; needed for the post-CV threshold sweep that finds
+            # the (buy, sell) cutoff pair maximising backtest Sharpe.
+            collected_probas: list[list[float]] = []
             # Legacy synthetic accumulators — kept so trainings without
             # bars_meta (older callers, focused unit tests) still emit
             # comparable metrics.
@@ -592,9 +638,13 @@ class XGBoostSignalModel(MLBase):
                 preds = fold_model.predict(X_test)
 
                 if bars_meta_raw is not None:
-                    for pred, idx in zip(preds, test_idx, strict=False):
+                    fold_probas = fold_model.predict_proba(X_test)
+                    for pred, idx, probs in zip(
+                        preds, test_idx, fold_probas, strict=False,
+                    ):
                         meta = bars_meta_raw[int(idx)]
                         collected_preds.append(int(pred))
+                        collected_probas.append([float(p) for p in probs])
                         collected_meta.append(BarMeta(
                             symbol=str(meta.get("symbol", "")),
                             entry_close=float(meta.get("entry_close") or 0.0),
@@ -638,31 +688,59 @@ class XGBoostSignalModel(MLBase):
 
             if bars_meta_raw is not None and collected_preds:
                 # Real-PnL backtest path
+                bt_cfg = BacktestConfig(
+                    product=backtest_product,
+                    max_concurrent_positions=backtest_max_positions,
+                )
                 bt = run_walk_forward_backtest(
                     preds=collected_preds,
                     bars_meta=collected_meta,
-                    config=BacktestConfig(
-                        product=backtest_product,
-                        max_concurrent_positions=backtest_max_positions,
-                    ),
+                    config=bt_cfg,
                 )
+
+                # Threshold sweep: search the 2D (buy, sell) cutoff space
+                # for the pair that maximises Sharpe on the same fold-test
+                # predictions. The trained model still picks argmax at
+                # inference by default — but if a tuned pair is saved
+                # alongside the artifact, _predict applies it instead.
+                # This converts "win the log-loss minimisation" into "win
+                # the PnL maximisation" without retraining.
+                tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
+                    probas=collected_probas,
+                    bars_meta=collected_meta,
+                    config=bt_cfg,
+                )
+                # When tuned thresholds beat the argmax baseline, report
+                # the tuned metrics as the headline numbers — that's what
+                # live trading will actually see. Keep the argmax sharpe
+                # accessible for comparison.
+                use_tuned = tuned_bt.sharpe > bt.sharpe
+                headline = tuned_bt if use_tuned else bt
                 metrics = {
-                    "sharpe": bt.sharpe,
-                    "max_drawdown_pct": bt.max_drawdown_pct,
-                    "win_rate": bt.win_rate,
+                    "sharpe": headline.sharpe,
+                    "max_drawdown_pct": headline.max_drawdown_pct,
+                    "win_rate": headline.win_rate,
                     "profit_factor": (
-                        bt.profit_factor if bt.profit_factor != float("inf")
+                        headline.profit_factor if headline.profit_factor != float("inf")
                         else 999.0
                     ),
-                    "total_trades": bt.total_trades,
+                    "total_trades": headline.total_trades,
                     "total_samples": len(y_arr),
                     # Extra real-PnL fields not produced by the legacy
                     # synthetic path — useful on the ML Models dashboard.
-                    "net_pnl": bt.net_pnl,
-                    "final_capital": bt.final_capital,
-                    "backtest_source": "walk_forward_real_pnl",
-                    "signals_skipped_at_cap": bt.signals_skipped_at_cap,
+                    "net_pnl": headline.net_pnl,
+                    "final_capital": headline.final_capital,
+                    "backtest_source": (
+                        "walk_forward_threshold_tuned" if use_tuned
+                        else "walk_forward_real_pnl"
+                    ),
+                    "signals_skipped_at_cap": headline.signals_skipped_at_cap,
                     "backtest_max_positions": backtest_max_positions,
+                    # Tuned thresholds: applied at inference when present.
+                    "tuned_buy_threshold": tuned_buy,
+                    "tuned_sell_threshold": tuned_sell,
+                    "argmax_sharpe": bt.sharpe,
+                    "tuned_sharpe": tuned_bt.sharpe,
                 }
             else:
                 # Legacy synthetic metrics — kept for tests / older callers
@@ -709,6 +787,24 @@ class XGBoostSignalModel(MLBase):
             elif model_type == "swing":
                 self._swing_features = feature_names
 
+        # Persist tuned thresholds when the sweep produced them and the
+        # tuned variant actually beat the argmax baseline (use_tuned in
+        # the train block already gated this — non-improving sweeps just
+        # don't write tuned_*_threshold to metrics).
+        tuned_buy = metrics.get("tuned_buy_threshold")
+        tuned_sell = metrics.get("tuned_sell_threshold")
+        if tuned_buy is not None and tuned_sell is not None:
+            self._set_thresholds(
+                model_type, {"buy": float(tuned_buy), "sell": float(tuned_sell)},
+            )
+            logger.info(
+                "Tuned %s thresholds: buy=%.2f sell=%.2f (argmax_sharpe=%.4f, "
+                "tuned_sharpe=%.4f)",
+                model_type, tuned_buy, tuned_sell,
+                metrics.get("argmax_sharpe", 0.0),
+                metrics.get("tuned_sharpe", 0.0),
+            )
+
         # Version stamp in IST so it matches log timestamps the user
         # reads (and matches the daily-bar timezone used elsewhere).
         # UTC stamping previously caused the model version to read 5h30m
@@ -753,6 +849,7 @@ class XGBoostSignalModel(MLBase):
                 "version": version_str,
                 "metrics": metrics,
                 "feature_names": feature_names,
+                "tuned_thresholds": self._get_thresholds(model_type),
                 "saved_at": datetime.now(UTC).isoformat(),
             }
             joblib.dump(artifact, filepath)
@@ -800,6 +897,17 @@ class XGBoostSignalModel(MLBase):
                 self._intraday_features = feature_names
             elif model_type == "swing":
                 self._swing_features = feature_names
+
+        # Restore tuned thresholds when present. Legacy artifacts without
+        # this key get None → _predict falls back to argmax.
+        tuned = artifact.get("tuned_thresholds")
+        if tuned and isinstance(tuned, dict):
+            self._set_thresholds(model_type, {
+                "buy": float(tuned.get("buy", 0.5)),
+                "sell": float(tuned.get("sell", 0.5)),
+            })
+        else:
+            self._set_thresholds(model_type, None)
 
         logger.info(
             "Loaded %s model version %s", model_type, self._get_version(model_type)
