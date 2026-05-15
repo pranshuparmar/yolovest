@@ -1209,11 +1209,32 @@ class Database:
         `pending` / `expired` state are also dropped so the symbols are
         free for re-evaluation.
 
+        Cascades to predictions.signal_id since the schema has no ON
+        DELETE CASCADE — without that, foreign_keys=ON would reject
+        the DELETE on signals that already have a linked prediction
+        (typical after a full heartbeat ran predict-track).
+
         Returns counts of deleted rows per table.
         """
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
         ).astimezone(UTC).isoformat()
+
+        # First null out predictions.signal_id for rows we're about to
+        # delete from signals. NULLing instead of cascading because the
+        # predictions table is part of the model-drift audit trail —
+        # we don't want to lose the scored outcomes just because the
+        # source signal was re-evaluated.
+        await self.conn.execute(
+            "UPDATE predictions SET signal_id = NULL "
+            "WHERE signal_id IN ("
+            "  SELECT id FROM signals WHERE created_at >= ? "
+            "  AND (disposition IS NULL "
+            "       OR disposition IN ('awaiting_approval', 'risk_rejected', "
+            "                          'llm_rejected', 'expired'))"
+            ")",
+            (today_start,),
+        )
 
         cursor = await self.conn.execute(
             "DELETE FROM signals "
@@ -4491,58 +4512,77 @@ class Database:
         - paper / live: trades + predictions + signals + pending_trades for that mode
         - dry_runs: all dry run results
         - predictions / signals / pending_trades: clears the table across all modes
+
+        Foreign-key safety: predictions.signal_id REFERENCES signals(id)
+        and predictions.trade_id REFERENCES trades(trade_id) — both
+        without ON DELETE CASCADE. With PRAGMA foreign_keys=ON,
+        deleting a signal that has a linked prediction would raise
+        SQLITE_CONSTRAINT_FOREIGNKEY and the row would survive. We
+        delete predictions FIRST in any path that touches signals
+        or trades.
         """
         deleted: dict[str, int] = {}
 
+        async def _delete(table: str, where: str = "", params: tuple = ()) -> int:
+            try:
+                if where:
+                    cursor = await self.conn.execute(
+                        f"DELETE FROM {table} WHERE {where}", params,  # noqa: S608
+                    )
+                else:
+                    cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
+                return cursor.rowcount
+            except Exception:
+                logger.warning(
+                    "bulk_delete: DELETE from %s failed",
+                    table, exc_info=True,
+                )
+                return 0
+
         if group in ("paper", "live"):
             mode = group
-            for table in ("trades", "predictions", "signals", "pending_trades"):
-                try:
-                    cursor = await self.conn.execute(
-                        f"DELETE FROM {table} WHERE mode = ?", (mode,),  # noqa: S608
-                    )
-                    deleted[table] = cursor.rowcount
-                except Exception:
-                    deleted[table] = 0
+            # Predictions reference signals + trades; drop first.
+            deleted["predictions"] = await _delete(
+                "predictions", "mode = ?", (mode,),
+            )
+            deleted["signals"] = await _delete("signals", "mode = ?", (mode,))
+            deleted["pending_trades"] = await _delete(
+                "pending_trades", "mode = ?", (mode,),
+            )
+            deleted["trades"] = await _delete("trades", "mode = ?", (mode,))
             # llm_reviews for paper-mode trades only (live trades keep audit trail)
             if group == "paper":
-                try:
-                    cursor = await self.conn.execute(
-                        "DELETE FROM llm_reviews WHERE trade_id IN "
-                        "(SELECT symbol FROM trades WHERE mode = 'paper')"
-                    )
-                    deleted["llm_reviews"] = cursor.rowcount
-                except Exception:
-                    deleted["llm_reviews"] = 0
+                deleted["llm_reviews"] = await _delete(
+                    "llm_reviews",
+                    "trade_id IN (SELECT symbol FROM trades WHERE mode = 'paper')",
+                )
 
         elif group == "dry_runs":
-            try:
-                cursor = await self.conn.execute("DELETE FROM dry_run_results")
-                deleted["dry_run_results"] = cursor.rowcount
-            except Exception:
-                deleted["dry_run_results"] = 0
+            deleted["dry_run_results"] = await _delete("dry_run_results")
 
         elif group == "predictions":
-            for table in ["predictions", "prediction_scoreboard", "failure_analyses"]:
-                try:
-                    cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
-                    deleted[table] = cursor.rowcount
-                except Exception:
-                    deleted[table] = 0
+            for table in ("predictions", "prediction_scoreboard", "failure_analyses"):
+                deleted[table] = await _delete(table)
 
         elif group == "signals":
+            # Drop predictions referencing any signal first (FK-safe),
+            # then signals. We NULL signal_id rather than deleting the
+            # prediction so model-drift / scored-outcome history
+            # survives the wipe.
             try:
-                cursor = await self.conn.execute("DELETE FROM signals")
-                deleted["signals"] = cursor.rowcount
+                await self.conn.execute(
+                    "UPDATE predictions SET signal_id = NULL "
+                    "WHERE signal_id IS NOT NULL"
+                )
             except Exception:
-                deleted["signals"] = 0
+                logger.warning(
+                    "bulk_delete: failed to null predictions.signal_id",
+                    exc_info=True,
+                )
+            deleted["signals"] = await _delete("signals")
 
         elif group == "pending_trades":
-            try:
-                cursor = await self.conn.execute("DELETE FROM pending_trades")
-                deleted["pending_trades"] = cursor.rowcount
-            except Exception:
-                deleted["pending_trades"] = 0
+            deleted["pending_trades"] = await _delete("pending_trades")
 
         else:
             raise ValueError(f"Unknown group: {group}")
