@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { useKillSwitch, useSystemState } from "../hooks/queries";
 
-type Command = "stop" | "kill" | "resume";
+type Command = "pause" | "stop" | "kill" | "resume";
 
 interface PendingConfirm {
   command: Command;
@@ -11,10 +11,15 @@ interface PendingConfirm {
 }
 
 const CONFIRMS: Record<Command, { label: string; message: string }> = {
+  pause: {
+    label: "Pause trading (soft)",
+    message:
+      "Block new signals from executing. Every existing broker order, GTT, SL leg and position is left untouched — exactly as it is right now. Use this when you want the bot to stop taking new bets but keep current protections alive. Continue?",
+  },
   stop: {
     label: "Stop trading",
     message:
-      "Cancel all pending orders and pause new signal execution. Existing positions are left untouched. Continue?",
+      "Cancel all pending orders (including SL / target legs of open MIS positions) and pause new signal execution. Open positions stay open but may lose their stop-loss protection. Continue?",
   },
   kill: {
     label: "Kill (square off + pause)",
@@ -28,6 +33,12 @@ const CONFIRMS: Record<Command, { label: string; message: string }> = {
   },
 };
 
+const ACTIVE_LABELS: Record<"pause" | "stop" | "kill", string> = {
+  pause: "Paused",
+  stop: "Stopped",
+  kill: "Killed",
+};
+
 export function KillSwitchControl() {
   const { data: systemState } = useSystemState();
   const killSwitch = useKillSwitch();
@@ -36,6 +47,11 @@ export function KillSwitchControl() {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
 
   const active = Boolean(systemState?.kill_switch_active);
+  const mode = systemState?.kill_switch_mode || "";
+  const activeLabel =
+    mode && mode in ACTIVE_LABELS
+      ? ACTIVE_LABELS[mode as "pause" | "stop" | "kill"]
+      : "Paused";
 
   useEffect(() => {
     if (!open) return;
@@ -80,7 +96,7 @@ export function KillSwitchControl() {
           )}
         />
         <span className="hidden sm:inline">
-          {active ? "Paused" : "Kill switch"}
+          {active ? activeLabel : "Kill switch"}
         </span>
       </button>
 
@@ -96,21 +112,30 @@ export function KillSwitchControl() {
           ) : (
             <>
               <button
+                onClick={() => trigger("pause")}
+                className="w-full text-left px-2 py-1.5 rounded hover:bg-sky-900/40 text-sm text-sky-300"
+                title="Block new trades only. Existing orders, GTTs and positions are untouched."
+              >
+                Pause (block new trades, broker untouched)
+              </button>
+              <button
                 onClick={() => trigger("stop")}
                 className="w-full text-left px-2 py-1.5 rounded hover:bg-amber-900/40 text-sm text-amber-300"
+                title="Pause + cancel every pending broker order, including SL/target legs."
               >
                 Stop (cancel orders, keep positions)
               </button>
               <button
                 onClick={() => trigger("kill")}
                 className="w-full text-left px-2 py-1.5 rounded hover:bg-red-900/40 text-sm text-red-300"
+                title="Pause + cancel orders + square off everything at market."
               >
                 Kill (square off everything)
               </button>
             </>
           )}
           <div className="border-t border-gray-800 mt-1.5 pt-1.5 px-2 text-[10px] text-gray-500 leading-snug">
-            Mirrors /stop /kill /resume in Telegram. Persists across restarts.
+            Mirrors /pause /stop /kill /resume in Telegram. Persists across restarts.
           </div>
         </div>
       )}

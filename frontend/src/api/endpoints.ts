@@ -437,7 +437,7 @@ export const api = {
   clearTodaysSignals: () =>
     apiFetch<{ success: boolean; signals_deleted: number; pending_deleted: number }>("/api/clear-signals", { method: "POST" }),
 
-  killSwitch: (command: "stop" | "kill" | "resume") =>
+  killSwitch: (command: "pause" | "stop" | "kill" | "resume") =>
     apiFetch<{ success: boolean; command: string; data: Record<string, unknown>; error: string | null }>(
       `/api/kill-switch/${command}`,
       { method: "POST" },

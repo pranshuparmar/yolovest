@@ -446,6 +446,8 @@ export interface DegradedFeature {
 
 export interface SystemState {
   kill_switch_active: boolean;
+  /** Which command activated the pause: pause / stop / kill. "" when inactive. */
+  kill_switch_mode?: "pause" | "stop" | "kill" | "";
   orchestrator: string | null;
   mode: "paper" | "live";
   degraded_features?: DegradedFeature[];

@@ -22,8 +22,25 @@ export function DashboardPage() {
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold">Dashboard</h2>
           {systemState?.kill_switch_active && (
-            <span className="px-3 py-1 rounded text-xs font-bold bg-red-900/60 text-red-400 animate-pulse">
-              KILL SWITCH ACTIVE
+            <span
+              className="px-3 py-1 rounded text-xs font-bold bg-red-900/60 text-red-400 animate-pulse"
+              title={
+                systemState.kill_switch_mode === "pause"
+                  ? "Soft pause — new trades blocked, broker untouched."
+                  : systemState.kill_switch_mode === "stop"
+                    ? "Stop — pending orders cancelled, positions still open."
+                    : systemState.kill_switch_mode === "kill"
+                      ? "Kill — every position squared off, trading paused."
+                      : "Kill switch is active."
+              }
+            >
+              {systemState.kill_switch_mode === "pause"
+                ? "PAUSED (NEW TRADES BLOCKED)"
+                : systemState.kill_switch_mode === "stop"
+                  ? "STOPPED (ORDERS CANCELLED)"
+                  : systemState.kill_switch_mode === "kill"
+                    ? "KILLED (ALL SQUARED OFF)"
+                    : "KILL SWITCH ACTIVE"}
             </span>
           )}
         </div>

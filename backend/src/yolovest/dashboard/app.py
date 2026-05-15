@@ -2189,6 +2189,12 @@ def create_app(ctx: AppContext) -> FastAPI:
     ) -> dict[str, Any]:
         """System state including kill switch, degraded features, and auto-approvals."""
         kill_switch = await ctx.db.is_kill_switch_active()
+        # Which command activated the pause? pause / stop / kill. Empty
+        # string when kill switch is inactive or when the value is
+        # missing (older installs that pre-date kill_switch_mode).
+        kill_switch_mode = (
+            (await ctx.db.get_system_state("kill_switch_mode")) or ""
+        ) if kill_switch else ""
         orchestrator_state = await ctx.db.get_system_state("orchestrator")
 
         # Build degraded mode report: which features are running with fallbacks
@@ -2266,6 +2272,7 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         return {
             "kill_switch_active": kill_switch,
+            "kill_switch_mode": kill_switch_mode,
             "orchestrator": orchestrator_state,
             "mode": ctx.config.mode,
             "degraded_features": degraded,
@@ -3254,10 +3261,10 @@ def create_app(ctx: AppContext) -> FastAPI:
         /api/skills/{name}/run endpoint can't carry a command parameter,
         so this is a dedicated surface.
         """
-        if command not in {"stop", "kill", "resume"}:
+        if command not in {"pause", "stop", "kill", "resume"}:
             raise HTTPException(
                 status_code=400,
-                detail="command must be one of: stop, kill, resume",
+                detail="command must be one of: pause, stop, kill, resume",
             )
         from yolovest.skills.kill_switch import KillSwitchSkill
 

@@ -2,7 +2,7 @@
 
 Handles:
 - Real-time trade alerts
-- Kill switch commands: /stop, /kill, /resume
+- Kill switch commands: /pause, /stop, /kill, /resume
 - Daily auth token flow: /auth <request_token>
 - Status commands: /status, /pnl, /positions
 
@@ -87,6 +87,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("pnl", self._cmd_pnl))
         self._app.add_handler(CommandHandler("positions", self._cmd_positions))
+        self._app.add_handler(CommandHandler("pause", self._cmd_pause))
         self._app.add_handler(CommandHandler("stop", self._cmd_stop))
         self._app.add_handler(CommandHandler("kill", self._cmd_kill))
         self._app.add_handler(CommandHandler("resume", self._cmd_resume))
@@ -240,7 +241,8 @@ class TelegramBot:
             "/dashboard — Full overview\n\n"
 
             "<b>Controls</b>\n"
-            "/stop — Pause trading (kill switch)\n"
+            "/pause — Block new trades only (broker untouched)\n"
+            "/stop — Pause + cancel pending orders\n"
             "/kill — Square off everything + pause\n"
             "/resume — Resume trading\n\n"
 
@@ -370,8 +372,22 @@ class TelegramBot:
         else:
             await update.message.reply_html("\n".join(lines))
 
+    async def _cmd_pause(self, update: Any, context: Any) -> None:
+        """Handle /pause — block new trades without touching broker state."""
+        from yolovest.skills.kill_switch import KillSwitchSkill
+
+        skill = KillSwitchSkill(self._ctx)
+        await skill.execute(command="pause")
+
+        await update.message.reply_html(
+            "<b>PAUSED</b>\n"
+            "New trades blocked. Existing orders, GTTs, and positions "
+            "are untouched.\n"
+            "Use /resume to restart."
+        )
+
     async def _cmd_stop(self, update: Any, context: Any) -> None:
-        """Handle /stop — pause trading."""
+        """Handle /stop — pause + cancel pending orders."""
         from yolovest.skills.kill_switch import KillSwitchSkill
 
         skill = KillSwitchSkill(self._ctx)
