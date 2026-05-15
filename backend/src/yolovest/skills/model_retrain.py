@@ -19,9 +19,13 @@ Flow:
 import logging
 from typing import Any
 
+from datetime import datetime, timedelta
+
 from yolovest.data.features import IndicatorConfig, compute_features, merge_feedback_features
+from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 from yolovest.models.schemas import OHLCVBar
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+from yolovest.timezone import IST
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +95,26 @@ class ModelRetrainSkill(SkillBase):
                 exc_info=True,
             )
 
+        # News-sentiment lookup: symbol → list of (headline, published_at_iso),
+        # sorted by published_at. Built once so per-sample VADER aggregation
+        # avoids the N+1 query trap. Window is max_training_days + 7 so the
+        # earliest training sample still has a full 7d news window behind it.
+        news_lookup: dict[str, list[tuple[str, str]]] = {}
+        try:
+            news_from = (
+                datetime.now(IST) - timedelta(days=cfg.max_training_days + 7)
+            ).strftime("%Y-%m-%d")
+            news_lookup = await self.ctx.db.get_news_timeline(date_from=news_from)
+            logger.info(
+                "News timeline: %d symbols with headlines since %s",
+                len(news_lookup), news_from,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to load news timeline; news features will be neutral",
+                exc_info=True,
+            )
+
         # Load feedback data for the ML feedback loop
         feedback_cfg = self.ctx.config.strategy.feedback
         feedback_data: dict[str, dict[str, float]] | None = None
@@ -145,6 +169,7 @@ class ModelRetrainSkill(SkillBase):
                 target_atr_mult=target_mult, sl_atr_mult=sl_mult,
                 sector_map=sector_map,
                 bulk_deal_lookup=bulk_deal_lookup,
+                news_lookup=news_lookup,
             )
             if len(y) < min_samples:
                 logger.warning(
@@ -412,6 +437,7 @@ class ModelRetrainSkill(SkillBase):
         sl_atr_mult: float = 0.75,
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
+        news_lookup: dict[str, list[tuple[str, str]]] | None = None,
     ) -> tuple[
         list[list[float]], list[int], list[str], list[float],
         list[dict[str, Any]],
@@ -494,6 +520,23 @@ class ModelRetrainSkill(SkillBase):
             bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
         for v in bulk_dates_by_sym.values():
             v.sort()
+
+        # News-sentiment lookup: parse published_at once per article so the
+        # per-sample loop can binary-slice the symbol's headline timeline.
+        news_lookup = news_lookup or {}
+        news_parsed_by_sym: dict[str, list[tuple[str, datetime]]] = {}
+        for sym_key, entries in news_lookup.items():
+            parsed: list[tuple[str, datetime]] = []
+            for headline, published_at in entries:
+                try:
+                    dt = datetime.fromisoformat(published_at)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=IST)
+                    parsed.append((headline, dt))
+                except (ValueError, TypeError):
+                    continue
+            if parsed:
+                news_parsed_by_sym[sym_key] = parsed
 
         for sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
@@ -611,6 +654,22 @@ class ModelRetrainSkill(SkillBase):
                     )
                 else:
                     features["delivery_pct_avg_5d"] = 0.0
+
+                # News-sentiment features. Slice the symbol's pre-parsed
+                # headline timeline to entries published before this bar's
+                # timestamp; compute_news_features handles the 24h / 7d
+                # window aggregation. Bar timestamps in training_data are
+                # naive; coerce to IST to match the parsed published_at
+                # tz so the window-cutoff comparisons stay correct.
+                _bar_ts = bars[i].timestamp
+                if _bar_ts.tzinfo is None:
+                    _bar_ts = _bar_ts.replace(tzinfo=IST)
+                _sym_news = news_parsed_by_sym.get(sym)
+                if _sym_news:
+                    news_feats = compute_news_features(_sym_news, _bar_ts)
+                else:
+                    news_feats = {k: 0.0 for k in NEWS_FEATURE_KEYS}
+                features.update(news_feats)
 
                 # Path-aware label: BUY iff target hits before SL when
                 # walking forward bar-by-bar, using the same ATR-based

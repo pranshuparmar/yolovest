@@ -18,6 +18,7 @@ import logging
 from datetime import datetime, time, timedelta
 from typing import Any
 from yolovest.data.features import IndicatorConfig, compute_features
+from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 from yolovest.timezone import IST, now_ist
 
@@ -256,6 +257,32 @@ class GenerateSignalsSkill(SkillBase):
                     })
                     logger.info("Feature computation failed for %s", symbol)
                     continue
+
+                # Merge live news-sentiment features. Pulls the symbol's
+                # headlines from the last 7 days; compute_news_features
+                # bucketises into 24h / 7d windows. Failures are silently
+                # neutralised — model is robust to NEWS_FEATURE_KEYS=0.
+                try:
+                    news_from = (now - timedelta(days=7)).isoformat()
+                    news_rows = await self.ctx.db.get_news_articles(
+                        symbol=symbol, date_from=news_from, limit=500,
+                    )
+                    headlines: list[tuple[str, datetime]] = []
+                    for row in news_rows:
+                        pub_raw = row.get("published_at")
+                        if not pub_raw:
+                            continue
+                        try:
+                            dt = datetime.fromisoformat(pub_raw)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=IST)
+                        except (ValueError, TypeError):
+                            continue
+                        headlines.append((row.get("headline", ""), dt))
+                    features.update(compute_news_features(headlines, now))
+                except Exception:
+                    logger.debug("News-feature merge failed for %s", symbol, exc_info=True)
+                    features.update({k: 0.0 for k in NEWS_FEATURE_KEYS})
 
                 # Fetch fresh LTP for accurate entry/target/SL pricing
                 current_price: float | None = None

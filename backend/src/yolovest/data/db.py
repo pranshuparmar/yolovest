@@ -1531,6 +1531,41 @@ class Database:
             for r in await cursor.fetchall()
         ]
 
+    async def get_news_timeline(
+        self, date_from: str | None = None,
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Return all news headlines grouped by symbol since date_from.
+
+        Each entry is (headline, published_at_iso). Used by model_retrain
+        to compute per-(symbol, as_of) sentiment features without an
+        N+1 query per sample — one scan, fan-out in Python.
+        """
+        query = (
+            "SELECT headline, symbols, published_at FROM news_articles "
+            "WHERE published_at IS NOT NULL"
+        )
+        params: list[Any] = []
+        if date_from:
+            query += " AND published_at >= ?"
+            params.append(date_from)
+        rows = await self.read_conn.execute_fetchall(query, tuple(params))
+        out: dict[str, list[tuple[str, str]]] = {}
+        for r in rows:
+            headline, symbols_raw, published_at = r[0], r[1], r[2]
+            if not symbols_raw:
+                continue
+            try:
+                symbols = json.loads(symbols_raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for sym in symbols:
+                if not isinstance(sym, str) or not sym:
+                    continue
+                out.setdefault(sym, []).append((headline, published_at))
+        for sym in out:
+            out[sym].sort(key=lambda x: x[1])
+        return out
+
     async def get_prediction_outcomes(self) -> list[dict[str, Any]]:
         """Load predictions with actual outcomes for retraining analysis."""
         cursor = await self.conn.execute(

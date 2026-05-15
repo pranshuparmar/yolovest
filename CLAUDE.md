@@ -389,6 +389,7 @@ The frontend nginx config (`frontend/nginx.conf`) uses Docker's embedded DNS (`r
   - **Sector-relative** (`sector_breadth`, `sector_avg_return`, `relative_momentum`) via `_compute_sector_index` over `symbol_sectors` join — stock vs its industry cohort.
   - **Institutional flow** (`bulk_deal_buy_5d`, `bulk_deal_sell_5d`, `bulk_deal_net_5d`, `delivery_pct_avg_5d`) — pre-built lookup from `bulk_deals` + per-bar `ohlcv.delivery_pct`.
   - **Time-of-day** (`minutes_since_open`, `day_phase`) via `data/features.py::_minutes_since_open`.
+  - **News sentiment** (`news_count_24h`, `news_count_7d`, `news_sentiment_24h`, `news_sentiment_7d`, `news_sentiment_momentum`) via `data/news_features.py::compute_news_features` — VADER compound polarity over headlines from the `news_articles` table, bucketed into trailing 24h / 7d windows ending at the bar's timestamp. Same code path runs at inference in `generate_signals`, so training and live features stay symmetric. Neutral defaults (0.0) when VADER isn't installed or no headlines exist.
   - **Feedback** (`fb_*`) including `fb_recent_loss_count` from `get_feedback_data`.
 - **`skills/drift_watch.py`** — CRON 16:30 IST, calls `db.get_model_drift_stats(days=14)` and pushes the existing drift `warning` field to Telegram via `notify.send(alert_type="errors")`. Replaces the LLM-review safety net for autonomous mode; flag when realised win-rate drops > 15 pp over last 7d vs prior 7d.
 - **`skills/report_generate.py`** — Daily (16:00) and weekly (Friday).
