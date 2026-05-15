@@ -287,6 +287,47 @@ class RiskCheckSkill(SkillBase):
         max_by_exposure = int((cfg.max_single_stock_pct * capital) / entry)
         position_size = min(position_size, max_by_exposure)
 
+        # Per-signal pacing cap. Keeps the first 1-2 signals of a
+        # heartbeat from saturating the daily portfolio budget,
+        # leaving room for higher-conviction setups later in the
+        # day. Optionally scaled by ML confidence so a 0.95-conf
+        # signal gets a bigger slot than a 0.75 one (interpolated
+        # linearly between confidence_scaled_min_factor at threshold
+        # and 1.0 at conf=0.95+).
+        signal_slot_pct = cfg.max_pct_per_signal
+        if cfg.confidence_scaled_sizing_enabled:
+            conf = float(signal.get("confidence_score") or 0)
+            # threshold = lower of the BUY/SELL minimums so we don't
+            # accidentally scale below the floor for a SELL when the
+            # BUY threshold is set higher (or vice versa).
+            sig_type = signal.get("signal_type", "BUY")
+            base_threshold = (
+                cfg.min_confidence_buy if sig_type == "BUY"
+                else cfg.min_confidence_sell
+            )
+            top = 0.95
+            if conf <= base_threshold:
+                factor = cfg.confidence_scaled_min_factor
+            elif conf >= top:
+                factor = 1.0
+            else:
+                span = top - base_threshold
+                progress = (conf - base_threshold) / span if span > 0 else 1.0
+                factor = (
+                    cfg.confidence_scaled_min_factor
+                    + (1.0 - cfg.confidence_scaled_min_factor) * progress
+                )
+            signal_slot_pct = cfg.max_pct_per_signal * factor
+        max_by_signal = int((signal_slot_pct * capital) / entry)
+        if max_by_signal < position_size:
+            logger.info(
+                "risk-check: pacing cap for %s — size %d -> %d "
+                "(slot=%.1f%% of ₹%.0f capital)",
+                signal["symbol"], position_size, max_by_signal,
+                signal_slot_pct * 100, capital,
+            )
+            position_size = max_by_signal
+
         # Margin enforcement.
         #
         # If margin_usage_enabled is False (default), every rupee of

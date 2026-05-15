@@ -502,6 +502,25 @@ class RiskConfig(BaseModel):
     max_portfolio_exposure_pct: float = Field(default=0.60, gt=0, le=1)
     max_open_positions: int = Field(default=10, ge=1)
     max_single_stock_pct: float = Field(default=0.25, gt=0, le=1)
+    # Per-signal allocation cap, applied AFTER max_single_stock_pct.
+    # Distinct from max_single_stock_pct in intent:
+    #   - max_single_stock_pct is a safety cap (don't have 1/4 of capital
+    #     in one name even if it's a great trade).
+    #   - max_pct_per_signal is a pacing cap (don't blow the daily
+    #     exposure budget on the first heartbeat of the day).
+    # Default 0.10 means a 60% portfolio cap fits ~6 trades before
+    # binding, instead of just 2-3 at the looser single-stock cap.
+    # Set equal to max_single_stock_pct to disable.
+    max_pct_per_signal: float = Field(default=0.10, gt=0, le=1)
+    # Scale the per-signal allocation by ML confidence. At 1.0 (default
+    # off, equal to max_pct_per_signal), every passing signal gets the
+    # full slot. With confidence_scaling on, a signal at confidence =
+    # base_threshold gets `min_factor` of the cap and a signal at 0.95+
+    # gets 100% — so a 0.95-conviction setup occupies twice the room
+    # of a 0.75-just-cleared-threshold one. Keeps high-conviction
+    # trades from being throttled by the same cap as marginal ones.
+    confidence_scaled_sizing_enabled: bool = True
+    confidence_scaled_min_factor: float = Field(default=0.5, gt=0, le=1)
     daily_loss_limit_pct: float = Field(default=0.03, gt=0, lt=1)
     weekly_loss_limit_pct: float = Field(default=0.05, gt=0, lt=1)
     weekly_loss_sizing_reduction: float = Field(default=0.50, gt=0, le=1)

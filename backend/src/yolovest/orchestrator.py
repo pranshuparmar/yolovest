@@ -190,7 +190,21 @@ class HeartbeatOrchestrator:
             return results
 
         # --- Step 5: Per-signal chain ---
+        # Process highest-conviction signals first. The portfolio-exposure
+        # cap is a binding constraint when several signals fire on the
+        # same heartbeat — earlier signals consume budget that later
+        # ones can't get back. Sorting by confidence descending means
+        # the best signals get evaluated first, and a low-conviction
+        # signal can't block a high-conviction one purely because of
+        # its position in the list.
         signals = signals_result.data.get("signals", [])
+        signals = sorted(
+            signals,
+            key=lambda s: float(
+                (s.get("confidence_score") if isinstance(s, dict) else 0) or 0
+            ),
+            reverse=True,
+        )
         signal_pipeline = []
         for i, signal in enumerate(signals):
             signal_results = await self._execute_signal_chain(signal, i)
