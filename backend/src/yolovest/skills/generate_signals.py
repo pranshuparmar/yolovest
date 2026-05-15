@@ -19,6 +19,7 @@ from datetime import datetime, time, timedelta
 from typing import Any
 from yolovest.data.features import IndicatorConfig, compute_features
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
+from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 from yolovest.timezone import IST, now_ist
 
@@ -170,6 +171,22 @@ class GenerateSignalsSkill(SkillBase):
 
         now = now_ist()
 
+        # India VIX is a broadcast series — every symbol on this run gets
+        # the same trailing-window value. Load once, before the per-symbol
+        # loop. Empty result → neutral VIX features at compute time.
+        vix_timeline: list[tuple[str, float]] = []
+        try:
+            vix_timeline = await self.ctx.db.get_vix_timeline(
+                date_from=(now - timedelta(days=40)).strftime("%Y-%m-%d"),
+            )
+        except Exception:
+            logger.debug("VIX timeline load failed; defaulting to neutral", exc_info=True)
+        _today_str = now.strftime("%Y-%m-%d")
+        if vix_timeline:
+            _vix_feats_today = compute_vix_features(vix_timeline, _today_str)
+        else:
+            _vix_feats_today = {k: 0.0 for k in VIX_FEATURE_KEYS}
+
         for stock in watchlist:
             symbol = stock["symbol"]
             # NOTE: We intentionally do NOT setdefault False here. Only
@@ -283,6 +300,10 @@ class GenerateSignalsSkill(SkillBase):
                 except Exception:
                     logger.debug("News-feature merge failed for %s", symbol, exc_info=True)
                     features.update({k: 0.0 for k in NEWS_FEATURE_KEYS})
+
+                # India VIX regime features. Same dict for every symbol
+                # on this run — the timeline was loaded once above.
+                features.update(_vix_feats_today)
 
                 # Fetch fresh LTP for accurate entry/target/SL pricing
                 current_price: float | None = None

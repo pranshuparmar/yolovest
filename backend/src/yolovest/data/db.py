@@ -1566,6 +1566,37 @@ class Database:
             out[sym].sort(key=lambda x: x[1])
         return out
 
+    async def get_vix_timeline(
+        self, date_from: str | None = None,
+    ) -> list[tuple[str, float]]:
+        """Return India VIX daily close history as (date_str, close), oldest first.
+
+        Reads from ohlcv where symbol='INDIA VIX' and interval='daily'.
+        Used by model_retrain to bind per-sample VIX regime features and
+        by ingest-vix's cold-start guard to decide whether to backfill.
+        """
+        query = (
+            "SELECT timestamp, close FROM ohlcv "
+            "WHERE symbol = 'INDIA VIX' AND interval = 'daily'"
+        )
+        params: list[Any] = []
+        if date_from:
+            query += " AND timestamp >= ?"
+            params.append(date_from)
+        query += " ORDER BY timestamp"
+        rows = await self.read_conn.execute_fetchall(query, tuple(params))
+        out: list[tuple[str, float]] = []
+        for r in rows:
+            ts_raw = r[0]
+            close = r[1]
+            if close is None:
+                continue
+            # ohlcv.timestamp is ISO datetime; the date portion is what
+            # we join against in model_retrain. Strip cheaply.
+            date_str = ts_raw.split("T")[0] if "T" in ts_raw else ts_raw[:10]
+            out.append((date_str, float(close)))
+        return out
+
     async def get_prediction_outcomes(self) -> list[dict[str, Any]]:
         """Load predictions with actual outcomes for retraining analysis."""
         cursor = await self.conn.execute(

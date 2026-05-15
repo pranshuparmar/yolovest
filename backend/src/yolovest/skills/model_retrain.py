@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 
 from yolovest.data.features import IndicatorConfig, compute_features, merge_feedback_features
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
+from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
 from yolovest.models.schemas import OHLCVBar
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 from yolovest.timezone import IST
@@ -115,6 +116,27 @@ class ModelRetrainSkill(SkillBase):
                 exc_info=True,
             )
 
+        # India VIX timeline: single broadcast series shared across every
+        # symbol on a given date. Window extends 30 calendar days past the
+        # earliest training sample so the trailing-20d z-score has full
+        # history at every sample. Empty list → neutral features at
+        # compute time; no crash.
+        vix_timeline: list[tuple[str, float]] = []
+        try:
+            vix_from = (
+                datetime.now(IST) - timedelta(days=cfg.max_training_days + 30)
+            ).strftime("%Y-%m-%d")
+            vix_timeline = await self.ctx.db.get_vix_timeline(date_from=vix_from)
+            logger.info(
+                "VIX timeline: %d daily bars since %s",
+                len(vix_timeline), vix_from,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to load VIX timeline; VIX features will be neutral",
+                exc_info=True,
+            )
+
         # Load feedback data for the ML feedback loop
         feedback_cfg = self.ctx.config.strategy.feedback
         feedback_data: dict[str, dict[str, float]] | None = None
@@ -170,6 +192,7 @@ class ModelRetrainSkill(SkillBase):
                 sector_map=sector_map,
                 bulk_deal_lookup=bulk_deal_lookup,
                 news_lookup=news_lookup,
+                vix_timeline=vix_timeline,
             )
             if len(y) < min_samples:
                 logger.warning(
@@ -438,6 +461,7 @@ class ModelRetrainSkill(SkillBase):
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
         news_lookup: dict[str, list[tuple[str, str]]] | None = None,
+        vix_timeline: list[tuple[str, float]] | None = None,
     ) -> tuple[
         list[list[float]], list[int], list[str], list[float],
         list[dict[str, Any]],
@@ -670,6 +694,15 @@ class ModelRetrainSkill(SkillBase):
                 else:
                     news_feats = {k: 0.0 for k in NEWS_FEATURE_KEYS}
                 features.update(news_feats)
+
+                # India VIX regime features. Single broadcast series — every
+                # symbol on the same _sample_date sees identical VIX values.
+                # compute_vix_features handles the trailing-window slicing.
+                if vix_timeline:
+                    vix_feats = compute_vix_features(vix_timeline, _sample_date)
+                else:
+                    vix_feats = {k: 0.0 for k in VIX_FEATURE_KEYS}
+                features.update(vix_feats)
 
                 # Path-aware label: BUY iff target hits before SL when
                 # walking forward bar-by-bar, using the same ATR-based
