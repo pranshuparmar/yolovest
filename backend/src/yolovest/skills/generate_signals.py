@@ -18,6 +18,7 @@ import logging
 from datetime import datetime, time, timedelta
 from typing import Any
 from yolovest.data.features import IndicatorConfig, compute_features
+from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
@@ -187,6 +188,17 @@ class GenerateSignalsSkill(SkillBase):
         else:
             _vix_feats_today = {k: 0.0 for k in VIX_FEATURE_KEYS}
 
+        # F&O option-chain timeline. Per-symbol lookup; misses → neutral.
+        # Only the last 3 days are needed to derive today's oi_change_pct
+        # and oi_buildup vs yesterday — keep the read window tight.
+        fno_lookup: dict[str, list[tuple[str, dict[str, float]]]] = {}
+        try:
+            fno_lookup = await self.ctx.db.get_fno_timeline(
+                date_from=(now - timedelta(days=5)).strftime("%Y-%m-%d"),
+            )
+        except Exception:
+            logger.debug("F&O timeline load failed; defaulting to neutral", exc_info=True)
+
         for stock in watchlist:
             symbol = stock["symbol"]
             # NOTE: We intentionally do NOT setdefault False here. Only
@@ -304,6 +316,24 @@ class GenerateSignalsSkill(SkillBase):
                 # India VIX regime features. Same dict for every symbol
                 # on this run — the timeline was loaded once above.
                 features.update(_vix_feats_today)
+
+                # F&O derivatives features. Only F&O-eligible names have
+                # a row; misses return is_fno_stock=0 + others 0. Use the
+                # last two equity closes from the daily_bars window to
+                # drive the oi_buildup classification.
+                _sym_fno = fno_lookup.get(symbol)
+                if _sym_fno:
+                    _prior_close = (
+                        daily_bars[-2].close if len(daily_bars) >= 2 else None
+                    )
+                    _current_close = daily_bars[-1].close
+                    features.update(compute_fno_features(
+                        _sym_fno, _today_str,
+                        prior_stock_close=_prior_close,
+                        current_stock_close=_current_close,
+                    ))
+                else:
+                    features.update({k: 0.0 for k in FNO_FEATURE_KEYS})
 
                 # Fetch fresh LTP for accurate entry/target/SL pricing
                 current_price: float | None = None

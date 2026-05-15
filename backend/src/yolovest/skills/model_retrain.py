@@ -22,6 +22,7 @@ from typing import Any
 from datetime import datetime, timedelta
 
 from yolovest.data.features import IndicatorConfig, compute_features, merge_feedback_features
+from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
 from yolovest.models.schemas import OHLCVBar
@@ -137,6 +138,27 @@ class ModelRetrainSkill(SkillBase):
                 exc_info=True,
             )
 
+        # F&O option-chain timeline. Per-symbol lookup → list of
+        # (date_str, agg_row). Forward-only (no historical backfill
+        # available from Kite), so older training rows return
+        # is_fno_stock=0 / others=0 and the model learns to weight
+        # these features only when present.
+        fno_lookup: dict[str, list[tuple[str, dict[str, float]]]] = {}
+        try:
+            fno_from = (
+                datetime.now(IST) - timedelta(days=cfg.max_training_days + 2)
+            ).strftime("%Y-%m-%d")
+            fno_lookup = await self.ctx.db.get_fno_timeline(date_from=fno_from)
+            logger.info(
+                "F&O timeline: %d underlyings with daily aggregates since %s",
+                len(fno_lookup), fno_from,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to load F&O timeline; F&O features will be neutral",
+                exc_info=True,
+            )
+
         # Load feedback data for the ML feedback loop
         feedback_cfg = self.ctx.config.strategy.feedback
         feedback_data: dict[str, dict[str, float]] | None = None
@@ -193,6 +215,7 @@ class ModelRetrainSkill(SkillBase):
                 bulk_deal_lookup=bulk_deal_lookup,
                 news_lookup=news_lookup,
                 vix_timeline=vix_timeline,
+                fno_lookup=fno_lookup,
             )
             if len(y) < min_samples:
                 logger.warning(
@@ -462,6 +485,7 @@ class ModelRetrainSkill(SkillBase):
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
         news_lookup: dict[str, list[tuple[str, str]]] | None = None,
         vix_timeline: list[tuple[str, float]] | None = None,
+        fno_lookup: dict[str, list[tuple[str, dict[str, float]]]] | None = None,
     ) -> tuple[
         list[list[float]], list[int], list[str], list[float],
         list[dict[str, Any]],
@@ -703,6 +727,25 @@ class ModelRetrainSkill(SkillBase):
                 else:
                     vix_feats = {k: 0.0 for k in VIX_FEATURE_KEYS}
                 features.update(vix_feats)
+
+                # F&O derivatives features. Only F&O-eligible symbols have
+                # rows in the timeline; misses return is_fno_stock=0 and
+                # the model learns to weight these features only when
+                # present. Pass equity closes from the OHLCV window so the
+                # oi_buildup classification uses the canonical underlying
+                # price change instead of the futures close (which can
+                # diverge near expiry).
+                _sym_fno = (fno_lookup or {}).get(sym)
+                if _sym_fno:
+                    _prior_close = bars[i - 1].close if i >= 1 else None
+                    fno_feats = compute_fno_features(
+                        _sym_fno, _sample_date,
+                        prior_stock_close=_prior_close,
+                        current_stock_close=bars[i].close,
+                    )
+                else:
+                    fno_feats = {k: 0.0 for k in FNO_FEATURE_KEYS}
+                features.update(fno_feats)
 
                 # Path-aware label: BUY iff target hits before SL when
                 # walking forward bar-by-bar, using the same ATR-based

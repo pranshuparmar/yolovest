@@ -1566,6 +1566,74 @@ class Database:
             out[sym].sort(key=lambda x: x[1])
         return out
 
+    async def upsert_fno_daily(
+        self, date_str: str, aggregates: dict[str, dict[str, float]],
+    ) -> int:
+        """Insert today's F&O aggregates. UPSERT semantics so the skill
+        can be re-run safely if the cron fires twice (idempotent).
+        Returns count of rows upserted.
+        """
+        if not aggregates:
+            return 0
+        rows = [
+            (
+                date_str,
+                symbol,
+                agg.get("pcr_oi"),
+                agg.get("pcr_volume"),
+                agg.get("futures_oi"),
+                agg.get("futures_volume"),
+                agg.get("futures_close"),
+            )
+            for symbol, agg in aggregates.items()
+        ]
+        await self.conn.executemany(
+            "INSERT INTO fno_daily "
+            "(date, symbol, pcr_oi, pcr_volume, futures_oi, "
+            "futures_volume, futures_close) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(symbol, date) DO UPDATE SET "
+            "pcr_oi=excluded.pcr_oi, pcr_volume=excluded.pcr_volume, "
+            "futures_oi=excluded.futures_oi, "
+            "futures_volume=excluded.futures_volume, "
+            "futures_close=excluded.futures_close, "
+            "created_at=datetime('now')",
+            rows,
+        )
+        await self.conn.commit()
+        return len(rows)
+
+    async def get_fno_timeline(
+        self, date_from: str | None = None,
+    ) -> dict[str, list[tuple[str, dict[str, float]]]]:
+        """Return F&O aggregates grouped by symbol, ascending by date.
+
+        Used by model_retrain to bind per-(symbol, date) features without
+        an N+1 query per sample — one scan, fan-out in Python. Same
+        shape as get_news_timeline.
+        """
+        query = (
+            "SELECT date, symbol, pcr_oi, pcr_volume, futures_oi, "
+            "futures_volume, futures_close FROM fno_daily WHERE 1=1"
+        )
+        params: list[Any] = []
+        if date_from:
+            query += " AND date >= ?"
+            params.append(date_from)
+        query += " ORDER BY symbol, date"
+        rows = await self.read_conn.execute_fetchall(query, tuple(params))
+        out: dict[str, list[tuple[str, dict[str, float]]]] = {}
+        for r in rows:
+            row_dict = {
+                "pcr_oi": r[2],
+                "pcr_volume": r[3],
+                "futures_oi": r[4],
+                "futures_volume": r[5],
+                "futures_close": r[6],
+            }
+            out.setdefault(r[1], []).append((r[0], row_dict))
+        return out
+
     async def get_vix_timeline(
         self, date_from: str | None = None,
     ) -> list[tuple[str, float]]:
