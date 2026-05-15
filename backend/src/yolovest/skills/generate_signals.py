@@ -500,6 +500,11 @@ class GenerateSignalsSkill(SkillBase):
                     signal.setdefault("mode", self.ctx.config.mode)
                     await self.ctx.db.insert_signal(signal)
                     signals_generated.append(signal)
+                    logger.info(
+                        "PASSED %s for %s @ %.2f (%s)",
+                        prediction.signal_type, symbol, prediction.confidence,
+                        _format_class_probs(prediction),
+                    )
                     await self.broadcast("signal_generated", {
                         "symbol": symbol,
                         "signal_type": prediction.signal_type,
