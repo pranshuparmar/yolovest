@@ -57,7 +57,7 @@ export function SymbolPage() {
     { label: "180d", days: 180, interval: "daily" },
     { label: "365d", days: 365, interval: "daily" },
   ];
-  const [periodIdx, setPeriodIdx] = useState(4); // default 60d
+  const [periodIdx, setPeriodIdx] = useState(1); // default 7d
   const period = PERIODS[periodIdx];
 
   const { data: ohlcv, isLoading: ohlcvLoading } = useSymbolOHLCV(sym, {

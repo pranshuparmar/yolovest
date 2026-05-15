@@ -7,7 +7,6 @@ import { EconomicCalendarWidget } from "../components/EconomicCalendarWidget";
 import { PremarketCard } from "../components/PremarketCard";
 import { PendingTradesBanner, ClearSignalsButton } from "../components/PendingTradesBanner";
 import { RecommendationsPanel } from "../components/RecommendationsPanel";
-import { SignalClassWidget } from "../components/SignalClassWidget";
 import { KillSwitchControl } from "../components/KillSwitchControl";
 import { useTradesToday, useSystemState } from "../hooks/queries";
 
@@ -100,8 +99,6 @@ export function DashboardPage() {
       </div>
 
       <RecommendationsPanel />
-
-      <SignalClassWidget days={7} />
 
       <EquityChart days={30} />
 

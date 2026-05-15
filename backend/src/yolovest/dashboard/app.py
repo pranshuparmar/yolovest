@@ -1938,6 +1938,21 @@ def create_app(ctx: AppContext) -> FastAPI:
             symbol=symbol, source=source, date_from=date_from, date_to=date_to,
             limit=limit, offset=offset,
         )
+        if symbol:
+            # Defensive post-filter: legacy rows scraped by the old
+            # substring matcher mis-tagged short symbols (e.g. ITC
+            # inside BITCOIN, BPL inside REPUBLIC). Drop rows whose
+            # headline doesn't contain the symbol as a standalone
+            # word. New rows will already pass; old rows get hidden
+            # without a destructive backfill.
+            import re as _re
+            pattern = _re.compile(
+                rf"(?<![A-Z0-9]){_re.escape(symbol.upper())}(?![A-Z0-9])"
+            )
+            articles = [
+                a for a in articles
+                if pattern.search((a.get("headline") or "").upper())
+            ]
         return articles
 
     @app.get("/api/sentiment/{symbol}")
@@ -2416,36 +2431,56 @@ def create_app(ctx: AppContext) -> FastAPI:
     ) -> dict[str, float]:
         """Best-effort LTP map for arbitrary symbols.
 
-        Order of preference per symbol:
-          1. KiteTicker cache (sub-second real-time when ticker is on)
-          2. Latest OHLCV close from the local DB (last known price,
-             enough to display a stale-but-informative LTP for closed
-             trades).
+        Order of preference per symbol — same chain that powers open
+        positions, so the trade-history table renders identical LTPs
+        for open and recently-closed rows:
+          1. KiteTicker cache (sub-second real-time when ticker is on
+             and the symbol is subscribed)
+          2. market_data.get_ltp() — live Kite REST quote (or jugaad /
+             yfinance fallback) for symbols the WS hasn't subscribed
+          3. Last OHLCV close from local DB as a final stale fallback
+             so an offline market still shows a price
 
-        Symbols with no cached or stored data are omitted from the
-        response — the caller can render an em-dash for those.
+        Symbols that resolve to no price are omitted from the response.
+        REST fetches run concurrently so a 30-symbol page doesn't
+        serialise into a 30 × round-trip wait.
         """
+        import asyncio as _asyncio
         syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
         result: dict[str, float] = {}
         ticker = getattr(ctx, "ticker", None)
-        for sym in syms:
-            ltp: float | None = None
+
+        async def _resolve(sym: str) -> tuple[str, float | None]:
+            # 1) WS tick cache (subscribed symbols only).
             if ticker is not None:
                 try:
                     ltp = ticker.get_ltp(sym, max_age_sec=600.0)
+                    if ltp is not None and ltp > 0:
+                        return sym, float(ltp)
                 except Exception:
-                    ltp = None
-            if ltp is None:
-                try:
-                    row = await ctx.db.read_conn.execute_fetchall(
-                        "SELECT close FROM ohlcv WHERE symbol = ? "
-                        "ORDER BY timestamp DESC LIMIT 1",
-                        (sym,),
-                    )
-                    if row and row[0][0] is not None:
-                        ltp = float(row[0][0])
-                except Exception:
-                    ltp = None
+                    pass
+            # 2) Live REST quote through the provider chain.
+            try:
+                ltp = await ctx.market_data.get_ltp(sym)
+                if ltp is not None and ltp > 0:
+                    return sym, float(ltp)
+            except Exception:
+                pass
+            # 3) Stale last-known close from local OHLCV.
+            try:
+                row = await ctx.db.read_conn.execute_fetchall(
+                    "SELECT close FROM ohlcv WHERE symbol = ? "
+                    "ORDER BY timestamp DESC LIMIT 1",
+                    (sym,),
+                )
+                if row and row[0][0] is not None:
+                    return sym, float(row[0][0])
+            except Exception:
+                pass
+            return sym, None
+
+        pairs = await _asyncio.gather(*[_resolve(s) for s in syms])
+        for sym, ltp in pairs:
             if ltp is not None and ltp > 0:
                 result[sym] = ltp
         return result
