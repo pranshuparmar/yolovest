@@ -156,6 +156,30 @@ class ModelRetrainSkill(SkillBase):
                 }
                 continue
 
+            # Label distribution — settles "is BUY even represented in
+            # training?" when the live model is producing zero BUYs.
+            # Class ints: 0=SELL, 1=HOLD, 2=BUY (per _path_aware_label).
+            label_counts = {"SELL": 0, "HOLD": 0, "BUY": 0}
+            for label in y:
+                if label == 0:
+                    label_counts["SELL"] += 1
+                elif label == 1:
+                    label_counts["HOLD"] += 1
+                elif label == 2:
+                    label_counts["BUY"] += 1
+            total = sum(label_counts.values()) or 1
+            label_pct = {
+                k: round(v / total * 100, 1) for k, v in label_counts.items()
+            }
+            logger.info(
+                "Label distribution for %s: BUY=%d (%.1f%%), HOLD=%d (%.1f%%), SELL=%d (%.1f%%) [n=%d]",
+                model_type,
+                label_counts["BUY"], label_pct["BUY"],
+                label_counts["HOLD"], label_pct["HOLD"],
+                label_counts["SELL"], label_pct["SELL"],
+                total,
+            )
+
             try:
                 await self.broadcast("retrain_progress", {
                     "model_type": model_type,
@@ -182,6 +206,12 @@ class ModelRetrainSkill(SkillBase):
                 metrics = await self.ctx.ml.train(
                     model_type, X, y, train_params, feature_names=feat_names,
                 )
+                # Stash label distribution so MLModelsPage can show
+                # whether a given checkpoint was trained on a class-
+                # balanced sample or a heavily-skewed one. Lives next
+                # to the existing numeric metrics in metrics_json.
+                metrics["label_counts"] = label_counts
+                metrics["label_pct"] = label_pct
                 version = await self.ctx.ml.save_model(model_type, metrics=metrics)
                 await self.broadcast("retrain_progress", {
                     "model_type": model_type,

@@ -300,6 +300,11 @@ class MLPrediction(BaseModel):
     holding_period: str  # "intraday", "3d", "1w"
     confidence: float = Field(ge=0.0, le=1.0)
     model_version: str
+    # Probability mass per class (after calibration if calibration was
+    # applied), keys are "BUY" / "SELL" / "HOLD". Lets generate-signals
+    # log the runner-up class so we can tell whether a HOLD output is a
+    # confident HOLD or a knife-edge case where BUY/SELL was close.
+    class_probabilities: dict[str, float] | None = None
     # Top-N feature contributions (typically top-5 by absolute value).
     # Surfaced on TradeDetailPage so the user can see WHY the model
     # picked the setup. None when the booster isn't reachable through

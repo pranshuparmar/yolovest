@@ -24,6 +24,24 @@ from yolovest.timezone import IST, now_ist
 logger = logging.getLogger(__name__)
 
 
+def _format_class_probs(prediction: Any) -> str:
+    """Render a prediction's per-class probability vector for logs.
+
+    Falls back to single-confidence form when the model didn't expose
+    its class_probabilities (older shadow models, defensive paths).
+    """
+    probs = getattr(prediction, "class_probabilities", None)
+    if not probs:
+        return f"confidence {getattr(prediction, 'confidence', 0):.2f}"
+    # Stable ordering with BUY first so a "zero BUYs" pattern is
+    # impossible to miss in a long log block.
+    return " ".join(
+        f"{label}={probs[label]:.2f}"
+        for label in ("BUY", "HOLD", "SELL")
+        if label in probs
+    )
+
+
 class GenerateSignalsSkill(SkillBase):
     name = "generate-signals"
     description = "Run ML models on watchlist to produce trade signals"
@@ -316,7 +334,11 @@ class GenerateSignalsSkill(SkillBase):
                         "symbol": symbol, "reason": "hold_signal",
                         "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
                     })
-                    logger.info("HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
+                    logger.info(
+                        "HOLD signal for %s (%s)",
+                        symbol,
+                        _format_class_probs(prediction),
+                    )
                     continue
 
                 # Skip SELL signals for locked holdings (user explicitly protected them)
@@ -509,8 +531,9 @@ class GenerateSignalsSkill(SkillBase):
                         "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {base_threshold}",
                     })
                     logger.info(
-                        "Low confidence for %s: %s @ %.2f < %.2f",
+                        "Low confidence for %s: %s @ %.2f < %.2f (%s)",
                         symbol, prediction.signal_type, prediction.confidence, base_threshold,
+                        _format_class_probs(prediction),
                     )
 
             except Exception as e:

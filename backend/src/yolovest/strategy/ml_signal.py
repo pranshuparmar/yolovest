@@ -234,29 +234,31 @@ class XGBoostSignalModel(MLBase):
         # Reuse the same inference logic as production
         feature_vector = self._build_feature_vector(features, expected)
 
-        def _run_inference() -> tuple[int, float]:
+        def _run_inference() -> tuple[int, float, list[float]]:
             import numpy as np
             X = np.array(feature_vector)
             pred_label = int(model.predict(X)[0])
             probas = model.predict_proba(X)[0]
             confidence = float(probas[pred_label])
-            return pred_label, confidence
+            return pred_label, confidence, [float(p) for p in probas]
 
-        pred_label, raw_confidence = await asyncio.to_thread(_run_inference)
+        pred_label, raw_confidence, probas_list = await asyncio.to_thread(_run_inference)
         confidence = raw_confidence
+        chosen_probas = probas_list
 
         if calibrator is not None:
-            def _calibrate() -> tuple[int, float]:
+            def _calibrate() -> tuple[int, float, list[float]]:
                 import numpy as np
                 X = np.array(feature_vector)
                 cal_label = int(calibrator.predict(X)[0])
                 cal_probas = calibrator.predict_proba(X)[0]
-                return cal_label, float(cal_probas[cal_label])
+                return cal_label, float(cal_probas[cal_label]), [float(p) for p in cal_probas]
 
-            cal_label, cal_confidence = await asyncio.to_thread(_calibrate)
+            cal_label, cal_confidence, cal_probas = await asyncio.to_thread(_calibrate)
             if cal_confidence > raw_confidence:
                 pred_label = cal_label
                 confidence = cal_confidence
+                chosen_probas = cal_probas
 
         signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
         entry_price = current_price or features.get("close", 100.0)
@@ -281,6 +283,11 @@ class XGBoostSignalModel(MLBase):
         from typing import Literal, cast
         signal_type = cast(Literal["BUY", "SELL", "HOLD"], signal_type_str)
 
+        class_probs = {
+            _LABEL_MAP.get(i, str(i)): round(float(p), 4)
+            for i, p in enumerate(chosen_probas)
+        }
+
         return MLPrediction(
             signal_type=signal_type,
             entry_price=round(entry_price, 2),
@@ -290,6 +297,7 @@ class XGBoostSignalModel(MLBase):
             holding_period=holding_period,
             confidence=round(confidence, 4),
             model_version=version,
+            class_probabilities=class_probs,
         )
 
     # ------------------------------------------------------------------
@@ -310,38 +318,40 @@ class XGBoostSignalModel(MLBase):
                     else self._swing_features)
         feature_vector = self._build_feature_vector(features, expected)
 
-        def _run_inference() -> tuple[int, float]:
+        def _run_inference() -> tuple[int, float, list[float]]:
             import numpy as np
 
             X = np.array(feature_vector)  # noqa: N806
             pred_label = int(model.predict(X)[0])
-            # Get probability for the predicted class
+            # Get probability for the predicted class + full distribution
             probas = model.predict_proba(X)[0]
             confidence = float(probas[pred_label])
-            return pred_label, confidence
+            return pred_label, confidence, [float(p) for p in probas]
 
-        pred_label, raw_confidence = await asyncio.to_thread(_run_inference)
+        pred_label, raw_confidence, probas_list = await asyncio.to_thread(_run_inference)
         confidence = raw_confidence
+        chosen_probas = probas_list
 
         # Calibrate if calibrator available
         calibrator = self._get_calibrator(model_type)
         if calibrator is not None:
 
-            def _calibrate() -> tuple[int, float]:
+            def _calibrate() -> tuple[int, float, list[float]]:
                 import numpy as np
 
                 X = np.array(feature_vector)  # noqa: N806
                 cal_label = int(calibrator.predict(X)[0])
                 cal_probas = calibrator.predict_proba(X)[0]
                 cal_confidence = float(cal_probas[cal_label])
-                return cal_label, cal_confidence
+                return cal_label, cal_confidence, [float(p) for p in cal_probas]
 
-            cal_label, cal_confidence = await asyncio.to_thread(_calibrate)
+            cal_label, cal_confidence, cal_probas = await asyncio.to_thread(_calibrate)
 
             if cal_confidence > raw_confidence:
                 # Calibration improved confidence — use calibrated values
                 pred_label = cal_label
                 confidence = cal_confidence
+                chosen_probas = cal_probas
             else:
                 # Calibration compressed confidence — keep raw model output
                 logger.debug(
@@ -382,6 +392,11 @@ class XGBoostSignalModel(MLBase):
             model, feature_vector, expected, pred_label,
         )
 
+        class_probs = {
+            _LABEL_MAP.get(i, str(i)): round(float(p), 4)
+            for i, p in enumerate(chosen_probas)
+        }
+
         return MLPrediction(
             signal_type=signal_type,
             entry_price=round(entry_price, 2),
@@ -391,6 +406,7 @@ class XGBoostSignalModel(MLBase):
             holding_period=holding_period,
             confidence=round(confidence, 4),
             model_version=self._get_version(model_type),
+            class_probabilities=class_probs,
             attribution=attribution,
         )
 
