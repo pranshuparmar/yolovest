@@ -2707,6 +2707,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         from yolovest.config import _MODE_HOLDING_DAYS, _MODE_HOLDING_PERIODS
         from yolovest.costs import compute_transaction_costs
         from yolovest.data.features import IndicatorConfig, compute_features
+        from yolovest.skills.generate_signals import _format_class_probs
         from yolovest.strategy.holding_period import adjust_sell_for_holdings, decide_holding_period, interpolate_atr_multipliers
         from yolovest.timezone import IST
 
@@ -2915,7 +2916,10 @@ def create_app(ctx: AppContext) -> FastAPI:
                         "reason": "hold_signal",
                         "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
                     })
-                    logger.info("Dry-run: HOLD signal for %s (confidence %.2f)", symbol, prediction.confidence)
+                    logger.info(
+                        "Dry-run: HOLD signal for %s (%s)",
+                        symbol, _format_class_probs(prediction),
+                    )
                     continue
 
                 threshold = (
@@ -2930,8 +2934,9 @@ def create_app(ctx: AppContext) -> FastAPI:
                         "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {threshold}",
                     })
                     logger.info(
-                        "Dry-run: Low confidence for %s: %s @ %.2f < %.2f",
+                        "Dry-run: Low confidence for %s: %s @ %.2f < %.2f (%s)",
                         symbol, prediction.signal_type, prediction.confidence, threshold,
+                        _format_class_probs(prediction),
                     )
                     continue
 
@@ -2965,6 +2970,12 @@ def create_app(ctx: AppContext) -> FastAPI:
                 )
 
                 filter_counts["passed"] += 1
+                logger.info(
+                    "Dry-run: PASSED %s for %s @ %.2f (%s)",
+                    prediction.signal_type, symbol,
+                    prediction.confidence,
+                    _format_class_probs(prediction),
+                )
                 signals_out.append({
                     "symbol": symbol,
                     "signal_type": prediction.signal_type,
