@@ -10,6 +10,31 @@ from dataclasses import dataclass
 
 from yolovest.models.schemas import OHLCVBar
 
+# Feature keys that compute_features emits but the ML model should NOT
+# see. These are raw absolute prices, raw cumulative levels, or raw
+# indicator bands that don't transfer across stocks at different price
+# levels (a stock at ₹150 vs ₹3000 has wildly different absolute close,
+# OBV, EMA, BB band values — the model can't learn generalizable patterns
+# from them). They stay in the features dict because the inference layer
+# (`ml_signal.py::_predict`) reads `close` and `atr_14` for entry-price
+# and ATR fallbacks. `model_retrain._prepare_training_data` filters this
+# set out of `feature_names`, so the trained model never sees them.
+MODEL_FEATURE_EXCLUSIONS: frozenset[str] = frozenset({
+    # Raw OHLC — model uses normalized derivatives (range_pct, body_pct, etc.)
+    "close", "open", "high", "low",
+    # Raw indicator bands / cumulative values — model uses normalized
+    # derivatives instead (bb_position, vwap_distance_pct, obv_change_5d).
+    "vwap", "atr_14", "obv",
+    "bb_upper", "bb_middle", "bb_lower",
+    "supertrend_upper", "supertrend_lower",
+    # Raw EMA levels — model uses close_vs_ema*_pct ratios.
+    "ema_9", "ema_21", "ema_50", "ema_200",
+    # Raw MACD components scale with price — model uses macd_histogram_pct.
+    "macd_line", "macd_signal", "macd_histogram",
+    # Absolute average volume — model uses relative_volume / volume_zscore_20d.
+    "avg_volume",
+})
+
 
 @dataclass
 class IndicatorConfig:
@@ -110,6 +135,88 @@ def compute_features(
             ema = compute_ema(closes, period)
             if ema is not None:
                 features[f"ema_{period}"] = ema
+
+    # Normalized derivatives — the features the ML model actually sees.
+    # All of these are price-invariant ratios or % deltas, so they
+    # generalize across stocks at different absolute price levels.
+    _last_close = closes[-1]
+    if _last_close > 0:
+        features["range_pct"] = (highs[-1] - lows[-1]) / _last_close
+        features["body_pct"] = (
+            (closes[-1] - opens[-1]) / opens[-1] if opens[-1] > 0 else 0.0
+        )
+        if len(closes) >= 2 and closes[-2] > 0:
+            features["gap_pct"] = (opens[-1] - closes[-2]) / closes[-2]
+            features["close_change_pct"] = (closes[-1] - closes[-2]) / closes[-2]
+
+        # Indicator-level → close-distance ratios. Each "raw level"
+        # feature gets a corresponding _pct version that's
+        # price-invariant. Trees can split on these meaningfully
+        # across the full Nifty 500 universe.
+        if "vwap" in features and features["vwap"] > 0:
+            features["vwap_distance_pct"] = (
+                (_last_close - features["vwap"]) / features["vwap"]
+            )
+        if "bb_upper" in features and "bb_lower" in features:
+            band_width = features["bb_upper"] - features["bb_lower"]
+            if band_width > 0:
+                # 0 = at lower band, 1 = at upper, can exceed [0,1] outside bands.
+                features["bb_position"] = (
+                    (_last_close - features["bb_lower"]) / band_width
+                )
+        if "macd_histogram" in features:
+            features["macd_histogram_pct"] = features["macd_histogram"] / _last_close
+        if "macd_line" in features:
+            features["macd_line_pct"] = features["macd_line"] / _last_close
+        if cfg.ema_periods:
+            for period in cfg.ema_periods:
+                key = f"ema_{period}"
+                if key in features and features[key] > 0:
+                    features[f"close_vs_{key}_pct"] = (
+                        (_last_close - features[key]) / features[key]
+                    )
+        # Fast vs slow EMA cross-over magnitude (normalised).
+        if "ema_9" in features and "ema_21" in features and features["ema_21"] > 0:
+            features["ema_9_vs_21_pct"] = (
+                (features["ema_9"] - features["ema_21"]) / features["ema_21"]
+            )
+        if "supertrend_upper" in features and "supertrend_lower" in features:
+            trend = features.get("supertrend_trend", 0.0)
+            # When bullish (trend=+1), lower band is the active SL line; when
+            # bearish, upper band is the active resistance. Distance from the
+            # active band is the meaningful signal.
+            active = (
+                features["supertrend_lower"] if trend >= 0
+                else features["supertrend_upper"]
+            )
+            if active > 0:
+                features["supertrend_distance_pct"] = (
+                    (_last_close - active) / active
+                )
+
+    # OBV normalization: raw OBV is a cumulative sum that drifts
+    # unboundedly. The 5-bar % change captures recent volume-direction
+    # momentum, which is what users actually look at.
+    if "obv" in features and len(closes) >= 6:
+        obv_now = features["obv"]
+        obv_5_ago = compute_obv(closes[:-5], volumes[:-5])
+        if obv_5_ago is not None and obv_5_ago != 0:
+            features["obv_change_5d_pct"] = (obv_now - obv_5_ago) / abs(obv_5_ago)
+
+    # Volume z-score: stock-relative spike detector. Raw avg_volume is
+    # nonsense across the universe; (today - mean_20) / std_20 is
+    # invariant. Uses up to the last 20 bars including today's; if the
+    # standard deviation is zero (perfectly flat), returns 0.
+    if len(volumes) >= 5:
+        window = volumes[-20:]
+        if len(window) >= 5:
+            mu = sum(window) / len(window)
+            var = sum((v - mu) ** 2 for v in window) / len(window)
+            sigma = math.sqrt(var)
+            if sigma > 0:
+                features["volume_zscore_20d"] = (volumes[-1] - mu) / sigma
+            else:
+                features["volume_zscore_20d"] = 0.0
 
     return features
 

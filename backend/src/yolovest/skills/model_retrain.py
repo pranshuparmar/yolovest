@@ -21,7 +21,12 @@ from typing import Any
 
 from datetime import datetime, timedelta
 
-from yolovest.data.features import IndicatorConfig, compute_features, merge_feedback_features
+from yolovest.data.features import (
+    MODEL_FEATURE_EXCLUSIONS,
+    IndicatorConfig,
+    compute_features,
+    merge_feedback_features,
+)
 from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
@@ -774,7 +779,14 @@ class ModelRetrainSkill(SkillBase):
                 # didn't have. When that happens, extend feature_names
                 # and backfill 0.0 into every prior row so np.array(X)
                 # ends up rectangular instead of inhomogeneous.
+                # MODEL_FEATURE_EXCLUSIONS gates out raw absolute prices /
+                # levels (close, ema_*, obv, ...) that don't transfer
+                # across stocks at different price levels — they stay in
+                # the features dict for the inference layer's entry-price
+                # lookups but the trained model never sees them.
                 for k in features:
+                    if k in MODEL_FEATURE_EXCLUSIONS:
+                        continue
                     if k not in feature_names_set:
                         feature_names.append(k)
                         feature_names_set.add(k)
