@@ -2008,8 +2008,29 @@ class Database:
         """Persist FII/DII net flows for the day. `data` shape matches
         NSEOfficialSource.fetch_fii_dii output: {date, fii: {...}, dii: {...}}.
         Returns True when a row was written.
+
+        The `date` value from NSE arrives in display format (e.g.
+        "15-May-2026"). Normalise to ISO `YYYY-MM-DD` before storing so
+        `WHERE date >= date('now', '-30 day')` lookups and `ORDER BY
+        date DESC` work — string-compared, "15-May-2026" sorts before
+        "2026-04-16" and the institutional-flows dashboard reads
+        empty. Other date formats NSE has used historically
+        ("15-05-2026", "15/05/2026", "2026-05-15") are also accepted.
         """
         if not data or not data.get("date"):
+            return False
+        raw_date = str(data["date"]).strip()
+        iso_date: str | None = None
+        for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%b-%Y %H:%M"):
+            try:
+                iso_date = datetime.strptime(raw_date, fmt).strftime("%Y-%m-%d")
+                break
+            except ValueError:
+                continue
+        if iso_date is None:
+            logger.warning(
+                "upsert_fii_dii: skipping row with unparseable date %r", raw_date,
+            )
             return False
         fii = data.get("fii") or {}
         dii = data.get("dii") or {}
@@ -2020,7 +2041,7 @@ class Database:
             "(date, fii_buy, fii_sell, fii_net, dii_buy, dii_sell, dii_net) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                str(data["date"]),
+                iso_date,
                 float(fii.get("buy_value") or 0.0),
                 float(fii.get("sell_value") or 0.0),
                 float(fii.get("net_value") or 0.0),
