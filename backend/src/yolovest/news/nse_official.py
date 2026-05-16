@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
@@ -31,6 +32,41 @@ _API_REFERER = f"{_BASE_URL}/get-quotes/equity?symbol=RELIANCE"
 
 # Max 3 requests per second to NSE
 _RATE_LIMIT_DELAY = 0.34
+
+# Process-level cache of NSE endpoints that have recently returned a
+# non-200. Survives across NSEOfficialSource instances (a fresh one is
+# constructed every ingest-data heartbeat) so we don't re-spam the
+# 15-symbol-fanout warning loop when an endpoint has been pulled from
+# the upstream. Keyed by URL path; value is the monotonic timestamp of
+# the failure plus the status code we last saw. After
+# _ENDPOINT_FAILURE_TTL_SEC elapses we let the request through again so
+# NSE coming back online is noticed naturally.
+_ENDPOINT_FAILURE_TTL_SEC = 60 * 60  # 1 hour
+_endpoint_failures: dict[str, tuple[float, int]] = {}
+
+
+def _endpoint_recently_failed(path: str) -> int | None:
+    """Return the cached failure status code if `path` failed within
+    the TTL, else None.
+    """
+    entry = _endpoint_failures.get(path)
+    if entry is None:
+        return None
+    ts, status = entry
+    if time.monotonic() - ts > _ENDPOINT_FAILURE_TTL_SEC:
+        _endpoint_failures.pop(path, None)
+        return None
+    return status
+
+
+def _record_endpoint_failure(path: str, status: int) -> bool:
+    """Stamp `path` as failed with `status`. Returns True if this is a
+    new entry (i.e. the caller should log a warning), False if we've
+    already warned within the TTL.
+    """
+    existing = _endpoint_failures.get(path)
+    _endpoint_failures[path] = (time.monotonic(), status)
+    return existing is None
 
 
 class NSEOfficialSource(NewsSource):
@@ -91,8 +127,17 @@ class NSEOfficialSource(NewsSource):
         a market-data page -> XHR to /api/*. The bot filter checks for
         consistent Sec-Fetch-* metadata + cookies acquired across at
         least two hops, so we replicate the sequence.
+
+        Failures are cached process-wide so we don't re-emit the same
+        homepage-blocked warning every heartbeat (NSE blocks last for
+        hours at a time once they start).
         """
         if self._session is None:
+            return
+        # If the warmup failed recently, give up immediately and stay
+        # silent — the first failure already logged.
+        if _endpoint_recently_failed(_BASE_URL):
+            self._cookies_failed = True
             return
         try:
             # Hop 1: fresh navigation to the homepage. No Referer (we're
@@ -109,10 +154,12 @@ class NSEOfficialSource(NewsSource):
             async with self._session.get(_BASE_URL, headers=homepage_headers) as resp:
                 await resp.read()
                 if resp.status != 200:
-                    logger.warning(
-                        "NSE homepage returned status %d — NSE data will be unavailable this session",
-                        resp.status,
-                    )
+                    if _record_endpoint_failure(_BASE_URL, resp.status):
+                        logger.warning(
+                            "NSE homepage returned status %d — NSE data will "
+                            "be unavailable; retrying after %d minutes",
+                            resp.status, _ENDPOINT_FAILURE_TTL_SEC // 60,
+                        )
                     self._cookies_failed = True
                     return
 
@@ -132,17 +179,25 @@ class NSEOfficialSource(NewsSource):
             ) as resp:
                 await resp.read()
                 if resp.status != 200:
-                    logger.warning(
-                        "NSE market-data warmup returned status %d — NSE data will be unavailable this session",
-                        resp.status,
-                    )
+                    if _record_endpoint_failure(_WARMUP_PATH, resp.status):
+                        logger.warning(
+                            "NSE market-data warmup returned status %d — "
+                            "NSE data will be unavailable; retrying after "
+                            "%d minutes",
+                            resp.status, _ENDPOINT_FAILURE_TTL_SEC // 60,
+                        )
                     self._cookies_failed = True
                     return
 
             self._cookies_initialized = True
             logger.debug("NSE cookies initialized successfully")
         except Exception as e:
-            logger.warning("Failed to initialize NSE cookies: %s — NSE data will be unavailable this session", e)
+            if _record_endpoint_failure(_BASE_URL, 0):
+                logger.warning(
+                    "Failed to initialize NSE cookies: %s — NSE data will "
+                    "be unavailable; retrying after %d minutes",
+                    e, _ENDPOINT_FAILURE_TTL_SEC // 60,
+                )
             self._cookies_failed = True
 
     async def _api_get(self, path: str, params: dict[str, str] | None = None) -> Any:
@@ -157,6 +212,16 @@ class NSEOfficialSource(NewsSource):
         """
         # Skip all API calls if cookie initialization failed (NSE is blocking us)
         if self._cookies_failed:
+            return None
+
+        # Per-endpoint circuit breaker: NSE pulls/relocates endpoints
+        # occasionally (corporateActions has been gone for weeks at a
+        # stretch). Once we've logged a non-200 for a path we skip it
+        # silently for an hour instead of hammering it for every symbol
+        # on every heartbeat. The TTL ensures we'd notice if NSE
+        # restores the route.
+        cached = _endpoint_recently_failed(path)
+        if cached is not None:
             return None
 
         session = await self._get_session()
@@ -174,17 +239,28 @@ class NSEOfficialSource(NewsSource):
             await asyncio.sleep(_RATE_LIMIT_DELAY)
             async with session.get(url, params=params, headers=api_headers) as resp:
                 if resp.status != 200:
-                    logger.warning("NSE API %s returned status %d", path, resp.status)
+                    if _record_endpoint_failure(path, resp.status):
+                        logger.warning(
+                            "NSE API %s returned status %d — suppressing further "
+                            "attempts for %d minutes",
+                            path, resp.status, _ENDPOINT_FAILURE_TTL_SEC // 60,
+                        )
                     return None
                 return await resp.json(content_type=None)
         except TimeoutError:
-            logger.warning("NSE API %s timed out", path)
+            if _record_endpoint_failure(path, 0):
+                logger.warning(
+                    "NSE API %s timed out — suppressing further attempts for "
+                    "%d minutes", path, _ENDPOINT_FAILURE_TTL_SEC // 60,
+                )
             return None
         except aiohttp.ClientError as e:
-            logger.warning("NSE API %s client error: %s", path, e)
+            if _record_endpoint_failure(path, 0):
+                logger.warning("NSE API %s client error: %s", path, e)
             return None
         except Exception as e:
-            logger.warning("NSE API %s unexpected error: %s", path, e)
+            if _record_endpoint_failure(path, 0):
+                logger.warning("NSE API %s unexpected error: %s", path, e)
             return None
 
     # ------------------------------------------------------------------
