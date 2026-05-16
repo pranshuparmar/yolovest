@@ -692,6 +692,10 @@ export interface BackupEntry {
   filename: string;
   size_bytes: number;
   created_at: string;
+  /** When true, the backup is pinned via a sibling .lock sentinel —
+   * the daily prune and manual delete will both skip it until the
+   * lock is cleared. */
+  locked: boolean;
 }
 
 export interface ResetResult {

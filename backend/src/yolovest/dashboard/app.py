@@ -3307,7 +3307,45 @@ def create_app(ctx: AppContext) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(e))
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
+        except PermissionError as e:
+            # Locked backup — refuse with 409 Conflict so the UI can
+            # prompt the user to unlock first.
+            raise HTTPException(status_code=409, detail=str(e))
         logger.info("Deleted backup %s (%d bytes)", filename, result["size_bytes"])
+        return {"success": True, **result}
+
+    @app.post("/api/backups/{filename}/lock")
+    async def lock_backup(
+        filename: str, _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Mark a backup as locked so the daily prune + manual delete
+        paths skip it. Idempotent.
+        """
+        backup_dir = ctx.config.database.backup_dir
+        try:
+            result = await ctx.db.set_backup_lock(backup_dir, filename, locked=True)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        logger.info("Locked backup %s", filename)
+        return {"success": True, **result}
+
+    @app.post("/api/backups/{filename}/unlock")
+    async def unlock_backup(
+        filename: str, _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Clear the lock sentinel on a backup so it's eligible for
+        prune / delete again. Idempotent.
+        """
+        backup_dir = ctx.config.database.backup_dir
+        try:
+            result = await ctx.db.set_backup_lock(backup_dir, filename, locked=False)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        logger.info("Unlocked backup %s", filename)
         return {"success": True, **result}
 
     @app.post("/api/bulk-delete/{group}")

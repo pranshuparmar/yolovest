@@ -4,6 +4,7 @@ Implements DatabaseProtocol from context.py. Uses aiosqlite for async access.
 Schema versioned via numbered SQL migration files in migrations/ directory.
 """
 
+import contextlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -4891,9 +4892,15 @@ class Database:
         return {"orphaned_files_deleted": deleted}
 
     async def list_backups(self, backup_dir: str) -> list[dict[str, Any]]:
-        """List available backup files with size and timestamp."""
-        import os
+        """List available backup files with size, timestamp, and lock state.
 
+        A backup is considered locked when a sibling sentinel file
+        `<filename>.lock` exists in the same directory. Locked backups
+        are skipped by the daily prune path and refused by the manual
+        delete endpoint until explicitly unlocked. Storing the lock as
+        a sentinel file (instead of a DB row) means it survives a
+        volume restore and can be inspected with `ls`.
+        """
         backup_path = Path(backup_dir)
         if not backup_path.is_dir():
             return []
@@ -4905,13 +4912,47 @@ class Database:
                 "filename": f.name,
                 "size_bytes": stat.st_size,
                 "created_at": datetime.fromtimestamp(stat.st_mtime, tz=IST).isoformat(),
+                "locked": (backup_path / f"{f.name}.lock").exists(),
             })
         return backups
+
+    async def set_backup_lock(
+        self, backup_dir: str, filename: str, locked: bool,
+    ) -> dict[str, Any]:
+        """Lock or unlock a backup so the daily prune / manual delete
+        paths skip it. Same path-traversal guards as `delete_backup`.
+        Idempotent: locking an already-locked backup is a no-op.
+        """
+        backup_path = Path(backup_dir).resolve()
+        if not backup_path.is_dir():
+            raise ValueError(f"Backup directory does not exist: {backup_dir}")
+
+        if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
+            raise ValueError(f"Invalid backup filename: {filename!r}")
+        if not (filename.startswith("yolovest_") and filename.endswith(".db")):
+            raise ValueError(
+                f"Refusing to lock {filename!r}: not a recognised backup file",
+            )
+
+        target = (backup_path / filename).resolve()
+        if backup_path not in target.parents:
+            raise ValueError(f"Path escape attempt: {filename!r}")
+        if not target.is_file():
+            raise FileNotFoundError(f"Backup not found: {filename}")
+
+        sentinel = backup_path / f"{filename}.lock"
+        if locked:
+            sentinel.touch(exist_ok=True)
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                sentinel.unlink()
+        return {"filename": filename, "locked": locked}
 
     async def delete_backup(self, backup_dir: str, filename: str) -> dict[str, Any]:
         """Delete a single backup file. Validates the name belongs to the
         backup directory and matches the standard yolovest_*.db pattern so
         a crafted path can't escape into other parts of the filesystem.
+        Refuses to delete locked backups — caller must unlock first.
         """
         backup_path = Path(backup_dir).resolve()
         if not backup_path.is_dir():
@@ -4932,8 +4973,27 @@ class Database:
         if not target.is_file():
             raise FileNotFoundError(f"Backup not found: {filename}")
 
+        if (backup_path / f"{filename}.lock").exists():
+            raise PermissionError(
+                f"Backup {filename!r} is locked; unlock it before deleting",
+            )
+
         size_bytes = target.stat().st_size
         target.unlink()
+        # Best-effort: also delete the matching model snapshot dir if it
+        # exists, so the freed-bytes report reflects what actually went
+        # away. Keyed off the timestamp portion (yolovest_<ts>.db ->
+        # models_<ts>).
+        import shutil as _shutil
+        ts = filename.removeprefix("yolovest_").removesuffix(".db")
+        model_dir = backup_path / f"models_{ts}"
+        if model_dir.is_dir():
+            try:
+                model_size = sum(p.stat().st_size for p in model_dir.rglob("*") if p.is_file())
+                _shutil.rmtree(model_dir)
+                size_bytes += model_size
+            except OSError as e:
+                logger.warning("Failed to prune model dir %s: %s", model_dir.name, e)
         return {"filename": filename, "size_bytes": size_bytes}
 
     # ------------------------------------------------------------------

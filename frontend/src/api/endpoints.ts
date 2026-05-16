@@ -413,6 +413,12 @@ export const api = {
       { method: "DELETE" },
     ),
 
+  setBackupLock: (filename: string, locked: boolean) =>
+    apiFetch<{ success: boolean; filename: string; locked: boolean }>(
+      `/api/backups/${filename}/${locked ? "lock" : "unlock"}`,
+      { method: "POST" },
+    ),
+
   changePassword: (newPassword: string) =>
     apiFetch<{ success: boolean }>("/api/change-password", {
       method: "POST",

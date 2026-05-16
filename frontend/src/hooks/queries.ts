@@ -729,6 +729,15 @@ export function useDeleteBackup() {
   });
 }
 
+export function useSetBackupLock() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ filename, locked }: { filename: string; locked: boolean }) =>
+      api.setBackupLock(filename, locked),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["backups"] }),
+  });
+}
+
 export function useChangePassword() {
   return useMutation({
     mutationFn: (newPassword: string) => api.changePassword(newPassword),

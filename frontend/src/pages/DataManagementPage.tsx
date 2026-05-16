@@ -6,6 +6,7 @@ import {
   useCreateBackup,
   useRestoreBackup,
   useDeleteBackup,
+  useSetBackupLock,
   useResetAllData,
   useQuarantinedSymbols,
   useUnquarantineSymbol,
@@ -412,6 +413,7 @@ export function DataManagementPage() {
   const createBackup = useCreateBackup();
   const restoreBackup = useRestoreBackup();
   const deleteBackup = useDeleteBackup();
+  const setBackupLock = useSetBackupLock();
   const resetAll = useResetAllData();
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [resetStep, setResetStep] = useState<"idle" | "warn" | "confirm">("idle");
@@ -551,7 +553,19 @@ export function DataManagementPage() {
             <tbody>
               {backups.map((b) => (
                 <tr key={b.filename} className="border-b border-gray-800 hover:bg-gray-800/30">
-                  <td className="py-2 px-4 font-mono text-gray-300 text-xs">{b.filename}</td>
+                  <td className="py-2 px-4 font-mono text-gray-300 text-xs">
+                    <span className="inline-flex items-center gap-2">
+                      {b.filename}
+                      {b.locked && (
+                        <span
+                          className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-900/40 text-amber-400"
+                          title="Locked — exempt from daily prune and manual delete"
+                        >
+                          LOCKED
+                        </span>
+                      )}
+                    </span>
+                  </td>
                   <td className="py-2 px-4 text-right text-gray-400">{formatBytes(b.size_bytes)}</td>
                   <td className="py-2 px-4 text-right text-gray-400">{formatDateTime(b.created_at)}</td>
                   <td className="py-2 px-4 text-right">
@@ -608,6 +622,29 @@ export function DataManagementPage() {
                     ) : (
                       <div className="flex items-center justify-end gap-1.5">
                         <button
+                          onClick={() => {
+                            setBackupLock.mutate(
+                              { filename: b.filename, locked: !b.locked },
+                              {
+                                onSuccess: () => setLastResult(
+                                  b.locked
+                                    ? `Unlocked ${b.filename}`
+                                    : `Locked ${b.filename} — exempt from prune & delete`,
+                                ),
+                              },
+                            );
+                          }}
+                          disabled={setBackupLock.isPending}
+                          className={b.locked
+                            ? "px-2 py-0.5 rounded text-xs font-medium bg-amber-900/40 text-amber-400 hover:bg-amber-900/60 transition-colors disabled:opacity-50"
+                            : "px-2 py-0.5 rounded text-xs font-medium bg-gray-800 hover:bg-amber-900/30 text-gray-400 hover:text-amber-400 transition-colors disabled:opacity-50"}
+                          title={b.locked
+                            ? "Click to unlock — backup will be eligible for prune/delete again"
+                            : "Click to lock — prevents auto-prune and manual delete"}
+                        >
+                          {b.locked ? "Unlock" : "Lock"}
+                        </button>
+                        <button
                           onClick={() => { setRestoreConfirm(b.filename); setDeleteConfirm(null); }}
                           className="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
                         >
@@ -615,7 +652,9 @@ export function DataManagementPage() {
                         </button>
                         <button
                           onClick={() => { setDeleteConfirm(b.filename); setRestoreConfirm(null); }}
-                          className="px-2 py-0.5 rounded text-xs font-medium bg-gray-800 hover:bg-red-900/40 text-gray-400 hover:text-red-400 transition-colors"
+                          disabled={b.locked}
+                          title={b.locked ? "Unlock first to delete" : undefined}
+                          className="px-2 py-0.5 rounded text-xs font-medium bg-gray-800 hover:bg-red-900/40 text-gray-400 hover:text-red-400 transition-colors disabled:opacity-40 disabled:hover:bg-gray-800 disabled:hover:text-gray-400 disabled:cursor-not-allowed"
                         >
                           Delete
                         </button>
