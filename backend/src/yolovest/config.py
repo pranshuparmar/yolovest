@@ -558,6 +558,14 @@ class RiskConfig(BaseModel):
     # are too slow or the test stack doesn't support estimate_margin.
     margin_usage_enabled: bool = True
     weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
+    # Minimum cost-adjusted reward:risk ratio required to take a signal.
+    # Computes (target − entry) × qty − round-trip-costs as net win and
+    # (entry − sl) × qty + costs as net loss (sign-flipped for SELL),
+    # then rejects when net_win / net_loss < this threshold. Catches the
+    # "0.6 × ATR target on a ₹180 stock at 38 qty" signals where the
+    # gross 2:1 collapses to 1.3:1 after brokerage + STT + GST, leaving
+    # no margin for slippage. Set to 0 to disable.
+    min_net_rr: float = Field(default=1.5, ge=0, le=10)
     holding_expiry: HoldingExpiryConfig = Field(default_factory=HoldingExpiryConfig)
     partial_profit: PartialProfitConfig = Field(default_factory=PartialProfitConfig)
     conviction_sizing: ConvictionSizingConfig = Field(default_factory=ConvictionSizingConfig)
