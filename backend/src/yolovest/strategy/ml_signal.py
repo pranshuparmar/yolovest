@@ -609,7 +609,8 @@ class XGBoostSignalModel(MLBase):
             # the end so the metrics reflect actual costs / sizing /
             # slippage rather than the legacy +1%/-0.5% fiction.
             from yolovest.strategy.walk_forward_backtest import (
-                BacktestConfig, BarMeta, run_walk_forward_backtest, sweep_thresholds,
+                BacktestConfig, BarMeta, apply_thresholds as _apply_thresholds,
+                run_walk_forward_backtest, sweep_thresholds,
             )
 
             collected_preds: list[int] = []
@@ -692,24 +693,72 @@ class XGBoostSignalModel(MLBase):
                     product=backtest_product,
                     max_concurrent_positions=backtest_max_positions,
                 )
-                bt = run_walk_forward_backtest(
-                    preds=collected_preds,
-                    bars_meta=collected_meta,
-                    config=bt_cfg,
+
+                # Chronological tuning / reporting split. The CV-test
+                # predictions accumulated above are in chronological
+                # order across folds, so the last `holdout_frac` slice
+                # is a strict future of the tuning slice. We pick
+                # thresholds on the tuning slice and report metrics on
+                # the holdout slice — without this, sweep_thresholds
+                # picks the (buy, sell) cell that maximises Sharpe on
+                # the exact same predictions we then report, which is
+                # in-sample optimisation and inflates the headline
+                # numbers dramatically (the user saw argmax→tuned go
+                # from 17.69 → 28.96 on intraday and 6.01 → 17.00 on
+                # swing, almost entirely from this).
+                _holdout_frac = 0.30
+                _split = int(len(collected_preds) * (1.0 - _holdout_frac))
+                # Tiny corpora can't support a holdout — fall back to
+                # the legacy in-sample path when we don't have at least
+                # enough samples on each side for the sweep's
+                # min_trades floor to fire honestly.
+                _min_each_side = 200
+                _can_split = (
+                    _split >= _min_each_side
+                    and (len(collected_preds) - _split) >= _min_each_side
                 )
 
-                # Threshold sweep: search the 2D (buy, sell) cutoff space
-                # for the pair that maximises Sharpe on the same fold-test
-                # predictions. The trained model still picks argmax at
-                # inference by default — but if a tuned pair is saved
-                # alongside the artifact, _predict applies it instead.
-                # This converts "win the log-loss minimisation" into "win
-                # the PnL maximisation" without retraining.
-                tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
-                    probas=collected_probas,
-                    bars_meta=collected_meta,
-                    config=bt_cfg,
-                )
+                if _can_split:
+                    # Tune on the chronological first slice; report on
+                    # the strict-future holdout slice for both baseline
+                    # and tuned, so the two numbers are apples-to-apples.
+                    tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
+                        probas=collected_probas[:_split],
+                        bars_meta=collected_meta[:_split],
+                        config=bt_cfg,
+                    )
+                    # Tuned: replay chosen cutoffs on the holdout.
+                    _holdout_tuned_preds = _apply_thresholds(
+                        collected_probas[_split:], tuned_buy, tuned_sell,
+                    )
+                    tuned_bt = run_walk_forward_backtest(
+                        preds=_holdout_tuned_preds,
+                        bars_meta=collected_meta[_split:],
+                        config=bt_cfg,
+                    )
+                    # Argmax baseline on the same holdout slice.
+                    bt = run_walk_forward_backtest(
+                        preds=collected_preds[_split:],
+                        bars_meta=collected_meta[_split:],
+                        config=bt_cfg,
+                    )
+                    _holdout_used = True
+                else:
+                    # Not enough samples to split — fall back to legacy
+                    # in-sample tuning so tests / small corpora still
+                    # produce a number. The metrics dict flags this so
+                    # it's visible on the dashboard.
+                    bt = run_walk_forward_backtest(
+                        preds=collected_preds,
+                        bars_meta=collected_meta,
+                        config=bt_cfg,
+                    )
+                    tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
+                        probas=collected_probas,
+                        bars_meta=collected_meta,
+                        config=bt_cfg,
+                    )
+                    _holdout_used = False
                 # When tuned thresholds beat the argmax baseline, report
                 # the tuned metrics as the headline numbers — that's what
                 # live trading will actually see. Keep the argmax sharpe
@@ -741,6 +790,7 @@ class XGBoostSignalModel(MLBase):
                     "tuned_sell_threshold": tuned_sell,
                     "argmax_sharpe": bt.sharpe,
                     "tuned_sharpe": tuned_bt.sharpe,
+                    "threshold_holdout_used": _holdout_used,
                 }
             else:
                 # Legacy synthetic metrics — kept for tests / older callers

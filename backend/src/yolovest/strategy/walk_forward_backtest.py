@@ -402,7 +402,7 @@ def sweep_thresholds(
     bars_meta: list[BarMeta],
     config: BacktestConfig | None = None,
     grid: tuple[float, ...] = _DEFAULT_THRESHOLD_GRID,
-    min_trades: int = 10,
+    min_trades: int = 100,
 ) -> tuple[float, float, BacktestResult]:
     """Find the (buy_threshold, sell_threshold) pair that maximises Sharpe
     on the walk-forward test predictions.
@@ -476,3 +476,29 @@ def sweep_thresholds(
 
     assert best_buy is not None and best_sell is not None
     return best_buy, best_sell, best_result
+
+
+def apply_thresholds(
+    probas: list[list[float]],
+    buy_thresh: float,
+    sell_thresh: float,
+) -> list[int]:
+    """Convert per-sample class-probability vectors to discrete
+    BUY/HOLD/SELL predictions using the same gating rule that
+    `sweep_thresholds` evaluates.
+
+    Public so callers can replay a chosen (buy, sell) cutoff pair on a
+    held-out slice for honest out-of-sample reporting after the sweep
+    picked the cutoffs on a separate tuning slice.
+    """
+    out: list[int] = []
+    for p in probas:
+        buy_prob = p[_LABEL_BUY] if len(p) > _LABEL_BUY else 0.0
+        sell_prob = p[_LABEL_SELL] if len(p) > _LABEL_SELL else 0.0
+        if buy_prob >= buy_thresh and buy_prob >= sell_prob:
+            out.append(_LABEL_BUY)
+        elif sell_prob >= sell_thresh and sell_prob > buy_prob:
+            out.append(_LABEL_SELL)
+        else:
+            out.append(_LABEL_HOLD)
+    return out

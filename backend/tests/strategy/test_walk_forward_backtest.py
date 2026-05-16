@@ -205,7 +205,10 @@ class TestSweepThresholds:
             risk_per_trade_pct=0.02,
             max_single_stock_pct=0.25,
         )
-        buy_t, sell_t, result = sweep_thresholds(probas, bars_meta, cfg)
+        # Tiny synthetic corpus (60 samples) — pass an explicit
+        # min_trades=10 so the test still exercises tuning behaviour
+        # under the new production default of 100.
+        buy_t, sell_t, result = sweep_thresholds(probas, bars_meta, cfg, min_trades=10)
         # The tuned BUY threshold should be above the losers' P(BUY)=0.55
         # so only the 0.80-conviction winners survive.
         assert buy_t > 0.55
