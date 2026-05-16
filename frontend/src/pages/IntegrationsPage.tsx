@@ -252,12 +252,38 @@ export function IntegrationsPage() {
 
           <div className="mt-auto pt-3 border-t border-gray-800 space-y-2">
             {zerodha.login_url && (
-              <a
-                href={zerodha.login_url}
-                className="block text-center px-3 py-1.5 rounded text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
-              >
-                {zerodha.connected ? "Re-authenticate Kite" : "Login to Kite"}
-              </a>
+              zerodha.connected ? (
+                // Authenticated: compact Re-auth + Logout pair, same
+                // layout shape as the Telegram card's two-button row.
+                <div className="flex gap-2">
+                  <a
+                    href={zerodha.login_url}
+                    className="px-3 py-1.5 rounded text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
+                  >
+                    Re-auth
+                  </a>
+                  <ActionButton
+                    onClick={() => {
+                      if (!window.confirm(
+                        "Drop the cached Kite token? Trading will be blocked until you re-authenticate, and the live tick stream will stop.",
+                      )) return;
+                      logoutZerodha.mutate();
+                    }}
+                    loading={logoutZerodha.isPending}
+                    variant="danger"
+                  >
+                    Logout Kite
+                  </ActionButton>
+                </div>
+              ) : (
+                // Not authenticated: full-width Login call to action.
+                <a
+                  href={zerodha.login_url}
+                  className="block text-center px-3 py-1.5 rounded text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
+                >
+                  Login to Kite
+                </a>
+              )
             )}
             <div className="flex gap-2">
               <input
@@ -280,20 +306,6 @@ export function IntegrationsPage() {
             </div>
             {authZerodha.data && (
               <ResultToast success={authZerodha.data.success} error={authZerodha.data.error} />
-            )}
-            {zerodha.connected && (
-              <ActionButton
-                onClick={() => {
-                  if (!window.confirm(
-                    "Drop the cached Kite token? Trading will be blocked until you re-authenticate, and the live tick stream will stop.",
-                  )) return;
-                  logoutZerodha.mutate();
-                }}
-                loading={logoutZerodha.isPending}
-                variant="danger"
-              >
-                Logout Kite
-              </ActionButton>
             )}
           </div>
         </div>
