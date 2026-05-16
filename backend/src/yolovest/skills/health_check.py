@@ -106,8 +106,16 @@ class HealthCheckSkill(SkillBase):
         # Check 5: Disk space
         checks["disk_ok"] = await self._check_disk_space()
 
-        # Check 6: Position consistency
-        checks["positions_consistent"] = await self._check_position_consistency()
+        # Check 6: Position consistency. Skip the broker round-trip
+        # if we already know auth is dead — the comparison is
+        # meaningless without a working session and re-calling
+        # broker.get_positions() just emits a TokenException
+        # traceback every heartbeat (most visibly on weekends, when
+        # Kite tokens have naturally expired and the user hasn't
+        # re-authed because the market is closed).
+        checks["positions_consistent"] = await self._check_position_consistency(
+            broker_ok=bool(checks.get("broker")),
+        )
 
         # Check 7: Kill switch state
         checks["kill_switch_active"] = await self.ctx.db.is_kill_switch_active()
@@ -155,13 +163,28 @@ class HealthCheckSkill(SkillBase):
             logger.debug("Disk space check failed", exc_info=True)
             return True  # assume OK if we can't check
 
-    async def _check_position_consistency(self) -> bool:
-        """Verify no orphaned orders or position mismatches."""
+    async def _check_position_consistency(self, broker_ok: bool = True) -> bool:
+        """Verify no orphaned orders or position mismatches.
+
+        When `broker_ok` is False (auth already known to be invalid)
+        we skip the broker round-trip. There's nothing to compare
+        without a working session and the failure mode is already
+        surfaced by check #1.
+        """
+        # In paper mode, no broker positions to compare
+        if self.ctx.config.mode == "paper":
+            return True
+        if not broker_ok:
+            # Expected on weekends / after Kite's daily 6:00 AM IST
+            # token expiry until the user re-auths. The auth state
+            # itself is reported by checks["broker"]; nothing else to
+            # do here.
+            logger.debug(
+                "Skipping position consistency check — broker not authenticated"
+            )
+            return True
         try:
             local = await self.ctx.db.get_open_positions()
-            # In paper mode, no broker positions to compare
-            if self.ctx.config.mode == "paper":
-                return True
             broker = await self.ctx.broker.get_positions()
             # Simple check: same count
             local_count = len(local)
