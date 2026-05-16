@@ -204,6 +204,7 @@ export function IntegrationsPage() {
               <ActionButton
                 onClick={() => toggleEnabled("llm.enabled", gemini.enabled)}
                 loading={updateConfig.isPending}
+                variant={gemini.enabled ? "danger" : "default"}
               >
                 {gemini.enabled ? "Mark Inactive" : "Mark Active"}
               </ActionButton>
@@ -272,7 +273,7 @@ export function IntegrationsPage() {
                     loading={logoutZerodha.isPending}
                     variant="danger"
                   >
-                    Logout Kite
+                    Logout
                   </ActionButton>
                 </div>
               ) : (
@@ -363,6 +364,7 @@ export function IntegrationsPage() {
                   toggleEnabled("notifications.telegram.enabled", telegram.enabled)
                 }
                 loading={updateConfig.isPending}
+                variant={telegram.enabled ? "danger" : "default"}
               >
                 {telegram.enabled ? "Mark Inactive" : "Mark Active"}
               </ActionButton>
