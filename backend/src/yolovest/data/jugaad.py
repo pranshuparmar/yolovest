@@ -5,6 +5,7 @@ Scrapes NSE directly. Built-in caching. History from 2013+.
 
 import asyncio
 import logging
+import warnings
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -12,6 +13,19 @@ from yolovest.data.base import MarketDataBase
 from yolovest.models.schemas import OHLCVBar
 
 logger = logging.getLogger(__name__)
+
+# jugaad-data's util.py emits this on every call because it converts a
+# tz-aware datetime to np.datetime64, which numpy doesn't support
+# (np strips the tz and warns). Harmless for our use — we already
+# normalise timestamps downstream — and there's nothing we can fix at
+# the call site without patching the library. Filter it once at
+# import so it doesn't spam every heartbeat.
+warnings.filterwarnings(
+    "ignore",
+    message="no explicit representation of timezones available for np.datetime64",
+    category=UserWarning,
+    module=r"jugaad_data\..*",
+)
 
 
 class JugaadDataProvider(MarketDataBase):
