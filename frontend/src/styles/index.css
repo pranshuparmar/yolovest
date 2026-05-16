@@ -62,16 +62,30 @@ html.light .border-gray-700 {
   border-color: #d0d7de;
 }
 
-html.light .border-emerald-800 {
+html.light .border-emerald-800,
+html.light .border-emerald-700 {
   border-color: rgba(26, 127, 55, 0.4);
 }
 
-html.light .border-red-800 {
+html.light .border-red-800,
+html.light .border-red-700 {
   border-color: rgba(207, 34, 46, 0.4);
 }
 
-html.light .border-amber-800 {
+html.light .border-amber-800,
+html.light .border-amber-700,
+html.light .border-amber-700\/60 {
   border-color: rgba(154, 103, 0, 0.4);
+}
+
+html.light .border-blue-700,
+html.light .border-blue-800 {
+  border-color: rgba(9, 105, 218, 0.4);
+}
+
+html.light .border-yellow-700,
+html.light .border-yellow-700\/50 {
+  border-color: rgba(154, 103, 0, 0.25);
 }
 
 html.light .border-red-900\/50,
@@ -131,6 +145,15 @@ html.light .text-emerald-500 {
   color: #1a7f37;
 }
 
+/* 200/300 sub-shades fall through to default tailwind in light theme,
+   which renders as washed-out pastel and is illegible on the faint
+   tinted banner backgrounds we use (bg-{color}-900/20 etc). Anchor
+   them to the same readable shade as text-{color}-400. */
+html.light .text-emerald-200,
+html.light .text-emerald-300 {
+  color: #1a7f37;
+}
+
 html.light .text-red-400 {
   color: #cf222e;
 }
@@ -139,7 +162,17 @@ html.light .text-red-500 {
   color: #cf222e;
 }
 
+html.light .text-red-200,
+html.light .text-red-300 {
+  color: #cf222e;
+}
+
 html.light .text-amber-400 {
+  color: #9a6700;
+}
+
+html.light .text-amber-200,
+html.light .text-amber-300 {
   color: #9a6700;
 }
 
@@ -148,6 +181,11 @@ html.light .text-blue-400 {
 }
 
 html.light .text-blue-500 {
+  color: #0969da;
+}
+
+html.light .text-blue-200,
+html.light .text-blue-300 {
   color: #0969da;
 }
 
@@ -165,6 +203,17 @@ html.light .text-orange-400 {
 
 html.light .text-pink-400 {
   color: #bf3989;
+}
+
+/* Yellow family is unmapped — used by the dashboard "Degraded mode"
+   banner. Tailwind's default yellow is harsh on a light surface, so
+   redirect every shade to the amber palette that already has
+   well-tuned overrides above. */
+html.light .text-yellow-300,
+html.light .text-yellow-400,
+html.light .text-yellow-500,
+html.light .text-yellow-600 {
+  color: #9a6700;
 }
 
 /* ---- Colored badges & tinted backgrounds ---- */
@@ -287,7 +336,7 @@ html.light .bg-gray-700\/50 {
   background-color: rgba(208, 215, 222, 0.5);
 }
 
-/* ---- Solid colored buttons ---- */
+/* ---- Solid colored buttons / bars ---- */
 html.light .bg-emerald-600 {
   background-color: #1a7f37;
 }
@@ -296,12 +345,24 @@ html.light .bg-emerald-400 {
   background-color: #1a7f37;
 }
 
+/* Bar-chart fills (Signal Distribution widget) — Tailwind default
+   bg-{color}-500 reads as garishly saturated on a white surface.
+   Tone them down to the palette's mid shade so the stacked bar is
+   visible without being eye-burning. */
+html.light .bg-emerald-500 {
+  background-color: #2da44e;
+}
+
 html.light .bg-amber-600 {
   background-color: #9a6700;
 }
 
 html.light .bg-amber-400 {
   background-color: #9a6700;
+}
+
+html.light .bg-amber-500 {
+  background-color: #bf8700;
 }
 
 html.light .bg-red-600 {
@@ -316,8 +377,24 @@ html.light .bg-red-400 {
   background-color: #cf222e;
 }
 
+html.light .bg-red-500 {
+  background-color: #d1242f;
+}
+
 html.light .bg-blue-500 {
   background-color: #0969da;
+}
+
+/* Yellow family backgrounds — used by the dashboard "Degraded mode"
+   banner. Tailwind default yellow-* is too saturated on a light
+   surface. Redirect to the same tinted-amber backgrounds the other
+   warning banners use so they look consistent. */
+html.light .bg-yellow-900\/30 {
+  background-color: rgba(154, 103, 0, 0.07);
+}
+
+html.light .bg-yellow-800\/60 {
+  background-color: rgba(154, 103, 0, 0.12);
 }
 
 /* ---- Form inputs ---- */
