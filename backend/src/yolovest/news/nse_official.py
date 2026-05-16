@@ -385,19 +385,37 @@ class NSEOfficialSource(NewsSource):
     async def fetch_bulk_deals(self) -> list[dict[str, Any]]:
         """Fetch today's bulk and block deals from NSE.
 
+        NSE consolidated the old /api/bulk-deal + /api/block-deal pair
+        into a single /api/snapshot-capital-market-largedeal endpoint
+        that returns both (plus short-selling) in one payload. The
+        legacy paths started 404-ing in 2024. We try the consolidated
+        endpoint first, fall back to the legacy pair so an older
+        rollback path still works if NSE flips back.
+
         Returns:
-            List of deal dicts with keys: symbol, dealType, clientName,
-            quantity, tradePrice.
+            List of deal dicts with keys: symbol, deal_type, client_name,
+            buy_sell, quantity, trade_price.
         """
         deals: list[dict[str, Any]] = []
 
-        # Fetch block deals
+        # Preferred: consolidated endpoint. Response shape:
+        #   {"BULK_DEALS_DATA": [...], "BLOCK_DEALS_DATA": [...],
+        #    "SHORT_DEALS_DATA": [...], ...}
+        snapshot = await self._api_get("/api/snapshot-capital-market-largedeal")
+        if snapshot and isinstance(snapshot, dict):
+            for item in snapshot.get("BULK_DEALS_DATA") or []:
+                deals.append(self._normalize_deal(item, "bulk"))
+            for item in snapshot.get("BLOCK_DEALS_DATA") or []:
+                deals.append(self._normalize_deal(item, "block"))
+            if deals:
+                return deals
+
+        # Legacy fallback — kept in case NSE reinstates the split paths.
         block_data = await self._api_get("/api/block-deal")
         if block_data and isinstance(block_data, dict):
             for item in block_data.get("data", []):
                 deals.append(self._normalize_deal(item, "block"))
 
-        # Fetch bulk deals
         await asyncio.sleep(_RATE_LIMIT_DELAY)
         bulk_data = await self._api_get("/api/bulk-deal")
         if bulk_data and isinstance(bulk_data, dict):
@@ -518,11 +536,14 @@ class NSEOfficialSource(NewsSource):
     def _normalize_deal(item: dict[str, Any], deal_type: str) -> dict[str, Any]:
         """Normalize a bulk/block deal entry to a consistent dict.
 
-        NSE has shipped at least two different field naming
+        NSE has shipped at least three different field naming
         conventions for this endpoint over time:
           - lowercase camel: symbol / clientName / buySell / quantity / tradePrice
-          - prefixed upper:   BD_SYMBOL / BD_CLIENT_NAME / BD_BUY_SELL /
-                              BD_QTY_TRD / BD_TP_WATP
+          - bulk-prefixed:   BD_SYMBOL / BD_CLIENT_NAME / BD_BUY_SELL /
+                             BD_QTY_TRD / BD_TP_WATP   (legacy /api/bulk-deal)
+          - block-prefixed:  BC_SYMBOL / BC_CLIENT_NAME / BC_BUY_SELL /
+                             BC_QTY_TRD / BC_TP_WATP   (legacy /api/block-deal +
+                             current snapshot-capital-market-largedeal payload)
         Try the candidates in order and use the first non-empty hit.
         Without this, a schema change silently fills the table with
         rows that have only a symbol and "block"/"bulk" type, every
@@ -536,13 +557,22 @@ class NSEOfficialSource(NewsSource):
             return default
 
         return {
-            "symbol": str(_first("symbol", "BD_SYMBOL", "tradingSymbol", default="")),
+            "symbol": str(_first(
+                "symbol", "BD_SYMBOL", "BC_SYMBOL", "tradingSymbol", default="",
+            )),
             "deal_type": deal_type,
-            "client_name": str(_first("clientName", "BD_CLIENT_NAME", default="")),
-            "buy_sell": str(_first("buySell", "BD_BUY_SELL", default="")),
-            "quantity": _first("quantity", "qty", "BD_QTY_TRD", default=None),
+            "client_name": str(_first(
+                "clientName", "BD_CLIENT_NAME", "BC_CLIENT_NAME", default="",
+            )),
+            "buy_sell": str(_first(
+                "buySell", "BD_BUY_SELL", "BC_BUY_SELL", default="",
+            )),
+            "quantity": _first(
+                "quantity", "qty", "BD_QTY_TRD", "BC_QTY_TRD", default=None,
+            ),
             "trade_price": _first(
-                "tradePrice", "weightedAvgPrice", "BD_TP_WATP", default=None,
+                "tradePrice", "weightedAvgPrice",
+                "BD_TP_WATP", "BC_TP_WATP", default=None,
             ),
         }
 
