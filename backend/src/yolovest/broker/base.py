@@ -19,6 +19,14 @@ class BrokerBase(ABC):
         """Exchange a request token for an authenticated session (daily re-auth)."""
         ...
 
+    async def logout(self) -> None:
+        """Drop any cached session state so the next is_authenticated()
+        check returns False. Default no-op for brokers without a
+        persistent session concept (e.g. paper). Subclasses should
+        override when they hold a token or DB-persisted state.
+        """
+        return None
+
     @abstractmethod
     async def place_order(
         self,

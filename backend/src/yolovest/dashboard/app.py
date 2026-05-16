@@ -1649,6 +1649,28 @@ def create_app(ctx: AppContext) -> FastAPI:
             logger.warning("Gemini ping failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
+    @app.post("/api/integrations/zerodha/logout")
+    async def logout_zerodha(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Drop the cached Kite access token (and the persisted one) so
+        the broker reports as unauthenticated until the next manual
+        re-auth. Also stops the live tick stream if it was running on
+        the now-stale token — the ticker holds the token from process
+        boot and won't pick up a fresh one without a restart, so it's
+        cleaner to let the user re-auth and explicitly restart than to
+        keep a half-alive WS open.
+        """
+        await ctx.broker.logout()
+        ticker = getattr(ctx, "ticker", None)
+        if ticker is not None:
+            try:
+                await ticker.stop()
+            except Exception:
+                logger.debug("Ticker stop on logout failed", exc_info=True)
+            ctx.ticker = None  # type: ignore[assignment]
+        return {"success": True}
+
     @app.post("/api/integrations/zerodha/authenticate")
     async def authenticate_zerodha(
         body: dict[str, Any],

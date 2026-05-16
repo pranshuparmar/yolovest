@@ -158,6 +158,28 @@ class ZerodhaBroker(BrokerBase):
             logger.exception("Kite authentication failed")
             return False
 
+    async def logout(self) -> None:
+        """Drop the cached access token and clear the persisted one so
+        the next is_authenticated() check returns False and the UI
+        flips to "Not authenticated".
+
+        Idempotent. Does NOT call any Kite logout endpoint — Kite
+        Connect's REST API has no per-token invalidate, tokens expire
+        at the next 6:00 AM IST cycle regardless. What we're doing
+        here is purely local: forget the token, invalidate the auth
+        cache, and wipe the system_state row that restore_session()
+        reads from on next boot.
+        """
+        self._access_token = None
+        self._auth_cache_valid_until = 0.0
+        self._kite = None
+        if self._db is not None:
+            try:
+                await self._db.set_system_state("kite_access_token", "")
+            except Exception:
+                logger.debug("Failed to clear persisted Kite token", exc_info=True)
+        logger.info("Kite session cleared locally")
+
     async def restore_session(self) -> bool:
         """Restore Kite session from persisted access token (after restart)."""
         if not self._db or not self._api_key:

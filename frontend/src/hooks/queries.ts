@@ -294,6 +294,14 @@ export function useAuthenticateZerodha() {
   });
 }
 
+export function useLogoutZerodha() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.logoutZerodha,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }),
+  });
+}
+
 export function useReloadConfig() {
   const qc = useQueryClient();
   return useMutation({

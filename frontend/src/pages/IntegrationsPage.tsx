@@ -3,6 +3,7 @@ import {
   useIntegrations,
   usePingGemini,
   useAuthenticateZerodha,
+  useLogoutZerodha,
   useTestTelegram,
   useSendTelegram,
   useChangePassword,
@@ -46,14 +47,16 @@ function ActionButton({
   onClick: () => void;
   loading: boolean;
   children: React.ReactNode;
-  variant?: "default" | "primary";
+  variant?: "default" | "primary" | "danger";
 }) {
   const base =
     "px-3 py-1.5 rounded text-sm font-medium disabled:opacity-50 transition-colors";
   const styles =
     variant === "primary"
       ? `${base} bg-emerald-600 hover:bg-emerald-700 text-white`
-      : `${base} bg-gray-700 hover:bg-gray-600 text-gray-200`;
+      : variant === "danger"
+        ? `${base} bg-red-700 hover:bg-red-600 text-white`
+        : `${base} bg-gray-700 hover:bg-gray-600 text-gray-200`;
   return (
     <button onClick={onClick} disabled={loading} className={styles}>
       {loading ? "..." : children}
@@ -75,6 +78,7 @@ export function IntegrationsPage() {
 
   const pingGemini = usePingGemini();
   const authZerodha = useAuthenticateZerodha();
+  const logoutZerodha = useLogoutZerodha();
   const testTelegram = useTestTelegram();
   const sendTelegram = useSendTelegram();
   const updateConfig = useUpdateConfig();
@@ -276,6 +280,20 @@ export function IntegrationsPage() {
             </div>
             {authZerodha.data && (
               <ResultToast success={authZerodha.data.success} error={authZerodha.data.error} />
+            )}
+            {zerodha.connected && (
+              <ActionButton
+                onClick={() => {
+                  if (!window.confirm(
+                    "Drop the cached Kite token? Trading will be blocked until you re-authenticate, and the live tick stream will stop.",
+                  )) return;
+                  logoutZerodha.mutate();
+                }}
+                loading={logoutZerodha.isPending}
+                variant="danger"
+              >
+                Logout Kite
+              </ActionButton>
             )}
           </div>
         </div>

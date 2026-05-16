@@ -180,6 +180,11 @@ export const api = {
       body: JSON.stringify({ request_token: requestToken }),
     }),
 
+  logoutZerodha: () =>
+    apiFetch<{ success: boolean }>("/api/integrations/zerodha/logout", {
+      method: "POST",
+    }),
+
   testTelegram: () =>
     apiFetch<ActionResult>("/api/integrations/telegram/test", { method: "POST" }),
 
