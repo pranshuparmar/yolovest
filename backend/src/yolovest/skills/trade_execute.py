@@ -32,6 +32,41 @@ from yolovest.timezone import now_ist
 logger = logging.getLogger(__name__)
 
 
+def _reanchor_levels(
+    signal: dict[str, Any], fill_price: float,
+) -> tuple[float, float, float]:
+    """Shift `target_price` and `stop_loss_price` by the entry-slippage
+    delta so they sit at the same ATR-multiplier distance from the
+    actual fill that they sat from the predicted entry.
+
+    Without this, a small adverse slippage (e.g. SELL filled 0.2%
+    below the predicted entry) silently flips the trade's intended
+    R:R — the SL distance widens and the target distance shrinks even
+    though the model's geometry was 2:1.
+
+    Returns (new_target, new_stop_loss, delta). When fill_price isn't
+    available (zero / non-finite / no slippage), returns the original
+    levels and delta=0 so the caller can skip any modify_order step.
+    """
+    try:
+        entry = float(signal.get("entry_price") or 0)
+        fill = float(fill_price or 0)
+        target = float(signal.get("target_price") or 0)
+        sl = float(signal.get("stop_loss_price") or 0)
+    except (TypeError, ValueError):
+        return (
+            float(signal.get("target_price") or 0),
+            float(signal.get("stop_loss_price") or 0),
+            0.0,
+        )
+    if entry <= 0 or fill <= 0 or target <= 0 or sl <= 0:
+        return target, sl, 0.0
+    delta = fill - entry
+    if delta == 0:
+        return target, sl, 0.0
+    return round(target + delta, 2), round(sl + delta, 2), delta
+
+
 def _signal_dedup_key(signal: dict[str, Any], mode: str = "paper") -> str:
     """Generate a dedup key for a signal to prevent duplicate order placement.
 
@@ -148,10 +183,17 @@ class TradeExecuteSkill(SkillBase):
 
         slippage = abs(fill_price - entry)
 
+        # Reanchor target/SL to the actual fill so the simulated trade
+        # is managed at the same ATR-distance from the fill that the
+        # model intended from the predicted entry.
+        reanchored_target, reanchored_sl, _ = _reanchor_levels(
+            {**signal, "entry_price": entry}, fill_price,
+        )
+
         # Estimate transaction costs for realistic paper PnL
         product = signal.get("product", "MIS")
         est_costs = compute_transaction_costs(
-            fill_price, signal["target_price"], actual_qty,
+            fill_price, reanchored_target, actual_qty,
             product=product, cost_config=self.ctx.config.transaction_costs,
         )
 
@@ -161,8 +203,8 @@ class TradeExecuteSkill(SkillBase):
             "entry_price": entry,
             "fill_price": round(fill_price, 2),
             "quantity": actual_qty,
-            "stop_loss_price": signal["stop_loss_price"],
-            "target_price": signal["target_price"],
+            "stop_loss_price": reanchored_sl,
+            "target_price": reanchored_target,
             "product": signal.get("product", "MIS"),
             "status": "open",
             "mode": "paper",
@@ -347,13 +389,30 @@ class TradeExecuteSkill(SkillBase):
                         ) / actual_qty
                         order_id = leg1_order_id  # primary order for tracking
 
+                    # Reanchor target/SL to the actual fill so the
+                    # resting SL and the downstream GTT/MIS-OCO target
+                    # sit at the same ATR-distance from the fill that
+                    # the model intended from the predicted entry.
+                    reanchored_target, reanchored_sl, delta = _reanchor_levels(
+                        signal, fill_price,
+                    )
+                    if delta:
+                        logger.info(
+                            "trade-execute: reanchored levels for %s by ₹%.2f "
+                            "(entry %.2f → fill %.2f): SL %.2f → %.2f, target %.2f → %.2f",
+                            signal["symbol"], delta,
+                            signal["entry_price"], fill_price,
+                            signal["stop_loss_price"], reanchored_sl,
+                            signal["target_price"], reanchored_target,
+                        )
+
                     # Place SL-M (stop-loss market) order for actual filled quantity
                     sl_order_id = await self.ctx.broker.place_order(
                         symbol=signal["symbol"],
                         side=sl_side,
                         quantity=actual_qty,
                         order_type="SL-M",
-                        trigger_price=signal["stop_loss_price"],
+                        trigger_price=reanchored_sl,
                         product=product,
                         tag="yv-sl",
                     )
@@ -366,8 +425,8 @@ class TradeExecuteSkill(SkillBase):
                         "entry_price": signal["entry_price"],
                         "fill_price": fill_price,
                         "quantity": actual_qty,
-                        "stop_loss_price": signal["stop_loss_price"],
-                        "target_price": signal["target_price"],
+                        "stop_loss_price": reanchored_sl,
+                        "target_price": reanchored_target,
                         "order_id": order_id,
                         "sl_order_id": sl_order_id,
                         "product": product,
@@ -483,14 +542,50 @@ class TradeExecuteSkill(SkillBase):
                     fill_price = order_status.get("average_price") or signal["entry_price"]
                     slippage = abs(fill_price - signal["entry_price"])
 
+                    # Reanchor target/SL to the actual fill. The SL was
+                    # placed before the fill was known, so modify it in
+                    # place via kite.modify_order. Target is enforced
+                    # downstream by GTT/MIS-OCO using the trade dict's
+                    # target_price below.
+                    reanchored_target, reanchored_sl, delta = _reanchor_levels(
+                        signal, fill_price,
+                    )
+                    if delta and sl_order_id:
+                        try:
+                            await self.ctx.broker.modify_sl_order(
+                                sl_order_id, reanchored_sl,
+                            )
+                            logger.info(
+                                "trade-execute: reanchored levels for %s by ₹%.2f "
+                                "(entry %.2f → fill %.2f): SL %.2f → %.2f, "
+                                "target %.2f → %.2f",
+                                signal["symbol"], delta,
+                                signal["entry_price"], fill_price,
+                                signal["stop_loss_price"], reanchored_sl,
+                                signal["target_price"], reanchored_target,
+                            )
+                        except Exception:
+                            # Modify failed — fall back to original SL.
+                            # Position-monitor's client-side detection
+                            # remains a safety net so we're not
+                            # exposed; just log loudly.
+                            logger.warning(
+                                "trade-execute: failed to reanchor SL for %s "
+                                "(order_id=%s); keeping original %.2f",
+                                signal["symbol"], sl_order_id,
+                                signal["stop_loss_price"], exc_info=True,
+                            )
+                            reanchored_sl = signal["stop_loss_price"]
+                            reanchored_target = signal["target_price"]
+
                     trade = {
                         "symbol": signal["symbol"],
                         "signal_type": signal["signal_type"],
                         "entry_price": signal["entry_price"],
                         "fill_price": fill_price,
                         "quantity": actual_qty,
-                        "stop_loss_price": signal["stop_loss_price"],
-                        "target_price": signal["target_price"],
+                        "stop_loss_price": reanchored_sl,
+                        "target_price": reanchored_target,
                         "order_id": order_id,
                         "sl_order_id": sl_order_id,
                         "product": product,

@@ -116,6 +116,16 @@ class ZerodhaBroker(BrokerBase):
         self._circuit_breaker = BrokerCircuitBreaker(
             failure_threshold=5, cooldown_sec=30.0,
         )
+        # Per-symbol tick-size cache built from kite.instruments("NSE")
+        # on first use. NSE equity tick sizes are not uniform — most are
+        # 0.05 but several (price < 250, F&O underlyings) use 0.10, and
+        # a handful of penny stocks use 0.01. Sending an order with a
+        # price/trigger that isn't a multiple of the symbol's tick size
+        # gets rejected by Kite with "Tick size for this script is X.YY".
+        # Default to 0.05 on cache miss to match the legacy behaviour
+        # for the common case.
+        self._tick_size_cache: dict[str, float] = {}
+        self._tick_size_cache_warmed: bool = False
         # Paper mode state
         self._paper_orders: dict[str, dict[str, Any]] = {}
         self._paper_order_counter = 0
@@ -376,8 +386,54 @@ class ZerodhaBroker(BrokerBase):
 
     @staticmethod
     def _tick_round(price: float, tick: float = 0.05) -> float:
-        """Snap a price to the instrument's tick grid (NSE equity default 0.05)."""
+        """Snap a price to a tick grid. Caller is responsible for
+        passing the right tick; defaults to 0.05 (the most common NSE
+        equity tick) when the per-symbol tick is unknown.
+        """
+        if tick <= 0:
+            tick = 0.05
         return round(round(price / tick) * tick, 2)
+
+    async def _ensure_tick_size_cache(self) -> None:
+        """Lazy-warm the per-symbol tick-size cache from
+        kite.instruments("NSE"). Returns once the cache is populated;
+        safe to call repeatedly — subsequent calls are no-ops.
+
+        The instrument master is ~5MB and only downloaded once per
+        broker lifetime. On failure (no auth, transient), cache stays
+        empty and callers fall back to the default 0.05 tick. Better to
+        place an order with a wrong tick that Kite rejects with a clear
+        message than to silently block trading on a transient API hiccup.
+        """
+        if self._tick_size_cache_warmed or self._kite is None:
+            return
+        try:
+            async with self._rate_limiter:
+                instruments = await asyncio.to_thread(self._kite.instruments, "NSE")
+            for inst in instruments:
+                sym = inst.get("tradingsymbol")
+                tick = inst.get("tick_size")
+                if sym and tick:
+                    self._tick_size_cache[sym] = float(tick)
+            self._tick_size_cache_warmed = True
+            distinct = sorted({round(v, 2) for v in self._tick_size_cache.values()})
+            logger.info(
+                "Tick-size cache warmed: %d symbols, distinct ticks=%s",
+                len(self._tick_size_cache), distinct,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to warm tick-size cache; falling back to 0.05 default",
+                exc_info=True,
+            )
+
+    def _tick_for(self, symbol: str) -> float:
+        """Return the cached tick size for `symbol`, or 0.05 on miss."""
+        return self._tick_size_cache.get(symbol, 0.05)
+
+    def _tick_round_for(self, symbol: str, price: float) -> float:
+        """Snap `price` to the symbol's tick grid using the warmed cache."""
+        return self._tick_round(price, self._tick_for(symbol))
 
     async def _live_place_order(
         self,
@@ -404,6 +460,11 @@ class ZerodhaBroker(BrokerBase):
         if self._kite is None:
             raise RuntimeError("Not authenticated")
 
+        # Warm the per-symbol tick-size cache once. After this returns,
+        # _tick_round_for uses the symbol's real tick instead of the
+        # 0.05 default.
+        await self._ensure_tick_size_cache()
+
         # Convert MARKET → LIMIT at LTP ± buffer (Zerodha API restriction).
         # Try sources in order: market_data (ingester), kite.ltp (paid), kite.ohlc (paid).
         if order_type == "MARKET":
@@ -412,10 +473,10 @@ class ZerodhaBroker(BrokerBase):
                 buffer = 0.005 if self._kite_data_enabled else 0.01
                 if side == "BUY":
                     raw = ltp * (1 + buffer)
-                    price = self._tick_round(raw)
+                    price = self._tick_round_for(symbol, raw)
                 else:
                     raw = ltp * (1 - buffer)
-                    price = self._tick_round(raw)
+                    price = self._tick_round_for(symbol, raw)
                 order_type = "LIMIT"
                 logger.info(
                     "MARKET→LIMIT conversion: %s %s LTP=%.2f → price=%.2f",
@@ -454,9 +515,9 @@ class ZerodhaBroker(BrokerBase):
         # default; values computed from ATR, percentages, or model outputs
         # rarely land on the tick grid.
         if price is not None:
-            price = self._tick_round(price)
+            price = self._tick_round_for(symbol, price)
         if trigger_price is not None:
-            trigger_price = self._tick_round(trigger_price)
+            trigger_price = self._tick_round_for(symbol, trigger_price)
 
         kite_side = "BUY" if side == "BUY" else "SELL"
         params: dict[str, Any] = {
@@ -634,11 +695,12 @@ class ZerodhaBroker(BrokerBase):
         if self._kite is None:
             raise RuntimeError("Not authenticated")
 
+        await self._ensure_tick_size_cache()
         kite_side = "BUY" if side == "BUY" else "SELL"
-        st_trig = self._tick_round(stoploss_trigger)
-        st_lim = self._tick_round(stoploss_limit)
-        tg_trig = self._tick_round(target_trigger)
-        tg_lim = self._tick_round(target_limit)
+        st_trig = self._tick_round_for(symbol, stoploss_trigger)
+        st_lim = self._tick_round_for(symbol, stoploss_limit)
+        tg_trig = self._tick_round_for(symbol, target_trigger)
+        tg_lim = self._tick_round_for(symbol, target_limit)
 
         legs = [
             {
@@ -663,7 +725,7 @@ class ZerodhaBroker(BrokerBase):
                 tradingsymbol=symbol,
                 exchange="NSE",
                 trigger_values=[st_trig, tg_trig],
-                last_price=float(self._tick_round(last_price)),
+                last_price=float(self._tick_round_for(symbol, last_price)),
                 orders=legs,
             )
 
@@ -706,11 +768,12 @@ class ZerodhaBroker(BrokerBase):
         if self._kite is None:
             raise RuntimeError("Not authenticated")
 
+        await self._ensure_tick_size_cache()
         kite_side = "BUY" if side == "BUY" else "SELL"
-        st_trig = self._tick_round(stoploss_trigger)
-        st_lim = self._tick_round(stoploss_limit)
-        tg_trig = self._tick_round(target_trigger)
-        tg_lim = self._tick_round(target_limit)
+        st_trig = self._tick_round_for(symbol, stoploss_trigger)
+        st_lim = self._tick_round_for(symbol, stoploss_limit)
+        tg_trig = self._tick_round_for(symbol, target_trigger)
+        tg_lim = self._tick_round_for(symbol, target_limit)
 
         legs = [
             {
@@ -736,7 +799,7 @@ class ZerodhaBroker(BrokerBase):
                 tradingsymbol=symbol,
                 exchange="NSE",
                 trigger_values=[st_trig, tg_trig],
-                last_price=float(self._tick_round(last_price)),
+                last_price=float(self._tick_round_for(symbol, last_price)),
                 orders=legs,
             )
 
