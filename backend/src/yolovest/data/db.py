@@ -25,6 +25,22 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
 
 
+class DuplicateSignalError(Exception):
+    """Raised when a trade insert collides with an existing
+    trades.signal_id (the UNIQUE index added in migration 042). Lets
+    trade-execute recognise "this signal already produced a trade"
+    and return the existing row instead of crashing the heartbeat.
+    """
+
+    def __init__(self, signal_id: int, existing_trade_id: str) -> None:
+        super().__init__(
+            f"signal_id={signal_id} already attached to trade "
+            f"{existing_trade_id}",
+        )
+        self.signal_id = signal_id
+        self.existing_trade_id = existing_trade_id
+
+
 class Database:
     """Async SQLite database with WAL mode, read/write separation, and migration support.
 
@@ -1029,16 +1045,21 @@ class Database:
     # Signals
     # ------------------------------------------------------------------
 
-    async def insert_signal(self, signal: dict[str, Any]) -> None:
+    async def insert_signal(self, signal: dict[str, Any]) -> int:
         """Persist a generated signal. Caller should set `mode` to the
         active trading mode so bulk-delete and analytics can scope by it.
         attribution_json holds the top-N feature contributions surfaced
         on TradeDetailPage; None when the ML layer couldn't compute
         them (e.g. booster unreachable through calibration wrapper).
+
+        Returns the autoincrement id of the inserted row. trade-execute
+        carries this id onto the trade row so the UNIQUE index on
+        trades.signal_id can enforce one-trade-per-signal at the DB
+        layer (defence-in-depth against a missed in-memory dedup).
         """
         attribution = signal.get("attribution")
         attribution_json = json.dumps(attribution) if attribution else None
-        await self.conn.execute(
+        cursor = await self.conn.execute(
             "INSERT INTO signals (symbol, signal_type, entry_price, target_price, "
             "stop_loss_price, position_size, confidence_score, model_version, "
             "features_snapshot, mode, attribution_json, created_at) "
@@ -1058,6 +1079,7 @@ class Database:
             ),
         )
         await self.conn.commit()
+        return int(cursor.lastrowid or 0)
 
     async def update_signal_disposition(
         self,
@@ -2818,7 +2840,7 @@ class Database:
             "quantity", "stop_loss_price", "target_price", "order_id", "sl_order_id",
             "product", "mode", "status", "slippage",
         ]
-        optional_cols = ["estimated_costs", "expected_holding_days"]
+        optional_cols = ["estimated_costs", "expected_holding_days", "signal_id"]
         insert_cols = base_cols + [c for c in optional_cols if c in trade_columns] + ["created_at"]
         placeholders = ", ".join("?" for _ in insert_cols)
         col_names = ", ".join(insert_cols)
@@ -2836,6 +2858,29 @@ class Database:
             }[c]
             for c in insert_cols
         )
+
+        # Idempotency pre-check. The trades.signal_id UNIQUE index
+        # (migration 042) is the hard guarantee; this SELECT is the
+        # graceful-error path so callers get a DuplicateSignalError
+        # instead of a raw IntegrityError. trade-execute is the only
+        # writer that sets signal_id and it processes signals
+        # sequentially per heartbeat, so the TOCTOU window between
+        # this SELECT and the INSERT below is effectively zero. If a
+        # parallel writer ever appears, the UNIQUE index still catches
+        # the duplicate — the caller just sees an IntegrityError
+        # bubble up instead of the typed DuplicateSignalError.
+        sig_id = trade.get("signal_id")
+        if sig_id:
+            cur = await self.read_conn.execute(
+                "SELECT trade_id FROM trades WHERE signal_id = ?",
+                (int(sig_id),),
+            )
+            row = await cur.fetchone()
+            if row:
+                raise DuplicateSignalError(
+                    signal_id=int(sig_id),
+                    existing_trade_id=str(row[0]),
+                )
 
         await self.conn.execute("SAVEPOINT insert_trade")
         try:

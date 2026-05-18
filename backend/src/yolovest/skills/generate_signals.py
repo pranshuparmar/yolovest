@@ -277,6 +277,36 @@ class GenerateSignalsSkill(SkillBase):
                     logger.info("Insufficient daily data for %s (%d bars)", symbol, len(daily_bars))
                     continue
 
+                # Staleness gate. If the latest persisted daily bar is
+                # more than `max_signal_data_age_trading_days` trading
+                # sessions behind the most recent completed session,
+                # signals built on this data would be reasoning about
+                # stale market state — reject so a delisted / fetch-
+                # broken symbol can't produce stale signals every
+                # heartbeat.
+                latest_bar_date = daily_bars[-1].timestamp.date()
+                expected_freshest = self.ctx.market_hours.most_recent_completed_trading_day(now)
+                missing = self.ctx.market_hours.trading_days_missing_after(
+                    latest_bar_date, expected_freshest,
+                )
+                max_age = self.ctx.config.market_data.max_signal_data_age_trading_days
+                if missing > max_age:
+                    filter_counts.setdefault("stale_data", 0)
+                    filter_counts["stale_data"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "stale_data",
+                        "detail": (
+                            f"latest bar {latest_bar_date} is {missing} trading "
+                            f"days behind {expected_freshest} (max {max_age})"
+                        ),
+                    })
+                    logger.info(
+                        "Skipping %s — latest bar %s is %d trading days "
+                        "behind %s (threshold %d)",
+                        symbol, latest_bar_date, missing, expected_freshest, max_age,
+                    )
+                    continue
+
                 features = compute_features(daily_bars, indicator_cfg)
                 if not features:
                     filter_counts["feature_computation_failed"] += 1
@@ -576,7 +606,13 @@ class GenerateSignalsSkill(SkillBase):
                     filter_counts["passed"] += 1
                     outcome_tracker[symbol] = True
                     signal.setdefault("mode", self.ctx.config.mode)
-                    await self.ctx.db.insert_signal(signal)
+                    signal_id = await self.ctx.db.insert_signal(signal)
+                    if signal_id:
+                        # Carry the row id forward so trade-execute can
+                        # write it on the trade and the UNIQUE index
+                        # rejects a duplicate execution of the same
+                        # signal under restart / retry races.
+                        signal["signal_id"] = signal_id
                     signals_generated.append(signal)
                     logger.info(
                         "PASSED %s for %s @ %.2f (%s)",

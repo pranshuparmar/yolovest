@@ -97,6 +97,15 @@ class MarketDataConfig(BaseModel):
     sentiment_ttl_hours: int = 48  # sentiment older than this is ignored in scanning
     backfill_days: int = 1095  # daily-bar history window for backfill-data and ingest-universe
     intraday_backfill_days: int = 365  # 5-minute-bar history window for backfill-intraday
+    # Reject a symbol from signal generation when its latest daily bar
+    # is older than this many trading days behind the most recent
+    # completed trading day. Default 1 covers the normal "mid-session
+    # ingest just hasn't run yet" case while still catching the
+    # FEDERALBNK-style "data is 2+ trading days stale" silence the
+    # YFinance provider used to flow through unchecked. 0 = strict
+    # (latest bar must be the most recent completed session). Set to
+    # a high number to disable the gate.
+    max_signal_data_age_trading_days: int = 1
 
 
 class HeartbeatConfig(BaseModel):

@@ -26,6 +26,7 @@ import math
 from typing import Any
 
 from yolovest.costs import compute_transaction_costs
+from yolovest.data.db import DuplicateSignalError
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 from yolovest.timezone import now_ist
 
@@ -200,6 +201,7 @@ class TradeExecuteSkill(SkillBase):
         trade = {
             "symbol": signal["symbol"],
             "signal_type": signal["signal_type"],
+            "signal_id": signal.get("signal_id"),
             "entry_price": entry,
             "fill_price": round(fill_price, 2),
             "quantity": actual_qty,
@@ -216,7 +218,22 @@ class TradeExecuteSkill(SkillBase):
         if is_scaled:
             trade["scaled_entry"] = True
 
-        trade_id = await self.ctx.db.insert_trade(trade)
+        try:
+            trade_id = await self.ctx.db.insert_trade(trade)
+        except DuplicateSignalError as exc:
+            logger.warning(
+                "trade-execute: PAPER signal_id=%d already produced trade %s — "
+                "skipping (DB UNIQUE caught the retry)",
+                exc.signal_id, exc.existing_trade_id,
+            )
+            return SkillResult(
+                success=True, skill_name=self.name,
+                data={
+                    "skipped": True, "reason": "duplicate_signal_db",
+                    "signal_id": exc.signal_id,
+                    "existing_trade_id": exc.existing_trade_id,
+                },
+            )
         trade["trade_id"] = trade_id
         await self.ctx.notify.send_trade_alert(trade)
         await self.broadcast("trade_executed", {
@@ -422,6 +439,7 @@ class TradeExecuteSkill(SkillBase):
                     trade = {
                         "symbol": signal["symbol"],
                         "signal_type": signal["signal_type"],
+                        "signal_id": signal.get("signal_id"),
                         "entry_price": signal["entry_price"],
                         "fill_price": fill_price,
                         "quantity": actual_qty,
@@ -581,6 +599,7 @@ class TradeExecuteSkill(SkillBase):
                     trade = {
                         "symbol": signal["symbol"],
                         "signal_type": signal["signal_type"],
+                        "signal_id": signal.get("signal_id"),
                         "entry_price": signal["entry_price"],
                         "fill_price": fill_price,
                         "quantity": actual_qty,
@@ -615,7 +634,47 @@ class TradeExecuteSkill(SkillBase):
                     # COMPLETE/filled from Kite means the order filled — position is "open"
                     trade["status"] = "open"
 
-                trade_id = await self.ctx.db.insert_trade(trade)
+                try:
+                    trade_id = await self.ctx.db.insert_trade(trade)
+                except DuplicateSignalError as exc:
+                    # The signal_id already attaches to an existing
+                    # trade — this LIVE execution is a duplicate. Best
+                    # effort: cancel the broker order(s) we just placed
+                    # so the position doesn't get doubled. The existing
+                    # trade row still tracks the original execution.
+                    logger.error(
+                        "trade-execute: LIVE signal_id=%d already produced trade %s — "
+                        "cancelling duplicate broker orders %s / %s",
+                        exc.signal_id, exc.existing_trade_id,
+                        trade.get("order_id"), trade.get("sl_order_id"),
+                    )
+                    for oid in (trade.get("order_id"), trade.get("sl_order_id")):
+                        if oid:
+                            try:
+                                await self.ctx.broker.cancel_order(oid)
+                            except Exception:
+                                logger.warning(
+                                    "trade-execute: failed to cancel duplicate "
+                                    "order %s", oid, exc_info=True,
+                                )
+                    try:
+                        await self.ctx.notify.send(
+                            f"Duplicate signal execution caught at DB UNIQUE — "
+                            f"signal_id={exc.signal_id} maps to trade "
+                            f"{exc.existing_trade_id}; cancelled broker orders "
+                            f"{trade.get('order_id')} / {trade.get('sl_order_id')}",
+                            alert_type="errors",
+                        )
+                    except Exception:
+                        pass
+                    return SkillResult(
+                        success=True, skill_name=self.name,
+                        data={
+                            "skipped": True, "reason": "duplicate_signal_db",
+                            "signal_id": exc.signal_id,
+                            "existing_trade_id": exc.existing_trade_id,
+                        },
+                    )
                 trade["trade_id"] = trade_id
 
                 # For CNC trades, attach a broker-side OCO GTT for target +
@@ -763,6 +822,7 @@ class TradeExecuteSkill(SkillBase):
         trade = {
             "symbol": symbol,
             "signal_type": signal["signal_type"],
+            "signal_id": signal.get("signal_id"),
             "entry_price": signal["entry_price"],
             "fill_price": fill_price,
             "quantity": actual_qty,
@@ -776,7 +836,26 @@ class TradeExecuteSkill(SkillBase):
             "slippage": slippage,
             "origin": "system",
         }
-        trade_id = await self.ctx.db.insert_trade(trade)
+        try:
+            trade_id = await self.ctx.db.insert_trade(trade)
+        except DuplicateSignalError as exc:
+            # Reconcile path also competes with the normal path. If
+            # the signal_id is already attached to a trade, the
+            # existing row already covers the broker order we
+            # rediscovered — nothing to do here.
+            logger.warning(
+                "trade-execute: reconcile saw broker order for signal_id=%d, "
+                "but trade %s already attached — leaving as-is",
+                exc.signal_id, exc.existing_trade_id,
+            )
+            return SkillResult(
+                success=True, skill_name=self.name,
+                data={
+                    "skipped": True, "reason": "duplicate_signal_db",
+                    "signal_id": exc.signal_id,
+                    "existing_trade_id": exc.existing_trade_id,
+                },
+            )
         trade["trade_id"] = trade_id
         try:
             await self.ctx.notify.send_trade_alert(trade)

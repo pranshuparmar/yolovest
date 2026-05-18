@@ -382,6 +382,68 @@ class MarketHoursChecker:
         date_str = check_date.isoformat()
         return date_str in self._mh.holidays
 
+    def is_trading_day(self, check_date: date) -> bool:
+        """A date is a trading day when it's a weekday and not on the
+        configured NSE holiday list.
+        """
+        return check_date.weekday() < 5 and not self.is_holiday(check_date)
+
+    def most_recent_completed_trading_day(
+        self, now: datetime | None = None,
+    ) -> date:
+        """Return the most recent date whose trading session has closed.
+
+        - If `now` falls within today's market hours, today is in-progress
+          → return the previous trading day.
+        - If `now` is after today's close on a trading day → return today.
+        - Otherwise walk back day-by-day until we find a trading day.
+
+        Walks back at most 10 days to handle stacked holidays (e.g.
+        Diwali week + adjacent weekend). Used by the signal-gen
+        staleness gate to bound the "data should be at least this fresh"
+        target.
+        """
+        from datetime import timedelta as _td
+        if now is None:
+            now = self._now()
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=self._tz)
+        today = now.date()
+        # Today's session done?
+        if self.is_trading_day(today):
+            close_time = self._parse_time(self._mh.close)
+            if (today.isoformat() in self._mh.early_close_days):
+                close_time = self._parse_time(self._mh.early_close_days[today.isoformat()])
+            if now.time() >= close_time:
+                return today
+        # Walk back until a closed trading day is found.
+        d = today - _td(days=1)
+        for _ in range(10):
+            if self.is_trading_day(d):
+                return d
+            d -= _td(days=1)
+        return d
+
+    def trading_days_missing_after(self, start: date, end: date) -> int:
+        """Count trading days in (start, end] — i.e. the number of
+        expected trading sessions that fall AFTER `start` and up to
+        and including `end`. Returns 0 when start >= end.
+
+        Used by the signal-gen staleness gate to express "data goes
+        up to start; the freshest expected session is end; therefore
+        N trading sessions are missing from our store".
+        """
+        from datetime import timedelta as _td
+        if start >= end:
+            return 0
+        n = 0
+        d = start + _td(days=1)
+        while d <= end:
+            if self.is_trading_day(d):
+                n += 1
+            d += _td(days=1)
+        return n
+
     def get_square_off_time(self, check_date: date | None = None) -> time:
         """Get the square-off time, accounting for early close days."""
         if check_date is None:
