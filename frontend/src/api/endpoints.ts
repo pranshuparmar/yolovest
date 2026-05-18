@@ -504,6 +504,12 @@ export const api = {
   unquarantineSymbol: (symbol: string) =>
     apiFetch<{ success: boolean; symbol: string }>(`/api/quarantined-symbols/${symbol}`, { method: "DELETE" }),
 
+  bulkUnquarantineSymbols: (symbols: string[]) =>
+    apiFetch<{ success: boolean; removed: number; results: Record<string, boolean> }>(
+      "/api/quarantined-symbols/bulk-unblock",
+      { method: "POST", body: JSON.stringify({ symbols }) },
+    ),
+
   setReplacementSymbol: (symbol: string, replacement: string | null) =>
     apiFetch<{ success: boolean; symbol: string; replacement: string | null }>(
       `/api/quarantined-symbols/${symbol}/replacement`,

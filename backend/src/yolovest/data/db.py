@@ -4287,6 +4287,16 @@ class Database:
             "ssl", "tls",
             "http 5",  # 500, 502, 503, 504 — server-side, retry-safe
             " 502", " 503", " 504",
+            # Broker / data-provider auth failures. A logged-out Kite
+            # session would otherwise mass-quarantine every symbol of
+            # the universe over three consecutive heartbeats — every
+            # historical_data() call returns "Incorrect api_key or
+            # access_token" but none of those symbols are actually
+            # broken.
+            "incorrect `api_key`", "incorrect `access_token`",
+            "api_key or access_token", "access token", "token expired",
+            "tokenexception", "skipping kite call",
+            "token previously rejected",
         )
         return any(marker in msg for marker in transient_markers)
 

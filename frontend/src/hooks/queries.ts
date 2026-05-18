@@ -944,6 +944,16 @@ export function useUnquarantineSymbol() {
   });
 }
 
+export function useBulkUnquarantineSymbols() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (symbols: string[]) => api.bulkUnquarantineSymbols(symbols),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["quarantined-symbols"] });
+    },
+  });
+}
+
 export function useSetReplacementSymbol() {
   const qc = useQueryClient();
   return useMutation({

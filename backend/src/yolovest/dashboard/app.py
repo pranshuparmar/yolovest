@@ -3229,6 +3229,37 @@ def create_app(ctx: AppContext) -> FastAPI:
             logger.info("Unquarantined symbol %s", symbol.upper())
         return {"success": removed, "symbol": symbol.upper()}
 
+    @app.post("/api/quarantined-symbols/bulk-unblock")
+    async def bulk_unquarantine_symbols(
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Unquarantine many symbols in one round-trip.
+
+        Body: {"symbols": ["AAA", "BBB", ...]} (max 500). Returns
+        per-symbol success status. Used by the Data Management page's
+        multi-select bulk action when an auth outage or transient
+        upstream incident sent a wave of valid symbols into quarantine.
+        """
+        raw = body.get("symbols") or []
+        if not isinstance(raw, list):
+            raise HTTPException(status_code=400, detail="`symbols` must be a list")
+        if len(raw) > 500:
+            raise HTTPException(status_code=400, detail="Too many symbols (max 500)")
+        symbols = [str(s).strip().upper() for s in raw if str(s).strip()]
+        results: dict[str, bool] = {}
+        for sym in symbols:
+            try:
+                results[sym] = bool(await ctx.db.unquarantine_symbol(sym))
+            except Exception:
+                logger.warning("Failed to unquarantine %s", sym, exc_info=True)
+                results[sym] = False
+        removed = sum(1 for ok in results.values() if ok)
+        logger.info(
+            "Bulk-unquarantined %d/%d symbols", removed, len(symbols),
+        )
+        return {"success": True, "removed": removed, "results": results}
+
     @app.put("/api/quarantined-symbols/{symbol}/replacement")
     async def set_replacement_symbol(
         symbol: str,
