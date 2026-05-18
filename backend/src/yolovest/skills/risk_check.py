@@ -452,45 +452,27 @@ class RiskCheckSkill(SkillBase):
         if cfg.min_net_rr > 0:
             target = float(signal.get("target_price") or 0)
             if target > 0 and entry > 0:
-                from yolovest.costs import compute_transaction_costs
-                direction = 1 if signal.get("signal_type") == "BUY" else -1
-                gross_win = (target - entry) * direction * position_size
-                gross_loss = (entry - sl) * direction * position_size
-                # Costs flip with direction (for SELL the entry is the
-                # sell-side leg and target the buy-side cover), but
-                # round-trip totals are the same either way; pass them
-                # in order so STT-on-sell hits the correct leg.
-                costs = (
-                    compute_transaction_costs(
-                        entry_price=entry, exit_price=target,
-                        quantity=position_size, product=product,
-                        cost_config=getattr(self.ctx.config, "transaction_costs", None),
-                    )
-                    if direction > 0
-                    else compute_transaction_costs(
-                        entry_price=target, exit_price=entry,
-                        quantity=position_size, product=product,
-                        cost_config=getattr(self.ctx.config, "transaction_costs", None),
-                    )
+                from yolovest.costs import evaluate_net_rr
+                net_rr, costs, reason = evaluate_net_rr(
+                    signal_type=signal.get("signal_type", "BUY"),
+                    entry_price=entry,
+                    target_price=target,
+                    stop_loss_price=sl,
+                    quantity=position_size,
+                    product=product,
+                    cost_config=getattr(self.ctx.config, "transaction_costs", None),
                 )
-                net_win = gross_win - costs
-                net_loss = gross_loss + costs
-                if net_loss > 0 and net_win > 0:
-                    net_rr = net_win / net_loss
-                    if net_rr < cfg.min_net_rr:
-                        return self._reject(
-                            signal,
-                            f"Net R:R {net_rr:.2f} < {cfg.min_net_rr:.2f} "
-                            f"(gross ₹{gross_win:.0f} win / ₹{gross_loss:.0f} loss, "
-                            f"costs ₹{costs:.0f} round-trip on {position_size} qty)",
-                        )
-                elif net_win <= 0:
-                    # Costs already exceed the gross win — no setup
-                    # where this trades profitably.
+                if reason is not None:
+                    return self._reject(signal, reason)
+                if net_rr is not None and net_rr < cfg.min_net_rr:
+                    direction = 1 if signal.get("signal_type") == "BUY" else -1
+                    gross_win = (target - entry) * direction * position_size
+                    gross_loss = (entry - sl) * direction * position_size
                     return self._reject(
                         signal,
-                        f"Costs ₹{costs:.0f} exceed gross win ₹{gross_win:.0f} "
-                        f"({position_size} qty, target ₹{target:.2f})",
+                        f"Net R:R {net_rr:.2f} < {cfg.min_net_rr:.2f} "
+                        f"(gross ₹{gross_win:.0f} win / ₹{gross_loss:.0f} loss, "
+                        f"costs ₹{costs:.0f} round-trip on {position_size} qty)",
                     )
 
         logger.info(

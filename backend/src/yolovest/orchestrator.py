@@ -375,6 +375,55 @@ class HeartbeatOrchestrator:
             new_target = round(old_target + delta, 2)
             new_sl = round(old_sl + delta, 2)
             new_entry = round(ltp, 2)
+
+            # Re-check the cost-adjusted R:R gate against the
+            # reanchored levels using the same arithmetic risk-check
+            # ran at signal time. If the move (or any partial
+            # truncation from rounding) has dropped the trade below
+            # the threshold, expire instead of pushing a setup the
+            # risk policy would refuse on approval.
+            min_net_rr = float(getattr(self._ctx.config.risk, "min_net_rr", 0))
+            if min_net_rr > 0:
+                from yolovest.costs import evaluate_net_rr
+                product = row.get("product", "MIS")
+                qty = int(row.get("position_size") or 0)
+                net_rr, _costs, fail_reason = evaluate_net_rr(
+                    signal_type=sig,
+                    entry_price=new_entry,
+                    target_price=new_target,
+                    stop_loss_price=new_sl,
+                    quantity=qty,
+                    product=product,
+                    cost_config=getattr(self._ctx.config, "transaction_costs", None),
+                )
+                if fail_reason is not None or (
+                    net_rr is not None and net_rr < min_net_rr
+                ):
+                    rr_str = (
+                        f"{net_rr:.2f}" if net_rr is not None else "n/a"
+                    )
+                    reason = (
+                        f"Reanchored R:R {rr_str} < {min_net_rr:.2f} "
+                        f"({fail_reason})" if fail_reason
+                        else f"Reanchored R:R {rr_str} < {min_net_rr:.2f}"
+                    )
+                    try:
+                        if await self._ctx.db.expire_pending_trade(
+                            row["id"], reason,
+                        ):
+                            expired.append({
+                                "id": row["id"], "symbol": symbol,
+                                "signal_type": sig,
+                                "entry_price": old_entry, "ltp": ltp,
+                                "reason": reason,
+                            })
+                    except Exception:
+                        logger.debug(
+                            "reprice: expire on R:R fail for %s", symbol,
+                            exc_info=True,
+                        )
+                    continue
+
             try:
                 ok = await self._ctx.db.update_pending_trade_levels(
                     row["id"],
