@@ -122,6 +122,17 @@ class PositionMonitorSkill(SkillBase):
         # position. Mutates local_positions in place.
         await self._reconcile_gtts(local_positions)
 
+        # Heal orphan broker-side exits. Positions whose DB row has no
+        # gtt_id / target_order_id / sl_order_id but whose symbol has an
+        # active GTT or open SL/LIMIT exit at the broker would otherwise
+        # cascade through client-side detection and double-place an
+        # exit, leaving the broker's resting order to fire afterwards
+        # for a duplicate transaction. Pull the broker state once, then
+        # either heal the DB row when the orphan can be safely matched
+        # back, or flag the position as "broker-partial-protected" so
+        # client-side stays quiet until the user investigates.
+        await self._reconcile_orphan_broker_exits(local_positions)
+
         discrepancies = self._reconcile(local_positions, broker_positions)
 
         # Recover ghost positions: local DB says open, broker says closed.
@@ -225,6 +236,19 @@ class PositionMonitorSkill(SkillBase):
                     await self._maybe_trail_mis_sl(
                         pos, entry, sl, current_price, risk_per_share, target,
                     )
+                await self.ctx.db.update_unrealized_pnl(
+                    pos["trade_id"], current_price,
+                )
+                continue
+
+            # Broker has a resting exit we couldn't safely pair up
+            # (e.g. an MIS SL exists but the matching target LIMIT was
+            # never placed, or the row is missing both order_ids).
+            # _reconcile_orphan_broker_exits set this transient marker
+            # — defer to the broker so a client-side exit can't
+            # double-place, but keep the warning visible in the audit
+            # log so the user notices.
+            if pos.get("_broker_partial_protected"):
                 await self.ctx.db.update_unrealized_pnl(
                     pos["trade_id"], current_price,
                 )
@@ -918,6 +942,152 @@ class PositionMonitorSkill(SkillBase):
     _GTT_DEAD_STATES = {
         "triggered", "cancelled", "rejected", "expired", "disabled", "deleted",
     }
+
+    @staticmethod
+    def _classify_exit_order(
+        order: dict[str, Any], signal_type: str,
+    ) -> str | None:
+        """Classify a broker open order as 'sl', 'target', or None for
+        the purpose of orphan-exit reconciliation. An "exit" order is
+        one whose transaction_type opposes the position's entry side —
+        SELL for a BUY position, BUY for a SELL position — and whose
+        order_type matches the leg pattern we place at entry time
+        (SL/SL-M for the stop, LIMIT for the target).
+        """
+        order_type = (order.get("order_type") or "").upper()
+        side = (order.get("transaction_type") or "").upper()
+        expected_exit_side = "SELL" if signal_type == "BUY" else "BUY"
+        if side != expected_exit_side:
+            return None
+        if order_type in ("SL", "SL-M"):
+            return "sl"
+        if order_type == "LIMIT":
+            return "target"
+        return None
+
+    async def _reconcile_orphan_broker_exits(
+        self, positions: list[dict[str, Any]],
+    ) -> None:
+        """For positions whose DB row claims no broker-side exit is
+        attached, look at the broker's current GTT list and pending
+        orders. If we find a resting exit for the symbol, either heal
+        the DB row (when we can match it cleanly) or flag the in-memory
+        row as `_broker_partial_protected` so the client-side exit
+        path stays quiet for this cycle.
+
+        Paper mode is a no-op (paper broker doesn't manage broker-side
+        exits).
+        """
+        if not positions or self.ctx.config.mode == "paper":
+            return
+        candidates = [
+            p for p in positions
+            if not p.get("gtt_id")
+            and not (p.get("target_order_id") and p.get("sl_order_id"))
+        ]
+        if not candidates:
+            return
+
+        try:
+            gtts = await self.ctx.broker.get_gtts()
+        except Exception:
+            logger.debug("orphan reconcile: get_gtts failed", exc_info=True)
+            gtts = []
+        try:
+            pending = await self.ctx.broker.get_pending_orders()
+        except Exception:
+            logger.debug("orphan reconcile: get_pending_orders failed", exc_info=True)
+            pending = []
+
+        gtts_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for g in gtts or []:
+            status = (g.get("status") or "").lower()
+            if status not in self._GTT_LIVE_STATES:
+                continue
+            cond = g.get("condition") or {}
+            sym = cond.get("tradingsymbol") or g.get("tradingsymbol")
+            if sym:
+                gtts_by_symbol.setdefault(str(sym), []).append(g)
+
+        pending_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for o in pending or []:
+            sym = o.get("tradingsymbol")
+            if sym:
+                pending_by_symbol.setdefault(str(sym), []).append(o)
+
+        for pos in candidates:
+            symbol = pos.get("symbol") or ""
+            sig_type = pos.get("signal_type", "BUY")
+            product = (pos.get("product") or "").upper()
+
+            # --- CNC: heal from broker GTT list ---
+            if product == "CNC":
+                hits = gtts_by_symbol.get(symbol, [])
+                if hits:
+                    gtt_id = 0
+                    for g in hits:
+                        try:
+                            gtt_id = int(g.get("id") or g.get("trigger_id") or 0)
+                            if gtt_id:
+                                break
+                        except (TypeError, ValueError):
+                            continue
+                    if gtt_id:
+                        logger.warning(
+                            "position-monitor: orphan broker GTT %d for %s — "
+                            "healing local row to skip client-side exit",
+                            gtt_id, symbol,
+                        )
+                        pos["gtt_id"] = gtt_id
+                        try:
+                            await self.ctx.db.set_trade_gtt(pos["trade_id"], gtt_id)
+                        except Exception:
+                            logger.debug(
+                                "orphan reconcile: set_trade_gtt heal failed",
+                                exc_info=True,
+                            )
+                        continue
+
+            # --- MIS: heal full pair, or flag partial ---
+            if product == "MIS":
+                orders = pending_by_symbol.get(symbol, [])
+                target_oid: str | None = None
+                sl_oid: str | None = None
+                for o in orders:
+                    kind = self._classify_exit_order(o, sig_type)
+                    oid = o.get("order_id")
+                    if kind == "target" and not target_oid and oid:
+                        target_oid = str(oid)
+                    elif kind == "sl" and not sl_oid and oid:
+                        sl_oid = str(oid)
+                if target_oid and sl_oid:
+                    logger.warning(
+                        "position-monitor: orphan broker MIS OCO pair for %s "
+                        "(target=%s, sl=%s) — healing local row",
+                        symbol, target_oid, sl_oid,
+                    )
+                    pos["target_order_id"] = target_oid
+                    pos["sl_order_id"] = sl_oid
+                    try:
+                        await self.ctx.db.set_trade_target_order_id(
+                            pos["trade_id"], target_oid,
+                        )
+                        await self.ctx.db.set_trade_sl_order_id(
+                            pos["trade_id"], sl_oid,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "orphan reconcile: MIS heal failed", exc_info=True,
+                        )
+                    continue
+                if target_oid or sl_oid:
+                    logger.warning(
+                        "position-monitor: orphan partial broker exit for %s "
+                        "(target=%s, sl=%s) — deferring client-side exit to "
+                        "avoid duplicates; investigate at broker",
+                        symbol, target_oid or "—", sl_oid or "—",
+                    )
+                    pos["_broker_partial_protected"] = True
 
     async def _reconcile_gtts(self, positions: list[dict[str, Any]]) -> None:
         """For each open position with a `gtt_id`, look up the GTT at the
