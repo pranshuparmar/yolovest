@@ -4151,6 +4151,63 @@ class Database:
 
         return cursor.rowcount
 
+    async def update_pending_trade_levels(
+        self, trade_id: int, *,
+        entry_price: float, target_price: float, stop_loss_price: float,
+    ) -> bool:
+        """Re-anchor a pending trade's price levels in place.
+
+        Used by the per-heartbeat repricer when the underlying LTP
+        has drifted but stayed inside the drift band. The row's
+        `created_at` is intentionally NOT touched — the pending-age
+        expiry timer keeps ticking against the original queue time.
+        Returns True when the row was found and still pending.
+        """
+        cur = await self.conn.execute(
+            "UPDATE pending_trades SET "
+            "  entry_price = ?, target_price = ?, stop_loss_price = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (
+                round(float(entry_price), 2),
+                round(float(target_price), 2),
+                round(float(stop_loss_price), 2),
+                int(trade_id),
+            ),
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
+    async def expire_pending_trade(
+        self, trade_id: int, reason: str,
+    ) -> bool:
+        """Flip a single pending trade to status='expired' with a
+        reason logged via signal disposition. Used by the per-heartbeat
+        repricer when the LTP has already moved past target / SL / the
+        drift band so the queued levels no longer make sense.
+        """
+        cur = await self.conn.execute(
+            "SELECT symbol FROM pending_trades "
+            "WHERE id = ? AND status = 'pending'",
+            (int(trade_id),),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return False
+        await self.conn.execute(
+            "UPDATE pending_trades SET status = 'expired', "
+            "  decided_by = 'system', decided_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (now_utc().isoformat(), int(trade_id)),
+        )
+        await self.conn.commit()
+        try:
+            await self.update_signal_disposition(
+                row[0], "expired", f"pending repriced out: {reason}",
+            )
+        except Exception:
+            pass
+        return True
+
     # ------------------------------------------------------------------
     # Storage Stats & Manual Cleanup
     # ------------------------------------------------------------------
