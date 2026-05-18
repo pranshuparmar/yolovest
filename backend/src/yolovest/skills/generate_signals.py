@@ -799,21 +799,44 @@ class GenerateSignalsSkill(SkillBase):
             logger.debug("Balanced: swing model failed for %s: %s", symbol, swing_pred)
             swing_pred = None
 
-        # Filter out HOLD signals (confidence is meaningless for HOLD)
-        intra_conf = intra_pred.confidence if intra_pred and intra_pred.signal_type != "HOLD" else -1
-        swing_conf = swing_pred.confidence if swing_pred and swing_pred.signal_type != "HOLD" else -1
+        # Filter out HOLD signals (confidence is meaningless for HOLD).
+        # Compare margin-above-threshold (not raw confidence): the
+        # intraday model is trained on balanced labels (~29/43/28)
+        # while swing is HOLD-dominated (~7/87/6), so raw confidence
+        # is not comparable across them. Margin = how far above the
+        # model's effective gating threshold the prediction sits,
+        # which normalises for the per-model calibration.
+        def _margin(pred: Any, model_type: str) -> float:
+            if pred is None or pred.signal_type == "HOLD":
+                return -1.0
+            thresholds = self.ctx.ml.get_effective_thresholds(model_type)
+            if not thresholds:
+                # Legacy model without tuned thresholds — fall back to
+                # raw confidence (matches the pre-tuning behaviour).
+                return float(pred.confidence)
+            key = pred.signal_type.lower()  # "buy" / "sell"
+            threshold = float(thresholds.get(key, 0.5))
+            return float(pred.confidence) - threshold
 
-        if intra_conf < 0 and swing_conf < 0:
+        intra_margin = _margin(intra_pred, "intraday")
+        swing_margin = _margin(swing_pred, "swing")
+
+        if intra_margin < 0 and swing_margin < 0:
             # Both HOLD or both failed — return the swing HOLD (or intraday if no swing)
             prediction = swing_pred or intra_pred
             return prediction, fallback_period, fallback_product, fallback_days
 
-        if intra_conf >= swing_conf:
+        if intra_margin >= swing_margin:
             # Intraday wins
             logger.debug(
-                "Balanced %s: intraday wins (%.2f %s) vs swing (%.2f %s)",
-                symbol, intra_conf, intra_pred.signal_type,
-                swing_conf, swing_pred.signal_type if swing_pred else "N/A",
+                "Balanced %s: intraday wins (margin=%.3f %s @ %.2f) vs swing "
+                "(margin=%.3f %s @ %.2f)",
+                symbol, intra_margin,
+                intra_pred.signal_type if intra_pred else "N/A",
+                intra_pred.confidence if intra_pred else 0,
+                swing_margin,
+                swing_pred.signal_type if swing_pred else "N/A",
+                swing_pred.confidence if swing_pred else 0,
             )
             return intra_pred, "intraday", "MIS", 0
         else:
@@ -830,9 +853,13 @@ class GenerateSignalsSkill(SkillBase):
             )
             label = "swing" if expected_days <= 5 else "positional" if expected_days <= 15 else "long_term"
             logger.debug(
-                "Balanced %s: swing wins (%.2f %s) vs intraday (%.2f %s) — %s (%dd)",
-                symbol, swing_conf, swing_pred.signal_type,
-                intra_conf, intra_pred.signal_type if intra_pred else "N/A",
+                "Balanced %s: swing wins (margin=%.3f %s @ %.2f) vs intraday "
+                "(margin=%.3f %s @ %.2f) — %s (%dd)",
+                symbol, swing_margin, swing_pred.signal_type,
+                swing_pred.confidence if swing_pred else 0,
+                intra_margin,
+                intra_pred.signal_type if intra_pred else "N/A",
+                intra_pred.confidence if intra_pred else 0,
                 label, expected_days,
             )
             return swing_pred, label, "CNC", expected_days

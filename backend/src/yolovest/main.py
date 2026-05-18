@@ -319,7 +319,7 @@ def _build_ml(config: AppConfig, db: Any) -> Any:
         from yolovest.strategy.ml_signal import XGBoostSignalModel
 
         model_dir = getattr(config.strategy, "model_dir", "./models")
-        return XGBoostSignalModel(model_dir=model_dir, db=db)
+        return XGBoostSignalModel(model_dir=model_dir, db=db, config=config)
     except Exception:
         logger.warning("Failed to build ML provider, signals will be unavailable")
         return None

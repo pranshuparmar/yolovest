@@ -35,10 +35,20 @@ class XGBoostSignalModel(MLBase):
     for each. Models are serialized with joblib.
     """
 
-    def __init__(self, model_dir: str = "./models", db: Any = None) -> None:
+    def __init__(
+        self,
+        model_dir: str = "./models",
+        db: Any = None,
+        config: Any = None,
+    ) -> None:
         self.model_dir = Path(model_dir)
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.db = db
+        # Held weakly — only used to read the configured
+        # risk.tuned_threshold_max_diff at inference time. Hot-reload
+        # of config updates ctx.config in-place which this still
+        # tracks via the same reference.
+        self._config = config
 
         # Model slots
         self._intraday_model: Any | None = None
@@ -136,6 +146,60 @@ class XGBoostSignalModel(MLBase):
         if model_type == "swing":
             return self._swing_thresholds
         return None
+
+    def get_effective_thresholds(
+        self, model_type: str,
+    ) -> dict[str, float] | None:
+        """Public override of MLBase.get_effective_thresholds — see
+        base for semantics. Alias for the internal helper.
+        """
+        return self._get_effective_thresholds(model_type)
+
+    def _get_effective_thresholds(
+        self, model_type: str,
+    ) -> dict[str, float] | None:
+        """Return the model's tuned thresholds with the configured
+        max-diff cap applied. The walk-forward threshold sweep can pick
+        highly asymmetric (buy, sell) pairs that collapse the model
+        into one-class-only behaviour in production. We shrink both
+        toward their midpoint until the gap is within
+        risk.tuned_threshold_max_diff. Public-ish so the balanced-mode
+        chooser in generate_signals can use the same numbers for its
+        margin-above-threshold comparison.
+        """
+        thresholds = self._get_thresholds(model_type)
+        if not thresholds:
+            return None
+        try:
+            buy = float(thresholds.get("buy", 0.5))
+            sell = float(thresholds.get("sell", 0.5))
+        except (TypeError, ValueError):
+            return thresholds
+        max_diff = float(
+            getattr(getattr(self._config, "risk", None),
+                    "tuned_threshold_max_diff", 0.05)
+            if self._config is not None else 0.05
+        )
+        diff = abs(buy - sell)
+        if diff <= max_diff:
+            return {"buy": buy, "sell": sell}
+        # Shrink both toward midpoint so the gap is exactly max_diff
+        # while preserving the direction the model learned (i.e. if
+        # tuned buy was higher, it stays higher).
+        midpoint = (buy + sell) / 2.0
+        half_gap = max_diff / 2.0
+        if buy > sell:
+            new_buy = midpoint + half_gap
+            new_sell = midpoint - half_gap
+        else:
+            new_buy = midpoint - half_gap
+            new_sell = midpoint + half_gap
+        logger.debug(
+            "Threshold-diff cap applied to %s: buy %.3f→%.3f, sell %.3f→%.3f "
+            "(max_diff=%.2f)",
+            model_type, buy, new_buy, sell, new_sell, max_diff,
+        )
+        return {"buy": round(new_buy, 4), "sell": round(new_sell, 4)}
 
     def _set_thresholds(
         self, model_type: str, thresholds: dict[str, float] | None,
@@ -389,7 +453,11 @@ class XGBoostSignalModel(MLBase):
         # P(BUY) >= buy_thresh AND >= P(SELL); SELL if P(SELL) >=
         # sell_thresh AND > P(BUY); else HOLD. Legacy models without
         # tuned thresholds keep their argmax label.
-        thresholds = self._get_thresholds(model_type)
+        # `_get_effective_thresholds` applies the configured
+        # tuned_threshold_max_diff cap so a wildly asymmetric (buy,
+        # sell) pair from the threshold sweep can't class-collapse
+        # the model in production.
+        thresholds = self._get_effective_thresholds(model_type)
         if thresholds and len(chosen_probas) >= 3:
             buy_prob = chosen_probas[_LABEL_BUY]
             sell_prob = chosen_probas[_LABEL_SELL]

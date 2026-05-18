@@ -567,6 +567,19 @@ class RiskConfig(BaseModel):
     # are too slow or the test stack doesn't support estimate_margin.
     margin_usage_enabled: bool = True
     weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
+    # Cap how far apart the model's PnL-tuned BUY and SELL probability
+    # thresholds may be at inference time. The walk-forward sweep that
+    # picks these thresholds can land on highly asymmetric pairs (e.g.
+    # BUY=0.80, SELL=0.70 from the user's most recent retrain) when one
+    # class happens to pay better on the holdout slice — and then the
+    # production model never fires that class. We shrink both
+    # thresholds toward their midpoint until the gap is at most this
+    # value. Default 0.05 (5 percentage points) keeps the model's
+    # learned preference but prevents the "0 BUY signals in 7 days"
+    # class-collapse the drift-watch tonight alert catches. Set to a
+    # large number (e.g. 1.0) to disable; set to 0.0 to force exactly
+    # symmetric thresholds.
+    tuned_threshold_max_diff: float = Field(default=0.05, ge=0, le=1.0)
     # Minimum cost-adjusted reward:risk ratio required to take a signal.
     # Computes (target − entry) × qty − round-trip-costs as net win and
     # (entry − sl) × qty + costs as net loss (sign-flipped for SELL),
