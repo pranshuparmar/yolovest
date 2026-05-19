@@ -47,3 +47,13 @@ class MarketDataBase(ABC):
     async def health_check(self) -> bool:
         """Check if this data provider is reachable and responding."""
         ...
+
+    def is_available(self) -> bool:
+        """Synchronous, cheap availability check used by the ingester
+        to skip dead providers without paying the per-symbol error
+        cost. Default True — providers that can know they're down
+        (e.g. KiteDataProvider when the access token has been
+        rejected) should override and return False until the cause
+        clears.
+        """
+        return True

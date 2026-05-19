@@ -426,3 +426,14 @@ class KiteDataProvider(MarketDataBase):
         except Exception:
             logger.debug("Kite data health check failed", exc_info=True)
             return False
+
+    def is_available(self) -> bool:
+        """Skip the provider entirely in the ingester fallback chain
+        when we know Kite won't accept us — either the access token
+        has never been set or a prior call already hit a
+        TokenException. This stops the per-symbol "Kite token
+        previously rejected" WARNING storm during an unauth'd
+        heartbeat. Cleared automatically when set_access_token is
+        called with a fresh token.
+        """
+        return bool(self._access_token) and not self._token_known_invalid

@@ -67,6 +67,15 @@ class MarketDataIngester(MarketDataBase):
                 Use for backfill/universe ingestion where historical data is fine.
         """
         providers = self._select_providers(interval)
+        # Skip providers that report themselves unavailable up front so a
+        # known-dead provider (e.g. KiteDataProvider after auth rejection)
+        # doesn't emit one WARNING per symbol for the rest of the
+        # heartbeat. is_available() is a cheap synchronous flag check;
+        # providers without an override default True.
+        available = [p for p in providers if p.is_available()]
+        if not available:
+            available = providers  # nothing reported available — try anyway
+        providers = available
         last_error: Exception | None = None
         best_stale_bars: list[OHLCVBar] | None = None
         provider_errors = 0
@@ -131,6 +140,11 @@ class MarketDataIngester(MarketDataBase):
         providers = self._daily_providers.copy()
         if self._intraday_provider and self._intraday_provider not in providers:
             providers.insert(0, self._intraday_provider)
+        # Same availability gate the OHLCV path uses — skip dead
+        # providers up front instead of catching their errors per symbol.
+        available = [p for p in providers if p.is_available()]
+        if available:
+            providers = available
 
         last_error: Exception | None = None
         for provider in providers:
