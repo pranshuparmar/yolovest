@@ -561,6 +561,16 @@ class NSEOfficialSource(NewsSource):
                 "symbol", "BD_SYMBOL", "BC_SYMBOL", "tradingSymbol", default="",
             )),
             "deal_type": deal_type,
+            # Preserve the original deal date when present. The
+            # consolidated /api/snapshot-capital-market-largedeal
+            # endpoint returns deals from the past several days, not
+            # just today — without this, upsert_bulk_deals would
+            # stamp every row with `today` and cause duplicates to
+            # accumulate across days as the same older deals get
+            # re-stored under each new day's date.
+            "deal_date": str(_first(
+                "dealDate", "BD_DT_DATE", "BC_DT_DATE", "date", default="",
+            )),
             "client_name": str(_first(
                 "clientName", "BD_CLIENT_NAME", "BC_CLIENT_NAME", default="",
             )),

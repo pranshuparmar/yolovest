@@ -24,7 +24,12 @@ logger = logging.getLogger(__name__)
 
 class HeartbeatPipelineSkill(SkillBase):
     name = "heartbeat-pipeline"
-    description = "Run the full heartbeat pipeline on demand"
+    description = (
+        "Run the full heartbeat pipeline on demand — runs in order: "
+        "expire-pending-trades, reprice-pending-trades, health-check, "
+        "ingest-data, market-scan, generate-signals (+ per-signal risk-check, "
+        "llm-review, trade-execute or manual-approval queue), position-monitor."
+    )
     trigger = SkillTrigger.MANUAL
     schedule = None
 

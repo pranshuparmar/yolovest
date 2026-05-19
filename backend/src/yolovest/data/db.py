@@ -25,6 +25,30 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
 
 
+def _normalize_iso_date(raw: Any) -> str | None:
+    """Parse an NSE deal-date string into ISO YYYY-MM-DD form.
+
+    NSE has shipped at least these formats over time:
+      - "19-May-2026"  (display, %d-%b-%Y)
+      - "19/05/2026"   (slash-DDMMYYYY)
+      - "19-05-2026"   (dash-DDMMYYYY)
+      - "2026-05-19"   (already ISO)
+    Returns None if the value is empty or unparseable so the caller
+    can fall back to "today".
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d/%m/%Y", "%d-%m-%Y", "%d-%b-%Y %H:%M"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
 class DuplicateSignalError(Exception):
     """Raised when a trade insert collides with an existing
     trades.signal_id (the UNIQUE index added in migration 042). Lets
@@ -1970,7 +1994,12 @@ class Database:
     async def upsert_bulk_deals(
         self, deals: list[dict[str, Any]], deal_date: str | None = None,
     ) -> int:
-        """Persist bulk/block deals. `deal_date` defaults to today (IST).
+        """Persist bulk/block deals. Each row's date comes from its own
+        `deal_date` field when present (the consolidated NSE largedeal
+        endpoint returns deals from multiple past sessions); the caller-
+        supplied `deal_date` arg is a fallback when the payload omits
+        it, and that fallback defaults to today (IST).
+
         Returns the number of new rows inserted (duplicates ignored via
         unique constraint).
 
@@ -1982,9 +2011,9 @@ class Database:
         """
         if not deals:
             return 0
-        ts = deal_date or now_ist().strftime("%Y-%m-%d")
+        fallback_date = deal_date or now_ist().strftime("%Y-%m-%d")
         before = (await (await self.conn.execute(
-            "SELECT COUNT(*) FROM bulk_deals WHERE deal_date = ?", (ts,),
+            "SELECT COUNT(*) FROM bulk_deals",
         )).fetchone())[0]
         skipped_empty = 0
         for d in deals:
@@ -2004,12 +2033,14 @@ class Database:
             if not client and not bs and qty_val is None and price_val is None:
                 skipped_empty += 1
                 continue
+            # Per-deal date when NSE gave us one — else fall back.
+            row_date = _normalize_iso_date(d.get("deal_date")) or fallback_date
             await self.conn.execute(
                 "INSERT OR IGNORE INTO bulk_deals "
                 "(deal_date, symbol, deal_type, client_name, buy_sell, "
                 " quantity, trade_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
-                    ts, sym,
+                    row_date, sym,
                     str(d.get("deal_type") or "bulk"),
                     client, bs, qty_val, price_val,
                 ),
@@ -2022,7 +2053,7 @@ class Database:
                 skipped_empty,
             )
         after = (await (await self.conn.execute(
-            "SELECT COUNT(*) FROM bulk_deals WHERE deal_date = ?", (ts,),
+            "SELECT COUNT(*) FROM bulk_deals",
         )).fetchone())[0]
         return after - before
 
