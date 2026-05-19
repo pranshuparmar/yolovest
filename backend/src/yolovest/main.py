@@ -109,6 +109,26 @@ def setup_logging(config: "AppConfig | None" = None) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("google_genai").setLevel(logging.WARNING)
 
+    # Drop asyncio's transport-layer "socket.send() raised exception"
+    # warning. It fires when a WebSocket peer drops without a proper
+    # close handshake — the underlying socket is in a half-closed
+    # state, our broadcast_ws send hits BrokenPipe at the OS layer,
+    # asyncio logs the generic warning, and our application-level
+    # try/except discards the dead client one line later. The warning
+    # is redundant noise; the prune is happening correctly. A single
+    # dashboard tab walking off can produce hundreds of these per
+    # heartbeat (one per broadcast event × one per dead client).
+    class _DropAsyncioSocketSendWarning(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return "socket.send() raised exception" not in record.getMessage()
+
+    asyncio_logger = logging.getLogger("asyncio")
+    if not any(
+        isinstance(f, _DropAsyncioSocketSendWarning)
+        for f in asyncio_logger.filters
+    ):
+        asyncio_logger.addFilter(_DropAsyncioSocketSendWarning())
+
 
 class _StubDB:
     """Minimal database stub when no real DB yet)."""
