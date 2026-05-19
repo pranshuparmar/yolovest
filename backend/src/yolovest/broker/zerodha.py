@@ -551,6 +551,15 @@ class ZerodhaBroker(BrokerBase):
     # Order Management
     # ------------------------------------------------------------------
 
+    # Order statuses where cancellation is a no-op — the order is
+    # already in a final state at the broker. Kite returns either
+    # "Order cannot be cancelled as it is being processed" (transition
+    # state) or a hard error from these; we treat them as
+    # already-cancelled rather than logging a traceback.
+    _TERMINAL_ORDER_STATUSES = {
+        "CANCELLED", "COMPLETE", "REJECTED", "AMO REQ RECEIVED",
+    }
+
     async def cancel_order(self, order_id: str) -> bool:
         if self._mode == "paper":
             if order_id in self._paper_orders:
@@ -558,13 +567,53 @@ class ZerodhaBroker(BrokerBase):
                 return True
             return False
 
+        # Pre-check status — when the user (or a parallel skill) has
+        # already cancelled this order, Kite responds with
+        # "Order cannot be cancelled as it is being processed"
+        # which is just transition-state noise. Skip the call if
+        # the order is already terminal.
+        try:
+            status_info = await self.get_order_status(order_id)
+            status = (status_info.get("status") or "").upper()
+            if status in self._TERMINAL_ORDER_STATUSES:
+                logger.debug(
+                    "cancel_order %s: already in terminal state %s, skipping",
+                    order_id, status,
+                )
+                return True
+        except Exception:
+            # Best-effort — if we can't read status, fall through to
+            # the cancel attempt and let it surface any real error.
+            logger.debug(
+                "cancel_order %s: status pre-check failed, attempting cancel anyway",
+                order_id, exc_info=True,
+            )
+
         try:
             async with self._rate_limiter:
                 await asyncio.to_thread(
                     self._kite.cancel_order, variety="regular", order_id=order_id
                 )
             return True
-        except Exception:
+        except Exception as exc:
+            # Common race: a parallel actor (Kite web UI, broker
+            # auto-square-off, another heartbeat) cancelled or
+            # completed the order while we were preparing. Kite
+            # returns "Order cannot be cancelled as it is being
+            # processed" — that's terminal-state ambiguity, not a
+            # real failure. Demote to INFO so logs stay quiet.
+            msg = str(exc).lower()
+            if (
+                "being processed" in msg
+                or "already" in msg
+                or "cannot be cancelled" in msg
+            ):
+                logger.info(
+                    "cancel_order %s: broker reports order already settling "
+                    "(%s) — treating as cancelled",
+                    order_id, exc,
+                )
+                return True
             logger.exception("Failed to cancel order %s", order_id)
             return False
 

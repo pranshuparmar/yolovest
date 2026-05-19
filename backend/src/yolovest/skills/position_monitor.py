@@ -552,9 +552,17 @@ class PositionMonitorSkill(SkillBase):
             bp = broker_by_symbol[symbol]
             broker_qty = bp.get("quantity", bp.get("net_quantity", 0))
             local_qty = pos.get("quantity", 0)
-            if broker_qty != local_qty:
+            # Kite's positions API returns net_quantity SIGNED — short
+            # positions come back negative. We store quantity as a
+            # positive int + a separate signal_type ("BUY" or "SELL").
+            # Translate to the broker's sign convention before
+            # comparing so a 440-share SELL doesn't spuriously look
+            # like a mismatch with broker_qty=-440.
+            direction = -1 if pos.get("signal_type", "BUY") == "SELL" else 1
+            local_qty_signed = int(local_qty) * direction
+            if broker_qty != local_qty_signed:
                 discrepancies.append(
-                    f"{symbol}: qty mismatch (local={local_qty}, broker={broker_qty})"
+                    f"{symbol}: qty mismatch (local={local_qty_signed}, broker={broker_qty})"
                 )
 
         # Check for broker positions not in local DB
