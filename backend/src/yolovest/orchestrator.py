@@ -88,27 +88,43 @@ class HeartbeatOrchestrator:
         """Get an instantiated skill by name."""
         return self._skills.get(name)
 
-    async def run_heartbeat(self) -> dict[str, Any]:
+    async def run_heartbeat(self, *, source: str = "scheduled") -> dict[str, Any]:
         """Execute one heartbeat cycle.
 
         Returns a dict with skill results and metadata. SkillResult values are
         keyed by skill name; metadata keys include 'skipped', 'aborted',
         'signal_pipeline', 'consecutive_skips', 'symbol'.
+
+        `source` is "scheduled" for the auto-loop's invocation and
+        "manual" when triggered by the user via the heartbeat-pipeline
+        skill. Manual triggers that race with a running heartbeat
+        skip without bumping `_consecutive_skips` — that counter is
+        meant to detect a scheduled cycle overrunning its 15-min
+        budget, not a user clicking Run twice.
         """
         # Mutex: skip if already running
         if self._lock.locked():
-            self._consecutive_skips += 1
-            logger.warning(
-                "Heartbeat skipped (still running). Consecutive skips: %d",
-                self._consecutive_skips,
-            )
-            if self._consecutive_skips >= self._max_consecutive_skips:
-                await self._ctx.notify.send(
-                    f"CRITICAL: {self._consecutive_skips} consecutive heartbeats "
-                    f"skipped due to overrun.",
-                    alert_type="errors",
+            if source == "scheduled":
+                self._consecutive_skips += 1
+                logger.warning(
+                    "Heartbeat skipped (still running). Consecutive skips: %d",
+                    self._consecutive_skips,
                 )
-            return {"skipped": True, "consecutive_skips": self._consecutive_skips}
+                if self._consecutive_skips >= self._max_consecutive_skips:
+                    await self._ctx.notify.send(
+                        f"CRITICAL: {self._consecutive_skips} consecutive heartbeats "
+                        f"skipped due to overrun.",
+                        alert_type="errors",
+                    )
+            else:
+                logger.info(
+                    "Heartbeat (%s) skipped — scheduled cycle still running",
+                    source,
+                )
+            return {
+                "skipped": True, "source": source,
+                "consecutive_skips": self._consecutive_skips,
+            }
 
         async with self._lock:
             self._consecutive_skips = 0

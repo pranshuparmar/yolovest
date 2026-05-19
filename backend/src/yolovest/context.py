@@ -608,3 +608,9 @@ class AppContext:
     # market_data.kite_websocket_enabled is true and the broker is
     # authenticated. Skills can read latest LTP via ctx.ticker.get_ltp.
     ticker: Any = None
+    # Heartbeat orchestrator handle — wired by main.async_main once the
+    # orchestrator is constructed. The heartbeat-pipeline skill calls
+    # `ctx.orchestrator.run_heartbeat()` to let the user trigger a full
+    # heartbeat cycle on demand (Telegram /run, dashboard Skills page).
+    # None until the orchestrator finishes booting.
+    orchestrator: Any = None

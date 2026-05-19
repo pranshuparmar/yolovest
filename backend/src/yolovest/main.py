@@ -644,8 +644,11 @@ async def async_main(args: argparse.Namespace) -> None:
     # is gated by an `await asyncio.sleep(2)` so models almost always
     # finish loading before the first inference is needed anyway.
 
-    # Build orchestrator (skills are instantiated internally)
+    # Build orchestrator (skills are instantiated internally) and
+    # expose it on ctx so the heartbeat-pipeline skill can invoke
+    # run_heartbeat on demand.
     orchestrator = HeartbeatOrchestrator(ctx)
+    ctx.orchestrator = orchestrator
 
     # Build heartbeat watchdog
     from yolovest.watchdog import HeartbeatWatchdog

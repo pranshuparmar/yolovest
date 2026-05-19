@@ -11,6 +11,7 @@ from yolovest.skills.db_maintenance import DatabaseMaintenanceSkill
 from yolovest.skills.drift_watch import DriftWatchSkill
 from yolovest.skills.generate_signals import GenerateSignalsSkill
 from yolovest.skills.health_check import HealthCheckSkill
+from yolovest.skills.heartbeat_pipeline import HeartbeatPipelineSkill
 from yolovest.skills.ingest_data import IngestDataSkill
 from yolovest.skills.ingest_fno import IngestFnoSkill
 from yolovest.skills.ingest_premarket import IngestPremarketSkill
@@ -48,6 +49,7 @@ SKILL_REGISTRY: dict[str, type] = {
     "model-retrain": ModelRetrainSkill,
     "report-generate": ReportGenerateSkill,
     "health-check": HealthCheckSkill,
+    "heartbeat-pipeline": HeartbeatPipelineSkill,
     "kill-switch": KillSwitchSkill,
     "database-maintenance": DatabaseMaintenanceSkill,
     "news-digest": NewsDigestSkill,
