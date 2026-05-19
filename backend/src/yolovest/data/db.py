@@ -2026,11 +2026,27 @@ class Database:
             price_raw = d.get("trade_price")
             client = str(client_raw or "").strip()
             bs = str(bs_raw or "").strip()
-            qty_val = int(qty_raw or 0) or None
-            price_val = float(price_raw or 0.0) or None
-            # Reject rows that are symbol-only — likely a parser-vs-API
-            # schema mismatch, not a real deal worth persisting.
-            if not client and not bs and qty_val is None and price_val is None:
+            # Always store numeric values — NEVER NULL — so the
+            # UNIQUE(deal_date, symbol, client_name, buy_sell,
+            # quantity, trade_price) constraint actually dedupes
+            # (SQLite treats NULL != NULL in UNIQUE, so rows with
+            # a missing trade_price would otherwise accumulate
+            # one new copy per heartbeat on NSE responses that
+            # omit the price field).
+            try:
+                qty_val = int(float(str(qty_raw).replace(",", ""))) if qty_raw else 0
+            except (TypeError, ValueError):
+                qty_val = 0
+            try:
+                price_val = (
+                    float(str(price_raw).replace(",", "")) if price_raw else 0.0
+                )
+            except (TypeError, ValueError):
+                price_val = 0.0
+            # Reject rows where everything beyond symbol is empty —
+            # a NSE schema mismatch dropping payload keys would
+            # otherwise persist one symbol-only stub row per deal.
+            if not client and not bs and qty_val == 0 and price_val == 0.0:
                 skipped_empty += 1
                 continue
             # Per-deal date when NSE gave us one — else fall back.
