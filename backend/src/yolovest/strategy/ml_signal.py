@@ -158,14 +158,21 @@ class XGBoostSignalModel(MLBase):
     def _get_effective_thresholds(
         self, model_type: str,
     ) -> dict[str, float] | None:
-        """Return the model's tuned thresholds with the configured
-        max-diff cap applied. The walk-forward threshold sweep can pick
-        highly asymmetric (buy, sell) pairs that collapse the model
-        into one-class-only behaviour in production. We shrink both
-        toward their midpoint until the gap is within
-        risk.tuned_threshold_max_diff. Public-ish so the balanced-mode
-        chooser in generate_signals can use the same numbers for its
-        margin-above-threshold comparison.
+        """Return the model's tuned thresholds with config-driven
+        overrides + the max-diff cap applied. Resolution order:
+
+        1. If `risk.{buy,sell}_threshold_override` is set, that value
+           wins outright for the corresponding class. Use this when
+           the saved tuned thresholds are unreachable in production
+           (e.g. tuner saved buy=0.80 but the model's calibrated
+           P(BUY) rarely exceeds 0.50, so no BUY ever fires).
+        2. Otherwise start from the saved tuned values.
+        3. Apply the `tuned_threshold_max_diff` symmetry cap so a
+           wildly asymmetric saved pair can't class-collapse the model.
+
+        Public-ish so the balanced-mode chooser in generate_signals
+        can use the same numbers for its margin-above-threshold
+        comparison.
         """
         thresholds = self._get_thresholds(model_type)
         if not thresholds:
@@ -175,10 +182,26 @@ class XGBoostSignalModel(MLBase):
             sell = float(thresholds.get("sell", 0.5))
         except (TypeError, ValueError):
             return thresholds
+
+        risk_cfg = getattr(self._config, "risk", None) if self._config else None
+        # Explicit overrides win — and they suppress the symmetry cap
+        # too, since the user has explicitly chosen these values.
+        buy_override = getattr(risk_cfg, "buy_threshold_override", None)
+        sell_override = getattr(risk_cfg, "sell_threshold_override", None)
+        if buy_override is not None or sell_override is not None:
+            out_buy = float(buy_override) if buy_override is not None else buy
+            out_sell = float(sell_override) if sell_override is not None else sell
+            logger.debug(
+                "Threshold override applied to %s: buy %.3f→%.3f, "
+                "sell %.3f→%.3f",
+                model_type, buy, out_buy, sell, out_sell,
+            )
+            return {"buy": round(out_buy, 4), "sell": round(out_sell, 4)}
+
+        # No override — apply the symmetry cap.
         max_diff = float(
-            getattr(getattr(self._config, "risk", None),
-                    "tuned_threshold_max_diff", 0.05)
-            if self._config is not None else 0.05
+            getattr(risk_cfg, "tuned_threshold_max_diff", 0.05)
+            if risk_cfg is not None else 0.05
         )
         diff = abs(buy - sell)
         if diff <= max_diff:

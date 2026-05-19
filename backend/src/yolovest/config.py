@@ -580,6 +580,18 @@ class RiskConfig(BaseModel):
     # large number (e.g. 1.0) to disable; set to 0.0 to force exactly
     # symmetric thresholds.
     tuned_threshold_max_diff: float = Field(default=0.05, ge=0, le=1.0)
+    # Hard overrides on the model's tuned probability thresholds.
+    # When set, these REPLACE the saved tuned values entirely (the
+    # diff cap above no longer applies). Use when the model's saved
+    # thresholds are unreachable in production — e.g. the tuner saved
+    # buy=0.80 but the model never outputs P(BUY) > 0.50, so no BUY
+    # signals fire regardless of the diff cap. Setting
+    # buy_threshold_override=0.45 then lets every P(BUY) >= 0.45
+    # through. None = use the model's saved tuned threshold (default).
+    # Both checks remain ANDed with `min_confidence_buy` /
+    # `min_confidence_sell`, so those are still the absolute floor.
+    buy_threshold_override: float | None = Field(default=None, ge=0, le=1.0)
+    sell_threshold_override: float | None = Field(default=None, ge=0, le=1.0)
     # Minimum cost-adjusted reward:risk ratio required to take a signal.
     # Computes (target − entry) × qty − round-trip-costs as net win and
     # (entry − sl) × qty + costs as net loss (sign-flipped for SELL),
