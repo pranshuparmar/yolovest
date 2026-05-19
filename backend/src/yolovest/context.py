@@ -374,6 +374,44 @@ class MarketHoursChecker:
 
         return market_open <= current_time <= market_close
 
+    def seconds_until_next_market_open(
+        self, now: datetime | None = None,
+    ) -> float:
+        """Return seconds from `now` to the next market-open moment.
+
+        - Returns 0.0 when the market is currently open.
+        - Walks forward day by day across weekends + NSE holidays so a
+          Friday-after-close gives ~63h until Monday's 9:15, etc.
+        - Caps at 10 days of look-ahead so stacked-holiday weeks still
+          terminate.
+
+        Used by the heartbeat loop to avoid getting stuck in a 60-min
+        off-hours sleep that straddles 9:15 AM — instead the next
+        wake-up is scheduled for market-open, so the first
+        market-hours heartbeat fires within a minute of opening bell.
+        """
+        from datetime import timedelta as _td
+        if now is None:
+            now = self._now()
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=self._tz)
+        if self.is_market_hours(now):
+            return 0.0
+
+        market_open = self._parse_time(self._mh.open)
+        for offset in range(11):
+            candidate_date = (now + _td(days=offset)).date()
+            if not self.is_trading_day(candidate_date):
+                continue
+            candidate = datetime.combine(
+                candidate_date, market_open, tzinfo=now.tzinfo,
+            )
+            if candidate > now:
+                return (candidate - now).total_seconds()
+        # Fallback — should never hit with the 10-day cap, but stay
+        # safe rather than returning a negative interval.
+        return 24 * 3600.0
+
     def is_holiday(self, check_date: date | None = None) -> bool:
         """Check if a date is an NSE holiday."""
         if check_date is None:

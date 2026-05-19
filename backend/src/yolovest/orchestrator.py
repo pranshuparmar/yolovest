@@ -838,11 +838,31 @@ class HeartbeatOrchestrator:
             if self._watchdog:
                 self._watchdog.record_heartbeat()
 
-            # Determine interval based on market hours
+            # Determine interval based on market hours. Off-hours uses
+            # the longer cadence (60-min default) — but we also clamp
+            # against "time until next market open" so an 8:00 AM
+            # heartbeat doesn't lock the next cycle to 9:00 AM and
+            # leave 9:15-9:45 unmonitored. When the next open is closer
+            # than the off-hours interval, we wake up at the open
+            # instead, fire a heartbeat there, and switch to market-
+            # hours cadence from then on.
             if self._ctx.market_hours.is_market_hours():
                 interval = self._ctx.config.heartbeat.market_hours_interval_min * 60
             else:
                 interval = self._ctx.config.heartbeat.off_hours_interval_min * 60
+                try:
+                    open_in = self._ctx.market_hours.seconds_until_next_market_open()
+                except Exception:
+                    open_in = float("inf")
+                # +2s of slack so is_market_hours() reads True when
+                # the next loop iteration runs.
+                if open_in > 0 and open_in + 2 < interval:
+                    logger.info(
+                        "Heartbeat: shortening off-hours sleep from %ds to %ds "
+                        "so the first market-hours cycle fires near 9:15",
+                        int(interval), int(open_in + 2),
+                    )
+                    interval = open_in + 2
 
             # Sleep for remaining interval (subtract elapsed time)
             elapsed = time.monotonic() - start
