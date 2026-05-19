@@ -206,6 +206,8 @@ All data exchange between skills uses typed Pydantic models in `models/schemas.p
 
 SQLite with WAL mode. Schema versioned via numbered migration scripts in `backend/migrations/` (run in lexical order at startup).
 
+**Migrations are schema only.** This is an OSS project — every user runs the same migrations against their own data. Never put data-cleanup queries (deduping rows, normalising existing values, backfilling content) into a migration file. A duplicate-row problem on one user's server is not something every fresh install needs to "fix". Limit `.sql` files to `CREATE TABLE` / `ALTER TABLE` / `CREATE INDEX` / `DROP …`. If you need a one-off data fix for a specific deployment, surface it as a `docker exec yolovest-backend python -c "..."` snippet in chat or the operational docs, never as a migration.
+
 ### Key Tables
 
 | Table | Purpose |
