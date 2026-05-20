@@ -230,6 +230,72 @@ def _extract_utilised_margin(margins: dict[str, Any]) -> float:
     return 0.0
 
 
+def _compute_cdsl_status(holdings: list[dict[str, Any]]) -> dict[str, Any]:
+    """Inspect Kite holdings to figure out CDSL TPIN auth state.
+
+    Per Kite's holdings schema:
+      - quantity            = total qty held
+      - t1_quantity         = subset still in T+1 (can't be sold today)
+      - authorised_quantity = qty already authorised for sale today
+                              (via DDPI or daily CDSL TPIN)
+      - authorised_date     = "0001-01-01 ..." when never authorised
+
+    Deliverable today  = quantity - t1_quantity
+    Needs CDSL auth    = deliverable - authorised_quantity > 0
+
+    DDPI users see authorised_quantity == quantity for every row at
+    every check, so this returns needs_auth=False without ever
+    nagging them.
+
+    Empty holdings → needs_auth=False (nothing to sell).
+    """
+    total_holdings = 0
+    total_deliverable = 0
+    total_authorised = 0
+    pending_symbols: list[dict[str, Any]] = []
+
+    for h in holdings or []:
+        qty = int(h.get("quantity") or h.get("opening_quantity") or 0)
+        if qty <= 0:
+            continue
+        t1 = int(h.get("t1_quantity") or 0)
+        deliverable = max(0, qty - t1)
+        if deliverable <= 0:
+            continue
+        authorised = int(h.get("authorised_quantity") or 0)
+        unauth = max(0, deliverable - authorised)
+        total_holdings += qty
+        total_deliverable += deliverable
+        total_authorised += min(authorised, deliverable)
+        if unauth > 0:
+            pending_symbols.append({
+                "symbol": h.get("tradingsymbol"),
+                "isin": h.get("isin"),
+                "deliverable_qty": deliverable,
+                "authorised_qty": authorised,
+                "pending_qty": unauth,
+            })
+
+    needs_auth = total_authorised < total_deliverable
+    return {
+        "needs_auth": needs_auth,
+        "total_holdings": total_holdings,
+        "deliverable_qty": total_deliverable,
+        "authorised_qty": total_authorised,
+        "pending_qty": max(0, total_deliverable - total_authorised),
+        "pending_count": len(pending_symbols),
+        "pending_symbols": pending_symbols,
+        # When the user has holdings but nothing is pending auth, the
+        # most likely explanation is DDPI is set up. We can't be 100%
+        # certain (could also mean they auth'd earlier today) but this
+        # is the right hint to suppress the banner once a day after
+        # they auth.
+        "ddpi_likely_enabled": (
+            total_deliverable > 0 and total_authorised >= total_deliverable
+        ),
+    }
+
+
 def _compute_holdings_breakdown(holdings: list[dict[str, Any]]) -> dict[str, float]:
     """Sum invested cost basis and current market value across delivery holdings."""
     invested = 0.0
@@ -1918,6 +1984,68 @@ def create_app(ctx: AppContext) -> FastAPI:
             ),
         }
 
+    @app.get("/api/broker/cdsl-status")
+    async def get_cdsl_status(
+        refresh: bool = Query(False, description="Force a live broker fetch"),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Current CDSL TPIN authorisation status across the user's
+        holdings. Used by the dashboard banner (and the cdsl-auth-check
+        CRON skill) to alert when CNC sells will require TPIN today.
+
+        By default returns the cached snapshot from system_state
+        (refreshed by the CRON skill at market open, ~9:20 IST).
+        Pass `refresh=true` to force a live fetch — useful from the
+        banner's "Refresh" button after the user has completed the
+        auth flow in another tab.
+        """
+        import json as _json
+
+        if not refresh:
+            cached = await ctx.db.get_system_state("cdsl_auth_status")
+            if cached:
+                try:
+                    return _json.loads(cached)
+                except (ValueError, TypeError):
+                    pass
+
+        if not await ctx.broker.is_authenticated():
+            return {
+                "authenticated": False, "needs_auth": False,
+                "checked_at": None,
+                "pending_symbols": [], "pending_count": 0,
+                "ddpi_likely_enabled": False,
+            }
+
+        try:
+            holdings = await ctx.broker.get_holdings()
+        except Exception as e:
+            logger.warning("cdsl-status: get_holdings failed: %s", e)
+            return {
+                "authenticated": True, "needs_auth": False,
+                "checked_at": None,
+                "error": str(e),
+                "pending_symbols": [], "pending_count": 0,
+                "ddpi_likely_enabled": False,
+            }
+
+        status = _compute_cdsl_status(holdings or [])
+        from yolovest.timezone import now_utc as _now_utc
+        result = {
+            "authenticated": True,
+            **status,
+            "checked_at": _now_utc().isoformat(),
+        }
+        # Persist the latest live read so the next dashboard tick
+        # gets a fresh value without re-hitting the broker.
+        try:
+            await ctx.db.set_system_state(
+                "cdsl_auth_status", _json.dumps(result),
+            )
+        except Exception:
+            logger.debug("cdsl-status: cache write failed", exc_info=True)
+        return result
+
     @app.post("/api/broker/holdings-auth")
     async def initiate_holdings_authorisation(
         body: dict[str, Any] | None = None,
@@ -3112,6 +3240,19 @@ def create_app(ctx: AppContext) -> FastAPI:
         except Exception:
             logger.debug("Failed to fetch LLM review counts", exc_info=True)
 
+        # Surface the cached CDSL TPIN status so the dashboard can
+        # render a "Authorise CDSL" banner without an extra round
+        # trip. Cache is populated by the cdsl-auth-check CRON skill
+        # at market open and by manual refresh from the banner.
+        cdsl_auth: dict[str, Any] | None = None
+        try:
+            import json as _json
+            raw = await ctx.db.get_system_state("cdsl_auth_status")
+            if raw:
+                cdsl_auth = _json.loads(raw)
+        except Exception:
+            logger.debug("Failed to read cached cdsl_auth_status", exc_info=True)
+
         return {
             "kill_switch_active": kill_switch,
             "kill_switch_mode": kill_switch_mode,
@@ -3122,6 +3263,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             "show_degraded_banner": ctx.config.dashboard.show_degraded_banner,
             "auto_approved_today": auto_approved_today,
             "llm_reviewed_today": llm_reviewed_today,
+            "cdsl_auth": cdsl_auth,
         }
 
     # ------------------------------------------------------------------

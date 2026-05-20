@@ -459,6 +459,24 @@ export interface SystemState {
   show_degraded_banner?: boolean;
   auto_approved_today?: number;
   llm_reviewed_today?: number;
+  // Set by the cdsl-auth-check CRON skill (and live refreshes from
+  // the banner's button). Null when never checked. Drives the
+  // CdslAuthBanner — see components/CdslAuthBanner.tsx.
+  cdsl_auth?: {
+    authenticated: boolean;
+    needs_auth?: boolean;
+    pending_qty?: number;
+    pending_count?: number;
+    pending_symbols?: Array<{
+      symbol: string;
+      isin?: string;
+      deliverable_qty: number;
+      authorised_qty: number;
+      pending_qty: number;
+    }>;
+    checked_at?: string | null;
+    ddpi_likely_enabled?: boolean;
+  } | null;
 }
 
 export interface NSESymbol {

@@ -9,6 +9,7 @@ import { PendingTradesBanner, ClearSignalsButton } from "../components/PendingTr
 import { RecommendationsPanel } from "../components/RecommendationsPanel";
 import { KillSwitchControl } from "../components/KillSwitchControl";
 import { useTradesToday, useSystemState } from "../hooks/queries";
+import { CdslAuthBanner } from "../components/CdslAuthBanner";
 
 export function DashboardPage() {
   const { data: todaysTrades, isLoading } = useTradesToday();
@@ -89,6 +90,8 @@ export function DashboardPage() {
           </div>
         </div>
       )}
+
+      <CdslAuthBanner />
 
       <PortfolioCards />
 
