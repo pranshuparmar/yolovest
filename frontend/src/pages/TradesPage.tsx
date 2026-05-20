@@ -4,9 +4,19 @@ import { CSVExportButton } from "../components/CSVExportButton";
 import { Pagination } from "../components/Pagination";
 import { useTrades } from "../hooks/queries";
 
+// Today's date in IST as YYYY-MM-DD. The Trades page defaults its Start +
+// End filters to this so first-load shows just today's activity — the
+// 90%-case for "what did the system do today?". Users can clear either
+// input to widen the window. en-CA gives YYYY-MM-DD; timeZone keeps it
+// stable for users with a non-IST browser locale.
+function todayIST(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+}
+
 export function TradesPage() {
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
+  const today = todayIST();
+  const [start, setStart] = useState(today);
+  const [end, setEnd] = useState(today);
   const [symbol, setSymbol] = useState("");
   const [limit, setLimit] = useState(50);
   const [page, setPage] = useState(0);
@@ -61,7 +71,7 @@ export function TradesPage() {
             type="text"
             value={symbol}
             onChange={(e) => { setSymbol(e.target.value.toUpperCase()); resetPage(); }}
-            placeholder="e.g. RELIANCE"
+            placeholder="e.g. REL"
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-emerald-500 w-full sm:w-36"
           />
         </div>

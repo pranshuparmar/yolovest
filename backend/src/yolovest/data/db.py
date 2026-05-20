@@ -3757,8 +3757,13 @@ class Database:
             query += " AND created_at < ?"
             params.append(next_day)
         if symbol:
-            query += " AND symbol = ?"
-            params.append(symbol)
+            # Substring match (case-insensitive) so the Trades page search
+            # acts like a filter rather than an exact-symbol picker —
+            # typing "REL" matches RELIANCE, RELINFRA, etc. SQLite LIKE
+            # is already case-insensitive for ASCII; symbol names are
+            # ASCII so no need for unicode-aware collation.
+            query += " AND symbol LIKE ?"
+            params.append(f"%{symbol}%")
 
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
