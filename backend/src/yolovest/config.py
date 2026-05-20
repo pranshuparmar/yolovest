@@ -559,7 +559,27 @@ class RiskConfig(BaseModel):
     weekly_loss_sizing_reduction: float = Field(default=0.50, gt=0, le=1)
     mandatory_stop_loss: bool = True
     trailing_sl_enabled: bool = True
+    # Legacy trigger expressed as a multiple of risk_per_share. Hard
+    # to reason about because it depends on the R:R ratio of each
+    # signal: 1.5 fires at 75% of target for a 2:1 R:R signal but
+    # at 150% (= never) for a 1:1 signal. Kept for backwards-compat
+    # with deployments that explicitly tuned this, but the runtime
+    # prefers the per-mode target-pct knobs below when set.
     trailing_sl_trigger_multiple: float = Field(default=1.5, gt=0)
+    # Per-strategy-bucket trailing trigger expressed as a fraction of
+    # target distance covered (0.0–1.0). 0.35 = "once price has moved
+    # 35% of the way from entry to target, start trailing." Bucket-
+    # split because intraday and swing have very different time
+    # horizons — an intraday position has 5-6 hours to reach the
+    # trigger; a swing position has 2-5 days, so intraday warrants a
+    # more eager trigger. None = fall back to the legacy
+    # trailing_sl_trigger_multiple semantics above.
+    trailing_sl_trigger_target_pct_intraday: float | None = Field(
+        default=0.35, ge=0.0, le=1.0,
+    )
+    trailing_sl_trigger_target_pct_swing: float | None = Field(
+        default=0.50, ge=0.0, le=1.0,
+    )
     trailing_sl_step_pct: float = Field(default=0.01, gt=0, lt=1)
     # Early-exit buffer applied to the target check. Heartbeats run every
     # 15 min, so a price that gets within this percentage of target but
@@ -675,6 +695,36 @@ class RiskConfig(BaseModel):
         return float(
             self.min_confidence_buy if is_buy else self.min_confidence_sell
         )
+
+    def resolve_trailing_trigger(
+        self, holding_period: str, risk_per_share: float, target_distance: float,
+    ) -> float:
+        """Return the profit-in-rupees threshold at which trailing-SL
+        should start firing, given a position's holding bucket.
+
+        New semantic (preferred): `trailing_sl_trigger_target_pct_*`
+        expresses the trigger as a fraction of target distance, so
+        0.5 = "start trailing once we've covered half the way from
+        entry to target." This is the same scale users see on the
+        progress bars in PositionsTable and is independent of the
+        signal's R:R ratio.
+
+        Legacy fallback: when the per-mode target-pct is None, we
+        keep the old `trailing_sl_trigger_multiple × risk_per_share`
+        behaviour so deployments that explicitly tuned the legacy
+        knob keep working.
+
+        Always returns rupees-of-profit threshold so the three
+        trailing paths (client-side / GTT / MIS) can stay symmetric.
+        """
+        is_intraday = holding_period == "intraday"
+        per_mode_pct = (
+            self.trailing_sl_trigger_target_pct_intraday if is_intraday
+            else self.trailing_sl_trigger_target_pct_swing
+        )
+        if per_mode_pct is not None and target_distance > 0:
+            return float(per_mode_pct) * float(target_distance)
+        return float(self.trailing_sl_trigger_multiple) * float(risk_per_share)
 
 
 class MarketHoursConfig(BaseModel):

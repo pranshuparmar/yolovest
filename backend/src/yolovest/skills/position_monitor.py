@@ -370,9 +370,18 @@ class PositionMonitorSkill(SkillBase):
                     profit = current_price - entry
                 else:
                     profit = entry - current_price
-                profit_multiple = profit / risk_per_share
+                # Threshold is per-bucket target-progress %; resolver
+                # converts back to a rupees-of-profit value the
+                # comparison can use directly.
+                target_distance = abs(target - entry) if target > 0 else 0.0
+                trigger_profit = cfg.resolve_trailing_trigger(
+                    holding_period=pos.get("expected_holding_period", "")
+                    or pos.get("holding_period", ""),
+                    risk_per_share=risk_per_share,
+                    target_distance=target_distance,
+                )
 
-                if profit_multiple >= cfg.trailing_sl_trigger_multiple:
+                if profit >= trigger_profit:
                     # Calculate new trailing SL. Tighten the step when
                     # we're already close to target so a final pullback
                     # can't surrender the gain.
@@ -1188,8 +1197,20 @@ class PositionMonitorSkill(SkillBase):
             profit = current_price - entry
         else:
             profit = entry - current_price
-        profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0
-        if profit_multiple < cfg.trailing_sl_trigger_multiple:
+        target = float(pos.get("target_price") or 0.0)
+        target_distance = abs(target - entry) if target > 0 else 0.0
+        # trades table only carries `expected_holding_days`; derive the
+        # bucket directly. 0 days == intraday by definition.
+        holding_bucket = (
+            "intraday" if int(pos.get("expected_holding_days") or 0) == 0
+            else "swing"
+        )
+        trigger_profit = cfg.resolve_trailing_trigger(
+            holding_period=holding_bucket,
+            risk_per_share=risk_per_share,
+            target_distance=target_distance,
+        )
+        if profit < trigger_profit:
             return
 
         # Mirror the client-side trailing-SL tightening near target.
@@ -1283,8 +1304,19 @@ class PositionMonitorSkill(SkillBase):
             profit = current_price - entry
         else:
             profit = entry - current_price
-        profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0
-        if profit_multiple < cfg.trailing_sl_trigger_multiple:
+        target_distance = abs(target - entry) if target > 0 else 0.0
+        # trades table only carries `expected_holding_days`; derive the
+        # bucket directly. 0 days == intraday by definition.
+        holding_bucket = (
+            "intraday" if int(pos.get("expected_holding_days") or 0) == 0
+            else "swing"
+        )
+        trigger_profit = cfg.resolve_trailing_trigger(
+            holding_period=holding_bucket,
+            risk_per_share=risk_per_share,
+            target_distance=target_distance,
+        )
+        if profit < trigger_profit:
             return
 
         step_pct = cfg.trailing_sl_step_pct

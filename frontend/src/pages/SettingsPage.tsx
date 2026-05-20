@@ -145,6 +145,8 @@ const NULLABLE_NUMBER_KEYS = new Set([
   "risk.min_confidence_sell_swing",
   "risk.buy_threshold_override",
   "risk.sell_threshold_override",
+  "risk.trailing_sl_trigger_target_pct_intraday",
+  "risk.trailing_sl_trigger_target_pct_swing",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -264,7 +266,9 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.weekly_loss_sizing_reduction": "Weekly Loss Size Reduction",
   "risk.mandatory_stop_loss": "Mandatory Stop Loss",
   "risk.trailing_sl_enabled": "Trailing Stop Loss",
-  "risk.trailing_sl_trigger_multiple": "Trailing SL Trigger (× risk)",
+  "risk.trailing_sl_trigger_multiple": "Trailing SL Trigger (× risk, legacy)",
+  "risk.trailing_sl_trigger_target_pct_intraday": "Trailing SL Trigger — Intraday (% of target)",
+  "risk.trailing_sl_trigger_target_pct_swing": "Trailing SL Trigger — Swing (% of target)",
   "risk.trailing_sl_step_pct": "Trailing SL Step",
   "risk.target_early_exit_pct": "Target Early-Exit Buffer",
   "risk.min_confidence_buy": "Min Confidence (BUY)",
@@ -493,7 +497,9 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "risk.weekly_loss_sizing_reduction": "Reduce position sizes by this factor when weekly breaker triggers.",
   "risk.mandatory_stop_loss": "Every trade must have a stop loss. Cannot be disabled in production.",
   "risk.trailing_sl_enabled": "Automatically trail stop loss upward as price moves in your favor.",
-  "risk.trailing_sl_trigger_multiple": "Activate trailing SL when profit reaches this multiple of risk.",
+  "risk.trailing_sl_trigger_multiple": "Legacy: activate trailing SL when profit reaches this multiple of risk_per_share. Hard to reason about because the threshold depends on each signal's R:R ratio (1.5 fires at 75% of target for a 2:1 setup but at 150% — never — for a 1:1). Kept for deployments that explicitly tuned it; the per-bucket target-% knobs below take precedence when set.",
+  "risk.trailing_sl_trigger_target_pct_intraday": "Start trailing the stop loss when an intraday position has covered this fraction of the entry-to-target distance (0–1). 0.35 (default) = SL starts ratcheting once price has moved 35% of the way to target. Intraday default is more eager than swing because the session is short and you can't afford to wait until 50% of target to start locking gains. Leave blank to fall back to the legacy × risk knob above.",
+  "risk.trailing_sl_trigger_target_pct_swing": "Start trailing the stop loss when a swing position (short_term / week / long) has covered this fraction of the entry-to-target distance (0–1). 0.50 (default) = halfway to target. Swing horizons are 2-66 days so the trigger can sit higher than intraday without missing the move. Leave blank to fall back to the legacy × risk knob above.",
   "risk.trailing_sl_step_pct": "Trail the stop loss in steps of this percentage.",
   "risk.target_early_exit_pct": "Exit when price is within this percentage of target. Heartbeats run every 15 min; without a buffer a price that gets within a paisa of target but never touches it waits a full cycle and may reverse. Default 0.15% catches ~₹0.15 on a ₹100 stock.",
   "risk.min_confidence_buy": "Global fallback: minimum ML confidence for a BUY signal (0–1). Used when the per-mode floor below is unset.",
