@@ -64,9 +64,22 @@ export const api = {
 
   positions: () => apiFetch<Trade[]>("/api/positions"),
 
-  closePosition: (tradeId: string) =>
-    apiFetch<{ status: string; trade_id: string; exit_price: number; pnl: number; exit_order_id: string }>(
-      `/api/positions/${encodeURIComponent(tradeId)}/close`,
+  closePosition: (tradeId: string, qty?: number) =>
+    apiFetch<{
+      status: string;
+      trade_id: string;
+      exit_order_id: string;
+      // Full close shape
+      exit_price?: number;
+      pnl?: number;
+      // Partial close shape
+      exit_qty?: number;
+      remaining_qty?: number;
+      partial_pnl?: number;
+    }>(
+      qty
+        ? `/api/positions/${encodeURIComponent(tradeId)}/close?qty=${qty}`
+        : `/api/positions/${encodeURIComponent(tradeId)}/close`,
       { method: "POST" },
     ),
 

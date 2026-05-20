@@ -689,15 +689,28 @@ def create_app(ctx: AppContext) -> FastAPI:
     @app.post("/api/positions/{trade_id}/close")
     async def close_position(
         trade_id: str,
+        qty: int | None = Query(
+            None, ge=1,
+            description="Optional partial-close quantity. Omit to close the whole position.",
+        ),
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Immediately exit a single open position at market.
 
-        Flow:
+        Full close (default — no `qty` param):
           1. Cancel any attached SL order at broker.
           2. Delete any attached GTT at broker (so it doesn't fire later).
           3. Place a MARKET exit order in the opposite direction.
           4. Close the trade row with realised PnL.
+
+        Partial close (`?qty=N` where N < current quantity):
+          1. Place a MARKET exit order for N shares.
+          2. Resize the broker-side SL / target / GTT to the remaining
+             quantity so the protection still matches the position.
+          3. Update trades.quantity to (current - N); trade stays open.
+          4. Log the partial realised PnL to audit_log (separate from
+             the trade's final pnl which still accrues against the
+             remaining shares).
 
         Live mode places a real order via the broker; paper mode simulates
         the exit using current LTP. Bypasses the normal manual-approval
@@ -713,9 +726,185 @@ def create_app(ctx: AppContext) -> FastAPI:
             )
 
         symbol = trade["symbol"]
-        qty = int(trade["quantity"])
+        full_qty = int(trade["quantity"])
+        is_partial = qty is not None and qty < full_qty
+        if qty is not None and qty > full_qty:
+            raise HTTPException(
+                status_code=400,
+                detail=f"qty={qty} exceeds current position size {full_qty}",
+            )
+        exit_qty = int(qty) if is_partial else full_qty
+        remaining_qty = full_qty - exit_qty
         exit_side = "SELL" if trade["signal_type"] == "BUY" else "BUY"
         product = trade.get("product", "MIS")
+
+        if is_partial:
+            # Partial-close path: place exit for `exit_qty`, then resize
+            # broker-side SL / target / GTT to `remaining_qty`. We do NOT
+            # cancel/delete the protection legs the way full-close does —
+            # the remaining shares still need them.
+            try:
+                exit_order_id = await ctx.broker.place_order(
+                    symbol=symbol, side=exit_side, quantity=exit_qty,
+                    order_type="MARKET", product=product,
+                    tag="yv-partial-close",
+                )
+            except Exception as e:
+                logger.exception(
+                    "close_position(partial): place exit failed for %s", trade_id,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Broker rejected partial-exit order: {e}",
+                )
+
+            # Wait briefly for fill
+            exit_price = None
+            for _ in range(10):
+                try:
+                    status = await ctx.broker.get_order_status(exit_order_id)
+                    exit_price = status.get("average_price")
+                    if exit_price and exit_price > 0:
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+            if not exit_price or exit_price <= 0:
+                try:
+                    exit_price = await ctx.market_data.get_ltp(symbol)
+                except Exception:
+                    exit_price = float(
+                        trade.get("fill_price") or trade["entry_price"] or 0
+                    )
+
+            entry = float(trade.get("fill_price") or trade["entry_price"])
+            gross_pnl = (
+                (exit_price - entry) * exit_qty
+                if trade["signal_type"] == "BUY"
+                else (entry - exit_price) * exit_qty
+            )
+            from yolovest.costs import resolve_round_trip_costs
+            costs, _src, _breakdown = await resolve_round_trip_costs(
+                ctx.broker, symbol=symbol, signal_type=trade["signal_type"],
+                entry_price=entry, exit_price=float(exit_price),
+                quantity=exit_qty, product=product,
+                cost_config=ctx.config.transaction_costs,
+            )
+            partial_pnl = round(gross_pnl - costs, 2)
+
+            # Resize broker-side protection to remaining_qty. GTT
+            # (CNC OCO) → modify with new quantity, target/SL prices
+            # unchanged. MIS broker-side SL → cancel + re-place at
+            # remaining_qty. Same template as
+            # position_monitor._check_partial_profit_booking's
+            # resize block, but without the move-to-breakeven step
+            # (that's a separate decision the user can take via the
+            # Tighten SL action).
+            gtt_id = trade.get("gtt_id")
+            if gtt_id and remaining_qty > 0 and hasattr(ctx.broker, "modify_gtt"):
+                tgt = float(trade.get("target_price") or 0)
+                cur_sl = float(trade.get("stop_loss_price") or 0)
+                if tgt > 0 and cur_sl > 0:
+                    buf = 0.005
+                    if exit_side == "SELL":
+                        sl_limit = cur_sl * (1 - buf)
+                        tgt_limit = tgt * (1 - buf * 0.5)
+                    else:
+                        sl_limit = cur_sl * (1 + buf)
+                        tgt_limit = tgt * (1 + buf * 0.5)
+                    try:
+                        await ctx.broker.modify_gtt(
+                            gtt_id=int(gtt_id), symbol=symbol, side=exit_side,
+                            quantity=remaining_qty,
+                            stoploss_trigger=cur_sl, stoploss_limit=sl_limit,
+                            target_trigger=tgt, target_limit=tgt_limit,
+                            last_price=float(exit_price),
+                        )
+                        await ctx.db.log_gtt_event(
+                            trade_id=trade_id, gtt_id=int(gtt_id), symbol=symbol,
+                            event_type="modified", status="active",
+                            details={
+                                "reason": "user_partial_close_resize",
+                                "quantity": remaining_qty,
+                                "sl_trigger": cur_sl, "sl_limit": sl_limit,
+                                "target_trigger": tgt, "target_limit": tgt_limit,
+                            },
+                        )
+                    except Exception:
+                        logger.exception(
+                            "close_position(partial): GTT resize failed for %s",
+                            trade_id,
+                        )
+
+            # For MIS broker-side SL / target LIMITs we cancel and let
+            # position-monitor re-attach them with the new qty on its
+            # next cycle. Resizing in place via cancel/replace here
+            # would duplicate trade_execute._attach_mis_target_limit
+            # logic for marginal benefit — position-monitor runs every
+            # 15 min and will reconcile.
+            if not gtt_id:
+                for oid_key in ("sl_order_id", "target_order_id"):
+                    oid = trade.get(oid_key)
+                    if not oid:
+                        continue
+                    try:
+                        await ctx.broker.cancel_order(oid)
+                    except Exception:
+                        logger.debug(
+                            "close_position(partial): cancel %s failed (terminal?)",
+                            oid_key, exc_info=True,
+                        )
+
+            # Resize the local trade row + record the partial PnL in
+            # audit_log. We don't touch trades.pnl — that's reserved for
+            # the final closure of the remaining shares.
+            await ctx.db.update_position_quantity(trade_id, remaining_qty)
+            try:
+                await ctx.db.log_audit(
+                    action_type="partial_close",
+                    skill_name="user_partial_close",
+                    output_summary={
+                        "trade_id": trade_id, "symbol": symbol,
+                        "exit_qty": exit_qty, "remaining_qty": remaining_qty,
+                        "exit_price": float(exit_price),
+                        "entry_price": entry,
+                        "partial_pnl": partial_pnl,
+                        "exit_order_id": exit_order_id,
+                    },
+                    duration_ms=0,
+                )
+            except Exception:
+                logger.debug("close_position(partial): audit log failed", exc_info=True)
+
+            try:
+                await ctx.notify.send(
+                    f"Partial close: {symbol} {exit_qty}/{full_qty} @ "
+                    f"₹{exit_price:.2f} (entry ₹{entry:.2f}) — "
+                    f"booked ₹{partial_pnl:+,.2f}. Remaining {remaining_qty} open.",
+                    alert_type="trade_exit",
+                )
+            except Exception:
+                logger.debug("close_position(partial): notify failed", exc_info=True)
+
+            logger.info(
+                "close_position(partial): %s %s qty=%d/%d exit=%.2f "
+                "partial_pnl=%.2f remaining=%d (order=%s)",
+                exit_side, symbol, exit_qty, full_qty, exit_price,
+                partial_pnl, remaining_qty, exit_order_id,
+            )
+
+            return {
+                "status": "partial",
+                "trade_id": trade_id,
+                "exit_qty": exit_qty,
+                "remaining_qty": remaining_qty,
+                "exit_price": float(exit_price),
+                "partial_pnl": partial_pnl,
+                "exit_order_id": exit_order_id,
+            }
+
+        # ---------- Full-close path (existing behaviour) ----------
+        qty = full_qty
 
         # Cancel any open SL / target (MIS LIMIT) orders so the exit isn't
         # double-placed and dangling orders don't fire after we've closed.

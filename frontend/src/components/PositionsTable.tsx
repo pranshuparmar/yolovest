@@ -29,10 +29,12 @@ export function PositionsTable({ positions }: { positions: Trade[] }) {
       )
     )
       return;
-    close.mutate(p.trade_id, {
+    close.mutate({ tradeId: p.trade_id }, {
       onSuccess: (r) => {
+        const exitPx = r.exit_price ?? 0;
+        const pnl = r.pnl ?? 0;
         window.alert(
-          `Closed ${p.symbol} at ₹${r.exit_price.toFixed(2)} — PnL ₹${r.pnl.toLocaleString("en-IN")}`,
+          `Closed ${p.symbol} at ₹${exitPx.toFixed(2)} — PnL ₹${pnl.toLocaleString("en-IN")}`,
         );
       },
       onError: (err: unknown) => {

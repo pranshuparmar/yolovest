@@ -39,12 +39,17 @@ export function usePositions() {
 export function useClosePosition() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (tradeId: string) => api.closePosition(tradeId),
+    // `qty` omitted = full close (legacy behaviour); pass a smaller
+    // number to book a partial close. Caller is responsible for
+    // validating qty <= current position quantity.
+    mutationFn: ({ tradeId, qty }: { tradeId: string; qty?: number }) =>
+      api.closePosition(tradeId, qty),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["positions"] });
       qc.invalidateQueries({ queryKey: ["trades", "today"] });
       qc.invalidateQueries({ queryKey: ["portfolio"] });
       qc.invalidateQueries({ queryKey: ["system-state"] });
+      qc.invalidateQueries({ queryKey: ["recommendations"] });
     },
   });
 }

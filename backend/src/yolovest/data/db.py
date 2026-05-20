@@ -2983,6 +2983,23 @@ class Database:
         )
         await self.conn.commit()
 
+    async def update_position_quantity(
+        self, position_id: int | str, new_quantity: int,
+    ) -> None:
+        """Resize an open position after a partial close.
+
+        Used by the user-initiated partial-close endpoint. The full
+        close path goes through `close_position` instead (which sets
+        status='closed'); this one keeps status='open' with the
+        remaining quantity. Callers are expected to have already
+        resized any broker-side SL / target / GTT to match.
+        """
+        await self.conn.execute(
+            "UPDATE trades SET quantity = ? WHERE trade_id = ?",
+            (int(new_quantity), str(position_id)),
+        )
+        await self.conn.commit()
+
     async def update_unrealized_pnl(self, position_id: int | str, current_price: float) -> None:
         """Update unrealized PnL for an open position based on current price.
 

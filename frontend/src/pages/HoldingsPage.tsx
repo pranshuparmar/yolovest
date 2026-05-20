@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLockHoldings, useReviewHoldings, useTightenSl } from "../hooks/queries";
+import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLockHoldings, useReviewHoldings, useTightenSl, useClosePosition } from "../hooks/queries";
 import { useLtpStream } from "../hooks/useLtpStream";
 import clsx from "clsx";
 import type { ManualOrder } from "../types/api";
@@ -201,6 +201,7 @@ export function HoldingsPage() {
   const bulkLock = useBulkLockHoldings();
   const review = useReviewHoldings();
   const tightenSl = useTightenSl();
+  const closePosition = useClosePosition();
 
   // Inline dialog state: which recommendation row is currently editing
   // its SL, what value the user has typed, and any in-flight error.
@@ -215,6 +216,19 @@ export function HoldingsPage() {
     inputValue: string;
   } | null>(null);
   const [tightenError, setTightenError] = useState<string | null>(null);
+
+  // Partial-close dialog state. Default suggested qty is 50% of
+  // current position, floored at 1. User can edit before applying.
+  const [partialCloseTarget, setPartialCloseTarget] = useState<{
+    symbol: string;
+    tradeId: string;
+    fullQty: number;
+    ltp: number;
+    entry: number;
+    direction: "BUY" | "SELL";
+    inputValue: string;
+  } | null>(null);
+  const [partialCloseError, setPartialCloseError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   type Rec = { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number; trade_id?: string | null; current_sl?: number; trade_signal_type?: string | null; entry_price?: number };
 
@@ -401,6 +415,138 @@ export function HoldingsPage() {
         </div>
       )}
 
+      {/* Partial-close modal — books a portion of the position at market.
+          Backend resizes the broker-side GTT / SL to the remaining qty. */}
+      {partialCloseTarget && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+          onClick={() => !closePosition.isPending && setPartialCloseTarget(null)}
+        >
+          <div
+            className="bg-gray-900 border border-emerald-800/50 rounded-lg max-w-sm w-full p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold text-emerald-400">
+                Book Partial Profit — {partialCloseTarget.symbol}
+              </h3>
+              <button
+                onClick={() => setPartialCloseTarget(null)}
+                disabled={closePosition.isPending}
+                className="text-gray-500 hover:text-gray-300 disabled:opacity-50"
+              >×</button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 text-xs">
+              <div>
+                <div className="text-gray-500">Entry</div>
+                <div className="font-mono text-gray-200 mt-0.5">
+                  {partialCloseTarget.entry > 0 ? fmt(partialCloseTarget.entry) : "—"}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-500">LTP</div>
+                <div className="font-mono text-gray-200 mt-0.5">
+                  {partialCloseTarget.ltp > 0 ? fmt(partialCloseTarget.ltp) : "—"}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-500">Holding</div>
+                <div className="font-mono text-gray-200 mt-0.5">
+                  {partialCloseTarget.fullQty}
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">
+                Close quantity (1–{partialCloseTarget.fullQty - 1})
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={partialCloseTarget.fullQty - 1}
+                step={1}
+                value={partialCloseTarget.inputValue}
+                onChange={(e) => {
+                  setPartialCloseTarget({ ...partialCloseTarget, inputValue: e.target.value });
+                  setPartialCloseError(null);
+                }}
+                disabled={closePosition.isPending}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 font-mono focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                autoFocus
+              />
+              {(() => {
+                const exitQty = parseInt(partialCloseTarget.inputValue, 10);
+                if (!Number.isFinite(exitQty) || exitQty <= 0) return null;
+                const ltp = partialCloseTarget.ltp;
+                const entry = partialCloseTarget.entry;
+                if (ltp <= 0 || entry <= 0) return null;
+                const estGross = partialCloseTarget.direction === "BUY"
+                  ? (ltp - entry) * exitQty
+                  : (entry - ltp) * exitQty;
+                const remaining = partialCloseTarget.fullQty - exitQty;
+                return (
+                  <p className="text-[11px] text-gray-500 mt-1.5">
+                    Est. realised PnL @ LTP: <span className={clsx("font-mono", estGross >= 0 ? "text-emerald-400" : "text-red-400")}>
+                      {estGross >= 0 ? "+" : ""}₹{fmt(estGross)}
+                    </span> (before costs). {remaining} share{remaining === 1 ? "" : "s"} stay open.
+                  </p>
+                );
+              })()}
+            </div>
+
+            {partialCloseError && (
+              <div className="text-xs text-red-400 bg-red-900/20 border border-red-800/50 rounded px-3 py-2">
+                {partialCloseError}
+              </div>
+            )}
+
+            <div className="flex gap-2 justify-end pt-1">
+              <button
+                onClick={() => setPartialCloseTarget(null)}
+                disabled={closePosition.isPending}
+                className="px-3 py-1.5 rounded text-xs bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-50"
+              >Cancel</button>
+              <button
+                onClick={async () => {
+                  const exitQty = parseInt(partialCloseTarget.inputValue, 10);
+                  if (!Number.isFinite(exitQty) || exitQty < 1) {
+                    setPartialCloseError("Quantity must be a positive integer");
+                    return;
+                  }
+                  if (exitQty >= partialCloseTarget.fullQty) {
+                    setPartialCloseError(
+                      `For a full exit use the Close button on the Positions page; ` +
+                      `partial close requires qty < ${partialCloseTarget.fullQty}`,
+                    );
+                    return;
+                  }
+                  try {
+                    const r = await closePosition.mutateAsync({
+                      tradeId: partialCloseTarget.tradeId,
+                      qty: exitQty,
+                    });
+                    setPartialCloseTarget(null);
+                    review.reset();  // hide stale recommendation
+                    window.alert(
+                      `Booked ${r.exit_qty}/${partialCloseTarget.fullQty} ` +
+                      `${partialCloseTarget.symbol} @ ₹${(r.exit_price ?? 0).toFixed(2)} — ` +
+                      `realised ₹${(r.partial_pnl ?? 0).toLocaleString("en-IN")}. ` +
+                      `${r.remaining_qty} shares still open.`,
+                    );
+                  } catch (e) {
+                    setPartialCloseError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                disabled={closePosition.isPending}
+                className="px-3 py-1.5 rounded text-xs bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50"
+              >{closePosition.isPending ? "Booking…" : "Book"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Recommendations panel */}
       {review.data && review.data.recommendations.length > 0 && (
         <div className="bg-gray-900 border border-blue-800/50 rounded-lg overflow-hidden">
@@ -459,35 +605,56 @@ export function HoldingsPage() {
                         </span>
                       )}
                       {r.action === "TIGHTEN_SL" && r.trade_id && r.current_sl && r.current_sl > 0 && (
-                        <button
-                          onClick={() => {
-                            const direction = (r.trade_signal_type === "SELL" ? "SELL" : "BUY") as "BUY" | "SELL";
-                            const ltp = r.last_price || 0;
-                            const currentSl = r.current_sl ?? 0;
-                            // Suggested new SL = midpoint of LTP and current SL,
-                            // floored at entry for BUY (lock in at least breakeven)
-                            // and capped at entry for SELL. Keeps the suggestion
-                            // safely on the right side for "tighten".
-                            const entry = r.entry_price ?? 0;
-                            let suggested: number;
-                            if (direction === "BUY") {
-                              suggested = Math.max(entry || currentSl, (ltp + currentSl) / 2);
-                            } else {
-                              suggested = Math.min(entry || currentSl, (ltp + currentSl) / 2);
-                            }
-                            setTightenTarget({
-                              symbol: r.symbol,
-                              tradeId: r.trade_id!,
-                              currentSl,
-                              ltp,
-                              entry,
-                              direction,
-                              inputValue: suggested.toFixed(2),
-                            });
-                            setTightenError(null);
-                          }}
-                          className="px-2 py-0.5 rounded text-xs bg-amber-900/40 text-amber-400 hover:bg-amber-800/50"
-                        >Tighten SL</button>
+                        <div className="inline-flex gap-1.5">
+                          <button
+                            onClick={() => {
+                              const direction = (r.trade_signal_type === "SELL" ? "SELL" : "BUY") as "BUY" | "SELL";
+                              const ltp = r.last_price || 0;
+                              const currentSl = r.current_sl ?? 0;
+                              // Suggested new SL = midpoint of LTP and current SL,
+                              // floored at entry for BUY (lock in at least breakeven)
+                              // and capped at entry for SELL.
+                              const entry = r.entry_price ?? 0;
+                              let suggested: number;
+                              if (direction === "BUY") {
+                                suggested = Math.max(entry || currentSl, (ltp + currentSl) / 2);
+                              } else {
+                                suggested = Math.min(entry || currentSl, (ltp + currentSl) / 2);
+                              }
+                              setTightenTarget({
+                                symbol: r.symbol,
+                                tradeId: r.trade_id!,
+                                currentSl,
+                                ltp,
+                                entry,
+                                direction,
+                                inputValue: suggested.toFixed(2),
+                              });
+                              setTightenError(null);
+                            }}
+                            className="px-2 py-0.5 rounded text-xs bg-amber-900/40 text-amber-400 hover:bg-amber-800/50"
+                          >Tighten SL</button>
+                          {r.quantity > 1 && (
+                            <button
+                              onClick={() => {
+                                const direction = (r.trade_signal_type === "SELL" ? "SELL" : "BUY") as "BUY" | "SELL";
+                                // Default: half the position (floored to 1).
+                                const suggestedQty = Math.max(1, Math.floor(r.quantity / 2));
+                                setPartialCloseTarget({
+                                  symbol: r.symbol,
+                                  tradeId: r.trade_id!,
+                                  fullQty: r.quantity,
+                                  ltp: r.last_price || 0,
+                                  entry: r.entry_price ?? r.average_price ?? 0,
+                                  direction,
+                                  inputValue: String(suggestedQty),
+                                });
+                                setPartialCloseError(null);
+                              }}
+                              className="px-2 py-0.5 rounded text-xs bg-emerald-900/40 text-emerald-400 hover:bg-emerald-800/50"
+                            >Book Partial</button>
+                          )}
+                        </div>
                       )}
                     </td>
                   </tr>
