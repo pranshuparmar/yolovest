@@ -11,11 +11,22 @@ export function CdslAuthBanner() {
   const { data: state } = useSystemState();
   const cdsl = state?.cdsl_auth;
 
-  if (!cdsl || !cdsl.authenticated || !cdsl.needs_auth) return null;
+  // Render only when the alert is genuinely actionable today —
+  // unauthorised holdings AND something that might try to sell
+  // (open CNC trade / active GTT / pending CNC sell). Long-term
+  // holders with no system exits never see this.
+  if (!cdsl || !cdsl.authenticated || !cdsl.alert_needed) return null;
 
   const pendingSyms = (cdsl.pending_symbols ?? []).slice(0, 6).map((s) => s.symbol).join(", ");
   const more = (cdsl.pending_count ?? 0) - 6;
   const symBlurb = more > 0 ? `${pendingSyms}, +${more} more` : pendingSyms;
+
+  // Build a small "why now" line so the alert isn't mysterious.
+  const triggerBits: string[] = [];
+  if (cdsl.active_cnc_positions) triggerBits.push(`${cdsl.active_cnc_positions} open CNC trade${cdsl.active_cnc_positions === 1 ? "" : "s"}`);
+  if (cdsl.active_gtts) triggerBits.push(`${cdsl.active_gtts} active GTT${cdsl.active_gtts === 1 ? "" : "s"}`);
+  if (cdsl.pending_cnc_sells) triggerBits.push(`${cdsl.pending_cnc_sells} pending CNC sell${cdsl.pending_cnc_sells === 1 ? "" : "s"}`);
+  const trigger = triggerBits.join(" + ");
 
   const handleOpenAuth = async () => {
     // Hitting the proactive endpoint mirrors what the OrderForm does
@@ -54,6 +65,11 @@ export function CdslAuthBanner() {
             authorising before delivery sells can be placed today.
             {pendingSyms && <span className="ml-1 text-gray-500">({symBlurb})</span>}
           </p>
+          {trigger && (
+            <p className="text-[11px] text-gray-500 mt-1">
+              Showing because of: <span className="text-gray-400">{trigger}</span>
+            </p>
+          )}
           <div className="flex flex-wrap items-center gap-2 mt-3">
             <button
               onClick={handleOpenAuth}

@@ -121,9 +121,57 @@ class CdslAuthCheckSkill(SkillBase):
             )
 
         status = _compute_cdsl_status(holdings or [])
+
+        # Alert gate: only ping when something the system manages could
+        # actually try to sell delivery today. A user who's holding
+        # long-term shares with no system-managed exits and no GTTs
+        # shouldn't be nagged daily about TPIN auth they don't need.
+        active_positions = 0
+        active_gtts = 0
+        pending_cnc_sells = 0
+        try:
+            positions = await self.ctx.db.get_open_positions(
+                mode=self.ctx.config.mode,
+            )
+            active_positions = sum(
+                1 for p in positions
+                if (p.get("product") or "").upper() == "CNC"
+                and (p.get("origin") or "system") == "system"
+            )
+        except Exception:
+            logger.debug("cdsl-auth-check: positions lookup failed", exc_info=True)
+        try:
+            if hasattr(broker, "get_gtts"):
+                gtts = await broker.get_gtts() or []
+                active_gtts = sum(
+                    1 for g in gtts
+                    if str(g.get("status") or "").lower() == "active"
+                )
+        except Exception:
+            logger.debug("cdsl-auth-check: gtts lookup failed", exc_info=True)
+        try:
+            pending = await self.ctx.db.get_pending_trades()
+            pending_cnc_sells = sum(
+                1 for p in pending
+                if (p.get("product") or "").upper() == "CNC"
+                and (p.get("signal_type") or "").upper() == "SELL"
+            )
+        except Exception:
+            logger.debug("cdsl-auth-check: pending lookup failed", exc_info=True)
+
+        has_active_cnc_exits = (
+            active_positions > 0 or active_gtts > 0 or pending_cnc_sells > 0
+        )
+        alert_needed = status["needs_auth"] and has_active_cnc_exits
+
         result = {
             "authenticated": True,
             **status,
+            "has_active_cnc_exits": has_active_cnc_exits,
+            "active_cnc_positions": active_positions,
+            "active_gtts": active_gtts,
+            "pending_cnc_sells": pending_cnc_sells,
+            "alert_needed": alert_needed,
             "checked_at": now_utc().isoformat(),
         }
 
@@ -137,11 +185,19 @@ class CdslAuthCheckSkill(SkillBase):
         except Exception:
             logger.debug("cdsl-auth-check: cache write failed", exc_info=True)
 
-        if not status["needs_auth"]:
+        if not alert_needed:
+            # Either nothing to authorise, or nothing the system
+            # manages might sell today — quiet path.
+            reason = (
+                "nothing pending auth" if not status["needs_auth"]
+                else "no active CNC exits (long-term holding, no GTTs / open trades / pending CNC sells)"
+            )
             logger.info(
-                "cdsl-auth-check: clean (deliverable=%d, authorised=%d). %s",
+                "cdsl-auth-check: no alert — %s "
+                "(deliverable=%d, authorised=%d, positions=%d, gtts=%d, pending_sells=%d)",
+                reason,
                 status["deliverable_qty"], status["authorised_qty"],
-                "DDPI likely on" if status["ddpi_likely_enabled"] else "Nothing to sell",
+                active_positions, active_gtts, pending_cnc_sells,
             )
             return SkillResult(
                 success=True, skill_name=self.name, data=result,
@@ -155,10 +211,22 @@ class CdslAuthCheckSkill(SkillBase):
         )
         if status["pending_count"] > 6:
             symbols_blurb += f", +{status['pending_count'] - 6} more"
+        # Build a one-line "why we're alerting" so the user understands
+        # this isn't a daily blanket nag.
+        trigger_bits: list[str] = []
+        if active_positions:
+            trigger_bits.append(f"{active_positions} open CNC trade(s)")
+        if active_gtts:
+            trigger_bits.append(f"{active_gtts} active GTT(s)")
+        if pending_cnc_sells:
+            trigger_bits.append(f"{pending_cnc_sells} pending CNC sell(s)")
+        trigger_blurb = " + ".join(trigger_bits) or "scheduled exit activity"
+
         msg = (
             f"⚠ CDSL TPIN required\n"
             f"{status['pending_qty']} share(s) across {status['pending_count']} "
-            f"symbol(s) need authorising before delivery sells can be placed.\n\n"
+            f"symbol(s) need authorising before delivery sells can be placed today.\n\n"
+            f"Triggered by: {trigger_blurb}\n"
             f"Pending: {symbols_blurb}\n\n"
             f"Open the dashboard banner or Kite Holdings to authorise. "
             f"For a one-time setup that skips daily TPIN, set up DDPI: "

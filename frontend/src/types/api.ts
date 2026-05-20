@@ -465,6 +465,15 @@ export interface SystemState {
   cdsl_auth?: {
     authenticated: boolean;
     needs_auth?: boolean;
+    // True iff needs_auth AND has_active_cnc_exits. This is the
+    // gate the UI banner / Telegram alert keys off — having
+    // unauthorised holdings alone doesn't trigger the alert if
+    // nothing the system manages might try to sell today.
+    alert_needed?: boolean;
+    has_active_cnc_exits?: boolean;
+    active_cnc_positions?: number;
+    active_gtts?: number;
+    pending_cnc_sells?: number;
     pending_qty?: number;
     pending_count?: number;
     pending_symbols?: Array<{

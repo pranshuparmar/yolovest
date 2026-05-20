@@ -248,6 +248,11 @@ def _compute_cdsl_status(holdings: list[dict[str, Any]]) -> dict[str, Any]:
     nagging them.
 
     Empty holdings → needs_auth=False (nothing to sell).
+
+    NOTE: `needs_auth` here is "are there unauthorised holdings?",
+    not "should we alert the user?". The alert gate is computed
+    separately by `_compute_cdsl_alert_gate` so users who hold
+    long-term shares with no system exits aren't pinged daily.
     """
     total_holdings = 0
     total_deliverable = 0
@@ -293,6 +298,72 @@ def _compute_cdsl_status(holdings: list[dict[str, Any]]) -> dict[str, Any]:
         "ddpi_likely_enabled": (
             total_deliverable > 0 and total_authorised >= total_deliverable
         ),
+    }
+
+
+async def _compute_cdsl_alert_gate(ctx: Any) -> dict[str, Any]:
+    """Decide whether a CDSL alert should actually fire.
+
+    Just having unauthorised holdings isn't enough — a long-term
+    investor who never sells shouldn't be nagged daily. We only
+    alert when something the system manages could try to place a
+    delivery (CNC) sell today:
+
+      - Open system-managed CNC position (could exit on target/SL).
+      - Active GTT at the broker (could fire on price crossing).
+      - Pending CNC SELL in the manual-approval queue.
+
+    Returns a dict the caller merges into the cdsl_status snapshot:
+        {
+            "has_active_cnc_exits": bool,
+            "active_cnc_positions": int,
+            "active_gtts": int,
+            "pending_cnc_sells": int,
+        }
+    """
+    active_positions = 0
+    active_gtts = 0
+    pending_cnc_sells = 0
+
+    try:
+        positions = await ctx.db.get_open_positions(mode=ctx.config.mode)
+        active_positions = sum(
+            1 for p in positions
+            if (p.get("product") or "").upper() == "CNC"
+            and (p.get("origin") or "system") == "system"
+        )
+    except Exception:
+        logger.debug("cdsl-gate: get_open_positions failed", exc_info=True)
+
+    try:
+        if hasattr(ctx.broker, "get_gtts") and await ctx.broker.is_authenticated():
+            gtts = await ctx.broker.get_gtts() or []
+            # Only count GTTs that aren't already terminal — Kite
+            # keeps cancelled/triggered ones in the list for a while.
+            active_gtts = sum(
+                1 for g in gtts
+                if str(g.get("status") or "").lower() == "active"
+            )
+    except Exception:
+        logger.debug("cdsl-gate: get_gtts failed", exc_info=True)
+
+    try:
+        pending = await ctx.db.get_pending_trades()
+        pending_cnc_sells = sum(
+            1 for p in pending
+            if (p.get("product") or "").upper() == "CNC"
+            and (p.get("signal_type") or "").upper() == "SELL"
+        )
+    except Exception:
+        logger.debug("cdsl-gate: get_pending_trades failed", exc_info=True)
+
+    return {
+        "has_active_cnc_exits": (
+            active_positions > 0 or active_gtts > 0 or pending_cnc_sells > 0
+        ),
+        "active_cnc_positions": active_positions,
+        "active_gtts": active_gtts,
+        "pending_cnc_sells": pending_cnc_sells,
     }
 
 
@@ -2030,10 +2101,16 @@ def create_app(ctx: AppContext) -> FastAPI:
             }
 
         status = _compute_cdsl_status(holdings or [])
+        gate = await _compute_cdsl_alert_gate(ctx)
         from yolovest.timezone import now_utc as _now_utc
         result = {
             "authenticated": True,
             **status,
+            **gate,
+            # alert_needed: the field the UI banner and CRON skill key
+            # off. Unauthorised holdings alone don't trigger an alert —
+            # there has to be something that might try to sell today.
+            "alert_needed": status["needs_auth"] and gate["has_active_cnc_exits"],
             "checked_at": _now_utc().isoformat(),
         }
         # Persist the latest live read so the next dashboard tick
