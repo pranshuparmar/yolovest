@@ -245,7 +245,6 @@ export function TradeDetailPage() {
                   ? (data.exit_price - data.fill_price) * data.quantity
                   : (data.fill_price - data.exit_price) * data.quantity)
               : null;
-          const pnlPct = data.pnl != null && invested > 0 ? (data.pnl / invested) * 100 : null;
           const pnlClass = (n: number | null) =>
             n != null && n > 0 ? "text-emerald-400" : n != null && n < 0 ? "text-red-400" : "";
           return (
@@ -274,15 +273,40 @@ export function TradeDetailPage() {
               </div>
               <div>
                 <p className="text-xs text-gray-500">Net PnL (after costs)</p>
-                <p className={clsx(pnlClass(data.pnl))}>
-                  {data.pnl !== null ? `₹${fmt(data.pnl)}` : "—"}
-                </p>
+                {(() => {
+                  const partial = data.realized_partial_pnl ?? 0;
+                  const totalNet = (data.pnl ?? 0) + partial;
+                  const hasAny = data.pnl !== null || partial !== 0;
+                  return (
+                    <>
+                      <p className={clsx(pnlClass(hasAny ? totalNet : null))}>
+                        {hasAny ? `₹${fmt(totalNet)}` : "—"}
+                      </p>
+                      {partial !== 0 && (
+                        <p className="text-[11px] text-gray-500 mt-0.5 leading-tight">
+                          Partial bookings ₹{fmt(partial)}
+                          {data.pnl !== null && ` · Final ₹${fmt(data.pnl)}`}
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
               <div>
                 <p className="text-xs text-gray-500">Net PnL %</p>
-                <p className={clsx(pnlClass(pnlPct))}>
-                  {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${fmt(pnlPct)}%` : "—"}
-                </p>
+                {(() => {
+                  const partial = data.realized_partial_pnl ?? 0;
+                  const totalNet = (data.pnl ?? 0) + partial;
+                  const totalPct = invested > 0 ? (totalNet / invested) * 100 : null;
+                  const hasAny = data.pnl !== null || partial !== 0;
+                  return (
+                    <p className={clsx(pnlClass(hasAny ? totalPct : null))}>
+                      {hasAny && totalPct != null
+                        ? `${totalPct >= 0 ? "+" : ""}${fmt(totalPct)}%`
+                        : "—"}
+                    </p>
+                  );
+                })()}
               </div>
               <div><p className="text-xs text-gray-500">Mode</p><p>{data.mode}</p></div>
               <div><p className="text-xs text-gray-500">Created</p><p className="text-xs">{parseUTC(data.created_at).toLocaleString("en-IN", { timeZone: getTimezone() })}</p></div>

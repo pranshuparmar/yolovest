@@ -935,10 +935,13 @@ def create_app(ctx: AppContext) -> FastAPI:
                             oid_key, exc_info=True,
                         )
 
-            # Resize the local trade row + record the partial PnL in
-            # audit_log. We don't touch trades.pnl — that's reserved for
-            # the final closure of the remaining shares.
+            # Resize the local trade row + record the partial PnL.
+            # trades.pnl stays NULL until the final closure of the
+            # remaining shares; trades.realized_partial_pnl accumulates
+            # the booked-along-the-way PnL so the UI can show
+            # total = realized_partial_pnl + (pnl or unrealised).
             await ctx.db.update_position_quantity(trade_id, remaining_qty)
+            await ctx.db.increment_realized_partial_pnl(trade_id, partial_pnl)
             try:
                 await ctx.db.log_audit(
                     action_type="partial_close",

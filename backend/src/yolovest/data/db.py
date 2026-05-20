@@ -2983,6 +2983,25 @@ class Database:
         )
         await self.conn.commit()
 
+    async def increment_realized_partial_pnl(
+        self, position_id: int | str, partial_pnl: float,
+    ) -> None:
+        """Add a partial-booking PnL to the trade's running total.
+
+        Each partial close is recorded individually in audit_log (with
+        exit_qty, exit_price, etc.); the running sum lives on trades
+        so reads don't need a JOIN. The final close (full exit of the
+        remainder) populates `pnl` separately; UI surfaces
+        total = realized_partial_pnl + pnl.
+        """
+        await self.conn.execute(
+            "UPDATE trades "
+            "SET realized_partial_pnl = COALESCE(realized_partial_pnl, 0) + ? "
+            "WHERE trade_id = ?",
+            (float(partial_pnl), str(position_id)),
+        )
+        await self.conn.commit()
+
     async def update_position_quantity(
         self, position_id: int | str, new_quantity: int,
     ) -> None:

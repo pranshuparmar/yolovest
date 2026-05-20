@@ -61,6 +61,10 @@ export interface Trade {
   estimated_costs: number | null;
   pnl: number | null;
   exit_price: number | null;
+  // Accumulated realised PnL from partial-close bookings, if any.
+  // Total PnL surfaced to the user is realized_partial_pnl + (pnl ?? 0).
+  // Null/undefined on rows from before migration 043.
+  realized_partial_pnl?: number | null;
   created_at: string;
   closed_at: string | null;
 }
