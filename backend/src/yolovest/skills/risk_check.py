@@ -301,10 +301,12 @@ class RiskCheckSkill(SkillBase):
             # accidentally scale below the floor for a SELL when the
             # BUY threshold is set higher (or vice versa).
             sig_type = signal.get("signal_type", "BUY")
-            base_threshold = (
-                cfg.min_confidence_buy if sig_type == "BUY"
-                else cfg.min_confidence_sell
+            sig_holding = str(
+                signal.get("expected_holding_period")
+                or signal.get("holding_period")
+                or ""
             )
+            base_threshold = cfg.resolve_min_confidence(sig_holding, sig_type)
             top = 0.95
             if conf <= base_threshold:
                 factor = cfg.confidence_scaled_min_factor

@@ -573,10 +573,12 @@ class GenerateSignalsSkill(SkillBase):
                 if is_reentry:
                     signal["reentry"] = True
 
-                # Step 5: Confidence filter (asymmetric per signal type)
-                base_threshold = (
-                    min_confidence_buy if prediction.signal_type == "BUY"
-                    else min_confidence_sell
+                # Step 5: Confidence filter (asymmetric per signal type
+                # AND per holding bucket — intraday and swing have very
+                # different signal characteristics so a single floor
+                # rarely fits both well).
+                base_threshold = risk_cfg.resolve_min_confidence(
+                    holding_period, prediction.signal_type,
                 )
                 effective_min = base_threshold
                 is_repeat = symbol in recently_traded

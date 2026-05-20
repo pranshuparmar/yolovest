@@ -549,6 +549,19 @@ class RiskConfig(BaseModel):
     kill_switch_enabled: bool = True
     min_confidence_buy: float = Field(default=0.60, ge=0, le=1)
     min_confidence_sell: float = Field(default=0.75, ge=0, le=1)
+    # Per-strategy-mode floors. Intraday and swing have very different
+    # signal characteristics (volatility, holding window, R:R geometry,
+    # short-availability), so the same probability floor rarely fits
+    # both well. When set, these REPLACE the global floor above for
+    # signals matching that holding bucket. `None` falls back to the
+    # global value, preserving behaviour for users who haven't
+    # configured per-mode floors. "Intraday" = `holding_period ==
+    # "intraday"`; everything else (short_swing / week / long) routes
+    # to the swing pair.
+    min_confidence_buy_intraday: float | None = Field(default=None, ge=0, le=1)
+    min_confidence_sell_intraday: float | None = Field(default=None, ge=0, le=1)
+    min_confidence_buy_swing: float | None = Field(default=None, ge=0, le=1)
+    min_confidence_sell_swing: float | None = Field(default=None, ge=0, le=1)
     skip_sell_on_holdings: bool = True  # position-monitor handles exits; no SELL on held symbols
     max_trades_per_day: int = Field(default=5, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
@@ -610,6 +623,34 @@ class RiskConfig(BaseModel):
     institutional_flow: InstitutionalFlowConfig = Field(default_factory=InstitutionalFlowConfig)
     exit_tweaks: ExitTweaksConfig = Field(default_factory=ExitTweaksConfig)
     reentry: ReentryConfig = Field(default_factory=ReentryConfig)
+
+    def resolve_min_confidence(
+        self, holding_period: str, signal_type: str,
+    ) -> float:
+        """Pick the per-mode floor when set, else fall back to the
+        global `min_confidence_buy` / `min_confidence_sell`.
+
+        Routes `holding_period == "intraday"` to the intraday pair;
+        everything else (short_swing / week / long) routes to the
+        swing pair.
+        """
+        is_intraday = holding_period == "intraday"
+        is_buy = signal_type == "BUY"
+        if is_intraday:
+            per_mode = (
+                self.min_confidence_buy_intraday if is_buy
+                else self.min_confidence_sell_intraday
+            )
+        else:
+            per_mode = (
+                self.min_confidence_buy_swing if is_buy
+                else self.min_confidence_sell_swing
+            )
+        if per_mode is not None:
+            return float(per_mode)
+        return float(
+            self.min_confidence_buy if is_buy else self.min_confidence_sell
+        )
 
 
 class MarketHoursConfig(BaseModel):

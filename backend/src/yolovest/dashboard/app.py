@@ -3053,9 +3053,8 @@ def create_app(ctx: AppContext) -> FastAPI:
                     )
                     continue
 
-                threshold = (
-                    min_confidence_buy if prediction.signal_type == "BUY"
-                    else min_confidence_sell
+                threshold = cfg.risk.resolve_min_confidence(
+                    holding_period, prediction.signal_type,
                 )
                 if prediction.confidence < threshold:
                     filter_counts["low_confidence"] += 1

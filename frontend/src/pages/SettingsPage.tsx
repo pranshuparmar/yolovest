@@ -135,6 +135,18 @@ const READ_ONLY_KEYS = new Set([
   "market_hours.timezone",
 ]);
 
+// Nullable numeric fields. When null, the model falls back to a global
+// default (documented in the tooltip). Renders as an empty input with a
+// "(global)" placeholder; clearing the input sends null back to the API.
+const NULLABLE_NUMBER_KEYS = new Set([
+  "risk.min_confidence_buy_intraday",
+  "risk.min_confidence_sell_intraday",
+  "risk.min_confidence_buy_swing",
+  "risk.min_confidence_sell_swing",
+  "risk.buy_threshold_override",
+  "risk.sell_threshold_override",
+]);
+
 // ---------------------------------------------------------------------------
 // Section labels
 // ---------------------------------------------------------------------------
@@ -251,6 +263,10 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.target_early_exit_pct": "Target Early-Exit Buffer",
   "risk.min_confidence_buy": "Min Confidence (BUY)",
   "risk.min_confidence_sell": "Min Confidence (SELL)",
+  "risk.min_confidence_buy_intraday": "Min Confidence (BUY · Intraday)",
+  "risk.min_confidence_sell_intraday": "Min Confidence (SELL · Intraday)",
+  "risk.min_confidence_buy_swing": "Min Confidence (BUY · Swing)",
+  "risk.min_confidence_sell_swing": "Min Confidence (SELL · Swing)",
   "risk.skip_sell_on_holdings": "Skip SELL on Holdings",
   "risk.max_trades_per_day": "Max Trades / Day",
   "risk.kill_switch_enabled": "Kill Switch",
@@ -462,8 +478,12 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "risk.trailing_sl_trigger_multiple": "Activate trailing SL when profit reaches this multiple of risk.",
   "risk.trailing_sl_step_pct": "Trail the stop loss in steps of this percentage.",
   "risk.target_early_exit_pct": "Exit when price is within this percentage of target. Heartbeats run every 15 min; without a buffer a price that gets within a paisa of target but never touches it waits a full cycle and may reverse. Default 0.15% catches ~₹0.15 on a ₹100 stock.",
-  "risk.min_confidence_buy": "Minimum ML confidence for a BUY signal (0–1).",
-  "risk.min_confidence_sell": "Minimum ML confidence for a SELL signal (0–1). Set higher than BUY to avoid exit noise.",
+  "risk.min_confidence_buy": "Global fallback: minimum ML confidence for a BUY signal (0–1). Used when the per-mode floor below is unset.",
+  "risk.min_confidence_sell": "Global fallback: minimum ML confidence for a SELL signal (0–1). Used when the per-mode floor below is unset. Set higher than BUY to avoid exit noise.",
+  "risk.min_confidence_buy_intraday": "Intraday BUY floor (0–1). Applied on top of the model's tuned threshold for intraday signals. Leave blank to fall back to the global Min Confidence (BUY).",
+  "risk.min_confidence_sell_intraday": "Intraday SELL floor (0–1). Applied on top of the model's tuned threshold for intraday signals. Indian retail intraday is BUY-biased (no overnight short, positive index drift) — a higher SELL floor here filters borderline shorts. Leave blank to fall back to the global Min Confidence (SELL).",
+  "risk.min_confidence_buy_swing": "Swing BUY floor (0–1). Applied on top of the model's tuned threshold for short_swing / week / long holding signals. Leave blank to fall back to the global Min Confidence (BUY).",
+  "risk.min_confidence_sell_swing": "Swing SELL floor (0–1). Applied on top of the model's tuned threshold for short_swing / week / long holding signals. Leave blank to fall back to the global Min Confidence (SELL).",
   "risk.skip_sell_on_holdings": "Don't generate SELL signals for symbols you already hold — position-monitor handles exits.",
   "risk.max_trades_per_day": "Maximum trades per day including re-entries.",
   "risk.kill_switch_enabled": "Allow /stop and /kill commands to halt all trading.",
@@ -829,6 +849,44 @@ function TextField({
   );
 }
 
+function NullableNumberField({
+  label,
+  description,
+  fullKey,
+  value,
+  hint,
+  onChange,
+}: {
+  label: string;
+  description?: string;
+  fullKey?: string;
+  value: number | null;
+  hint?: string | null;
+  onChange: (val: number | null) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between py-2.5 gap-4">
+      <FieldLabel label={label} description={description} fullKey={fullKey} hint={hint} />
+      <input
+        type="number"
+        step={0.05}
+        placeholder="(global)"
+        value={value === null ? "" : value}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === "") {
+            onChange(null);
+          } else {
+            const parsed = v.includes(".") ? parseFloat(v) : parseInt(v, 10);
+            onChange(Number.isFinite(parsed) ? parsed : null);
+          }
+        }}
+        className="w-28 bg-gray-800 border border-gray-700 rounded px-2.5 py-1.5 text-sm text-gray-200 text-right focus:border-blue-500 focus:outline-none"
+      />
+    </div>
+  );
+}
+
 function JsonField({
   label,
   description,
@@ -873,6 +931,12 @@ function ConfigField({
   }
   if (SELECT_OPTIONS[fullKey] && typeof value === "string") {
     return <SelectField label={label} description={description} fullKey={fullKey} value={value} options={SELECT_OPTIONS[fullKey]} onChange={(v) => onChange(fullKey, v)} />;
+  }
+  if (NULLABLE_NUMBER_KEYS.has(fullKey)) {
+    const numOrNull = value === null || value === undefined
+      ? null
+      : typeof value === "number" ? value : null;
+    return <NullableNumberField label={label} description={description} fullKey={fullKey} value={numOrNull} hint={hint} onChange={(v) => onChange(fullKey, v)} />;
   }
   if (typeof value === "boolean") {
     return <ToggleField label={label} description={description} fullKey={fullKey} checked={value} onChange={(v) => onChange(fullKey, v)} />;
