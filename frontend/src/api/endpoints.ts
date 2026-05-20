@@ -62,6 +62,31 @@ export const api = {
 
   portfolio: () => apiFetch<PortfolioState>("/api/portfolio"),
 
+  funds: () =>
+    apiFetch<{
+      authenticated: boolean;
+      enabled?: boolean;
+      raw: Record<string, unknown> | null;
+      summary: {
+        available_cash: number;
+        live_balance: number;
+        opening_balance: number;
+        adhoc_margin?: number;
+        intraday_payin?: number;
+        collateral: number;
+        utilised_margin: number;
+        m2m_unrealised: number;
+        m2m_realised: number;
+        payout: number;
+        exposure: number;
+        span: number;
+        delivery: number;
+        option_premium?: number;
+        turnover?: number;
+        net: number;
+      };
+    }>("/api/funds"),
+
   positions: () => apiFetch<Trade[]>("/api/positions"),
 
   closePosition: (tradeId: string, qty?: number) =>

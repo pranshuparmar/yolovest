@@ -22,6 +22,7 @@ const groups: NavGroup[] = [
       { to: "/trades", label: "Trades", icon: "T" },
       { to: "/watchlist", label: "Watchlist", icon: "W" },
       { to: "/holdings", label: "Holdings", icon: "H" },
+      { to: "/funds", label: "Funds", icon: "F" },
       { to: "/dry-run", label: "Dry Run", icon: ">" },
       { to: "/alerts", label: "Alerts", icon: "!" },
     ],

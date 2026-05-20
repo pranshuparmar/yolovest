@@ -17,6 +17,7 @@ import { parseUTC, getTimezone } from "../utils/datetime";
 import { newsSourceColorClass, newsSourceLabel } from "../utils/newsSource";
 import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 import { useLtpStream } from "../hooks/useLtpStream";
+import { OrderForm } from "../components/OrderForm";
 
 /** Trailing simple moving average over the last `period` values of
  * the named field. Returns null for indices that don't have enough
@@ -59,6 +60,11 @@ export function SymbolPage() {
   ];
   const [periodIdx, setPeriodIdx] = useState(1); // default 7d
   const period = PERIODS[periodIdx];
+
+  // Inline order form trigger — populated when the user clicks Buy/Sell
+  // in the header. Symbol pre-fills from the URL param so the user
+  // doesn't have to retype it.
+  const [orderForm, setOrderForm] = useState<{ side: "BUY" | "SELL" } | null>(null);
 
   const { data: ohlcv, isLoading: ohlcvLoading } = useSymbolOHLCV(sym, {
     days: period.days,
@@ -160,7 +166,25 @@ export function SymbolPage() {
             {sentiment.sentiment} ({Math.round(sentiment.confidence * 100)}%)
           </span>
         )}
+        <div className="ml-auto flex gap-2">
+          <button
+            onClick={() => setOrderForm({ side: "BUY" })}
+            className="px-3 py-1 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white"
+          >Buy</button>
+          <button
+            onClick={() => setOrderForm({ side: "SELL" })}
+            className="px-3 py-1 rounded text-sm font-medium bg-red-600 hover:bg-red-700 text-white"
+          >Sell</button>
+        </div>
       </div>
+
+      {orderForm && (
+        <OrderForm
+          defaultSymbol={sym}
+          defaultSide={orderForm.side}
+          onClose={() => setOrderForm(null)}
+        />
+      )}
 
       {/* Period selector */}
       <div className="flex gap-2 flex-wrap">

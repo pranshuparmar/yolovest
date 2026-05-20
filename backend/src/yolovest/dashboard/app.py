@@ -625,6 +625,86 @@ def create_app(ctx: AppContext) -> FastAPI:
     # Portfolio Overview
     # ------------------------------------------------------------------
 
+    @app.get("/api/funds")
+    async def get_funds(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Live funds / margins snapshot from the broker.
+
+        Returns the raw broker.get_margins() payload alongside a parsed
+        summary so the UI can render the high-signal numbers without
+        knowing the Kite-specific schema. Used by the Funds page to
+        give a complete "what's in my account right now" view —
+        equivalent to Kite's Funds tab — so the user doesn't need to
+        log into Zerodha to check available cash, used margin, payout
+        balance, etc.
+        """
+        if not await ctx.broker.is_authenticated():
+            return {
+                "authenticated": False,
+                "raw": None,
+                "summary": {
+                    "available_cash": 0.0,
+                    "live_balance": 0.0,
+                    "opening_balance": 0.0,
+                    "utilised_margin": 0.0,
+                    "m2m_unrealised": 0.0,
+                    "m2m_realised": 0.0,
+                    "payout": 0.0,
+                    "collateral": 0.0,
+                    "exposure": 0.0,
+                    "span": 0.0,
+                    "delivery": 0.0,
+                    "net": 0.0,
+                },
+            }
+
+        try:
+            raw = await ctx.broker.get_margins()
+        except Exception as e:
+            logger.exception("get_funds: broker.get_margins failed")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Broker margins fetch failed: {e}",
+            ) from e
+
+        # Parse the Kite equity segment into a flat summary. Commodity
+        # is intentionally ignored — the platform is equity-only.
+        equity: dict[str, Any] = (raw or {}).get("equity", {}) or {}
+        avail: dict[str, Any] = equity.get("available", {}) or {}
+        util: dict[str, Any] = equity.get("utilised", {}) or {}
+
+        def _f(d: dict[str, Any], key: str) -> float:
+            try:
+                return float(d.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        summary = {
+            "available_cash": _f(avail, "cash"),
+            "live_balance": _f(avail, "live_balance"),
+            "opening_balance": _f(avail, "opening_balance"),
+            "adhoc_margin": _f(avail, "adhoc_margin"),
+            "intraday_payin": _f(avail, "intraday_payin"),
+            "collateral": _f(avail, "collateral"),
+            "utilised_margin": _f(util, "debits"),
+            "m2m_unrealised": _f(util, "m2m_unrealised"),
+            "m2m_realised": _f(util, "m2m_realised"),
+            "payout": _f(util, "payout"),
+            "exposure": _f(util, "exposure"),
+            "span": _f(util, "span"),
+            "delivery": _f(util, "delivery"),
+            "option_premium": _f(util, "option_premium"),
+            "turnover": _f(util, "turnover"),
+            "net": _f(equity, "net"),
+        }
+        return {
+            "authenticated": True,
+            "enabled": bool(equity.get("enabled", True)),
+            "raw": raw,
+            "summary": summary,
+        }
+
     @app.get("/api/portfolio")
     async def get_portfolio(user: str = Depends(verify_credentials)) -> dict[str, Any]:
         """Portfolio overview: capital, exposure, open positions, PnL.

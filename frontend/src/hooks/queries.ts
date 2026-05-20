@@ -27,6 +27,15 @@ export function usePortfolio() {
   });
 }
 
+export function useFunds() {
+  return useQuery({
+    queryKey: ["funds"],
+    queryFn: api.funds,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
 export function usePositions() {
   return useQuery({
     queryKey: ["positions"],
