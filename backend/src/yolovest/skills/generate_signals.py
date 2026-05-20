@@ -477,13 +477,37 @@ class GenerateSignalsSkill(SkillBase):
                     outcome_tracker[symbol] = False
                     continue
 
-                # Adjust SELL signals: force to MIS/intraday if user doesn't hold the stock
+                # Adjust SELL signals: force to MIS/intraday if user doesn't
+                # hold the stock. Dropped when the per-symbol decision is
+                # swing (long_term / short_term modes, or balanced mode where
+                # the swing model won) — converting a swing-horizon SELL into
+                # an intraday MIS short would mix geometries.
                 from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-                holding_period, product, expected_days = adjust_sell_for_holdings(
+                adjusted = adjust_sell_for_holdings(
                     prediction.signal_type, holding_period, product,
                     symbol, held_symbols, expected_days,
                 )
+                if adjusted is None:
+                    filter_counts.setdefault("short_on_swing_horizon", 0)
+                    filter_counts["short_on_swing_horizon"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "short_on_swing_horizon",
+                        "detail": (
+                            f"SELL on non-held {symbol} with "
+                            f"holding_period='{holding_period}' would require "
+                            f"intraday/MIS — dropped (only intraday-decided "
+                            f"SELLs are eligible for retail shorting)"
+                        ),
+                    })
+                    logger.info(
+                        "Skipping SELL for non-held %s — would mix swing "
+                        "geometry (%s, %dd) with intraday MIS short",
+                        symbol, holding_period, expected_days,
+                    )
+                    outcome_tracker[symbol] = False
+                    continue
+                holding_period, product, expected_days = adjusted
 
                 # Intraday cutoff: skip intraday signals after configured time
                 if holding_period == "intraday":

@@ -356,16 +356,33 @@ def adjust_sell_for_holdings(
     symbol: str,
     held_symbols: set[str],
     expected_days: int = 0,
-) -> tuple[str, str, int]:
+) -> tuple[str, str, int] | None:
     """Adjust SELL signals based on whether the user holds the stock.
 
-    - If the user holds the stock, SELL can use any product/period (selling owned shares).
-    - If the user does NOT hold the stock, it's a short sell — force to MIS/intraday
-      (Indian equity rules: retail short selling must be squared off same day).
+    - If the user holds the stock, SELL can use any product/period
+      (selling owned shares).
+    - If the user does NOT hold the stock, it's a short sell. Indian
+      retail rules require intraday/MIS — but we only ALLOW that when
+      the per-symbol decision already chose `holding_period ==
+      "intraday"`. A swing-model SELL converted to intraday would mix
+      geometries: swing ATR-multiplier target/SL clamped onto an
+      intraday horizon. Dropping is the right call instead.
     - BUY signals are never affected.
 
+    Mode interaction (informational — this function checks
+    `holding_period` directly rather than the strategy mode):
+      * `intraday` mode: every signal already decides intraday →
+        all non-held SELLs route through as MIS shorts. (unchanged)
+      * `balanced` mode: the per-symbol balanced predictor picks
+        intraday vs swing. Only intraday-winners survive a non-held
+        SELL; swing-winners are dropped.
+      * `short_term` / `long_term` modes: holding_period is never
+        "intraday" → all non-held SELLs are dropped.
+
     Returns:
-        (holding_period, product, expected_days)
+        (holding_period, product, expected_days), or None when the
+        signal should be dropped because a non-held SELL on a swing
+        horizon would have to be converted to intraday/MIS.
     """
     if signal_type != "SELL":
         return (holding_period, product, expected_days)
@@ -373,7 +390,12 @@ def adjust_sell_for_holdings(
     if symbol in held_symbols:
         return (holding_period, product, expected_days)
 
-    # Short sell — must be intraday MIS (no overnight short positions for retail)
+    # Non-held SELL = short candidate. Only keep when the per-symbol
+    # decision already chose intraday — otherwise we'd be silently
+    # repurposing a swing setup as an intraday short.
+    if holding_period != "intraday":
+        return None
+
     return ("intraday", "MIS", 0)
 
 

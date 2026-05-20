@@ -3070,11 +3070,27 @@ def create_app(ctx: AppContext) -> FastAPI:
                     )
                     continue
 
-                # Adjust SELL: force to MIS/intraday if user doesn't hold the stock
-                holding_period, product, expected_days = adjust_sell_for_holdings(
+                # Adjust SELL: force to MIS/intraday if user doesn't hold
+                # the stock. Drop when the per-symbol decision is swing —
+                # mirrors generate-signals so the dry-run preview matches.
+                _adjusted = adjust_sell_for_holdings(
                     prediction.signal_type, holding_period, product,
                     symbol, held_symbols, expected_days,
                 )
+                if _adjusted is None:
+                    filter_counts.setdefault("short_on_swing_horizon", 0)
+                    filter_counts["short_on_swing_horizon"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "short_on_swing_horizon",
+                        "detail": (
+                            f"SELL on non-held {symbol} with "
+                            f"holding_period='{holding_period}' would require "
+                            f"intraday/MIS — dropped"
+                        ),
+                    })
+                    continue
+                holding_period, product, expected_days = _adjusted
 
                 # Apply ATR multipliers interpolated for holding duration
                 entry = prediction.entry_price

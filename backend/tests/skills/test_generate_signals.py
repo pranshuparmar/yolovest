@@ -407,13 +407,28 @@ class TestATRMultipliers:
 class TestSellHoldingsAdjustment:
     """Test that SELL signals are forced to MIS/intraday when user doesn't hold the stock."""
 
-    def test_sell_without_holdings_forced_to_mis(self):
+    def test_sell_without_holdings_on_intraday_decision_is_mis_short(self):
+        """When the per-symbol decision is already intraday, a non-held SELL
+        becomes an MIS short. (Intraday strategy mode, or balanced mode where
+        the intraday model won.)"""
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product, days = adjust_sell_for_holdings("SELL", "short_term", "CNC", "BEL", held_symbols=set(), expected_days=4)
-        assert hp == "intraday"
-        assert product == "MIS"
-        assert days == 0
+        result = adjust_sell_for_holdings(
+            "SELL", "intraday", "MIS", "BEL",
+            held_symbols=set(), expected_days=0,
+        )
+        assert result == ("intraday", "MIS", 0)
+
+    def test_sell_without_holdings_on_swing_decision_is_dropped(self):
+        """When the per-symbol decision is swing (short_term, long_term, week,
+        positional), a non-held SELL would have to be converted to intraday
+        MIS — mixing swing geometry with an intraday horizon. Drop instead."""
+        from yolovest.strategy.holding_period import adjust_sell_for_holdings
+
+        assert adjust_sell_for_holdings(
+            "SELL", "short_term", "CNC", "BEL",
+            held_symbols=set(), expected_days=4,
+        ) is None
 
     def test_sell_with_holdings_keeps_cnc(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
@@ -423,13 +438,16 @@ class TestSellHoldingsAdjustment:
         assert product == "CNC"
         assert days == 4
 
-    def test_sell_long_term_without_holdings_forced_to_mis(self):
+    def test_sell_long_term_without_holdings_dropped(self):
+        """Long-term mode: holding_period == "long_term", never intraday.
+        Non-held SELL gets dropped to avoid silently converting to an
+        intraday short that contradicts the chosen strategy."""
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-        hp, product, days = adjust_sell_for_holdings("SELL", "long_term", "CNC", "RELIANCE", held_symbols=set(), expected_days=10)
-        assert hp == "intraday"
-        assert product == "MIS"
-        assert days == 0
+        assert adjust_sell_for_holdings(
+            "SELL", "long_term", "CNC", "RELIANCE",
+            held_symbols=set(), expected_days=10,
+        ) is None
 
     def test_buy_unaffected_regardless_of_holdings(self):
         from yolovest.strategy.holding_period import adjust_sell_for_holdings
@@ -447,8 +465,9 @@ class TestSellHoldingsAdjustment:
         assert product == "CNC"
         assert days == 10
 
-    async def test_sell_signal_gets_mis_in_pipeline(self, signal_skill):
-        """Full pipeline: SELL signal for non-held stock -> MIS/intraday."""
+    async def test_sell_signal_dropped_on_swing_horizon(self, signal_skill):
+        """Full pipeline: non-held SELL on a swing horizon is dropped — we
+        don't silently convert a short_term setup into an intraday MIS short."""
         signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
             {"symbol": "BEL"},
         ])
@@ -464,10 +483,11 @@ class TestSellHoldingsAdjustment:
         with patch.object(signal_skill, "_decide_holding_period", return_value=("short_term", "CNC", 3)):
             result = await signal_skill.execute()
 
-        assert result.data["signals_generated"] == 1
-        sig = result.data["signals"][0]
-        assert sig["product"] == "MIS"
-        assert sig["expected_holding_period"] == "intraday"
+        # The contract: no MIS short emitted for a swing-decided SELL on
+        # a non-held symbol. (Whether the signal is dropped specifically
+        # at adjust_sell_for_holdings or earlier in the filter chain
+        # depends on fixture details; what matters is signals_generated.)
+        assert result.data["signals_generated"] == 0
 
     async def test_sell_signal_keeps_cnc_when_held(self, signal_skill):
         """Full pipeline: SELL signal for held stock keeps CNC."""
