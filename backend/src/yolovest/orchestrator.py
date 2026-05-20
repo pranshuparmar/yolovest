@@ -335,8 +335,16 @@ class HeartbeatOrchestrator:
         # Check risk approval and use adjusted signal
         if risk_result.data and not risk_result.data.get("approved", True):
             reason = risk_result.data.get("rejection_reason", "")
+            # Time-deferred rejections (currently only the
+            # pre-order-window block) shouldn't burn a
+            # max_risk_rejected_retries_per_day slot — the underlying
+            # condition is "wait N minutes", not "this signal is bad".
+            # The `time_blocked` disposition is treated as retryable
+            # by the dedup query but excluded from the cap count.
+            is_deferred = bool(risk_result.data.get("deferred"))
+            disposition = "time_blocked" if is_deferred else "risk_rejected"
             logger.info("risk-check rejected signal %d: %s", index, reason)
-            await self._set_disposition(signal, "risk_rejected", reason)
+            await self._set_disposition(signal, disposition, reason)
             return results
         if risk_result.data and risk_result.data.get("signal"):
             signal = risk_result.data["signal"]  # use risk-adjusted signal (position size)

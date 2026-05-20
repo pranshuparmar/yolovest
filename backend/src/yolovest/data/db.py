@@ -1205,6 +1205,15 @@ class Database:
           exception. Treated as retryable so a persistent skill bug
           doesn't burn the cap on the *risk decision* side; the cap
           still protects against churn loops.
+
+        Deferred dispositions (re-evaluated freely, cap-exempt):
+        - time_blocked: signal was generated outside the order window
+          (e.g. heartbeat fired between market.open and order_start).
+          The underlying condition is purely time-based ("wait N
+          minutes"), so consuming a retry slot would punish the
+          symbol for a scheduler edge case rather than a real signal
+          problem. Counts as neither "other" nor "retryable" in the
+          dedup math.
         """
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -1218,18 +1227,25 @@ class Database:
             'risk_rejected', 'expired',
             'trade_execute_failed', 'skill_error',
         )
-        placeholders = ", ".join(["?"] * len(retryable))
+        deferred = ('time_blocked',)
+        ignorable = retryable + deferred  # neither blocks nor counts toward cap when "other"-counting
+        ignorable_ph = ", ".join(["?"] * len(ignorable))
+        retryable_ph = ", ".join(["?"] * len(retryable))
         mode_clause = " AND mode = ?" if mode else ""
         sig_params: tuple[Any, ...] = (today_start,)
         if mode:
             sig_params = sig_params + (mode,)
-        sig_params = sig_params + retryable + retryable + (int(risk_rejected_retry_cap),)
+        # Bound params order: first the ignorable set for the "other"
+        # count (deferred rows must NOT count as other), then the
+        # retryable set for the cap count (deferred rows must NOT
+        # count toward the cap), then the cap value itself.
+        sig_params = sig_params + ignorable + retryable + (int(risk_rejected_retry_cap),)
         cursor = await self.read_conn.execute(
             "SELECT symbol FROM signals "
             f"WHERE created_at >= ?{mode_clause} "
             "GROUP BY symbol "
-            f"HAVING SUM(CASE WHEN disposition IN ({placeholders}) THEN 0 ELSE 1 END) > 0 "
-            f"   OR SUM(CASE WHEN disposition IN ({placeholders}) THEN 1 ELSE 0 END) >= ?",
+            f"HAVING SUM(CASE WHEN disposition IN ({ignorable_ph}) THEN 0 ELSE 1 END) > 0 "
+            f"   OR SUM(CASE WHEN disposition IN ({retryable_ph}) THEN 1 ELSE 0 END) >= ?",
             sig_params,
         )
         signaled = {row[0] for row in await cursor.fetchall()}
@@ -1282,7 +1298,7 @@ class Database:
             "  SELECT id FROM signals WHERE created_at >= ? "
             "  AND (disposition IS NULL "
             "       OR disposition IN ('awaiting_approval', 'risk_rejected', "
-            "                          'llm_rejected', 'expired'))"
+            "                          'llm_rejected', 'expired', 'time_blocked'))"
             ")",
             (today_start,),
         )
@@ -1292,7 +1308,7 @@ class Database:
             "WHERE created_at >= ? "
             "AND (disposition IS NULL "
             "     OR disposition IN ('awaiting_approval', 'risk_rejected', "
-            "                        'llm_rejected', 'expired'))",
+            "                        'llm_rejected', 'expired', 'time_blocked'))",
             (today_start,),
         )
         signals_deleted = cursor.rowcount

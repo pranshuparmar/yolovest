@@ -81,7 +81,7 @@ class RiskCheckSkill(SkillBase):
 
         # Market hours
         if not self.ctx.market_hours.is_order_window():
-            return self._reject(signal, "Outside order window")
+            return self._defer(signal, "Outside order window")
 
         # Early close day — block new MIS positions if close to square-off
         if (self.ctx.market_hours.is_early_close_day()
@@ -529,6 +529,28 @@ class RiskCheckSkill(SkillBase):
             skill_name=self.name,
             data={
                 "approved": False,
+                "symbol": signal["symbol"],
+                "rejection_reason": reason,
+            },
+        )
+
+    def _defer(self, signal: dict[str, Any], reason: str) -> SkillResult:
+        """Block the signal for a transient time-based reason (currently
+        only "Outside order window"). Distinct from `_reject` so the
+        orchestrator can route this to the `time_blocked` disposition
+        instead of `risk_rejected` — the symbol stays eligible for
+        re-evaluation on the next heartbeat *without* burning a
+        max_risk_rejected_retries_per_day slot. Genuine risk decisions
+        (exposure, cooldown, depth, correlation) still go through
+        `_reject` and consume retries as before.
+        """
+        logger.info("risk-check: DEFERRED %s — %s", signal["symbol"], reason)
+        return SkillResult(
+            success=True,
+            skill_name=self.name,
+            data={
+                "approved": False,
+                "deferred": True,
                 "symbol": signal["symbol"],
                 "rejection_reason": reason,
             },
