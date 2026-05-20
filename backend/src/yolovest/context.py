@@ -412,6 +412,44 @@ class MarketHoursChecker:
         # safe rather than returning a negative interval.
         return 24 * 3600.0
 
+    def seconds_until_next_order_window(
+        self, now: datetime | None = None,
+    ) -> float:
+        """Return seconds from `now` to the next `order_start` moment.
+
+        The heartbeat uses this (not `seconds_until_next_market_open`)
+        so the first cycle of the day fires at order_start rather than
+        market_open. A user who sets order_start=09:20 to skip opening
+        volatility was previously seeing a 09:15 heartbeat fire,
+        generate signals, and have every one of them risk-rejected with
+        "Outside order window" — wasting one risk-rejected-retry slot
+        per symbol before trading could actually begin.
+
+        - Returns 0.0 when the market is open AND we're inside the
+          order window.
+        - Walks forward day by day across weekends + holidays.
+        - Caps at 10 days of look-ahead.
+        """
+        from datetime import timedelta as _td
+        if now is None:
+            now = self._now()
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=self._tz)
+        if self.is_order_window(now):
+            return 0.0
+
+        order_start = self._parse_time(self._mh.order_start)
+        for offset in range(11):
+            candidate_date = (now + _td(days=offset)).date()
+            if not self.is_trading_day(candidate_date):
+                continue
+            candidate = datetime.combine(
+                candidate_date, order_start, tzinfo=now.tzinfo,
+            )
+            if candidate > now:
+                return (candidate - now).total_seconds()
+        return 24 * 3600.0
+
     def is_holiday(self, check_date: date | None = None) -> bool:
         """Check if a date is an NSE holiday."""
         if check_date is None:
