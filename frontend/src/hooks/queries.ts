@@ -75,6 +75,69 @@ export function useTightenSl() {
   });
 }
 
+export function useModifyTarget() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ tradeId, newTarget }: { tradeId: string; newTarget: number }) =>
+      api.modifyTarget(tradeId, newTarget),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["recommendations"] });
+      qc.invalidateQueries({ queryKey: ["broker-orders"] });
+    },
+  });
+}
+
+export function useBrokerOrders() {
+  return useQuery({
+    queryKey: ["broker-orders"],
+    queryFn: api.brokerOrders,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function useCancelBrokerOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (orderId: string) => api.cancelBrokerOrder(orderId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["broker-orders"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+    },
+  });
+}
+
+export function useModifyBrokerOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      orderId, ...body
+    }: {
+      orderId: string;
+      price?: number;
+      quantity?: number;
+      trigger_price?: number;
+      order_type?: string;
+    }) => api.modifyBrokerOrder(orderId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["broker-orders"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+    },
+  });
+}
+
+export function useCancelBrokerGtt() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (gttId: number) => api.cancelBrokerGtt(gttId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["broker-orders"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+    },
+  });
+}
+
 export function usePnlCalendar(days = 90) {
   return useQuery({
     queryKey: ["pnl-calendar", days],

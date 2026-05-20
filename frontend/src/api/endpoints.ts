@@ -114,6 +114,41 @@ export const api = {
       { method: "POST", body: JSON.stringify({ new_sl: newSl }) },
     ),
 
+  modifyTarget: (tradeId: string, newTarget: number) =>
+    apiFetch<{ ok: boolean; trade_id: string; symbol: string; previous_target: number; new_target: number; path: string }>(
+      `/api/positions/${encodeURIComponent(tradeId)}/modify-target`,
+      { method: "POST", body: JSON.stringify({ new_target: newTarget }) },
+    ),
+
+  brokerOrders: () =>
+    apiFetch<{
+      authenticated: boolean;
+      orders: Record<string, unknown>[];
+      gtts: Record<string, unknown>[];
+      error?: string;
+    }>("/api/broker/orders"),
+
+  cancelBrokerOrder: (orderId: string) =>
+    apiFetch<{ ok: boolean; order_id: string }>(
+      `/api/broker/orders/${encodeURIComponent(orderId)}/cancel`,
+      { method: "POST" },
+    ),
+
+  modifyBrokerOrder: (
+    orderId: string,
+    body: { price?: number; quantity?: number; trigger_price?: number; order_type?: string },
+  ) =>
+    apiFetch<{ ok: boolean; order_id: string }>(
+      `/api/broker/orders/${encodeURIComponent(orderId)}/modify`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  cancelBrokerGtt: (gttId: number) =>
+    apiFetch<{ ok: boolean; gtt_id: number }>(
+      `/api/broker/gtts/${gttId}/cancel`,
+      { method: "POST" },
+    ),
+
   tradesToday: () => apiFetch<Trade[]>("/api/trades/today"),
 
   holdings: () => apiFetch<HoldingsResponse>("/api/holdings"),

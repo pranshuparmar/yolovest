@@ -19,6 +19,7 @@ const groups: NavGroup[] = [
     items: [
       { to: "/", label: "Dashboard", icon: "D" },
       { to: "/positions", label: "Positions", icon: "P" },
+      { to: "/orders", label: "Orders", icon: "O" },
       { to: "/trades", label: "Trades", icon: "T" },
       { to: "/watchlist", label: "Watchlist", icon: "W" },
       { to: "/holdings", label: "Holdings", icon: "H" },

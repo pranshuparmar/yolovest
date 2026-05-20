@@ -173,6 +173,20 @@ class _StubBroker:
     async def modify_sl_order(self, order_id: str, new_trigger_price: float) -> bool:
         raise NotImplementedError("No broker configured")
 
+    async def modify_order(
+        self,
+        order_id: str,
+        *,
+        price: float | None = None,
+        quantity: int | None = None,
+        trigger_price: float | None = None,
+        order_type: str | None = None,
+    ) -> bool:
+        raise NotImplementedError("No broker configured")
+
+    async def get_orders(self) -> list[dict[str, object]]:
+        return []
+
     def get_login_url(self) -> str:
         return ""
 

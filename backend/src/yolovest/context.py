@@ -48,6 +48,18 @@ class BrokerProtocol(Protocol):
 
     async def modify_sl_order(self, order_id: str, new_trigger_price: float) -> bool: ...
 
+    async def modify_order(
+        self,
+        order_id: str,
+        *,
+        price: float | None = None,
+        quantity: int | None = None,
+        trigger_price: float | None = None,
+        order_type: str | None = None,
+    ) -> bool: ...
+
+    async def get_orders(self) -> list[dict[str, Any]]: ...
+
 
 @runtime_checkable
 class LLMProtocol(Protocol):

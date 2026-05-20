@@ -706,6 +706,93 @@ class ZerodhaBroker(BrokerBase):
         await self._retry_api_call(_modify)
         return True
 
+    async def modify_order(
+        self,
+        order_id: str,
+        *,
+        price: float | None = None,
+        quantity: int | None = None,
+        trigger_price: float | None = None,
+        order_type: str | None = None,
+    ) -> bool:
+        """Generic order modification — adjust price / qty / trigger /
+        order_type on a still-open broker order.
+
+        Used by the dashboard's order-book "Modify" action so the user
+        can move a queued LIMIT price or resize an SL trigger without
+        going to Kite. Tick rounding applies the same way as the
+        original place_order. None-valued fields are passed through
+        unchanged.
+        """
+        if self._mode == "paper":
+            logger.info(
+                "[PAPER] Modify order %s price=%s qty=%s trigger=%s type=%s",
+                order_id, price, quantity, trigger_price, order_type,
+            )
+            if order_id in self._paper_orders:
+                po = self._paper_orders[order_id]
+                if price is not None:
+                    po["price"] = price
+                if quantity is not None:
+                    po["quantity"] = int(quantity)
+                if trigger_price is not None:
+                    po["trigger_price"] = trigger_price
+                if order_type is not None:
+                    po["order_type"] = order_type
+            return True
+
+        if not self._kite:
+            raise RuntimeError("Not authenticated")
+
+        # Round to symbol tick (same path as place_order)
+        if price is not None:
+            try:
+                # Best-effort symbol resolution from kite.orders(); skip
+                # cache warm if it fails — broker still rejects on
+                # bad tick which surfaces as an error to the caller.
+                async with self._rate_limiter:
+                    orders = await asyncio.to_thread(self._kite.orders)
+                sym = next(
+                    (o.get("tradingsymbol") for o in orders if o.get("order_id") == order_id),
+                    None,
+                )
+                if sym:
+                    price = self._tick_round_for(sym, float(price))
+            except Exception:
+                logger.debug(
+                    "modify_order: tick-rounding lookup failed for %s",
+                    order_id, exc_info=True,
+                )
+        if trigger_price is not None and price is not None:
+            # Mirror place_order's logic — trigger uses same tick as price
+            trigger_price = self._tick_round_for(sym, float(trigger_price)) if sym else trigger_price
+
+        kwargs: dict[str, Any] = {"variety": "regular", "order_id": order_id}
+        if price is not None:
+            kwargs["price"] = price
+        if quantity is not None:
+            kwargs["quantity"] = int(quantity)
+        if trigger_price is not None:
+            kwargs["trigger_price"] = trigger_price
+        if order_type is not None:
+            kwargs["order_type"] = order_type
+
+        def _modify() -> None:
+            self._kite.modify_order(**kwargs)
+
+        await self._retry_api_call(_modify)
+        return True
+
+    async def get_orders(self) -> list[dict[str, Any]]:
+        """Return every order from today (open / executed / cancelled /
+        rejected / trigger-pending). Mirrors Kite's order book.
+        """
+        if self._mode == "paper":
+            return list(self._paper_orders.values())
+        async with self._rate_limiter:
+            orders = await asyncio.to_thread(self._kite.orders)
+        return list(orders)
+
     # ------------------------------------------------------------------
     # GTT (Good Till Triggered) orders
     # ------------------------------------------------------------------

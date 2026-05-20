@@ -1213,6 +1213,245 @@ def create_app(ctx: AppContext) -> FastAPI:
             "previous_sl": current_sl, "new_sl": new_sl, "path": path,
         }
 
+    @app.post("/api/positions/{trade_id}/modify-target")
+    async def modify_target(
+        trade_id: str,
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Move the target price on an open position.
+
+        Symmetric to tighten-sl but with no direction restriction —
+        target can move in either direction since "extend the target"
+        and "take profits sooner" are both legitimate user intents.
+
+        Routes through:
+          - `gtt_id` (CNC OCO): modify_gtt with target trigger lifted,
+            SL leg unchanged.
+          - `target_order_id` (MIS resting LIMIT): modify_order with
+            new price.
+          - Neither: just updates the DB so position-monitor's
+            client-side exit uses the new level.
+        """
+        body = await request.json()
+        try:
+            new_target = float(body["new_target"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Body must include numeric new_target: {e}",
+            ) from e
+        if new_target <= 0:
+            raise HTTPException(status_code=400, detail="new_target must be > 0")
+
+        trade = await ctx.db.get_trade(trade_id)
+        if not trade:
+            raise HTTPException(status_code=404, detail=f"No trade with id={trade_id}")
+        if trade.get("status") != "open":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trade {trade_id} is {trade.get('status')!r}, not open",
+            )
+
+        signal_type = trade["signal_type"]
+        current_target = float(trade.get("target_price") or 0)
+        current_sl = float(trade.get("stop_loss_price") or 0)
+        symbol = trade["symbol"]
+        path: str
+        gtt_id = trade.get("gtt_id")
+        target_order_id = trade.get("target_order_id")
+
+        # Sanity: target must stay on the right side of LTP / entry,
+        # otherwise the OCO logic flips. For BUY target > entry/SL;
+        # for SELL target < entry/SL. We don't enforce this strictly
+        # (user might want to lower a BUY target to take profits at a
+        # tighter level, which is valid) but we DO refuse "target
+        # crosses SL" which makes the OCO unworkable.
+        if current_sl > 0:
+            if signal_type == "BUY" and new_target <= current_sl:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"BUY target {new_target} would be at/below SL {current_sl} "
+                        f"— move SL first via Tighten SL"
+                    ),
+                )
+            if signal_type == "SELL" and new_target >= current_sl:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"SELL target {new_target} would be at/above SL {current_sl} "
+                        f"— move SL first"
+                    ),
+                )
+
+        if gtt_id and hasattr(ctx.broker, "modify_gtt"):
+            exit_side = "SELL" if signal_type == "BUY" else "BUY"
+            buf = 0.005
+            if exit_side == "SELL":
+                sl_limit = current_sl * (1 - buf)
+                tgt_limit = new_target * (1 - buf * 0.5)
+            else:
+                sl_limit = current_sl * (1 + buf)
+                tgt_limit = new_target * (1 + buf * 0.5)
+            try:
+                ltp = await ctx.market_data.get_ltp(symbol)
+            except Exception:
+                ltp = float(trade.get("fill_price") or trade.get("entry_price") or 0)
+            await ctx.broker.modify_gtt(
+                gtt_id=int(gtt_id), symbol=symbol, side=exit_side,
+                quantity=int(trade["quantity"]),
+                stoploss_trigger=current_sl, stoploss_limit=sl_limit,
+                target_trigger=new_target, target_limit=tgt_limit,
+                last_price=float(ltp or 0),
+            )
+            await ctx.db.log_gtt_event(
+                trade_id=trade_id, gtt_id=int(gtt_id), symbol=symbol,
+                event_type="modified", status="active",
+                details={
+                    "reason": "user_modify_target",
+                    "sl_trigger": current_sl, "sl_limit": sl_limit,
+                    "target_trigger": new_target, "target_limit": tgt_limit,
+                    "previous_target": current_target,
+                },
+            )
+            path = "gtt"
+        elif target_order_id and hasattr(ctx.broker, "modify_order"):
+            await ctx.broker.modify_order(target_order_id, price=new_target)
+            path = "target_order"
+        else:
+            path = "client_side"
+
+        await ctx.db.conn.execute(
+            "UPDATE trades SET target_price = ? WHERE trade_id = ?",
+            (float(new_target), trade_id),
+        )
+        await ctx.db.conn.commit()
+
+        logger.info(
+            "modify-target: %s (trade_id=%s) target %.2f → %.2f via %s",
+            symbol, trade_id, current_target, new_target, path,
+        )
+        return {
+            "ok": True, "trade_id": trade_id, "symbol": symbol,
+            "previous_target": current_target,
+            "new_target": new_target, "path": path,
+        }
+
+    @app.get("/api/broker/orders")
+    async def get_broker_orders(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Today's full order book from the broker (open, executed,
+        cancelled, rejected, trigger-pending). Plus active GTTs.
+
+        Mirrors what Kite shows on the Orders tab so the user can
+        cancel / modify open orders without bouncing through Kite.
+        """
+        if not await ctx.broker.is_authenticated():
+            return {"authenticated": False, "orders": [], "gtts": []}
+        orders: list[dict[str, Any]] = []
+        gtts: list[dict[str, Any]] = []
+        try:
+            orders = list(await ctx.broker.get_orders() or [])
+        except Exception as e:
+            logger.exception("get_broker_orders: get_orders failed")
+            return {
+                "authenticated": True, "orders": [], "gtts": [],
+                "error": f"orders fetch failed: {e}",
+            }
+        try:
+            if hasattr(ctx.broker, "get_gtts"):
+                gtts = list(await ctx.broker.get_gtts() or [])
+        except Exception:
+            logger.debug("get_broker_orders: get_gtts failed", exc_info=True)
+        return {"authenticated": True, "orders": orders, "gtts": gtts}
+
+    @app.post("/api/broker/orders/{order_id}/cancel")
+    async def cancel_broker_order(
+        order_id: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Cancel a still-open broker order by id."""
+        try:
+            ok = await ctx.broker.cancel_order(order_id)
+        except Exception as e:
+            logger.exception("cancel_broker_order: %s failed", order_id)
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        return {"ok": bool(ok), "order_id": order_id}
+
+    @app.post("/api/broker/orders/{order_id}/modify")
+    async def modify_broker_order(
+        order_id: str,
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Modify an open broker order. Body accepts any subset of
+        {price, quantity, trigger_price, order_type}. None fields are
+        left unchanged.
+        """
+        body = await request.json()
+        price = body.get("price")
+        quantity = body.get("quantity")
+        trigger_price = body.get("trigger_price")
+        order_type = body.get("order_type")
+        if all(v is None for v in (price, quantity, trigger_price, order_type)):
+            raise HTTPException(
+                status_code=400,
+                detail="Body must include at least one of: price, quantity, trigger_price, order_type",
+            )
+        try:
+            await ctx.broker.modify_order(
+                order_id,
+                price=float(price) if price is not None else None,
+                quantity=int(quantity) if quantity is not None else None,
+                trigger_price=float(trigger_price) if trigger_price is not None else None,
+                order_type=str(order_type) if order_type is not None else None,
+            )
+        except Exception as e:
+            logger.exception("modify_broker_order: %s failed", order_id)
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        return {
+            "ok": True, "order_id": order_id,
+            "price": price, "quantity": quantity,
+            "trigger_price": trigger_price, "order_type": order_type,
+        }
+
+    @app.post("/api/broker/gtts/{gtt_id}/cancel")
+    async def cancel_broker_gtt(
+        gtt_id: int,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete a GTT order by id. Also clears the trades.gtt_id
+        link when the GTT belonged to a tracked trade so client-side
+        exit detection takes over.
+        """
+        if not hasattr(ctx.broker, "delete_gtt"):
+            raise HTTPException(status_code=400, detail="Broker does not support GTT")
+        try:
+            await ctx.broker.delete_gtt(int(gtt_id))
+        except Exception as e:
+            logger.exception("cancel_broker_gtt: %s failed", gtt_id)
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        # Best-effort: clear gtt_id on any trade carrying this GTT so
+        # position-monitor's ghost-recovery doesn't see a phantom link.
+        try:
+            cur = await ctx.db.conn.execute(
+                "SELECT trade_id, symbol FROM trades WHERE gtt_id = ?",
+                (int(gtt_id),),
+            )
+            rows = await cur.fetchall()
+            for r in rows:
+                await ctx.db.set_trade_gtt(r[0], None)
+                await ctx.db.log_gtt_event(
+                    trade_id=r[0], gtt_id=int(gtt_id), symbol=r[1],
+                    event_type="deleted", status="deleted",
+                    details={"reason": "user_cancel_via_order_book"},
+                )
+        except Exception:
+            logger.debug("cancel_broker_gtt: trade unlink failed", exc_info=True)
+        return {"ok": True, "gtt_id": gtt_id}
+
     @app.post("/api/positions/{trade_id}/convert")
     async def convert_position(
         trade_id: str,

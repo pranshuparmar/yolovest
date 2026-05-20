@@ -79,6 +79,31 @@ class BrokerBase(ABC):
         """Modify the trigger price of an existing stop-loss order."""
         ...
 
+    async def modify_order(
+        self,
+        order_id: str,
+        *,
+        price: float | None = None,
+        quantity: int | None = None,
+        trigger_price: float | None = None,
+        order_type: str | None = None,
+    ) -> bool:
+        """Generic order modification. Default implementation defers to
+        modify_sl_order for trigger-only changes; concrete brokers
+        override to support full price/qty/type modification.
+        """
+        if trigger_price is not None and price is None and quantity is None and order_type is None:
+            return await self.modify_sl_order(order_id, trigger_price)
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement generic modify_order",
+        )
+
+    async def get_orders(self) -> list[dict[str, Any]]:
+        """Return today's full order book. Default implementation
+        narrows to pending orders; concrete brokers override.
+        """
+        return await self.get_pending_orders()
+
     @abstractmethod
     async def get_holdings(self) -> list[dict[str, Any]]:
         """Get all CNC holdings from the broker (delivery stocks held overnight)."""
