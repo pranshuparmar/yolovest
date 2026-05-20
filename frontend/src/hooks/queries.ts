@@ -49,6 +49,18 @@ export function useClosePosition() {
   });
 }
 
+export function useTightenSl() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ tradeId, newSl }: { tradeId: string; newSl: number }) =>
+      api.tightenSl(tradeId, newSl),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["recommendations"] });
+    },
+  });
+}
+
 export function usePnlCalendar(days = 90) {
   return useQuery({
     queryKey: ["pnl-calendar", days],

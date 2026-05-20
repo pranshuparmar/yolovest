@@ -816,6 +816,134 @@ def create_app(ctx: AppContext) -> FastAPI:
             "exit_order_id": exit_order_id,
         }
 
+    @app.post("/api/positions/{trade_id}/tighten-sl")
+    async def tighten_sl(
+        trade_id: str,
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Move the stop-loss to a tighter level on an open position.
+
+        Body: {"new_sl": float}
+
+        Routes through the right execution path based on what the trade
+        carries:
+          - `gtt_id` (CNC OCO GTT): calls broker.modify_gtt to lift the
+            SL leg in place. Target leg unchanged.
+          - `sl_order_id` (MIS broker-side SL): calls broker.modify_sl_order
+            to raise the trigger.
+          - Neither (legacy client-side managed): just updates the DB so
+            position-monitor's client-side exit uses the new level.
+
+        Validates that the new level is genuinely tighter (closer to LTP)
+        than the existing one — refuses to widen the SL via this endpoint
+        to prevent accidental risk increases. Use the order form to flip
+        a position outright.
+        """
+        body = await request.json()
+        try:
+            new_sl = float(body["new_sl"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(
+                status_code=400, detail=f"Body must include numeric new_sl: {e}",
+            ) from e
+        if new_sl <= 0:
+            raise HTTPException(status_code=400, detail="new_sl must be > 0")
+
+        trade = await ctx.db.get_trade(trade_id)
+        if not trade:
+            raise HTTPException(status_code=404, detail=f"No trade with id={trade_id}")
+        if trade.get("status") != "open":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trade {trade_id} is {trade.get('status')!r}, not open",
+            )
+
+        signal_type = trade["signal_type"]
+        current_sl = float(trade.get("stop_loss_price") or 0)
+        # Tighten = move SL toward LTP (higher for BUY, lower for SELL).
+        if current_sl > 0:
+            if signal_type == "BUY" and new_sl <= current_sl:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"new_sl {new_sl} must be above current SL {current_sl} "
+                        f"to tighten a BUY position"
+                    ),
+                )
+            if signal_type == "SELL" and new_sl >= current_sl:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"new_sl {new_sl} must be below current SL {current_sl} "
+                        f"to tighten a SELL position"
+                    ),
+                )
+
+        symbol = trade["symbol"]
+        path: str
+        gtt_id = trade.get("gtt_id")
+        sl_order_id = trade.get("sl_order_id")
+
+        if gtt_id and hasattr(ctx.broker, "modify_gtt"):
+            # CNC OCO: modify_gtt requires both legs supplied; target
+            # unchanged, SL trigger / SL limit moved. Mirrors
+            # position_monitor._maybe_trail_gtt_sl.
+            exit_side = "SELL" if signal_type == "BUY" else "BUY"
+            tgt = float(trade.get("target_price") or 0)
+            if tgt <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Trade has no target_price; cannot modify GTT",
+                )
+            buf = 0.005
+            if exit_side == "SELL":
+                sl_limit = new_sl * (1 - buf)
+                tgt_limit = tgt * (1 - buf * 0.5)
+            else:
+                sl_limit = new_sl * (1 + buf)
+                tgt_limit = tgt * (1 + buf * 0.5)
+            try:
+                ltp = await ctx.market_data.get_ltp(symbol)
+            except Exception:
+                ltp = float(trade.get("fill_price") or trade.get("entry_price") or 0)
+            await ctx.broker.modify_gtt(
+                gtt_id=int(gtt_id), symbol=symbol, side=exit_side,
+                quantity=int(trade["quantity"]),
+                stoploss_trigger=new_sl, stoploss_limit=sl_limit,
+                target_trigger=tgt, target_limit=tgt_limit,
+                last_price=float(ltp or 0),
+            )
+            await ctx.db.log_gtt_event(
+                trade_id=trade_id, gtt_id=int(gtt_id), symbol=symbol,
+                event_type="modified", status="active",
+                details={
+                    "reason": "user_tighten_sl",
+                    "sl_trigger": new_sl, "sl_limit": sl_limit,
+                    "target_trigger": tgt, "target_limit": tgt_limit,
+                    "previous_sl": current_sl,
+                },
+            )
+            path = "gtt"
+        elif sl_order_id and hasattr(ctx.broker, "modify_sl_order"):
+            # MIS broker-side SL: trigger lifted in place.
+            await ctx.broker.modify_sl_order(sl_order_id, new_sl)
+            path = "sl_order"
+        else:
+            # Legacy client-side managed — just update the DB; the
+            # next position-monitor cycle will exit at the new level.
+            path = "client_side"
+
+        await ctx.db.update_position_sl(trade_id, new_sl)
+        logger.info(
+            "tighten-sl: %s (trade_id=%s) SL %.2f → %.2f via %s",
+            symbol, trade_id, current_sl, new_sl, path,
+        )
+        return {
+            "ok": True, "trade_id": trade_id, "symbol": symbol,
+            "previous_sl": current_sl, "new_sl": new_sl, "path": path,
+        }
+
     @app.post("/api/positions/{trade_id}/convert")
     async def convert_position(
         trade_id: str,
@@ -981,6 +1109,19 @@ def create_app(ctx: AppContext) -> FastAPI:
             pass
         holding_map = {h["tradingsymbol"]: h for h in (holdings or []) if h.get("quantity", 0) > 0}
 
+        # Map open system-managed trades by symbol so the recommendation
+        # payload can carry `trade_id` and `current_sl` — the Holdings UI
+        # uses these to power the in-row "Tighten SL" action without an
+        # extra round trip to look up the trade by symbol.
+        open_trades_for_symbol: dict[str, dict[str, Any]] = {}
+        try:
+            for tr in await ctx.db.get_open_positions(mode=ctx.config.mode):
+                sym = tr.get("symbol")
+                if sym and sym not in open_trades_for_symbol:
+                    open_trades_for_symbol[sym] = tr
+        except Exception:
+            logger.debug("review: failed to load open positions", exc_info=True)
+
         if requested:
             symbols = [s.upper() for s in requested]
         elif holding_map:
@@ -1000,6 +1141,7 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         for symbol in symbols:
             held = holding_map.get(symbol)
+            open_trade = open_trades_for_symbol.get(symbol)
             rec: dict[str, Any] = {
                 "symbol": symbol,
                 "held": held is not None,
@@ -1011,6 +1153,22 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "confidence": 0,
                 "signal_type": "HOLD",
                 "reasoning": "",
+                # Open-trade context so the "Tighten SL" button can act
+                # without an extra round trip. None when no system-tracked
+                # trade exists for this symbol (e.g. a holding the user
+                # acquired outside the system).
+                "trade_id": open_trade.get("trade_id") if open_trade else None,
+                "current_sl": (
+                    float(open_trade.get("stop_loss_price") or 0)
+                    if open_trade else 0
+                ),
+                "trade_signal_type": (
+                    open_trade.get("signal_type") if open_trade else None
+                ),
+                "entry_price": (
+                    float(open_trade.get("entry_price") or 0)
+                    if open_trade else 0
+                ),
             }
 
             entry = rec["average_price"]

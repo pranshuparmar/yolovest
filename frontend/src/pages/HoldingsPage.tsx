@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLockHoldings, useReviewHoldings } from "../hooks/queries";
+import { useHoldings, usePlaceOrder, useLockHolding, useUnlockHolding, useBulkLockHoldings, useReviewHoldings, useTightenSl } from "../hooks/queries";
 import { useLtpStream } from "../hooks/useLtpStream";
 import clsx from "clsx";
 import type { ManualOrder } from "../types/api";
@@ -200,8 +200,23 @@ export function HoldingsPage() {
   const unlockHolding = useUnlockHolding();
   const bulkLock = useBulkLockHoldings();
   const review = useReviewHoldings();
+  const tightenSl = useTightenSl();
+
+  // Inline dialog state: which recommendation row is currently editing
+  // its SL, what value the user has typed, and any in-flight error.
+  // Keyed by symbol because the recommendations panel is symbol-keyed.
+  const [tightenTarget, setTightenTarget] = useState<{
+    symbol: string;
+    tradeId: string;
+    currentSl: number;
+    ltp: number;
+    entry: number;
+    direction: "BUY" | "SELL";
+    inputValue: string;
+  } | null>(null);
+  const [tightenError, setTightenError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  type Rec = { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number };
+  type Rec = { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number; trade_id?: string | null; current_sl?: number; trade_signal_type?: string | null; entry_price?: number };
 
   const toggleSelect = (sym: string) => {
     setSelected((prev) => {
@@ -274,6 +289,118 @@ export function HoldingsPage() {
         />
       )}
 
+      {/* Tighten-SL modal — applies via the right execution path
+          (GTT modify for CNC, sl_order modify for MIS, DB-only for
+          legacy client-side) and refuses to widen the SL. */}
+      {tightenTarget && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+          onClick={() => !tightenSl.isPending && setTightenTarget(null)}
+        >
+          <div
+            className="bg-gray-900 border border-amber-800/50 rounded-lg max-w-sm w-full p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold text-amber-400">
+                Tighten Stop Loss — {tightenTarget.symbol}
+              </h3>
+              <button
+                onClick={() => setTightenTarget(null)}
+                disabled={tightenSl.isPending}
+                className="text-gray-500 hover:text-gray-300 disabled:opacity-50"
+              >×</button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 text-xs">
+              <div>
+                <div className="text-gray-500">Entry</div>
+                <div className="font-mono text-gray-200 mt-0.5">
+                  {tightenTarget.entry > 0 ? fmt(tightenTarget.entry) : "—"}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-500">LTP</div>
+                <div className="font-mono text-gray-200 mt-0.5">
+                  {tightenTarget.ltp > 0 ? fmt(tightenTarget.ltp) : "—"}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-500">Current SL</div>
+                <div className="font-mono text-amber-400 mt-0.5">
+                  {fmt(tightenTarget.currentSl)}
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">
+                New SL ({tightenTarget.direction === "BUY"
+                  ? "must be > current"
+                  : "must be < current"})
+              </label>
+              <input
+                type="number"
+                step="0.05"
+                value={tightenTarget.inputValue}
+                onChange={(e) => {
+                  setTightenTarget({ ...tightenTarget, inputValue: e.target.value });
+                  setTightenError(null);
+                }}
+                disabled={tightenSl.isPending}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 font-mono focus:outline-none focus:border-amber-500 disabled:opacity-50"
+                autoFocus
+              />
+              <p className="text-[11px] text-gray-600 mt-1">
+                {tightenTarget.direction === "BUY"
+                  ? "Raises the SL closer to LTP, locking in more of the unrealised gain."
+                  : "Lowers the SL closer to LTP, locking in more of the unrealised gain."}
+              </p>
+            </div>
+
+            {tightenError && (
+              <div className="text-xs text-red-400 bg-red-900/20 border border-red-800/50 rounded px-3 py-2">
+                {tightenError}
+              </div>
+            )}
+
+            <div className="flex gap-2 justify-end pt-1">
+              <button
+                onClick={() => setTightenTarget(null)}
+                disabled={tightenSl.isPending}
+                className="px-3 py-1.5 rounded text-xs bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-50"
+              >Cancel</button>
+              <button
+                onClick={async () => {
+                  const newSl = parseFloat(tightenTarget.inputValue);
+                  if (!Number.isFinite(newSl) || newSl <= 0) {
+                    setTightenError("Enter a valid positive price");
+                    return;
+                  }
+                  if (tightenTarget.direction === "BUY" && newSl <= tightenTarget.currentSl) {
+                    setTightenError(`New SL must be above ${fmt(tightenTarget.currentSl)} to tighten`);
+                    return;
+                  }
+                  if (tightenTarget.direction === "SELL" && newSl >= tightenTarget.currentSl) {
+                    setTightenError(`New SL must be below ${fmt(tightenTarget.currentSl)} to tighten`);
+                    return;
+                  }
+                  try {
+                    await tightenSl.mutateAsync({ tradeId: tightenTarget.tradeId, newSl });
+                    setTightenTarget(null);
+                    review.reset();  // hide stale recommendation
+                  } catch (e) {
+                    setTightenError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                disabled={tightenSl.isPending}
+                className="px-3 py-1.5 rounded text-xs bg-amber-700 text-white hover:bg-amber-600 disabled:opacity-50"
+              >{tightenSl.isPending ? "Applying…" : "Apply"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Recommendations panel */}
       {review.data && review.data.recommendations.length > 0 && (
         <div className="bg-gray-900 border border-blue-800/50 rounded-lg overflow-hidden">
@@ -325,6 +452,42 @@ export function HoldingsPage() {
                           onClick={() => setOrderForm({ symbol: r.symbol, side: "BUY" })}
                           className="px-2 py-0.5 rounded text-xs bg-emerald-900/40 text-emerald-400 hover:bg-emerald-800/50"
                         >Buy</button>
+                      )}
+                      {r.action === "TIGHTEN_SL" && (!r.trade_id || !r.current_sl || r.current_sl <= 0) && (
+                        <span className="text-[11px] text-gray-600" title="No system-tracked trade for this symbol — adopt it via positions or set an SL manually at Kite.">
+                          not tracked
+                        </span>
+                      )}
+                      {r.action === "TIGHTEN_SL" && r.trade_id && r.current_sl && r.current_sl > 0 && (
+                        <button
+                          onClick={() => {
+                            const direction = (r.trade_signal_type === "SELL" ? "SELL" : "BUY") as "BUY" | "SELL";
+                            const ltp = r.last_price || 0;
+                            const currentSl = r.current_sl ?? 0;
+                            // Suggested new SL = midpoint of LTP and current SL,
+                            // floored at entry for BUY (lock in at least breakeven)
+                            // and capped at entry for SELL. Keeps the suggestion
+                            // safely on the right side for "tighten".
+                            const entry = r.entry_price ?? 0;
+                            let suggested: number;
+                            if (direction === "BUY") {
+                              suggested = Math.max(entry || currentSl, (ltp + currentSl) / 2);
+                            } else {
+                              suggested = Math.min(entry || currentSl, (ltp + currentSl) / 2);
+                            }
+                            setTightenTarget({
+                              symbol: r.symbol,
+                              tradeId: r.trade_id!,
+                              currentSl,
+                              ltp,
+                              entry,
+                              direction,
+                              inputValue: suggested.toFixed(2),
+                            });
+                            setTightenError(null);
+                          }}
+                          className="px-2 py-0.5 rounded text-xs bg-amber-900/40 text-amber-400 hover:bg-amber-800/50"
+                        >Tighten SL</button>
                       )}
                     </td>
                   </tr>

@@ -70,6 +70,12 @@ export const api = {
       { method: "POST" },
     ),
 
+  tightenSl: (tradeId: string, newSl: number) =>
+    apiFetch<{ ok: boolean; trade_id: string; symbol: string; previous_sl: number; new_sl: number; path: string }>(
+      `/api/positions/${encodeURIComponent(tradeId)}/tighten-sl`,
+      { method: "POST", body: JSON.stringify({ new_sl: newSl }) },
+    ),
+
   tradesToday: () => apiFetch<Trade[]>("/api/trades/today"),
 
   holdings: () => apiFetch<HoldingsResponse>("/api/holdings"),
@@ -529,7 +535,7 @@ export const api = {
     ),
 
   reviewHoldings: (symbols?: string[]) =>
-    apiFetch<{ recommendations: { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number }[] }>(
+    apiFetch<{ recommendations: { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number; trade_id?: string | null; current_sl?: number; trade_signal_type?: string | null; entry_price?: number }[] }>(
       "/api/review",
       { method: "POST", body: JSON.stringify(symbols ? { symbols } : {}) },
     ),
