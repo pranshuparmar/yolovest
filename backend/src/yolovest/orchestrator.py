@@ -137,36 +137,21 @@ class HeartbeatOrchestrator:
             "market_hours": self._ctx.market_hours.is_market_hours(),
         })
 
-        # Sweep abandoned pending trades before anything else. Risk-check
-        # counts pending notional and pending count toward exposure /
-        # max_open_positions / max_trades_per_day, so a forgotten pending
-        # silently locks those budgets and chokes off signal generation
-        # for the rest of the day. Previously this only ran when the
-        # dashboard polled /api/pending-trades, which Telegram-only users
-        # never trigger.
-        try:
-            expiry_min = self._ctx.config.execution.pending_expiry_minutes
-            expired_count = await self._ctx.db.expire_pending_trades(
-                max_age_minutes=expiry_min,
-            )
-            if expired_count:
-                logger.info(
-                    "Heartbeat: auto-expired %d pending trade(s) (>%dmin old)",
-                    expired_count, expiry_min,
-                )
-        except Exception:
-            logger.debug("Pending-trade auto-expiry failed", exc_info=True)
-
-        # Reprice still-pending trades against the latest LTP. Without
-        # this, a queued BUY at ₹100 sits unchanged for the whole
-        # pending window even if the price has since moved to ₹103 —
-        # the queued target/SL no longer reflect any useful geometry.
-        # We either shift entry/target/SL to track the new price or
-        # expire the trade outright when the move has gone too far.
-        try:
-            await self._reprice_pending_trades()
-        except Exception:
-            logger.debug("Pending-trade repricing failed", exc_info=True)
+        # Sweep abandoned pending trades, then re-anchor the survivors
+        # to the latest LTP, before health-check runs. Risk-check counts
+        # pending notional + pending count toward exposure /
+        # max_open_positions / max_trades_per_day, so a forgotten
+        # pending silently locks those budgets and chokes off the day's
+        # signals. Both steps run as registered skills now — that keeps
+        # the audit-log + skill_completed broadcasts symmetric with
+        # the rest of the pipeline and lets the user trigger them on
+        # demand from Telegram /run or the dashboard Skills page.
+        results["expire-pending-trades"] = await self._run_skill(
+            "expire-pending-trades",
+        )
+        results["reprice-pending-trades"] = await self._run_skill(
+            "reprice-pending-trades",
+        )
 
         # --- Step 1: health-check (ABORT on failure) ---
         health_result = await self._run_skill("health-check")
@@ -287,232 +272,6 @@ class HeartbeatOrchestrator:
             await self._ctx.event_bus.publish(Event(event_type=event_type, data=data))
         except Exception:
             logger.debug("Failed to broadcast event %s", event_type, exc_info=True)
-
-    # Min absolute drift (as a fraction of entry) before we bother
-    # rewriting a pending row + sending notifications. Stops a tick of
-    # noise on every heartbeat for a near-flat symbol.
-    _REPRICE_MIN_ADJUSTMENT_PCT: ClassVar[float] = 0.001  # 0.1%
-
-    async def _reprice_pending_trades(self) -> None:
-        """Re-evaluate every still-pending trade against the latest LTP.
-
-        Three outcomes per row:
-          - Expire: LTP has already moved past target / past SL / further
-            from entry than `execution.price_drift_max_pct`. The queued
-            geometry no longer makes sense; flip the row to 'expired'.
-          - Adjust: drift is small enough to keep the trade viable but
-            larger than _REPRICE_MIN_ADJUSTMENT_PCT. Shift entry/target/SL
-            by the LTP-vs-entry delta so the same ATR-distance geometry
-            sits around the new entry.
-          - Skip: drift below the noise threshold, or row carries
-            user overrides / is_manual=1, or LTP fetch failed.
-
-        Each adjust + each expiry emits a `pending_repriced` /
-        `pending_expired` WS event and (when configured) a single
-        batched Telegram alert listing all changes from this cycle.
-        """
-        try:
-            pending = await self._ctx.db.get_pending_trades()
-        except Exception:
-            logger.debug("reprice: get_pending_trades failed", exc_info=True)
-            return
-        if not pending:
-            return
-
-        drift_max = float(self._ctx.config.execution.price_drift_max_pct)
-
-        adjusted: list[dict[str, Any]] = []
-        expired: list[dict[str, Any]] = []
-
-        for row in pending:
-            # Don't touch trades the user already overrode or that the
-            # user queued manually with their own levels — those are
-            # explicitly user-chosen and shouldn't be auto-shifted.
-            if row.get("is_manual") or row.get("user_entry_price"):
-                continue
-
-            symbol = row.get("symbol")
-            sig = (row.get("signal_type") or "BUY").upper()
-            old_entry = float(row.get("entry_price") or 0)
-            old_target = float(row.get("target_price") or 0)
-            old_sl = float(row.get("stop_loss_price") or 0)
-            if not symbol or old_entry <= 0 or old_target <= 0 or old_sl <= 0:
-                continue
-
-            try:
-                ltp = await self._ctx.market_data.get_ltp(symbol)
-            except Exception:
-                logger.debug("reprice: LTP fetch failed for %s", symbol, exc_info=True)
-                continue
-            if not ltp or ltp <= 0:
-                continue
-
-            # Has the move already happened (or gone the wrong way)?
-            already_at_target = (
-                (sig == "BUY" and ltp >= old_target)
-                or (sig == "SELL" and ltp <= old_target)
-            )
-            already_at_sl = (
-                (sig == "BUY" and ltp <= old_sl)
-                or (sig == "SELL" and ltp >= old_sl)
-            )
-            drift_pct = (ltp - old_entry) / old_entry
-
-            reason: str | None = None
-            if already_at_target:
-                reason = f"LTP ₹{ltp:.2f} reached target ₹{old_target:.2f} before approval"
-            elif already_at_sl:
-                reason = f"LTP ₹{ltp:.2f} hit SL ₹{old_sl:.2f} before approval"
-            elif abs(drift_pct) > drift_max:
-                reason = (
-                    f"LTP ₹{ltp:.2f} drifted {drift_pct * 100:+.2f}% from "
-                    f"queued entry ₹{old_entry:.2f} (max {drift_max * 100:.2f}%)"
-                )
-
-            if reason:
-                try:
-                    if await self._ctx.db.expire_pending_trade(row["id"], reason):
-                        expired.append({
-                            "id": row["id"], "symbol": symbol, "signal_type": sig,
-                            "entry_price": old_entry, "ltp": ltp, "reason": reason,
-                        })
-                except Exception:
-                    logger.debug(
-                        "reprice: expire_pending_trade failed for %s", symbol,
-                        exc_info=True,
-                    )
-                continue
-
-            # Adjust path. Don't bother rewriting / notifying for sub-noise
-            # moves — the queued levels are still close enough.
-            if abs(drift_pct) < self._REPRICE_MIN_ADJUSTMENT_PCT:
-                continue
-            delta = ltp - old_entry
-            new_target = round(old_target + delta, 2)
-            new_sl = round(old_sl + delta, 2)
-            new_entry = round(ltp, 2)
-
-            # Re-check the cost-adjusted R:R gate against the
-            # reanchored levels using the same arithmetic risk-check
-            # ran at signal time. If the move (or any partial
-            # truncation from rounding) has dropped the trade below
-            # the threshold, expire instead of pushing a setup the
-            # risk policy would refuse on approval.
-            min_net_rr = float(getattr(self._ctx.config.risk, "min_net_rr", 0))
-            if min_net_rr > 0:
-                from yolovest.costs import evaluate_net_rr
-                product = row.get("product", "MIS")
-                qty = int(row.get("position_size") or 0)
-                net_rr, _costs, fail_reason = evaluate_net_rr(
-                    signal_type=sig,
-                    entry_price=new_entry,
-                    target_price=new_target,
-                    stop_loss_price=new_sl,
-                    quantity=qty,
-                    product=product,
-                    cost_config=getattr(self._ctx.config, "transaction_costs", None),
-                )
-                if fail_reason is not None or (
-                    net_rr is not None and net_rr < min_net_rr
-                ):
-                    rr_str = (
-                        f"{net_rr:.2f}" if net_rr is not None else "n/a"
-                    )
-                    reason = (
-                        f"Reanchored R:R {rr_str} < {min_net_rr:.2f} "
-                        f"({fail_reason})" if fail_reason
-                        else f"Reanchored R:R {rr_str} < {min_net_rr:.2f}"
-                    )
-                    try:
-                        if await self._ctx.db.expire_pending_trade(
-                            row["id"], reason,
-                        ):
-                            expired.append({
-                                "id": row["id"], "symbol": symbol,
-                                "signal_type": sig,
-                                "entry_price": old_entry, "ltp": ltp,
-                                "reason": reason,
-                            })
-                    except Exception:
-                        logger.debug(
-                            "reprice: expire on R:R fail for %s", symbol,
-                            exc_info=True,
-                        )
-                    continue
-
-            try:
-                ok = await self._ctx.db.update_pending_trade_levels(
-                    row["id"],
-                    entry_price=new_entry,
-                    target_price=new_target,
-                    stop_loss_price=new_sl,
-                )
-            except Exception:
-                logger.debug(
-                    "reprice: update_pending_trade_levels failed for %s", symbol,
-                    exc_info=True,
-                )
-                continue
-            if not ok:
-                continue
-            adjusted.append({
-                "id": row["id"], "symbol": symbol, "signal_type": sig,
-                "old_entry": old_entry, "new_entry": new_entry,
-                "old_target": old_target, "new_target": new_target,
-                "old_sl": old_sl, "new_sl": new_sl,
-                "drift_pct": drift_pct,
-            })
-
-        if not adjusted and not expired:
-            return
-
-        if adjusted:
-            await self._broadcast("pending_repriced", {"trades": adjusted})
-            logger.info(
-                "Repriced %d pending trade(s): %s",
-                len(adjusted),
-                ", ".join(
-                    f"{a['symbol']}({a['old_entry']:.2f}→{a['new_entry']:.2f})"
-                    for a in adjusted
-                ),
-            )
-        if expired:
-            await self._broadcast("pending_expired", {
-                "count": len(expired),
-                "trades": expired,
-            })
-            logger.info(
-                "Auto-expired %d pending trade(s) on price drift: %s",
-                len(expired),
-                ", ".join(f"{e['symbol']} ({e['reason']})" for e in expired),
-            )
-
-        # One batched Telegram message per heartbeat so we don't spam the
-        # user with N independent toasts when multiple pending trades
-        # shift in the same cycle.
-        try:
-            lines: list[str] = []
-            if expired:
-                lines.append(f"⏱ {len(expired)} pending trade(s) expired (price drift):")
-                for e in expired:
-                    lines.append(
-                        f"  • {e['signal_type']} {e['symbol']}: {e['reason']}"
-                    )
-            if adjusted:
-                if lines:
-                    lines.append("")
-                lines.append(f"✎ {len(adjusted)} pending trade(s) repriced to LTP:")
-                for a in adjusted:
-                    lines.append(
-                        f"  • {a['signal_type']} {a['symbol']}: "
-                        f"entry ₹{a['old_entry']:.2f}→₹{a['new_entry']:.2f}, "
-                        f"target ₹{a['old_target']:.2f}→₹{a['new_target']:.2f}, "
-                        f"SL ₹{a['old_sl']:.2f}→₹{a['new_sl']:.2f}"
-                    )
-            if lines:
-                await self._ctx.notify.send("\n".join(lines))
-        except Exception:
-            logger.debug("reprice: notify failed", exc_info=True)
 
     def _signal_symbol(self, signal: object) -> str:
         if isinstance(signal, dict):

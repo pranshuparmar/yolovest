@@ -9,6 +9,7 @@ from yolovest.skills.backfill_data import BackfillDataSkill
 from yolovest.skills.backfill_intraday import BackfillIntradaySkill
 from yolovest.skills.db_maintenance import DatabaseMaintenanceSkill
 from yolovest.skills.drift_watch import DriftWatchSkill
+from yolovest.skills.expire_pending import ExpirePendingSkill
 from yolovest.skills.generate_signals import GenerateSignalsSkill
 from yolovest.skills.health_check import HealthCheckSkill
 from yolovest.skills.heartbeat_pipeline import HeartbeatPipelineSkill
@@ -25,6 +26,7 @@ from yolovest.skills.news_digest import NewsDigestSkill
 from yolovest.skills.position_monitor import PositionMonitorSkill
 from yolovest.skills.predict_track import PredictTrackSkill
 from yolovest.skills.report_generate import ReportGenerateSkill
+from yolovest.skills.reprice_pending import RepricePendingSkill
 from yolovest.skills.risk_check import RiskCheckSkill
 from yolovest.skills.square_off import SquareOffSkill
 from yolovest.skills.trade_execute import TradeExecuteSkill
@@ -54,6 +56,8 @@ SKILL_REGISTRY: dict[str, type] = {
     "database-maintenance": DatabaseMaintenanceSkill,
     "news-digest": NewsDigestSkill,
     "drift-watch": DriftWatchSkill,
+    "expire-pending-trades": ExpirePendingSkill,
+    "reprice-pending-trades": RepricePendingSkill,
 }
 
 __all__ = ["SKILL_REGISTRY"]
