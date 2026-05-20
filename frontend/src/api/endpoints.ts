@@ -62,6 +62,24 @@ export const api = {
 
   portfolio: () => apiFetch<PortfolioState>("/api/portfolio"),
 
+  fundsHistory: (days = 90) =>
+    apiFetch<{
+      count: number;
+      snapshots: Array<{
+        snapshot_date: string;
+        captured_at: string;
+        mode: string;
+        available_cash: number;
+        utilised_margin: number;
+        net: number;
+        holdings_invested: number;
+        holdings_current: number;
+        m2m_realised: number;
+        m2m_unrealised: number;
+        live_balance: number;
+      }>;
+    }>(`/api/funds/history?days=${days}`),
+
   funds: () =>
     apiFetch<{
       authenticated: boolean;

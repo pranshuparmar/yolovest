@@ -1,5 +1,9 @@
-import { useFunds } from "../hooks/queries";
+import { useFunds, useFundsHistory } from "../hooks/queries";
 import clsx from "clsx";
+import {
+  ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
+} from "recharts";
+import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", {
@@ -38,6 +42,69 @@ function Row({
         {value}
       </p>
     </div>
+  );
+}
+
+function FundsMovementChart() {
+  const { data: hist, isLoading } = useFundsHistory(90);
+  const theme = useChartTheme();
+  const tooltipStyle = useTooltipStyle();
+
+  if (isLoading) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+        <div className="h-40 animate-pulse bg-gray-800 rounded" />
+      </div>
+    );
+  }
+
+  const snapshots = (hist?.snapshots ?? []).slice().reverse();
+  // Chronological for the chart; DB returns newest-first.
+  const chartData = snapshots.map((s) => ({
+    date: s.snapshot_date,
+    cash: Math.round(s.available_cash),
+    used: Math.round(s.utilised_margin),
+    holdings: Math.round(s.holdings_current),
+  }));
+
+  return (
+    <section className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-gray-200">Funds Movement (last 90 days)</h3>
+        <p className="text-[11px] text-gray-600">Captured daily 16:05 IST by `funds-snapshot`</p>
+      </div>
+      {chartData.length === 0 ? (
+        <p className="text-sm text-gray-500 py-8 text-center">
+          No snapshots yet. Run <code className="text-xs bg-gray-800 px-1.5 py-0.5 rounded">/run funds-snapshot</code> from
+          Skills or wait for tomorrow's 16:05 IST cron fire.
+        </p>
+      ) : (
+        <ResponsiveContainer width="100%" height={260}>
+          <AreaChart data={chartData} margin={{ top: 8, right: 16, bottom: 4, left: 0 }}>
+            <CartesianGrid stroke={theme.grid} strokeDasharray="3 3" />
+            <XAxis dataKey="date" stroke={theme.tick} tick={{ fontSize: 10 }} />
+            <YAxis stroke={theme.tick} tick={{ fontSize: 10 }} />
+            <Tooltip
+              contentStyle={tooltipStyle}
+              formatter={(value: number) => `₹${value.toLocaleString("en-IN")}`}
+            />
+            <Legend wrapperStyle={{ fontSize: 11, paddingTop: 6 }} />
+            <Area
+              type="monotone" dataKey="cash" name="Available Cash"
+              stroke="#10b981" fill="#10b981" fillOpacity={0.15} stackId="1"
+            />
+            <Area
+              type="monotone" dataKey="used" name="Used Margin"
+              stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.15} stackId="1"
+            />
+            <Area
+              type="monotone" dataKey="holdings" name="Holdings"
+              stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.15} stackId="1"
+            />
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+    </section>
   );
 }
 
@@ -205,6 +272,8 @@ export function FundsPage() {
           )}
         </div>
       </div>
+
+      <FundsMovementChart />
 
       <p className="text-[11px] text-gray-600">
         Data fetched live from Zerodha (kite.get_margins). Refreshes every 30s

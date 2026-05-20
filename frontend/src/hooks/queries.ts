@@ -36,6 +36,16 @@ export function useFunds() {
   });
 }
 
+export function useFundsHistory(days = 90) {
+  return useQuery({
+    queryKey: ["funds-history", days],
+    queryFn: () => api.fundsHistory(days),
+    // Daily snapshot — once an hour is plenty.
+    staleTime: 60 * 60 * 1000,
+    refetchInterval: 60 * 60 * 1000,
+  });
+}
+
 export function usePositions() {
   return useQuery({
     queryKey: ["positions"],

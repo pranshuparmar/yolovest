@@ -705,6 +705,22 @@ def create_app(ctx: AppContext) -> FastAPI:
             "summary": summary,
         }
 
+    @app.get("/api/funds/history")
+    async def get_funds_history(
+        days: int = Query(90, ge=1, le=365),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Daily funds/margins history from the funds-snapshot CRON.
+
+        Mode-scoped to the current trading mode (paper / live). Used
+        by the Funds page to render the cash + holdings + used-margin
+        trail so the user can see daily movements without Kite.
+        """
+        snapshots = await ctx.db.get_funds_snapshots(
+            mode=ctx.config.mode, days=days,
+        )
+        return {"snapshots": snapshots, "count": len(snapshots)}
+
     @app.get("/api/portfolio")
     async def get_portfolio(user: str = Depends(verify_credentials)) -> dict[str, Any]:
         """Portfolio overview: capital, exposure, open positions, PnL.

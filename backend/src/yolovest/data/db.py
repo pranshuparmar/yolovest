@@ -2983,6 +2983,78 @@ class Database:
         )
         await self.conn.commit()
 
+    async def upsert_funds_snapshot(
+        self,
+        snapshot_date: str,
+        mode: str,
+        summary: dict[str, float],
+        raw_json: str | None = None,
+        holdings_invested: float = 0.0,
+        holdings_current: float = 0.0,
+    ) -> None:
+        """Insert today's funds/margins snapshot (or replace if it
+        already exists for the same date+mode).
+
+        Called by the funds-snapshot CRON skill so the user can track
+        daily cash movements without logging into Kite.
+        """
+        from yolovest.timezone import now_utc as _now_utc
+
+        captured_at = _now_utc().isoformat()
+        keys_in_order = (
+            "available_cash", "live_balance", "opening_balance",
+            "utilised_margin", "m2m_unrealised", "m2m_realised",
+            "payout", "collateral", "exposure", "span", "delivery", "net",
+        )
+        params: list[Any] = [
+            snapshot_date, captured_at, mode,
+        ]
+        params.extend(float(summary.get(k, 0.0) or 0.0) for k in keys_in_order)
+        params.extend([float(holdings_invested), float(holdings_current), raw_json])
+
+        col_list = (
+            "snapshot_date, captured_at, mode, " + ", ".join(keys_in_order)
+            + ", holdings_invested, holdings_current, raw_json"
+        )
+        placeholders = ", ".join(["?"] * (3 + len(keys_in_order) + 3))
+        await self.conn.execute(
+            f"INSERT INTO funds_snapshots ({col_list}) VALUES ({placeholders}) "
+            "ON CONFLICT(snapshot_date, mode) DO UPDATE SET "
+            "captured_at=excluded.captured_at, "
+            + ", ".join(f"{k}=excluded.{k}" for k in keys_in_order)
+            + ", holdings_invested=excluded.holdings_invested"
+            + ", holdings_current=excluded.holdings_current"
+            + ", raw_json=excluded.raw_json",
+            params,
+        )
+        await self.conn.commit()
+
+    async def get_funds_snapshots(
+        self, mode: str | None = None, days: int = 90,
+    ) -> list[dict[str, Any]]:
+        """Return funds snapshots (newest first) for the last N days.
+
+        Mode-scoped when supplied; paper / live snapshots are stored
+        independently so flipping modes doesn't corrupt either history.
+        """
+        from datetime import date as _date, timedelta as _td
+        since = (_date.today() - _td(days=days)).isoformat()
+        query = (
+            "SELECT id, snapshot_date, captured_at, mode, available_cash, "
+            "live_balance, opening_balance, utilised_margin, m2m_unrealised, "
+            "m2m_realised, payout, collateral, exposure, span, delivery, net, "
+            "holdings_invested, holdings_current "
+            "FROM funds_snapshots WHERE snapshot_date >= ?"
+        )
+        params: list[Any] = [since]
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        query += " ORDER BY snapshot_date DESC, captured_at DESC"
+        cur = await self.read_conn.execute(query, params)
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     async def increment_realized_partial_pnl(
         self, position_id: int | str, partial_pnl: float,
     ) -> None:
