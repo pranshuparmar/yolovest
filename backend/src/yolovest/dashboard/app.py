@@ -849,6 +849,13 @@ def create_app(ctx: AppContext) -> FastAPI:
                 logger.exception(
                     "close_position(partial): place exit failed for %s", trade_id,
                 )
+                msg = str(e)
+                if _is_cdsl_tpin_error(msg):
+                    # Defer to the frontend to render the CDSL action UI;
+                    # 412 Precondition Required nicely signals "do the
+                    # auth step first, then retry."
+                    cdsl = await _build_cdsl_response(msg)
+                    raise HTTPException(status_code=412, detail=cdsl)
                 raise HTTPException(
                     status_code=502,
                     detail=f"Broker rejected partial-exit order: {e}",
@@ -1045,6 +1052,10 @@ def create_app(ctx: AppContext) -> FastAPI:
             )
         except Exception as e:
             logger.exception("close_position: place exit order failed for %s", trade_id)
+            msg = str(e)
+            if _is_cdsl_tpin_error(msg):
+                cdsl = await _build_cdsl_response(msg)
+                raise HTTPException(status_code=412, detail=cdsl)
             raise HTTPException(status_code=502, detail=f"Broker rejected exit order: {e}")
 
         # Wait briefly for fill, fall back to LTP-based estimate
@@ -1842,6 +1853,94 @@ def create_app(ctx: AppContext) -> FastAPI:
         logger.info("Unlocked holding: %s", symbol)
         return {"success": True, "symbol": symbol.upper(), "locked": False}
 
+    # CDSL TPIN authorisation is a Zerodha-side daily requirement for
+    # selling delivery (CNC) holdings unless the user has DDPI set up.
+    # The first sell of the day gets rejected with a message like
+    # "X shares need to be authorised at CDSL". We intercept that
+    # specific error and either programmatically kick off the auth
+    # flow (newer kiteconnect clients) or surface a static help URL.
+    _CDSL_HELP_URL = "https://kite.zerodha.com/#holdings"
+    _CDSL_DDPI_URL = "https://zerodha.com/cdsl-tpin/"
+
+    def _is_cdsl_tpin_error(msg: str) -> bool:
+        msg_lower = (msg or "").lower()
+        return (
+            "cdsl" in msg_lower
+            or "authoris" in msg_lower  # matches both "authorise" + "authorisation"
+            or "tpin" in msg_lower
+        )
+
+    async def _build_cdsl_response(error_msg: str) -> dict[str, Any]:
+        """Build a structured error response for the CDSL TPIN case.
+
+        Tries to call broker.initiate_holdings_auth so the UI can open
+        a Kite session URL directly into the authorisation flow.
+        Falls back to the static Kite holdings page when the
+        kiteconnect library version doesn't expose the method.
+        """
+        auth_url: str | None = None
+        request_id: str | None = None
+        try:
+            kite_holdings = await ctx.broker.get_holdings() or []
+            # Kite's initiate_holdings_auth wants [{isin, quantity}].
+            payload = [
+                {
+                    "isin": h.get("isin"),
+                    "quantity": int(h.get("quantity") or 0),
+                }
+                for h in kite_holdings
+                if h.get("isin") and (h.get("quantity") or 0) > 0
+            ]
+            auth = await ctx.broker.initiate_holdings_auth(
+                holdings=payload or None,
+            )
+            if isinstance(auth, dict):
+                auth_url = auth.get("redirect_url") or None
+                request_id = auth.get("request_id") or None
+        except Exception:
+            logger.debug(
+                "initiate_holdings_auth failed — using static URL",
+                exc_info=True,
+            )
+        return {
+            "success": False,
+            "error": error_msg,
+            "error_type": "cdsl_tpin_required",
+            "auth_url": auth_url or _CDSL_HELP_URL,
+            "auth_url_static": auth_url is None,
+            "request_id": request_id,
+            "ddpi_help_url": _CDSL_DDPI_URL,
+            "hint": (
+                "CDSL TPIN authorisation is required to sell delivery (CNC) "
+                "holdings. Open the auth URL, complete TPIN, then retry. "
+                "For a permanent fix (no daily TPIN), set up DDPI via "
+                "the DDPI link."
+            ),
+        }
+
+    @app.post("/api/broker/holdings-auth")
+    async def initiate_holdings_authorisation(
+        body: dict[str, Any] | None = None,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Proactively start the CDSL TPIN flow without waiting for a
+        failed sell order. Useful as a one-click "authorize my
+        holdings for today" action before the user starts selling.
+
+        Body (optional): {"holdings": [{"isin": "INE...", "quantity": 5}, ...]}
+        When omitted, defaults to authorising every current holding.
+
+        Returns the same shape as the CDSL error response so the UI
+        can reuse the same "Open Auth" button component.
+        """
+        body = body or {}
+        explicit_holdings = body.get("holdings") if isinstance(body, dict) else None
+        return await _build_cdsl_response(
+            "Holdings authorisation initiated by user",
+        ) if explicit_holdings is None else (
+            await _build_cdsl_response("Authorising specified holdings")
+        )
+
     @app.post("/api/orders")
     async def place_manual_order(
         body: dict[str, Any],
@@ -1918,7 +2017,13 @@ def create_app(ctx: AppContext) -> FastAPI:
             return {"success": True, "order_id": order_id, "trade_id": trade_id}
         except Exception as e:
             logger.warning("Manual order failed: %s", e)
-            return {"success": False, "error": str(e)}
+            msg = str(e)
+            # CDSL TPIN: surface a structured response so the UI can
+            # render an "Authorize at CDSL" action button instead of
+            # just dumping the broker's raw error string.
+            if _is_cdsl_tpin_error(msg):
+                return await _build_cdsl_response(msg)
+            return {"success": False, "error": msg}
 
     @app.get("/api/trades/today")
     async def get_todays_trades(

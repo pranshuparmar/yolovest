@@ -187,6 +187,11 @@ class _StubBroker:
     async def get_orders(self) -> list[dict[str, object]]:
         return []
 
+    async def initiate_holdings_auth(
+        self, holdings: list[dict[str, object]] | None = None,
+    ) -> dict[str, object] | None:
+        return None
+
     def get_login_url(self) -> str:
         return ""
 

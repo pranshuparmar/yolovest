@@ -27,6 +27,17 @@ export function OrderForm({
   const [product, setProduct] = useState<"CNC" | "MIS">("CNC");
   const [price, setPrice] = useState("");
   const [result, setResult] = useState<string | null>(null);
+  // Populated when the broker fails the order with a CDSL TPIN
+  // authorisation requirement. We render an inline action panel
+  // (open Kite auth URL + DDPI help link + Retry) instead of just
+  // dumping the error string.
+  const [cdslAuth, setCdslAuth] = useState<{
+    error: string;
+    auth_url: string;
+    ddpi_help_url?: string;
+    hint?: string;
+    static_url: boolean;
+  } | null>(null);
 
   const handleSubmit = () => {
     const order: ManualOrder = {
@@ -39,11 +50,23 @@ export function OrderForm({
     if (orderType === "LIMIT" && price) {
       order.price = Number(price);
     }
+    setCdslAuth(null);
     placeOrder.mutate(order, {
       onSuccess: (res) => {
         if (res.success) {
           setResult(`Order placed: ${res.order_id}`);
           setTimeout(onClose, 2000);
+        } else if (res.error_type === "cdsl_tpin_required" && res.auth_url) {
+          // Don't show the "Failed: …" red banner — render the
+          // dedicated CDSL panel below instead.
+          setResult(null);
+          setCdslAuth({
+            error: res.error ?? "CDSL TPIN authorisation required",
+            auth_url: res.auth_url,
+            ddpi_help_url: res.ddpi_help_url,
+            hint: res.hint,
+            static_url: !!res.auth_url_static,
+          });
         } else {
           setResult(`Failed: ${res.error}`);
         }
@@ -175,6 +198,53 @@ export function OrderForm({
           </span>
         )}
       </div>
+
+      {cdslAuth && (
+        <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg p-3 space-y-2">
+          <div className="flex items-start gap-2">
+            <span className="text-amber-400 text-base shrink-0">!</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-amber-300">
+                CDSL TPIN authorisation required
+              </p>
+              <p className="text-xs text-gray-400 mt-1">
+                {cdslAuth.hint ?? cdslAuth.error}
+              </p>
+              {cdslAuth.static_url && (
+                <p className="text-[11px] text-gray-500 mt-1">
+                  The Kite API didn't return a programmatic auth URL — you'll
+                  be taken to your Kite Holdings page; click "Authorise"
+                  next to the relevant symbol.
+                </p>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <a
+              href={cdslAuth.auth_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1.5 rounded text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white"
+            >Open CDSL auth</a>
+            <button
+              onClick={() => {
+                setCdslAuth(null);
+                handleSubmit();
+              }}
+              disabled={placeOrder.isPending}
+              className="px-3 py-1.5 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-100 disabled:opacity-50"
+            >Retry order</button>
+            {cdslAuth.ddpi_help_url && (
+              <a
+                href={cdslAuth.ddpi_help_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] text-gray-500 hover:text-gray-300 underline"
+              >Set up DDPI (skip daily TPIN)</a>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

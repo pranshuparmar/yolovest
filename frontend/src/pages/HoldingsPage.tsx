@@ -366,6 +366,22 @@ export function HoldingsPage() {
                       `${r.remaining_qty} shares still open.`,
                     );
                   } catch (e) {
+                    const detail = (e as { detail?: unknown })?.detail;
+                    if (
+                      detail &&
+                      typeof detail === "object" &&
+                      (detail as { error_type?: string }).error_type === "cdsl_tpin_required"
+                    ) {
+                      const d = detail as { auth_url?: string; hint?: string; error?: string };
+                      setPartialCloseError(
+                        `${d.hint ?? d.error ?? "CDSL TPIN authorisation required."} ` +
+                        `Open ${d.auth_url ?? "Kite"} in a new tab, authorise, then retry.`,
+                      );
+                      if (d.auth_url) {
+                        window.open(d.auth_url, "_blank", "noopener,noreferrer");
+                      }
+                      return;
+                    }
                     setPartialCloseError(e instanceof Error ? e.message : String(e));
                   }
                 }}

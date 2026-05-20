@@ -39,6 +39,31 @@ export function PositionsTable({ positions }: { positions: Trade[] }) {
       },
       onError: (err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
+        // CDSL TPIN required (FastAPI 412 wraps the auth response in
+        // `detail`). Walk the user through the authorisation flow
+        // instead of dumping a raw error string.
+        const detail = (err as { detail?: unknown })?.detail;
+        if (
+          detail &&
+          typeof detail === "object" &&
+          (detail as { error_type?: string }).error_type === "cdsl_tpin_required"
+        ) {
+          const d = detail as {
+            auth_url?: string;
+            ddpi_help_url?: string;
+            hint?: string;
+            error?: string;
+          };
+          const openAuth = window.confirm(
+            `${d.hint ?? d.error ?? msg}\n\n` +
+            `Click OK to open the CDSL TPIN auth page in a new tab. ` +
+            `After authorising, click Close again to retry.`,
+          );
+          if (openAuth && d.auth_url) {
+            window.open(d.auth_url, "_blank", "noopener,noreferrer");
+          }
+          return;
+        }
         window.alert(`Close failed: ${msg}`);
       },
     });

@@ -104,6 +104,17 @@ class BrokerBase(ABC):
         """
         return await self.get_pending_orders()
 
+    async def initiate_holdings_auth(
+        self, holdings: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Initiate CDSL TPIN authorisation for selling holdings.
+
+        Default returns None (broker doesn't support / not authenticated);
+        concrete brokers override. UI falls back to a static help URL
+        when this returns None.
+        """
+        return None
+
     @abstractmethod
     async def get_holdings(self) -> list[dict[str, Any]]:
         """Get all CNC holdings from the broker (delivery stocks held overnight)."""

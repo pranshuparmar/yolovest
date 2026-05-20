@@ -60,6 +60,10 @@ class BrokerProtocol(Protocol):
 
     async def get_orders(self) -> list[dict[str, Any]]: ...
 
+    async def initiate_holdings_auth(
+        self, holdings: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None: ...
+
 
 @runtime_checkable
 class LLMProtocol(Protocol):

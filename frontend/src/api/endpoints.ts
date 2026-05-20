@@ -172,10 +172,32 @@ export const api = {
   holdings: () => apiFetch<HoldingsResponse>("/api/holdings"),
 
   placeOrder: (order: ManualOrder) =>
-    apiFetch<{ success: boolean; order_id?: string; error?: string }>("/api/orders", {
+    apiFetch<{
+      success: boolean;
+      order_id?: string;
+      error?: string;
+      // Populated when the broker rejected the order because of a
+      // missing CDSL TPIN authorisation. The UI renders an
+      // "Authorize at CDSL" action button that opens auth_url.
+      error_type?: string;
+      auth_url?: string;
+      auth_url_static?: boolean;
+      ddpi_help_url?: string;
+      hint?: string;
+    }>("/api/orders", {
       method: "POST",
       body: JSON.stringify(order),
     }),
+
+  initiateHoldingsAuth: () =>
+    apiFetch<{
+      success: boolean;
+      error_type?: string;
+      auth_url?: string;
+      auth_url_static?: boolean;
+      ddpi_help_url?: string;
+      hint?: string;
+    }>("/api/broker/holdings-auth", { method: "POST", body: "{}" }),
 
   trades: (params?: {
     start?: string;

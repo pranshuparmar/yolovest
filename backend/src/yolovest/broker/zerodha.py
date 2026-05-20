@@ -793,6 +793,45 @@ class ZerodhaBroker(BrokerBase):
             orders = await asyncio.to_thread(self._kite.orders)
         return list(orders)
 
+    async def initiate_holdings_auth(
+        self, holdings: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Kick off the CDSL TPIN authorisation flow for a list of
+        holdings the user is about to sell.
+
+        Returns a dict from kiteconnect (typically
+        `{"request_id": ..., "redirect_url": ...}`) that the UI can
+        open in a new tab so the user can complete CDSL TPIN entry.
+        Returns None when the kiteconnect client doesn't expose this
+        method (older library version) or when called in paper mode.
+
+        `holdings` shape (per Kite docs):
+            [{"isin": "INE...", "quantity": 5}, ...]
+        When omitted, defaults to authorising EVERY current holding
+        (Kite accepts the empty/None call to mean "all holdings").
+        """
+        if self._mode == "paper":
+            return None
+        if not self._kite or not hasattr(self._kite, "initiate_holdings_auth"):
+            return None
+
+        def _call() -> Any:
+            kwargs: dict[str, Any] = {}
+            if holdings:
+                kwargs["holdings"] = holdings
+            return self._kite.initiate_holdings_auth(**kwargs)
+
+        try:
+            async with self._rate_limiter:
+                result = await asyncio.to_thread(_call)
+            return result if isinstance(result, dict) else None
+        except Exception:
+            logger.warning(
+                "initiate_holdings_auth failed — falling back to static URL",
+                exc_info=True,
+            )
+            return None
+
     # ------------------------------------------------------------------
     # GTT (Good Till Triggered) orders
     # ------------------------------------------------------------------
