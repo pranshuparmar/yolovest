@@ -376,6 +376,44 @@ class GenerateSignalsSkill(SkillBase):
                 holding_period, product, expected_days = await self._decide_holding_period(
                     features, existing_positions=open_positions,
                 )
+
+                # Hard ATR-eligibility cap for intraday: a stock with daily
+                # ATR > volatility.max_atr_pct_for_intraday_eligibility (5%
+                # default) is too volatile to reliably square off in a
+                # half-day session. `_is_intraday_viable` already enforces
+                # this in balanced/dynamic mode (routing to swing); this
+                # block covers the pure intraday strategy mode where the
+                # `max_days == 0` shortcut bypasses that check.
+                if holding_period == "intraday":
+                    elig_cap = float(getattr(
+                        self.ctx.config.strategy.volatility,
+                        "max_atr_pct_for_intraday_eligibility",
+                        0.0,
+                    ))
+                    sym_atr_pct = float(features.get("atr_pct", 0.0))
+                    if elig_cap > 0 and sym_atr_pct > elig_cap:
+                        filter_counts.setdefault(
+                            "intraday_atr_ineligible", 0,
+                        )
+                        filter_counts["intraday_atr_ineligible"] += 1
+                        rejection_details.append({
+                            "symbol": symbol,
+                            "reason": "intraday_atr_ineligible",
+                            "detail": (
+                                f"atr_pct {sym_atr_pct * 100:.2f}% > "
+                                f"intraday eligibility cap "
+                                f"{elig_cap * 100:.2f}% — stock too volatile "
+                                f"to square off in a half-day session"
+                            ),
+                        })
+                        logger.info(
+                            "Intraday ATR ineligible: %s atr_pct=%.2f%% > "
+                            "cap %.2f%% — skipping",
+                            symbol, sym_atr_pct * 100, elig_cap * 100,
+                        )
+                        outcome_tracker[symbol] = False
+                        continue
+
                 use_intraday = holding_period == "intraday"
                 is_balanced = self.ctx.config.strategy.mode == "balanced"
 
@@ -532,6 +570,26 @@ class GenerateSignalsSkill(SkillBase):
 
                 entry = prediction.entry_price
                 atr = features.get("atr_14", entry * 0.02)
+                # Clamp the ATR used for intraday geometry. A high-ATR
+                # stock (e.g. JAINREC at ~11.6% daily ATR) would otherwise
+                # get a 6-7% intraday target with the default 0.6×
+                # multiplier — unreachable in a half-day. Capping at 3.5%
+                # (default) limits the implied target distance to ~2.1%
+                # while leaving median large-caps (1-2% ATR) untouched.
+                if holding_period == "intraday":
+                    max_atr_pct = float(
+                        self.ctx.config.strategy.holding_periods.intraday
+                            .max_atr_pct_for_target
+                    )
+                    if max_atr_pct > 0:
+                        atr_cap = entry * max_atr_pct
+                        if atr > atr_cap:
+                            logger.info(
+                                "Clamping intraday ATR for %s: %.2f → "
+                                "%.2f (entry=%.2f, max_atr_pct=%.3f)",
+                                symbol, atr, atr_cap, entry, max_atr_pct,
+                            )
+                            atr = atr_cap
                 target_mult, sl_mult = interpolate_atr_multipliers(
                     expected_days, self.ctx.config.strategy.holding_periods,
                 )

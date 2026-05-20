@@ -3092,9 +3092,20 @@ def create_app(ctx: AppContext) -> FastAPI:
                     continue
                 holding_period, product, expected_days = _adjusted
 
-                # Apply ATR multipliers interpolated for holding duration
+                # Apply ATR multipliers interpolated for holding duration.
+                # Mirror generate-signals: clamp intraday ATR at
+                # holding_periods.intraday.max_atr_pct_for_target so the
+                # dry-run preview shows the same target/SL geometry the
+                # live engine would produce.
                 entry = prediction.entry_price
                 atr = features.get("atr_14", entry * 0.02)
+                if holding_period == "intraday":
+                    max_atr_pct = float(
+                        cfg.strategy.holding_periods.intraday
+                            .max_atr_pct_for_target
+                    )
+                    if max_atr_pct > 0:
+                        atr = min(atr, entry * max_atr_pct)
                 target_mult, sl_mult = interpolate_atr_multipliers(
                     expected_days, cfg.strategy.holding_periods,
                 )

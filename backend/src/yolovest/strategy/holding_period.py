@@ -91,7 +91,18 @@ def _is_intraday_viable(
 
     Relaxed from the original: requires decent volatility OR high volume
     (not both), and allows until 2:30 PM instead of 2:00 PM.
+
+    Hard eligibility cap (`max_atr_pct_for_intraday_eligibility`): refuses
+    intraday for stocks too volatile to square off in a half-day session
+    (e.g. 11%+ daily ATR small-caps). Returns False so the caller routes
+    to swing instead.
     """
+    eligibility_cap = getattr(
+        volatility_config, "max_atr_pct_for_intraday_eligibility", 0.0,
+    )
+    if eligibility_cap > 0 and atr_pct > eligibility_cap:
+        return False
+
     has_volatility = atr_pct >= volatility_config.min_atr_pct  # 0.5% min (was ideal 1.5%)
     has_good_volatility = atr_pct >= volatility_config.ideal_min_atr_pct  # 1.5% ideal
     has_volume = rel_vol >= 1.2  # relaxed from 1.5

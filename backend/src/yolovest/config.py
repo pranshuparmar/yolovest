@@ -178,6 +178,14 @@ class ATRMultipliers(BaseModel):
 
     target: float = Field(default=2.0, gt=0)
     stop_loss: float = Field(default=1.0, gt=0)
+    # Cap on the ATR value (as a fraction of entry price) used when
+    # computing target/SL distance. Only relevant for the intraday
+    # bucket today — a high-ATR stock (e.g. JAINREC at ~11.6% daily
+    # ATR) gets a 6-7% intraday target with the default 0.6× multiplier,
+    # which is unreachable in a half-day session. Clamping caps the
+    # implied target distance at ~max_atr_pct × multiplier (e.g. 0.035
+    # × 0.6 = ~2.1% max target distance). 0 = no cap (legacy behaviour).
+    max_atr_pct_for_target: float = Field(default=0.0, ge=0, le=0.5)
 
 
 class HoldingPeriodConfig(BaseModel):
@@ -188,7 +196,14 @@ class HoldingPeriodConfig(BaseModel):
     """
 
     intraday: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=0.6, stop_loss=0.3),
+        default_factory=lambda: ATRMultipliers(
+            target=0.6, stop_loss=0.3,
+            # 3.5% caps the implied target distance at ~2.1% for high-ATR
+            # stocks. Median NSE large-caps have 1-2% daily ATR and stay
+            # well under the cap; only the volatile tail (small caps,
+            # F&O momentum names) gets clamped.
+            max_atr_pct_for_target=0.035,
+        ),
     )
     short_swing: ATRMultipliers = Field(
         default_factory=lambda: ATRMultipliers(target=1.5, stop_loss=0.75),
@@ -211,6 +226,15 @@ class VolatilityConfig(BaseModel):
     max_atr_pct: float = Field(default=0.05, gt=0)
     ideal_min_atr_pct: float = Field(default=0.015, ge=0)
     ideal_max_atr_pct: float = Field(default=0.03, gt=0)
+    # Hard eligibility cap for the intraday bucket. When `atr_pct >
+    # this`, the stock is refused as intraday material — either routed
+    # to swing (balanced mode where swing is allowed), or dropped
+    # outright (pure intraday strategy mode). Different lever from
+    # `max_atr_pct_for_target` on the multipliers config: that one
+    # *caps* the geometry on a stock that still trades intraday; this
+    # one *refuses* intraday entirely for stocks too volatile to
+    # square off in a half-day session. 0 = disabled.
+    max_atr_pct_for_intraday_eligibility: float = Field(default=0.05, ge=0, le=0.5)
 
 
 # Mode presets: (min_days, max_days) range per strategy mode.
