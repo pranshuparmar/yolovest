@@ -17,7 +17,6 @@ const groups: NavGroup[] = [
   {
     label: "Trading",
     items: [
-      { to: "/", label: "Dashboard", icon: "D" },
       { to: "/positions", label: "Positions", icon: "P" },
       { to: "/orders", label: "Orders", icon: "O" },
       { to: "/trades", label: "Trades", icon: "T" },
@@ -62,6 +61,46 @@ const groups: NavGroup[] = [
     ],
   },
 ];
+
+// Items pinned above the grouped sections — top-level navigation that
+// shouldn't be hidden behind a collapsed group header. Dashboard lives
+// here so it's a one-click landing target regardless of which group is
+// currently expanded.
+const pinnedItems: NavItem[] = [
+  { to: "/", label: "Dashboard", icon: "D" },
+];
+
+function PinnedItem({
+  item,
+  collapsed,
+  onNavigate,
+}: {
+  item: NavItem;
+  collapsed: boolean;
+  onNavigate?: () => void;
+}) {
+  return (
+    <NavLink
+      to={item.to}
+      end={item.to === "/"}
+      onClick={onNavigate}
+      className={({ isActive }) =>
+        clsx(
+          "flex items-center gap-2 px-2.5 py-1.5 rounded text-sm",
+          isActive
+            ? "bg-blue-900/30 text-blue-400"
+            : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+        )
+      }
+      title={collapsed ? item.label : undefined}
+    >
+      <span className="w-5 h-5 rounded bg-gray-800/50 flex items-center justify-center text-xs font-bold shrink-0">
+        {item.icon}
+      </span>
+      {!collapsed && <span>{item.label}</span>}
+    </NavLink>
+  );
+}
 
 function findActiveGroup(pathname: string): string {
   for (const g of groups) {
@@ -186,6 +225,11 @@ export function Sidebar({
         </svg>
       </button>
       <nav className="flex-1 p-1.5 pt-2 space-y-1 overflow-y-auto">
+        <div className="space-y-0.5 mb-2">
+          {pinnedItems.map((item) => (
+            <PinnedItem key={item.to} item={item} collapsed={collapsed} />
+          ))}
+        </div>
         {groups.map((group) => (
           <GroupSection
             key={group.label}
@@ -232,6 +276,16 @@ export function Sidebar({
           </button>
         </div>
         <nav className="flex-1 p-1.5 space-y-1 overflow-y-auto">
+          <div className="space-y-0.5 mb-2">
+            {pinnedItems.map((item) => (
+              <PinnedItem
+                key={item.to}
+                item={item}
+                collapsed={false}
+                onNavigate={onMobileClose}
+              />
+            ))}
+          </div>
           {groups.map((group) => (
             <GroupSection
               key={group.label}
