@@ -3,6 +3,7 @@ import clsx from "clsx";
 import type { Trade } from "../types/api";
 import { useClosePosition } from "../hooks/queries";
 import { useLtpStream } from "../hooks/useLtpStream";
+import { formatPriceMovePct, priceMovePct } from "../utils/priceMove";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", {
@@ -138,8 +139,18 @@ export function PositionsTable({ positions }: { positions: Trade[] }) {
                 );
               })()}
               <td className="py-2 pr-4">{p.quantity}</td>
-              <td className="py-2 pr-4 text-red-400">{fmt(p.stop_loss_price)}</td>
-              <td className="py-2 pr-4 text-emerald-400">{fmt(p.target_price)}</td>
+              <td className="py-2 pr-4 text-red-400">
+                {fmt(p.stop_loss_price)}
+                <span className="ml-1 text-xs text-red-400/70">
+                  {formatPriceMovePct(priceMovePct(p.entry_price, p.stop_loss_price, p.signal_type))}
+                </span>
+              </td>
+              <td className="py-2 pr-4 text-emerald-400">
+                {fmt(p.target_price)}
+                <span className="ml-1 text-xs text-emerald-400/70">
+                  {formatPriceMovePct(priceMovePct(p.entry_price, p.target_price, p.signal_type))}
+                </span>
+              </td>
               <td className="py-2 pr-4 text-gray-400">{p.product}</td>
               <td className="py-2 pr-4 text-gray-400">{fmt(p.slippage)}</td>
               <td className="py-2 pr-4 text-xs text-gray-400">{p.status}</td>

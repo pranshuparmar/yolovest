@@ -8,6 +8,7 @@ import {
   useDeleteDryRun,
 } from "../hooks/queries";
 import clsx from "clsx";
+import { formatPriceMovePct, priceMovePct } from "../utils/priceMove";
 
 function fmt(n: number | null | undefined, d = 2) {
   if (n == null) return "--";
@@ -381,9 +382,15 @@ export function DryRunPage() {
                       </td>
                       <td className="py-2 px-3 text-right font-mono text-emerald-400">
                         {fmt(s.target_price)}
+                        <span className="ml-1 text-[10px] text-emerald-400/70">
+                          {formatPriceMovePct(priceMovePct(s.entry_price, s.target_price, s.signal_type))}
+                        </span>
                       </td>
                       <td className="py-2 px-3 text-right font-mono text-red-400">
                         {fmt(s.stop_loss_price)}
+                        <span className="ml-1 text-[10px] text-red-400/70">
+                          {formatPriceMovePct(priceMovePct(s.entry_price, s.stop_loss_price, s.signal_type))}
+                        </span>
                       </td>
                       <td className="py-2 px-3 text-right">
                         <span

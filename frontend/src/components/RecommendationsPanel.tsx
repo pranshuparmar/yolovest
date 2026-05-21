@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { useRecommendations } from "../hooks/queries";
 import { useLtpStream } from "../hooks/useLtpStream";
 import type { Recommendation, SignalDisposition } from "../types/api";
+import { formatPriceMovePct, priceMovePct } from "../utils/priceMove";
 import { SymbolLink } from "./SymbolLink";
 
 const DISPOSITION_LABELS: Record<SignalDisposition, string> = {
@@ -119,11 +120,21 @@ function RecommendationRow({ r, ltp }: { r: Recommendation; ltp?: number }) {
           </div>
           <div>
             <div className="text-gray-500">Target</div>
-            <div className="text-emerald-400">₹{fmt(r.target_price)}</div>
+            <div className="text-emerald-400">
+              ₹{fmt(r.target_price)}
+              <span className="ml-1 text-[10px] text-emerald-400/70">
+                {formatPriceMovePct(priceMovePct(r.entry_price, r.target_price, r.signal_type))}
+              </span>
+            </div>
           </div>
           <div>
             <div className="text-gray-500">Stop Loss</div>
-            <div className="text-red-400">₹{fmt(r.stop_loss_price)}</div>
+            <div className="text-red-400">
+              ₹{fmt(r.stop_loss_price)}
+              <span className="ml-1 text-[10px] text-red-400/70">
+                {formatPriceMovePct(priceMovePct(r.entry_price, r.stop_loss_price, r.signal_type))}
+              </span>
+            </div>
           </div>
           <div>
             <div className="text-gray-500">Confidence</div>

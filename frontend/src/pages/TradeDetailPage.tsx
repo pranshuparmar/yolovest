@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useTradeDetail, useDeleteTrade, useTradeOrderDetail } from "../hooks/queries";
 import clsx from "clsx";
 import { parseUTC, getTimezone } from "../utils/datetime";
+import { formatPriceMovePct, priceMovePct } from "../utils/priceMove";
 import type { FeatureAttribution } from "../types/api";
 
 function fmt(n: number, d = 2) {
@@ -261,8 +262,24 @@ export function TradeDetailPage() {
               {data.estimated_costs != null && (
                 <div><p className="text-xs text-gray-500">Est. Costs</p><p className="text-amber-400">₹{fmt(data.estimated_costs)}</p></div>
               )}
-              <div><p className="text-xs text-gray-500">Stop Loss</p><p className="text-red-400">₹{fmt(data.stop_loss_price)}</p></div>
-              <div><p className="text-xs text-gray-500">Target</p><p className="text-emerald-400">₹{fmt(data.target_price)}</p></div>
+              <div>
+                <p className="text-xs text-gray-500">Stop Loss</p>
+                <p className="text-red-400">
+                  ₹{fmt(data.stop_loss_price)}
+                  <span className="ml-1 text-xs text-red-400/70">
+                    {formatPriceMovePct(priceMovePct(data.entry_price, data.stop_loss_price, data.signal_type))}
+                  </span>
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Target</p>
+                <p className="text-emerald-400">
+                  ₹{fmt(data.target_price)}
+                  <span className="ml-1 text-xs text-emerald-400/70">
+                    {formatPriceMovePct(priceMovePct(data.entry_price, data.target_price, data.signal_type))}
+                  </span>
+                </p>
+              </div>
               <div><p className="text-xs text-gray-500">Product</p><p>{data.product}</p></div>
               <div><p className="text-xs text-gray-500">Status</p><p>{data.status}</p></div>
               <div>

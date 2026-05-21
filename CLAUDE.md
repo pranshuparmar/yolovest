@@ -42,7 +42,7 @@ YoloVest is an AI-driven Indian stock trading platform. It uses Google Gemini fo
 │   │   ├── api/            — API client + endpoint definitions
 │   │   ├── hooks/          — React Query hooks, WebSocket, auth
 │   │   ├── types/          — TypeScript type definitions
-│   │   └── utils/          — datetime, csvExport helpers
+│   │   └── utils/          — datetime, csvExport, priceMove helpers
 │   ├── nginx.conf          — Reverse proxy for /api → backend (uses Docker DNS resolver)
 │   ├── Dockerfile
 │   └── package.json
