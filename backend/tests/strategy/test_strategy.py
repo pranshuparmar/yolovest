@@ -141,7 +141,14 @@ class TestPredictIntraday:
         assert result.signal_type == "BUY"
 
     async def test_predict_calibrator_different_label(self, signal_model):
-        """When calibrator improves confidence with a different label, use calibrator's label."""
+        """When calibrator argmax disagrees with raw, keep raw probas.
+
+        The CalibratedClassifierCV sigmoid Platt-scaling on a HOLD-
+        dominated training set (e.g. swing model's 73% HOLD) systematically
+        pulls directional predictions back to the HOLD prior, even when
+        the class-weighted XGBoost has clear conviction. Keeping raw on
+        disagreement preserves the trained model's directional intuition.
+        """
         mock_calibrator = MagicMock()
         mock_calibrator.predict.return_value = np.array([0])  # SELL (different from raw BUY)
         mock_calibrator.predict_proba.return_value = np.array([[0.85, 0.05, 0.10]])
@@ -150,9 +157,27 @@ class TestPredictIntraday:
         features = {"close": 100.0, "atr_14": 5.0, "rsi": 55.0}
         result = await signal_model.predict_intraday("RELIANCE", features)
 
-        # Calibrated confidence (0.85) > raw (0.8) — calibrated label+confidence used
-        assert result.confidence == 0.85
-        assert result.signal_type == "SELL"
+        # Disagreement on label → raw wins, regardless of confidence delta.
+        assert result.confidence == 0.8
+        assert result.signal_type == "BUY"
+
+    async def test_predict_calibrator_compresses_directional_to_hold(self, signal_model):
+        """The dominant failure case fixed by the calibration logic change:
+        raw model has a clear BUY argmax, calibrator pulls it to HOLD with
+        higher confidence. Old logic adopted the HOLD; new logic keeps the
+        BUY direction.
+        """
+        mock_calibrator = MagicMock()
+        mock_calibrator.predict.return_value = np.array([1])  # HOLD
+        mock_calibrator.predict_proba.return_value = np.array([[0.20, 0.55, 0.25]])
+        signal_model._intraday_calibrator = mock_calibrator
+
+        features = {"close": 100.0, "atr_14": 5.0, "rsi": 55.0}
+        result = await signal_model.predict_intraday("RELIANCE", features)
+
+        # Raw (BUY @ 0.8) preserved despite calibrator preferring HOLD @ 0.55.
+        assert result.signal_type == "BUY"
+        assert result.confidence == 0.8
 
 
 class TestPredictSwing:

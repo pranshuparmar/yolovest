@@ -478,16 +478,35 @@ class XGBoostSignalModel(MLBase):
 
             cal_label, cal_confidence, cal_probas = await asyncio.to_thread(_calibrate)
 
-            if cal_confidence > raw_confidence:
-                # Calibration improved confidence — use calibrated values
-                pred_label = cal_label
-                confidence = cal_confidence
-                chosen_probas = cal_probas
+            # Only adopt calibrated probabilities when the calibrator
+            # AGREES with the raw model on the argmax class. The
+            # CalibratedClassifierCV uses sigmoid Platt scaling that,
+            # on a HOLD-dominated label distribution (e.g. the swing
+            # model's ~73% HOLD), systematically compresses directional
+            # predictions back toward the HOLD prior — even when the
+            # class-weighted XGBoost has clear conviction. When raw
+            # says BUY/SELL but calibrator pulls it to HOLD, that's
+            # the over-correction kicking in; trust the trained model.
+            # When they agree on direction, use the higher-confidence
+            # version (calibration is doing its job refining the
+            # probability magnitude). The old "always use higher
+            # confidence" rule silently flipped most swing
+            # directional argmaxes into HOLD.
+            if cal_label == pred_label:
+                if cal_confidence > raw_confidence:
+                    confidence = cal_confidence
+                    chosen_probas = cal_probas
+                else:
+                    logger.debug(
+                        "Calibration compressed %s confidence from %.4f to %.4f, using raw",
+                        symbol, raw_confidence, cal_confidence,
+                    )
             else:
-                # Calibration compressed confidence — keep raw model output
                 logger.debug(
-                    "Calibration compressed %s confidence from %.4f to %.4f, using raw",
-                    symbol, raw_confidence, cal_confidence,
+                    "Calibrator disagrees with raw on %s: raw=%s@%.3f cal=%s@%.3f, keeping raw probas",
+                    symbol,
+                    _LABEL_MAP.get(pred_label, "?"), raw_confidence,
+                    _LABEL_MAP.get(cal_label, "?"), cal_confidence,
                 )
 
         # Apply tuned class thresholds when the model was trained with the

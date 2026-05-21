@@ -4088,12 +4088,27 @@ def create_app(ctx: AppContext) -> FastAPI:
                     if isinstance(swing_pred, BaseException):
                         swing_pred = None
 
-                    intra_conf = intra_pred.confidence if intra_pred and intra_pred.signal_type != "HOLD" else -1
-                    swing_conf = swing_pred.confidence if swing_pred and swing_pred.signal_type != "HOLD" else -1
+                    # Compare margin-above-threshold (not raw confidence)
+                    # — mirrors generate_signals._predict_balanced. The
+                    # intraday model is balanced-label and produces
+                    # higher raw confidences than swing (HOLD-dominated),
+                    # so raw-confidence comparison would systematically
+                    # pick intraday and the dry-run would show 100% MIS.
+                    def _margin(pred: Any, model_type: str) -> float:
+                        if pred is None or pred.signal_type == "HOLD":
+                            return -1.0
+                        thresholds = ctx.ml.get_effective_thresholds(model_type)
+                        if not thresholds:
+                            return float(pred.confidence)
+                        key = pred.signal_type.lower()
+                        return float(pred.confidence) - float(thresholds.get(key, 0.5))
 
-                    if intra_conf < 0 and swing_conf < 0:
+                    intra_margin = _margin(intra_pred, "intraday")
+                    swing_margin = _margin(swing_pred, "swing")
+
+                    if intra_margin < 0 and swing_margin < 0:
                         prediction = swing_pred or intra_pred
-                    elif intra_conf >= swing_conf:
+                    elif intra_margin >= swing_margin:
                         prediction = intra_pred
                         holding_period, product, expected_days = "intraday", "MIS", 0
                     else:
