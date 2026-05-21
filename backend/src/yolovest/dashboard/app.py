@@ -991,7 +991,15 @@ def create_app(ctx: AppContext) -> FastAPI:
                     # Defer to the frontend to render the CDSL action UI;
                     # 412 Precondition Required nicely signals "do the
                     # auth step first, then retry."
-                    cdsl = await _build_cdsl_response(msg)
+                    cdsl = await _build_cdsl_response(
+                        msg,
+                        triggered_by={
+                            "symbol": symbol,
+                            "quantity": exit_qty,
+                            "side": exit_side,
+                            "source": "partial-close",
+                        },
+                    )
                     raise HTTPException(status_code=412, detail=cdsl)
                 raise HTTPException(
                     status_code=502,
@@ -1191,7 +1199,15 @@ def create_app(ctx: AppContext) -> FastAPI:
             logger.exception("close_position: place exit order failed for %s", trade_id)
             msg = str(e)
             if _is_cdsl_tpin_error(msg):
-                cdsl = await _build_cdsl_response(msg)
+                cdsl = await _build_cdsl_response(
+                    msg,
+                    triggered_by={
+                        "symbol": symbol,
+                        "quantity": qty,
+                        "side": exit_side,
+                        "source": "close-position",
+                    },
+                )
                 raise HTTPException(status_code=412, detail=cdsl)
             raise HTTPException(status_code=502, detail=f"Broker rejected exit order: {e}")
 
@@ -2007,13 +2023,23 @@ def create_app(ctx: AppContext) -> FastAPI:
             or "tpin" in msg_lower
         )
 
-    async def _build_cdsl_response(error_msg: str) -> dict[str, Any]:
+    async def _build_cdsl_response(
+        error_msg: str,
+        *,
+        triggered_by: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Build a structured error response for the CDSL TPIN case.
 
         Tries to call broker.initiate_holdings_auth so the UI can open
         a Kite session URL directly into the authorisation flow.
         Falls back to the static Kite holdings page when the
         kiteconnect library version doesn't expose the method.
+
+        When `triggered_by` is provided (= a real sell order just
+        failed, not a proactive button click), also pings Telegram so
+        the user sees the same alert outside the UI. Per-symbol-per-day
+        dedup via system_state keeps repeated clicks on the same
+        failing order from spamming the channel.
         """
         auth_url: str | None = None
         request_id: str | None = None
@@ -2039,11 +2065,43 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "initiate_holdings_auth failed — using static URL",
                 exc_info=True,
             )
+
+        resolved_url = auth_url or _CDSL_HELP_URL
+
+        # Fire Telegram alert only on reactive failures (real sell got
+        # rejected). The proactive endpoint doesn't pass triggered_by
+        # because the user is already engaged with the UI.
+        if triggered_by:
+            try:
+                from yolovest.timezone import now_ist as _now_ist
+                sym = (triggered_by.get("symbol") or "?").upper()
+                today = _now_ist().date().isoformat()
+                dedup_key = f"cdsl_alert_sent:{today}:{sym}"
+                already = await ctx.db.get_system_state(dedup_key)
+                if not already:
+                    qty = triggered_by.get("quantity")
+                    side = (triggered_by.get("side") or "").upper()
+                    src = triggered_by.get("source") or "order"
+                    qty_blurb = f" ({side} x{qty})" if qty else ""
+                    msg = (
+                        f"⚠ CDSL TPIN required — {sym}{qty_blurb} sell rejected\n\n"
+                        f"Source: {src}\n"
+                        f"{error_msg}\n\n"
+                        f"Authorise: {resolved_url}\n"
+                        f"Skip daily TPIN (DDPI): {_CDSL_DDPI_URL}"
+                    )
+                    await ctx.notify.send(msg, alert_type="errors")
+                    await ctx.db.set_system_state(dedup_key, "1")
+            except Exception:
+                logger.debug(
+                    "CDSL reactive Telegram alert failed", exc_info=True,
+                )
+
         return {
             "success": False,
             "error": error_msg,
             "error_type": "cdsl_tpin_required",
-            "auth_url": auth_url or _CDSL_HELP_URL,
+            "auth_url": resolved_url,
             "auth_url_static": auth_url is None,
             "request_id": request_id,
             "ddpi_help_url": _CDSL_DDPI_URL,
@@ -2227,7 +2285,15 @@ def create_app(ctx: AppContext) -> FastAPI:
             # render an "Authorize at CDSL" action button instead of
             # just dumping the broker's raw error string.
             if _is_cdsl_tpin_error(msg):
-                return await _build_cdsl_response(msg)
+                return await _build_cdsl_response(
+                    msg,
+                    triggered_by={
+                        "symbol": symbol,
+                        "quantity": quantity,
+                        "side": side,
+                        "source": "manual-order",
+                    },
+                )
             return {"success": False, "error": msg}
 
     @app.get("/api/trades/today")
