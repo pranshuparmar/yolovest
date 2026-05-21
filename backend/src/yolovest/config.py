@@ -637,6 +637,20 @@ class RiskConfig(BaseModel):
     # large number (e.g. 1.0) to disable; set to 0.0 to force exactly
     # symmetric thresholds.
     tuned_threshold_max_diff: float = Field(default=0.05, ge=0, le=1.0)
+    # Absolute ceiling on the tuned BUY / SELL probability thresholds.
+    # The diff cap above only addresses asymmetry — it can't help when
+    # the sweep saved (0.70, 0.70) and the calibrated probabilities
+    # rarely cross 0.60. That's the second class-collapse mode: both
+    # tuned thresholds are reachable in the holdout slice but
+    # unreachable on the live feed (because the holdout had a few
+    # high-conviction setups dominating Sharpe, while live trading
+    # mostly sees moderate-conviction signals). Capping at this value
+    # keeps the sweep's directional preference intact while guaranteeing
+    # the gate stays reachable. 0.60 = "any tuned threshold above 0.60
+    # gets pulled down to 0.60". Set to 1.0 to disable. Setting this
+    # below `min_confidence_buy` / `min_confidence_sell` doesn't add
+    # value since those floors still apply downstream.
+    tuned_threshold_max_value: float = Field(default=0.60, ge=0.5, le=1.0)
     # Hard overrides on the model's tuned probability thresholds.
     # When set, these REPLACE the saved tuned values entirely (the
     # diff cap above no longer applies). Use when the model's saved

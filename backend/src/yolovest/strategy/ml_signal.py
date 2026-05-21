@@ -198,31 +198,50 @@ class XGBoostSignalModel(MLBase):
             )
             return {"buy": round(out_buy, 4), "sell": round(out_sell, 4)}
 
-        # No override — apply the symmetry cap.
+        # No override — apply the symmetry cap first.
         max_diff = float(
             getattr(risk_cfg, "tuned_threshold_max_diff", 0.05)
             if risk_cfg is not None else 0.05
         )
         diff = abs(buy - sell)
-        if diff <= max_diff:
-            return {"buy": buy, "sell": sell}
-        # Shrink both toward midpoint so the gap is exactly max_diff
-        # while preserving the direction the model learned (i.e. if
-        # tuned buy was higher, it stays higher).
-        midpoint = (buy + sell) / 2.0
-        half_gap = max_diff / 2.0
-        if buy > sell:
-            new_buy = midpoint + half_gap
-            new_sell = midpoint - half_gap
-        else:
-            new_buy = midpoint - half_gap
-            new_sell = midpoint + half_gap
-        logger.debug(
-            "Threshold-diff cap applied to %s: buy %.3f→%.3f, sell %.3f→%.3f "
-            "(max_diff=%.2f)",
-            model_type, buy, new_buy, sell, new_sell, max_diff,
+        if diff > max_diff:
+            # Shrink both toward midpoint so the gap is exactly
+            # max_diff while preserving the direction the model
+            # learned (i.e. if tuned buy was higher, it stays higher).
+            midpoint = (buy + sell) / 2.0
+            half_gap = max_diff / 2.0
+            if buy > sell:
+                new_buy = midpoint + half_gap
+                new_sell = midpoint - half_gap
+            else:
+                new_buy = midpoint - half_gap
+                new_sell = midpoint + half_gap
+            logger.debug(
+                "Threshold-diff cap applied to %s: buy %.3f→%.3f, "
+                "sell %.3f→%.3f (max_diff=%.2f)",
+                model_type, buy, new_buy, sell, new_sell, max_diff,
+            )
+            buy, sell = new_buy, new_sell
+
+        # Then the absolute-ceiling cap. Pulls thresholds above the
+        # configured ceiling back down so a sweep that landed on
+        # (0.70, 0.70) can't class-collapse the live model when the
+        # calibrated probabilities rarely reach that high.
+        max_value = float(
+            getattr(risk_cfg, "tuned_threshold_max_value", 0.60)
+            if risk_cfg is not None else 0.60
         )
-        return {"buy": round(new_buy, 4), "sell": round(new_sell, 4)}
+        if buy > max_value or sell > max_value:
+            new_buy = min(buy, max_value)
+            new_sell = min(sell, max_value)
+            logger.debug(
+                "Threshold-ceiling cap applied to %s: buy %.3f→%.3f, "
+                "sell %.3f→%.3f (max_value=%.2f)",
+                model_type, buy, new_buy, sell, new_sell, max_value,
+            )
+            buy, sell = new_buy, new_sell
+
+        return {"buy": round(buy, 4), "sell": round(sell, 4)}
 
     def _set_thresholds(
         self, model_type: str, thresholds: dict[str, float] | None,

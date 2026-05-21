@@ -193,8 +193,13 @@ class ModelRetrainSkill(SkillBase):
         results: dict[str, Any] = {}
         shadow_deployed = []
 
-        # Lookahead periods: intraday uses 1-bar, swing uses 5-bar returns
-        lookahead_map = {"intraday": 1, "swing": 5}
+        # Lookahead periods: intraday uses 1-bar, swing uses 10-bar
+        # returns. 10 bars (~2 weeks) gives genuine swing setups
+        # enough room for the 1.5×ATR target to develop without the
+        # 0.75×ATR SL noise-tripping on the same window — at 5 bars
+        # the SL fires constantly and the labeler classes most
+        # outcomes as HOLD even after the first-winner disambiguation.
+        lookahead_map = {"intraday": 1, "swing": 10}
 
         # Match each model's path-aware label geometry to the holding
         # bucket it actually trades at runtime: intraday uses the tight
@@ -939,8 +944,16 @@ class ModelRetrainSkill(SkillBase):
         - SELL: target_hit when low  ≤ entry × (1 − target_pct)
                  SL_hit    when high ≥ entry × (1 + sl_pct)
 
-        Both touched in the same bar is treated as ambiguous (HOLD)
-        because daily OHLC can't tell us the intra-bar order.
+        Both touched in the same bar is treated as ambiguous because
+        daily OHLC can't tell us the intra-bar order. When both legs
+        cleanly win on DIFFERENT bars, the side that won first wins
+        the label — a real trader who took the BUY would have closed
+        at target on bar j and not been around for the SELL win on
+        bar k>j (and vice versa). The old "both won → HOLD" rule was
+        the dominant source of HOLD-label inflation on the swing
+        model (87% HOLD) because, on a 5-bar window with SL closer
+        than target, oscillating prices regularly trip both legs'
+        targets in different bars.
 
         Returns: 2 BUY, 0 SELL, 1 HOLD.
         """
@@ -949,8 +962,10 @@ class ModelRetrainSkill(SkillBase):
         sell_target = entry * (1 - target_pct)
         sell_sl = entry * (1 + sl_pct)
 
-        buy_outcome: str | None = None  # "win" / "loss" / None
+        buy_outcome: str | None = None  # "win" / "loss" / "ambiguous" / None
         sell_outcome: str | None = None
+        buy_win_bar: int | None = None
+        sell_win_bar: int | None = None
 
         end_idx = min(start_idx + lookahead, len(bars) - 1)
         for k in range(start_idx + 1, end_idx + 1):
@@ -965,6 +980,7 @@ class ModelRetrainSkill(SkillBase):
                     buy_outcome = "ambiguous"
                 elif target_now:
                     buy_outcome = "win"
+                    buy_win_bar = k
                 elif sl_now:
                     buy_outcome = "loss"
 
@@ -976,17 +992,30 @@ class ModelRetrainSkill(SkillBase):
                     sell_outcome = "ambiguous"
                 elif target_now:
                     sell_outcome = "win"
+                    sell_win_bar = k
                 elif sl_now:
                     sell_outcome = "loss"
 
             if buy_outcome is not None and sell_outcome is not None:
                 break
 
-        # Decide label. Only label BUY/SELL when one side cleanly won
-        # and the other didn't also win — otherwise HOLD.
-        if buy_outcome == "win" and sell_outcome != "win":
+        buy_won = buy_outcome == "win"
+        sell_won = sell_outcome == "win"
+
+        if buy_won and sell_won:
+            # Disambiguate by which leg's target hit first. Same-bar
+            # cross-direction wins fall through to HOLD because daily
+            # OHLC can't tell us the intra-bar order.
+            if buy_win_bar is not None and sell_win_bar is not None:
+                if buy_win_bar < sell_win_bar:
+                    return 2
+                if sell_win_bar < buy_win_bar:
+                    return 0
+            return 1
+
+        if buy_won:
             return 2
-        if sell_outcome == "win" and buy_outcome != "win":
+        if sell_won:
             return 0
         return 1
 
