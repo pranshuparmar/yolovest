@@ -60,6 +60,65 @@ def compute_transaction_costs(
     return round(entry_brokerage + exit_brokerage + stt + other, 2)
 
 
+def evaluate_net_rr(
+    *,
+    signal_type: str,
+    entry_price: float,
+    target_price: float,
+    stop_loss_price: float,
+    quantity: int,
+    product: str = "MIS",
+    cost_config: TransactionCostConfig | None = None,
+) -> tuple[float | None, float, str | None]:
+    """Compute the cost-adjusted reward:risk ratio of a trade setup.
+
+    Returns (net_rr, round_trip_costs, reason). When the setup is
+    unviable (costs would exceed gross win, or denominator non-positive),
+    `net_rr` is None and `reason` carries a human-readable explanation.
+    Otherwise `reason` is None and the caller compares `net_rr` against
+    its threshold to decide.
+
+    Shared by risk-check (signal-time gate) and the pending-trade
+    repricer (per-heartbeat revalidation), so the same arithmetic
+    rejects the same setups in both places.
+
+    For SELL trades the entry leg is the sell side, so the costs call
+    is flipped — STT lands on the correct leg in both directions.
+    """
+    try:
+        entry = float(entry_price)
+        target = float(target_price)
+        sl = float(stop_loss_price)
+        qty = int(quantity)
+    except (TypeError, ValueError):
+        return None, 0.0, "non-numeric levels"
+    if entry <= 0 or target <= 0 or sl <= 0 or qty <= 0:
+        return None, 0.0, "missing levels"
+    direction = 1 if signal_type == "BUY" else -1
+    gross_win = (target - entry) * direction * qty
+    gross_loss = (entry - sl) * direction * qty
+    if direction > 0:
+        costs = compute_transaction_costs(
+            entry_price=entry, exit_price=target,
+            quantity=qty, product=product, cost_config=cost_config,
+        )
+    else:
+        costs = compute_transaction_costs(
+            entry_price=target, exit_price=entry,
+            quantity=qty, product=product, cost_config=cost_config,
+        )
+    net_win = gross_win - costs
+    net_loss = gross_loss + costs
+    if net_win <= 0:
+        return None, costs, (
+            f"Costs ₹{costs:.0f} exceed gross win ₹{gross_win:.0f} "
+            f"({qty} qty, target ₹{target:.2f})"
+        )
+    if net_loss <= 0:
+        return None, costs, "non-positive net loss (SL on wrong side?)"
+    return net_win / net_loss, costs, None
+
+
 def compute_transaction_cost_breakdown(
     entry_price: float,
     exit_price: float,

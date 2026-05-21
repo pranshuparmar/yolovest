@@ -62,11 +62,108 @@ export const api = {
 
   portfolio: () => apiFetch<PortfolioState>("/api/portfolio"),
 
+  fundsHistory: (days = 90) =>
+    apiFetch<{
+      count: number;
+      snapshots: Array<{
+        snapshot_date: string;
+        captured_at: string;
+        mode: string;
+        available_cash: number;
+        utilised_margin: number;
+        net: number;
+        holdings_invested: number;
+        holdings_current: number;
+        m2m_realised: number;
+        m2m_unrealised: number;
+        live_balance: number;
+      }>;
+    }>(`/api/funds/history?days=${days}`),
+
+  funds: () =>
+    apiFetch<{
+      authenticated: boolean;
+      enabled?: boolean;
+      raw: Record<string, unknown> | null;
+      summary: {
+        available_cash: number;
+        live_balance: number;
+        opening_balance: number;
+        adhoc_margin?: number;
+        intraday_payin?: number;
+        collateral: number;
+        utilised_margin: number;
+        m2m_unrealised: number;
+        m2m_realised: number;
+        payout: number;
+        exposure: number;
+        span: number;
+        delivery: number;
+        option_premium?: number;
+        turnover?: number;
+        net: number;
+      };
+    }>("/api/funds"),
+
   positions: () => apiFetch<Trade[]>("/api/positions"),
 
-  closePosition: (tradeId: string) =>
-    apiFetch<{ status: string; trade_id: string; exit_price: number; pnl: number; exit_order_id: string }>(
-      `/api/positions/${encodeURIComponent(tradeId)}/close`,
+  closePosition: (tradeId: string, qty?: number) =>
+    apiFetch<{
+      status: string;
+      trade_id: string;
+      exit_order_id: string;
+      // Full close shape
+      exit_price?: number;
+      pnl?: number;
+      // Partial close shape
+      exit_qty?: number;
+      remaining_qty?: number;
+      partial_pnl?: number;
+    }>(
+      qty
+        ? `/api/positions/${encodeURIComponent(tradeId)}/close?qty=${qty}`
+        : `/api/positions/${encodeURIComponent(tradeId)}/close`,
+      { method: "POST" },
+    ),
+
+  tightenSl: (tradeId: string, newSl: number) =>
+    apiFetch<{ ok: boolean; trade_id: string; symbol: string; previous_sl: number; new_sl: number; path: string }>(
+      `/api/positions/${encodeURIComponent(tradeId)}/tighten-sl`,
+      { method: "POST", body: JSON.stringify({ new_sl: newSl }) },
+    ),
+
+  modifyTarget: (tradeId: string, newTarget: number) =>
+    apiFetch<{ ok: boolean; trade_id: string; symbol: string; previous_target: number; new_target: number; path: string }>(
+      `/api/positions/${encodeURIComponent(tradeId)}/modify-target`,
+      { method: "POST", body: JSON.stringify({ new_target: newTarget }) },
+    ),
+
+  brokerOrders: () =>
+    apiFetch<{
+      authenticated: boolean;
+      orders: Record<string, unknown>[];
+      gtts: Record<string, unknown>[];
+      error?: string;
+    }>("/api/broker/orders"),
+
+  cancelBrokerOrder: (orderId: string) =>
+    apiFetch<{ ok: boolean; order_id: string }>(
+      `/api/broker/orders/${encodeURIComponent(orderId)}/cancel`,
+      { method: "POST" },
+    ),
+
+  modifyBrokerOrder: (
+    orderId: string,
+    body: { price?: number; quantity?: number; trigger_price?: number; order_type?: string },
+  ) =>
+    apiFetch<{ ok: boolean; order_id: string }>(
+      `/api/broker/orders/${encodeURIComponent(orderId)}/modify`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  cancelBrokerGtt: (gttId: number) =>
+    apiFetch<{ ok: boolean; gtt_id: number }>(
+      `/api/broker/gtts/${gttId}/cancel`,
       { method: "POST" },
     ),
 
@@ -75,10 +172,32 @@ export const api = {
   holdings: () => apiFetch<HoldingsResponse>("/api/holdings"),
 
   placeOrder: (order: ManualOrder) =>
-    apiFetch<{ success: boolean; order_id?: string; error?: string }>("/api/orders", {
+    apiFetch<{
+      success: boolean;
+      order_id?: string;
+      error?: string;
+      // Populated when the broker rejected the order because of a
+      // missing CDSL TPIN authorisation. The UI renders an
+      // "Authorize at CDSL" action button that opens auth_url.
+      error_type?: string;
+      auth_url?: string;
+      auth_url_static?: boolean;
+      ddpi_help_url?: string;
+      hint?: string;
+    }>("/api/orders", {
       method: "POST",
       body: JSON.stringify(order),
     }),
+
+  initiateHoldingsAuth: () =>
+    apiFetch<{
+      success: boolean;
+      error_type?: string;
+      auth_url?: string;
+      auth_url_static?: boolean;
+      ddpi_help_url?: string;
+      hint?: string;
+    }>("/api/broker/holdings-auth", { method: "POST", body: "{}" }),
 
   trades: (params?: {
     start?: string;
@@ -178,6 +297,11 @@ export const api = {
     apiFetch<ActionResult>("/api/integrations/zerodha/authenticate", {
       method: "POST",
       body: JSON.stringify({ request_token: requestToken }),
+    }),
+
+  logoutZerodha: () =>
+    apiFetch<{ success: boolean }>("/api/integrations/zerodha/logout", {
+      method: "POST",
     }),
 
   testTelegram: () =>
@@ -312,6 +436,11 @@ export const api = {
   symbolTrades: (symbol: string, limit = 50) =>
     apiFetch<Trade[]>(`/api/symbol/${symbol}/trades?limit=${limit}`),
 
+  ltpBatch: (symbols: string[]) => {
+    const qs = encodeURIComponent(symbols.join(","));
+    return apiFetch<Record<string, number>>(`/api/ltp?symbols=${qs}`);
+  },
+
   symbolPredictions: (symbol: string) =>
     apiFetch<PredictionDetail[]>(`/api/symbol/${symbol}/predictions`),
 
@@ -408,6 +537,12 @@ export const api = {
       { method: "DELETE" },
     ),
 
+  setBackupLock: (filename: string, locked: boolean) =>
+    apiFetch<{ success: boolean; filename: string; locked: boolean }>(
+      `/api/backups/${filename}/${locked ? "lock" : "unlock"}`,
+      { method: "POST" },
+    ),
+
   changePassword: (newPassword: string) =>
     apiFetch<{ success: boolean }>("/api/change-password", {
       method: "POST",
@@ -488,6 +623,12 @@ export const api = {
   unquarantineSymbol: (symbol: string) =>
     apiFetch<{ success: boolean; symbol: string }>(`/api/quarantined-symbols/${symbol}`, { method: "DELETE" }),
 
+  bulkUnquarantineSymbols: (symbols: string[]) =>
+    apiFetch<{ success: boolean; removed: number; results: Record<string, boolean> }>(
+      "/api/quarantined-symbols/bulk-unblock",
+      { method: "POST", body: JSON.stringify({ symbols }) },
+    ),
+
   setReplacementSymbol: (symbol: string, replacement: string | null) =>
     apiFetch<{ success: boolean; symbol: string; replacement: string | null }>(
       `/api/quarantined-symbols/${symbol}/replacement`,
@@ -507,7 +648,7 @@ export const api = {
     ),
 
   reviewHoldings: (symbols?: string[]) =>
-    apiFetch<{ recommendations: { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number }[] }>(
+    apiFetch<{ recommendations: { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number; trade_id?: string | null; current_sl?: number; trade_signal_type?: string | null; entry_price?: number }[] }>(
       "/api/review",
       { method: "POST", body: JSON.stringify(symbols ? { symbols } : {}) },
     ),

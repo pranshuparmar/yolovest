@@ -83,6 +83,11 @@ class KiteDataProvider(MarketDataBase):
         # Tracks whether _prewarm_token_cache has populated the cache from
         # the full NSE instrument master. Cleared on set_access_token().
         self._token_cache_warmed: bool = False
+        # Flips to True the first time Kite rejects us with a token
+        # error. Subsequent calls short-circuit via _assert_kite_authed
+        # so a stale-token heartbeat doesn't burn through retries on
+        # every symbol. Cleared on set_access_token() with a real token.
+        self._token_known_invalid: bool = False
         # Time-based throttle for historical_data. The historical endpoint
         # has a tighter per-second limit than the general quote/order quota,
         # and a semaphore alone doesn't enforce inter-call spacing.
@@ -103,6 +108,45 @@ class KiteDataProvider(MarketDataBase):
         self._kite = None  # _get_kite() will re-create with new token
         self._token_cache.clear()  # instrument tokens may change across sessions
         self._token_cache_warmed = False
+        # A new token is being installed — clear the "known invalid"
+        # short-circuit so the next call goes to Kite again. If the
+        # caller is wiping the token (set_access_token("")), this
+        # leaves _access_token falsy and _assert_kite_authed below
+        # will short-circuit regardless.
+        self._token_known_invalid = False
+
+    def _assert_kite_authed(self) -> None:
+        """Raise a fast, well-known error when we already know Kite
+        won't accept us — either no token has ever been set, or a
+        previous call hit a TokenException and flipped the
+        "known invalid" flag. Skips the 3-retry × 8s backoff dance
+        on every symbol of a heartbeat when the broker is logged out
+        (weekends, expired token, post-logout), which was filling logs
+        with the same `Incorrect api_key or access_token` warning.
+        Cleared on the next successful set_access_token().
+        """
+        if not self._access_token:
+            raise RuntimeError("Kite access_token unset; skipping Kite call")
+        if self._token_known_invalid:
+            raise RuntimeError(
+                "Kite token previously rejected by server; skipping until re-auth"
+            )
+
+    @staticmethod
+    def _is_token_error(exc: BaseException) -> bool:
+        """Detect TokenException by class name + message substring.
+
+        Class-name check avoids a hard import dependency on
+        kiteconnect.exceptions (the module is optional). Message
+        check is the fallback for transports that wrap the original.
+        """
+        if type(exc).__name__ == "TokenException":
+            return True
+        msg = str(exc).lower()
+        return (
+            "api_key" in msg or "access_token" in msg
+            or "invalid token" in msg or "token expired" in msg
+        )
 
     def _get_kite(self) -> Any:
         """Lazy-init Kite Connect client.
@@ -131,9 +175,15 @@ class KiteDataProvider(MarketDataBase):
         making bulk operations like ingest-universe N+1 expensive AND
         burning through the Kite rate-limit budget.
         """
+        self._assert_kite_authed()
         kite = self._get_kite()
         async with self._rate_limiter:
-            instruments = await asyncio.to_thread(kite.instruments, "NSE")
+            try:
+                instruments = await asyncio.to_thread(kite.instruments, "NSE")
+            except Exception as e:
+                if self._is_token_error(e):
+                    self._token_known_invalid = True
+                raise
         for inst in instruments:
             sym = inst.get("tradingsymbol")
             token = inst.get("instrument_token")
@@ -188,6 +238,7 @@ class KiteDataProvider(MarketDataBase):
         when the requested window exceeds Kite's per-interval limit
         (see _KITE_MAX_DAYS_PER_CALL).
         """
+        self._assert_kite_authed()
         kite_interval = _INTERVAL_MAP.get(interval)
         if kite_interval is None:
             raise ValueError(
@@ -259,6 +310,13 @@ class KiteDataProvider(MarketDataBase):
                 ]
             except Exception as e:
                 last_error = e
+                # A TokenException is permanent within this token's
+                # lifetime — flipping the flag short-circuits every
+                # subsequent symbol in the same heartbeat instead of
+                # retrying through the same wall.
+                if self._is_token_error(e):
+                    self._token_known_invalid = True
+                    raise
                 if attempt < self._max_retries - 1:
                     if self._is_rate_limit_error(e):
                         # Hard back-off: server-side window needs time to
@@ -302,6 +360,7 @@ class KiteDataProvider(MarketDataBase):
 
     async def get_quote(self, symbol: str) -> dict[str, Any]:
         """Get real-time quote via Kite API."""
+        self._assert_kite_authed()
         kite = self._get_kite()
         nse_symbol = f"NSE:{symbol}"
 
@@ -350,6 +409,8 @@ class KiteDataProvider(MarketDataBase):
                 "last_quantity": int(quote.get("last_quantity") or 0),
             }
         except Exception as e:
+            if self._is_token_error(e):
+                self._token_known_invalid = True
             logger.warning("Kite quote failed for %s: %s", symbol, e)
             raise
 
@@ -365,3 +426,14 @@ class KiteDataProvider(MarketDataBase):
         except Exception:
             logger.debug("Kite data health check failed", exc_info=True)
             return False
+
+    def is_available(self) -> bool:
+        """Skip the provider entirely in the ingester fallback chain
+        when we know Kite won't accept us — either the access token
+        has never been set or a prior call already hit a
+        TokenException. This stops the per-symbol "Kite token
+        previously rejected" WARNING storm during an unauth'd
+        heartbeat. Cleared automatically when set_access_token is
+        called with a fresh token.
+        """
+        return bool(self._access_token) and not self._token_known_invalid

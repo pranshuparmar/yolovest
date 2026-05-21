@@ -14,8 +14,10 @@ import {
 } from "recharts";
 import clsx from "clsx";
 import { parseUTC, getTimezone } from "../utils/datetime";
+import { newsSourceColorClass, newsSourceLabel } from "../utils/newsSource";
 import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
 import { useLtpStream } from "../hooks/useLtpStream";
+import { OrderForm } from "../components/OrderForm";
 
 /** Trailing simple moving average over the last `period` values of
  * the named field. Returns null for indices that don't have enough
@@ -44,9 +46,30 @@ export function SymbolPage() {
   const { symbol } = useParams<{ symbol: string }>();
   const navigate = useNavigate();
   const sym = symbol?.toUpperCase() || "";
-  const [days, setDays] = useState(60);
+  // Period selector. `Today` = current-day intraday 5-minute bars; the
+  // rest are calendar-day windows of daily bars.
+  const PERIODS: { label: string; days: number; interval: "daily" | "5minute" }[] = [
+    { label: "Today", days: 1, interval: "5minute" },
+    { label: "7d", days: 7, interval: "daily" },
+    { label: "15d", days: 15, interval: "daily" },
+    { label: "30d", days: 30, interval: "daily" },
+    { label: "60d", days: 60, interval: "daily" },
+    { label: "90d", days: 90, interval: "daily" },
+    { label: "180d", days: 180, interval: "daily" },
+    { label: "365d", days: 365, interval: "daily" },
+  ];
+  const [periodIdx, setPeriodIdx] = useState(1); // default 7d
+  const period = PERIODS[periodIdx];
 
-  const { data: ohlcv, isLoading: ohlcvLoading } = useSymbolOHLCV(sym, { days });
+  // Inline order form trigger — populated when the user clicks Buy/Sell
+  // in the header. Symbol pre-fills from the URL param so the user
+  // doesn't have to retype it.
+  const [orderForm, setOrderForm] = useState<{ side: "BUY" | "SELL" } | null>(null);
+
+  const { data: ohlcv, isLoading: ohlcvLoading } = useSymbolOHLCV(sym, {
+    days: period.days,
+    interval: period.interval,
+  });
   const { data: trades, isLoading: tradesLoading } = useSymbolTrades(sym);
   const { data: predictions } = useSymbolPredictions(sym);
   const { data: sentiment } = useSentiment(sym);
@@ -72,10 +95,20 @@ export function SymbolPage() {
       }
     }
 
+    // Intraday bars (5min) get a HH:MM tick label; daily bars get a
+    // "MMM D" label so the X-axis stays readable.
+    const intraday = period.interval === "5minute";
     const base = (ohlcv || []).map((b) => {
-      const date = parseUTC(b.timestamp).toLocaleDateString("en-IN", { timeZone: getTimezone(), month: "short", day: "numeric" });
-      const entry = entryMap.get(date);
-      const exit = exitMap.get(date);
+      const d = parseUTC(b.timestamp);
+      const dateKey = d.toLocaleDateString("en-IN", { timeZone: getTimezone(), month: "short", day: "numeric" });
+      const date = intraday
+        ? d.toLocaleTimeString("en-IN", { timeZone: getTimezone(), hour: "2-digit", minute: "2-digit" })
+        : dateKey;
+      // Suppress per-bar entry/exit markers on intraday charts —
+      // multiple bars share the same calendar day so the marker would
+      // stamp every bar of that day instead of the single fill bar.
+      const entry = intraday ? undefined : entryMap.get(dateKey);
+      const exit = intraday ? undefined : exitMap.get(dateKey);
       return {
         date,
         open: b.open,
@@ -105,7 +138,7 @@ export function SymbolPage() {
       sma21: sma21[i],
       sma50: sma50[i],
     }));
-  }, [ohlcv, trades]);
+  }, [ohlcv, trades, period.interval]);
 
   const chartClose = chartData.length > 0 ? chartData[chartData.length - 1].close : null;
   const liveLtp = ltps.get(sym);
@@ -133,14 +166,32 @@ export function SymbolPage() {
             {sentiment.sentiment} ({Math.round(sentiment.confidence * 100)}%)
           </span>
         )}
+        <div className="ml-auto flex gap-2">
+          <button
+            onClick={() => setOrderForm({ side: "BUY" })}
+            className="px-3 py-1 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white"
+          >Buy</button>
+          <button
+            onClick={() => setOrderForm({ side: "SELL" })}
+            className="px-3 py-1 rounded text-sm font-medium bg-red-600 hover:bg-red-700 text-white"
+          >Sell</button>
+        </div>
       </div>
 
+      {orderForm && (
+        <OrderForm
+          defaultSymbol={sym}
+          defaultSide={orderForm.side}
+          onClose={() => setOrderForm(null)}
+        />
+      )}
+
       {/* Period selector */}
-      <div className="flex gap-2">
-        {[30, 60, 90, 180, 365].map((d) => (
-          <button key={d} onClick={() => setDays(d)}
-            className={clsx("px-3 py-1 text-xs rounded", days === d ? "bg-emerald-900/40 text-emerald-400" : "bg-gray-800 text-gray-400 hover:bg-gray-700")}
-          >{d}d</button>
+      <div className="flex gap-2 flex-wrap">
+        {PERIODS.map((p, i) => (
+          <button key={p.label} onClick={() => setPeriodIdx(i)}
+            className={clsx("px-3 py-1 text-xs rounded", periodIdx === i ? "bg-emerald-900/40 text-emerald-400" : "bg-gray-800 text-gray-400 hover:bg-gray-700")}
+          >{p.label}</button>
         ))}
       </div>
 
@@ -514,7 +565,7 @@ export function SymbolPage() {
         </div>
       </div>
 
-      {/* News */}
+      {/* News — same chip style as the News Feed page for consistency. */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
         <h3 className="text-sm font-medium text-gray-400 mb-3">Recent News</h3>
         {!news || news.length === 0 ? (
@@ -522,11 +573,42 @@ export function SymbolPage() {
         ) : (
           <div className="space-y-2">
             {news.map((a) => (
-              <a key={a.content_hash} href={a.url} target="_blank" rel="noopener noreferrer"
-                className="block text-sm text-gray-300 hover:text-blue-400 py-1 border-b border-gray-800/50 last:border-0">
-                {a.headline}
-                <span className="text-xs text-gray-500 ml-2">{a.source}</span>
-              </a>
+              <div
+                key={a.content_hash}
+                className="bg-gray-900 border border-gray-800 rounded-lg p-3 hover:border-gray-700 transition-colors"
+              >
+                <p className="text-sm text-gray-200 line-clamp-2">{a.headline}</p>
+                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                  <span
+                    className={clsx(
+                      "px-2 py-0.5 rounded text-xs font-medium",
+                      newsSourceColorClass(a.source),
+                    )}
+                  >
+                    {newsSourceLabel(a.source)}
+                  </span>
+                  {a.published_at && (
+                    <span className="text-xs text-gray-500">
+                      {new Date(a.published_at).toLocaleTimeString("en-IN", {
+                        timeZone: getTimezone(),
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  )}
+                  {a.url && (
+                    <a
+                      href={a.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-gray-500 hover:text-blue-400 transition-colors"
+                      title="Open original article"
+                    >
+                      &#8599;
+                    </a>
+                  )}
+                </div>
+              </div>
             ))}
           </div>
         )}

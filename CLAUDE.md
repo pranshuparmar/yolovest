@@ -49,10 +49,7 @@ YoloVest is an AI-driven Indian stock trading platform. It uses Google Gemini fo
 ├── nginx/                  — Shared nginx-proxy assets
 │   ├── custom.conf         — Global HTTP-level overrides
 │   ├── heal-cert-symlinks.sh   — Restore <domain>.crt / <domain>.key on each boot
-│   ├── cert-heal-loop.sh   — Periodic heal sidecar entrypoint
 │   └── tls-healthcheck.sh  — Detect ssl_reject_handshake / missing symlinks
-├── scripts/                — Operational scripts
-│   └── cert-backup-loop.sh — Periodic tar backup of the certs volume
 ├── docs/                   — Operational + design docs
 │   ├── tls-recovery.md
 │   └── kite-features-backlog.md
@@ -154,7 +151,7 @@ Risk-check includes pending-trade notional in the `max_portfolio_exposure_pct` c
 
 ### Signal-Disposition Retry Caps
 
-`db.get_todays_signaled_symbols` dedups today's signals so a symbol doesn't re-fire repeatedly, but distinguishes terminal from transient dispositions. A symbol with one of the **retryable** dispositions (`risk_rejected`, `expired`, `trade_execute_failed`, `skill_error`) is re-evaluated each heartbeat **until** its count of retryable signals today reaches `risk.max_risk_rejected_retries_per_day` (default 5). After that, the cap engages and the symbol is dedup-blocked for the rest of the day. Any **non-retryable** disposition (`executed`, `llm_rejected`, `awaiting_approval`, in-flight NULL) blocks immediately. Mode-scoped so paper and live retry budgets stay independent.
+`db.get_todays_signaled_symbols` dedups today's signals so a symbol doesn't re-fire repeatedly, but distinguishes terminal from transient dispositions. A symbol with one of the **retryable** dispositions (`risk_rejected`, `expired`, `trade_execute_failed`, `skill_error`) is re-evaluated each heartbeat **until** its count of retryable signals today reaches `risk.max_risk_rejected_retries_per_day` (default 5). After that, the cap engages and the symbol is dedup-blocked for the rest of the day. Any **non-retryable** disposition (`executed`, `llm_rejected`, `awaiting_approval`, in-flight NULL) blocks immediately. The **deferred** disposition `time_blocked` (signal generated outside the order window) is a third class — re-evaluated freely AND cap-exempt, since the underlying condition is a scheduler edge case ("wait N minutes until `market_hours.order_start`"), not a real signal problem. Mode-scoped so paper and live retry budgets stay independent.
 
 This closes the failure mode where 12 transient risk-rejections (broad-market chop / depth / correlation with pending / exposure cap) at 9:30 would have permanently blocked those symbols for the rest of the day, leaving `max_trades_per_day` unused.
 
@@ -208,6 +205,8 @@ All data exchange between skills uses typed Pydantic models in `models/schemas.p
 ## Database
 
 SQLite with WAL mode. Schema versioned via numbered migration scripts in `backend/migrations/` (run in lexical order at startup).
+
+**Migrations are schema only.** This is an OSS project — every user runs the same migrations against their own data. Never put data-cleanup queries (deduping rows, normalising existing values, backfilling content) into a migration file. A duplicate-row problem on one user's server is not something every fresh install needs to "fix". Limit `.sql` files to `CREATE TABLE` / `ALTER TABLE` / `CREATE INDEX` / `DROP …`. If you need a one-off data fix for a specific deployment, surface it as a `docker exec yolovest-backend python -c "..."` snippet in chat or the operational docs, never as a migration.
 
 ### Key Tables
 
@@ -332,13 +331,11 @@ Secrets, filesystem paths, and server binding:
 
 ## TLS / nginx-proxy Reliability
 
-The stack hosts the dashboard behind `nginxproxy/nginx-proxy` + `nginxproxy/acme-companion` (pinned versions in `docker-compose.yml`). Several defensive layers protect against the well-known cert-symlink failure mode where acme-companion deletes top-level `<domain>.crt` / `<domain>.key` symlinks during a failed renewal attempt:
+The stack hosts the dashboard behind `nginxproxy/nginx-proxy` + `nginxproxy/acme-companion` (pinned versions in `docker-compose.yml`). Three defensive layers protect against the well-known cert-symlink failure mode where acme-companion deletes top-level `<domain>.crt` / `<domain>.key` symlinks during a failed renewal attempt:
 
 1. **Pinned image versions** prevent silent upstream behaviour drift.
 2. **`nginx/heal-cert-symlinks.sh`** runs as the nginx-proxy entrypoint before nginx boots, recreating any missing symlinks.
-3. **`cert-heal`** sidecar runs the heal script in a loop every `INTERVAL_SEC` seconds (default 15) so symlinks deleted mid-day are restored quickly.
-4. **`nginx/tls-healthcheck.sh`** marks the container unhealthy when `ssl_reject_handshake on;` is present in generated config or when a per-domain dir exists without its top-level symlinks — Docker's restart policy kicks the entrypoint again.
-5. **`cert-backup`** sidecar snapshots the certs named volume daily into `./backups/certs/` for disaster recovery without burning Let's Encrypt rate limits.
+3. **`nginx/tls-healthcheck.sh`** marks the container unhealthy when `ssl_reject_handshake on;` is present in generated config or when a per-domain dir exists without its top-level symlinks — Docker's `restart: always` then re-runs the entrypoint heal. Worst-case dashboard downtime after a botched mid-life renewal is ~3 min (healthcheck interval 60s × 3 retries) which is fine for a single-user app.
 
 Details and manual recovery steps in `docs/tls-recovery.md`.
 
@@ -425,6 +422,6 @@ The frontend nginx config (`frontend/nginx.conf`) uses Docker's embedded DNS (`r
 
 ### Infrastructure
 
-- **`docker-compose.yml`** — Pinned `nginx-proxy:1.10.1` and `acme-companion:2.6.3`. nginx-proxy entrypoint invokes the symlink heal script. `cert-heal` and `cert-backup` sidecars. Frontend depends on backend healthcheck (start_period 10s, interval 10s).
+- **`docker-compose.yml`** — Pinned `nginx-proxy:1.10.1` and `acme-companion:2.6.3`. nginx-proxy entrypoint invokes the symlink heal script. Frontend depends on backend healthcheck (start_period 10s, interval 10s).
 - **`backend/Dockerfile`** — Healthcheck tightened to detect ready state ~20s after start.
 - **`frontend/nginx.conf`** — `resolver 127.0.0.11` + variable in `proxy_pass` for resilient backend resolution.

@@ -27,6 +27,25 @@ export function usePortfolio() {
   });
 }
 
+export function useFunds() {
+  return useQuery({
+    queryKey: ["funds"],
+    queryFn: api.funds,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function useFundsHistory(days = 90) {
+  return useQuery({
+    queryKey: ["funds-history", days],
+    queryFn: () => api.fundsHistory(days),
+    // Daily snapshot — once an hour is plenty.
+    staleTime: 60 * 60 * 1000,
+    refetchInterval: 60 * 60 * 1000,
+  });
+}
+
 export function usePositions() {
   return useQuery({
     queryKey: ["positions"],
@@ -39,12 +58,92 @@ export function usePositions() {
 export function useClosePosition() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (tradeId: string) => api.closePosition(tradeId),
+    // `qty` omitted = full close (legacy behaviour); pass a smaller
+    // number to book a partial close. Caller is responsible for
+    // validating qty <= current position quantity.
+    mutationFn: ({ tradeId, qty }: { tradeId: string; qty?: number }) =>
+      api.closePosition(tradeId, qty),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["positions"] });
       qc.invalidateQueries({ queryKey: ["trades", "today"] });
       qc.invalidateQueries({ queryKey: ["portfolio"] });
       qc.invalidateQueries({ queryKey: ["system-state"] });
+      qc.invalidateQueries({ queryKey: ["recommendations"] });
+    },
+  });
+}
+
+export function useTightenSl() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ tradeId, newSl }: { tradeId: string; newSl: number }) =>
+      api.tightenSl(tradeId, newSl),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["recommendations"] });
+    },
+  });
+}
+
+export function useModifyTarget() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ tradeId, newTarget }: { tradeId: string; newTarget: number }) =>
+      api.modifyTarget(tradeId, newTarget),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["recommendations"] });
+      qc.invalidateQueries({ queryKey: ["broker-orders"] });
+    },
+  });
+}
+
+export function useBrokerOrders() {
+  return useQuery({
+    queryKey: ["broker-orders"],
+    queryFn: api.brokerOrders,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function useCancelBrokerOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (orderId: string) => api.cancelBrokerOrder(orderId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["broker-orders"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+    },
+  });
+}
+
+export function useModifyBrokerOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      orderId, ...body
+    }: {
+      orderId: string;
+      price?: number;
+      quantity?: number;
+      trigger_price?: number;
+      order_type?: string;
+    }) => api.modifyBrokerOrder(orderId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["broker-orders"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+    },
+  });
+}
+
+export function useCancelBrokerGtt() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (gttId: number) => api.cancelBrokerGtt(gttId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["broker-orders"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
     },
   });
 }
@@ -290,6 +389,14 @@ export function useAuthenticateZerodha() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (token: string) => api.authenticateZerodha(token),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }),
+  });
+}
+
+export function useLogoutZerodha() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.logoutZerodha,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["integrations"] }),
   });
 }
@@ -729,6 +836,15 @@ export function useDeleteBackup() {
   });
 }
 
+export function useSetBackupLock() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ filename, locked }: { filename: string; locked: boolean }) =>
+      api.setBackupLock(filename, locked),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["backups"] }),
+  });
+}
+
 export function useChangePassword() {
   return useMutation({
     mutationFn: (newPassword: string) => api.changePassword(newPassword),
@@ -921,6 +1037,16 @@ export function useUnquarantineSymbol() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.unquarantineSymbol,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["quarantined-symbols"] });
+    },
+  });
+}
+
+export function useBulkUnquarantineSymbols() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (symbols: string[]) => api.bulkUnquarantineSymbols(symbols),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["quarantined-symbols"] });
     },

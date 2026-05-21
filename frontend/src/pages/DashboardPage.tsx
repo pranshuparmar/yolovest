@@ -7,9 +7,9 @@ import { EconomicCalendarWidget } from "../components/EconomicCalendarWidget";
 import { PremarketCard } from "../components/PremarketCard";
 import { PendingTradesBanner, ClearSignalsButton } from "../components/PendingTradesBanner";
 import { RecommendationsPanel } from "../components/RecommendationsPanel";
-import { SignalClassWidget } from "../components/SignalClassWidget";
 import { KillSwitchControl } from "../components/KillSwitchControl";
 import { useTradesToday, useSystemState } from "../hooks/queries";
+import { CdslAuthBanner } from "../components/CdslAuthBanner";
 
 export function DashboardPage() {
   const { data: todaysTrades, isLoading } = useTradesToday();
@@ -91,6 +91,8 @@ export function DashboardPage() {
         </div>
       )}
 
+      <CdslAuthBanner />
+
       <PortfolioCards />
 
       {/* Pre-market + Calendar row */}
@@ -100,8 +102,6 @@ export function DashboardPage() {
       </div>
 
       <RecommendationsPanel />
-
-      <SignalClassWidget days={7} />
 
       <EquityChart days={30} />
 

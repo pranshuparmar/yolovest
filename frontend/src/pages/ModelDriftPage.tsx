@@ -6,6 +6,7 @@ import {
 import clsx from "clsx";
 import { useModelDrift } from "../hooks/queries";
 import { useChartTheme, useTooltipStyle } from "../hooks/useChartTheme";
+import { SignalClassWidget } from "../components/SignalClassWidget";
 import type { ModelDriftVersion } from "../types/api";
 
 function pct(n: number | null | undefined, d = 1) {
@@ -253,6 +254,11 @@ export function ModelDriftPage() {
           <p className="text-sm text-red-200 mt-1">{data.warning}</p>
         </div>
       )}
+
+      {/* Signal-class distribution — same data drift-watch monitors for
+          class collapse / dominance, surfaced inline so the user can
+          see it before the daily Telegram alert fires. */}
+      <SignalClassWidget days={7} />
 
       {models.length === 0 ? (
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">

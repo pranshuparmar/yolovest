@@ -23,7 +23,7 @@ function OverrideRow({
   onCancel,
   isPending,
 }: {
-  trade: { id: number; symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; product: string; position_size: number };
+  trade: { id: number; symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; product: string; position_size: number; confidence_score: number };
   onApprove: (overrides: Override) => void;
   onCancel: () => void;
   isPending: boolean;
@@ -58,6 +58,9 @@ function OverrideRow({
     <tr className="border-b border-amber-800/30 bg-amber-950/20">
       <td className="py-2 px-3 font-medium text-amber-300">
         <SymbolLink symbol={trade.symbol} className="text-amber-300" />
+      </td>
+      <td className="py-2 px-3 text-right font-mono text-gray-300">
+        {(trade.confidence_score * 100).toFixed(0)}%
       </td>
       <td className="py-2 px-3 text-center">
         <select
@@ -260,6 +263,7 @@ export function PendingTradesBanner() {
           <thead>
             <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-amber-800/30 sticky top-0 bg-gray-900/90">
               <th className="py-2 px-3 text-left">Symbol</th>
+              <th className="py-2 px-3 text-right">Conf</th>
               <th className="py-2 px-3 text-center">Signal</th>
               <th className="py-2 px-3 text-center">Product</th>
               <th className="py-2 px-3 text-right">Entry</th>
@@ -291,6 +295,9 @@ export function PendingTradesBanner() {
                   <td className="py-2 px-3 font-medium text-gray-200">
                     <SymbolLink symbol={t.symbol} className="text-gray-200" />
                   </td>
+                  <td className="py-2 px-3 text-right font-mono text-gray-300">
+                    {(t.confidence_score * 100).toFixed(0)}%
+                  </td>
                   <td className="py-2 px-3 text-center">
                     <span
                       className={clsx(
@@ -321,9 +328,12 @@ export function PendingTradesBanner() {
                       const ltp = ltps.get(t.symbol);
                       if (!ltp) return <span className="text-gray-600">—</span>;
                       const drift = ((ltp - t.entry_price) / t.entry_price) * 100;
+                      // Favorable direction is signed: a BUY is happy
+                      // when price rises, a SELL when it drops.
+                      const favorable = t.signal_type === "BUY" ? drift > 0 : drift < 0;
                       const cls =
                         Math.abs(drift) < 0.25 ? "text-gray-300"
-                        : (drift > 0 ? "text-emerald-400" : "text-red-400");
+                        : favorable ? "text-emerald-400" : "text-red-400";
                       return (
                         <span className={cls} title={`${drift >= 0 ? "+" : ""}${drift.toFixed(2)}% vs entry`}>
                           {fmt(ltp)}

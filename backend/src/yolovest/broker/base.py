@@ -19,6 +19,14 @@ class BrokerBase(ABC):
         """Exchange a request token for an authenticated session (daily re-auth)."""
         ...
 
+    async def logout(self) -> None:
+        """Drop any cached session state so the next is_authenticated()
+        check returns False. Default no-op for brokers without a
+        persistent session concept (e.g. paper). Subclasses should
+        override when they hold a token or DB-persisted state.
+        """
+        return None
+
     @abstractmethod
     async def place_order(
         self,
@@ -70,6 +78,42 @@ class BrokerBase(ABC):
     ) -> bool:
         """Modify the trigger price of an existing stop-loss order."""
         ...
+
+    async def modify_order(
+        self,
+        order_id: str,
+        *,
+        price: float | None = None,
+        quantity: int | None = None,
+        trigger_price: float | None = None,
+        order_type: str | None = None,
+    ) -> bool:
+        """Generic order modification. Default implementation defers to
+        modify_sl_order for trigger-only changes; concrete brokers
+        override to support full price/qty/type modification.
+        """
+        if trigger_price is not None and price is None and quantity is None and order_type is None:
+            return await self.modify_sl_order(order_id, trigger_price)
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement generic modify_order",
+        )
+
+    async def get_orders(self) -> list[dict[str, Any]]:
+        """Return today's full order book. Default implementation
+        narrows to pending orders; concrete brokers override.
+        """
+        return await self.get_pending_orders()
+
+    async def initiate_holdings_auth(
+        self, holdings: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Initiate CDSL TPIN authorisation for selling holdings.
+
+        Default returns None (broker doesn't support / not authenticated);
+        concrete brokers override. UI falls back to a static help URL
+        when this returns None.
+        """
+        return None
 
     @abstractmethod
     async def get_holdings(self) -> list[dict[str, Any]]:

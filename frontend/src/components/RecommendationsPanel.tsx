@@ -48,15 +48,19 @@ function RecommendationRow({ r, ltp }: { r: Recommendation; ltp?: number }) {
   const sigColor = r.signal_type === "BUY" ? "text-emerald-400" : "text-red-400";
   const dispKey: SignalDisposition = (r.disposition || "pending") as SignalDisposition;
   // Drift = signed % move from entry to LTP. Sign matters because a SELL
-  // at ₹100 with LTP ₹98 is +2% in our favour, whereas the same drift
-  // for a BUY would be -2%. Render in the directionally-correct color
-  // so a glance at the row tells you "good" vs "bad" without arithmetic.
+  // at ₹100 with LTP ₹98 is in our favour (price dropped, short profits),
+  // whereas the same drop is unfavourable for a BUY. Render in the
+  // directionally-correct colour so a glance at the row tells you
+  // "good" vs "bad" without arithmetic.
   let driftPct: number | null = null;
   let driftFavorable: boolean | null = null;
   if (ltp && r.entry_price) {
     const raw = ((ltp - r.entry_price) / r.entry_price) * 100;
     driftPct = raw;
-    driftFavorable = r.signal_type === "BUY" ? raw < 0 : raw > 0;
+    // BUY favours price moving UP (raw > 0); SELL favours price moving
+    // DOWN (raw < 0). The previous logic was the literal inverse — a
+    // losing BUY rendered green and a losing SELL rendered green too.
+    driftFavorable = r.signal_type === "BUY" ? raw > 0 : raw < 0;
   }
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg">

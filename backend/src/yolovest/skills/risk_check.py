@@ -81,7 +81,7 @@ class RiskCheckSkill(SkillBase):
 
         # Market hours
         if not self.ctx.market_hours.is_order_window():
-            return self._reject(signal, "Outside order window")
+            return self._defer(signal, "Outside order window")
 
         # Early close day — block new MIS positions if close to square-off
         if (self.ctx.market_hours.is_early_close_day()
@@ -301,10 +301,12 @@ class RiskCheckSkill(SkillBase):
             # accidentally scale below the floor for a SELL when the
             # BUY threshold is set higher (or vice versa).
             sig_type = signal.get("signal_type", "BUY")
-            base_threshold = (
-                cfg.min_confidence_buy if sig_type == "BUY"
-                else cfg.min_confidence_sell
+            sig_holding = str(
+                signal.get("expected_holding_period")
+                or signal.get("holding_period")
+                or ""
             )
+            base_threshold = cfg.resolve_min_confidence(sig_holding, sig_type)
             top = 0.95
             if conf <= base_threshold:
                 factor = cfg.confidence_scaled_min_factor
@@ -444,6 +446,37 @@ class RiskCheckSkill(SkillBase):
         if position_size <= 0:
             return self._reject(signal, "Computed position size is 0")
 
+        # Cost-adjusted reward:risk gate. The model fires plenty of
+        # "0.6 × ATR target on a sub-₹200 stock at small qty" setups
+        # whose gross 2:1 collapses to ~1.3:1 after Zerodha brokerage,
+        # STT, GST, and exchange fees — leaving no margin for slippage.
+        # Reject them before they reach LLM review / pending queue.
+        if cfg.min_net_rr > 0:
+            target = float(signal.get("target_price") or 0)
+            if target > 0 and entry > 0:
+                from yolovest.costs import evaluate_net_rr
+                net_rr, costs, reason = evaluate_net_rr(
+                    signal_type=signal.get("signal_type", "BUY"),
+                    entry_price=entry,
+                    target_price=target,
+                    stop_loss_price=sl,
+                    quantity=position_size,
+                    product=product,
+                    cost_config=getattr(self.ctx.config, "transaction_costs", None),
+                )
+                if reason is not None:
+                    return self._reject(signal, reason)
+                if net_rr is not None and net_rr < cfg.min_net_rr:
+                    direction = 1 if signal.get("signal_type") == "BUY" else -1
+                    gross_win = (target - entry) * direction * position_size
+                    gross_loss = (entry - sl) * direction * position_size
+                    return self._reject(
+                        signal,
+                        f"Net R:R {net_rr:.2f} < {cfg.min_net_rr:.2f} "
+                        f"(gross ₹{gross_win:.0f} win / ₹{gross_loss:.0f} loss, "
+                        f"costs ₹{costs:.0f} round-trip on {position_size} qty)",
+                    )
+
         logger.info(
             "risk-check: APPROVED %s — size=%d (risk=₹%.0f, slippage_penalty=%.1f%%)",
             signal["symbol"], position_size, risk_amount, slippage_penalty * 100,
@@ -496,6 +529,28 @@ class RiskCheckSkill(SkillBase):
             skill_name=self.name,
             data={
                 "approved": False,
+                "symbol": signal["symbol"],
+                "rejection_reason": reason,
+            },
+        )
+
+    def _defer(self, signal: dict[str, Any], reason: str) -> SkillResult:
+        """Block the signal for a transient time-based reason (currently
+        only "Outside order window"). Distinct from `_reject` so the
+        orchestrator can route this to the `time_blocked` disposition
+        instead of `risk_rejected` — the symbol stays eligible for
+        re-evaluation on the next heartbeat *without* burning a
+        max_risk_rejected_retries_per_day slot. Genuine risk decisions
+        (exposure, cooldown, depth, correlation) still go through
+        `_reject` and consume retries as before.
+        """
+        logger.info("risk-check: DEFERRED %s — %s", signal["symbol"], reason)
+        return SkillResult(
+            success=True,
+            skill_name=self.name,
+            data={
+                "approved": False,
+                "deferred": True,
                 "symbol": signal["symbol"],
                 "rejection_reason": reason,
             },

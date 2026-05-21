@@ -4,6 +4,7 @@ Implements DatabaseProtocol from context.py. Uses aiosqlite for async access.
 Schema versioned via numbered SQL migration files in migrations/ directory.
 """
 
+import contextlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,46 @@ logger = logging.getLogger(__name__)
 
 # Default migrations directory (relative to project root)
 _DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
+
+
+def _normalize_iso_date(raw: Any) -> str | None:
+    """Parse an NSE deal-date string into ISO YYYY-MM-DD form.
+
+    NSE has shipped at least these formats over time:
+      - "19-May-2026"  (display, %d-%b-%Y)
+      - "19/05/2026"   (slash-DDMMYYYY)
+      - "19-05-2026"   (dash-DDMMYYYY)
+      - "2026-05-19"   (already ISO)
+    Returns None if the value is empty or unparseable so the caller
+    can fall back to "today".
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d/%m/%Y", "%d-%m-%Y", "%d-%b-%Y %H:%M"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+class DuplicateSignalError(Exception):
+    """Raised when a trade insert collides with an existing
+    trades.signal_id (the UNIQUE index added in migration 042). Lets
+    trade-execute recognise "this signal already produced a trade"
+    and return the existing row instead of crashing the heartbeat.
+    """
+
+    def __init__(self, signal_id: int, existing_trade_id: str) -> None:
+        super().__init__(
+            f"signal_id={signal_id} already attached to trade "
+            f"{existing_trade_id}",
+        )
+        self.signal_id = signal_id
+        self.existing_trade_id = existing_trade_id
 
 
 class Database:
@@ -905,8 +946,12 @@ class Database:
         )
         params: list[Any] = []
         if symbol:
+            # Match the symbol as a standalone JSON-string element so
+            # the filter for "ITC" doesn't also return rows tagged
+            # ["BITCOIN"]. symbols is stored as `["ITC", ...]` so we
+            # search for the quoted form.
             query += " AND symbols LIKE ?"
-            params.append(f"%{symbol}%")
+            params.append(f'%"{symbol}"%')
         if source:
             query += " AND source = ?"
             params.append(source)
@@ -1024,16 +1069,21 @@ class Database:
     # Signals
     # ------------------------------------------------------------------
 
-    async def insert_signal(self, signal: dict[str, Any]) -> None:
+    async def insert_signal(self, signal: dict[str, Any]) -> int:
         """Persist a generated signal. Caller should set `mode` to the
         active trading mode so bulk-delete and analytics can scope by it.
         attribution_json holds the top-N feature contributions surfaced
         on TradeDetailPage; None when the ML layer couldn't compute
         them (e.g. booster unreachable through calibration wrapper).
+
+        Returns the autoincrement id of the inserted row. trade-execute
+        carries this id onto the trade row so the UNIQUE index on
+        trades.signal_id can enforce one-trade-per-signal at the DB
+        layer (defence-in-depth against a missed in-memory dedup).
         """
         attribution = signal.get("attribution")
         attribution_json = json.dumps(attribution) if attribution else None
-        await self.conn.execute(
+        cursor = await self.conn.execute(
             "INSERT INTO signals (symbol, signal_type, entry_price, target_price, "
             "stop_loss_price, position_size, confidence_score, model_version, "
             "features_snapshot, mode, attribution_json, created_at) "
@@ -1053,6 +1103,7 @@ class Database:
             ),
         )
         await self.conn.commit()
+        return int(cursor.lastrowid or 0)
 
     async def update_signal_disposition(
         self,
@@ -1154,6 +1205,15 @@ class Database:
           exception. Treated as retryable so a persistent skill bug
           doesn't burn the cap on the *risk decision* side; the cap
           still protects against churn loops.
+
+        Deferred dispositions (re-evaluated freely, cap-exempt):
+        - time_blocked: signal was generated outside the order window
+          (e.g. heartbeat fired between market.open and order_start).
+          The underlying condition is purely time-based ("wait N
+          minutes"), so consuming a retry slot would punish the
+          symbol for a scheduler edge case rather than a real signal
+          problem. Counts as neither "other" nor "retryable" in the
+          dedup math.
         """
         today_start = now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -1167,18 +1227,25 @@ class Database:
             'risk_rejected', 'expired',
             'trade_execute_failed', 'skill_error',
         )
-        placeholders = ", ".join(["?"] * len(retryable))
+        deferred = ('time_blocked',)
+        ignorable = retryable + deferred  # neither blocks nor counts toward cap when "other"-counting
+        ignorable_ph = ", ".join(["?"] * len(ignorable))
+        retryable_ph = ", ".join(["?"] * len(retryable))
         mode_clause = " AND mode = ?" if mode else ""
         sig_params: tuple[Any, ...] = (today_start,)
         if mode:
             sig_params = sig_params + (mode,)
-        sig_params = sig_params + retryable + retryable + (int(risk_rejected_retry_cap),)
+        # Bound params order: first the ignorable set for the "other"
+        # count (deferred rows must NOT count as other), then the
+        # retryable set for the cap count (deferred rows must NOT
+        # count toward the cap), then the cap value itself.
+        sig_params = sig_params + ignorable + retryable + (int(risk_rejected_retry_cap),)
         cursor = await self.read_conn.execute(
             "SELECT symbol FROM signals "
             f"WHERE created_at >= ?{mode_clause} "
             "GROUP BY symbol "
-            f"HAVING SUM(CASE WHEN disposition IN ({placeholders}) THEN 0 ELSE 1 END) > 0 "
-            f"   OR SUM(CASE WHEN disposition IN ({placeholders}) THEN 1 ELSE 0 END) >= ?",
+            f"HAVING SUM(CASE WHEN disposition IN ({ignorable_ph}) THEN 0 ELSE 1 END) > 0 "
+            f"   OR SUM(CASE WHEN disposition IN ({retryable_ph}) THEN 1 ELSE 0 END) >= ?",
             sig_params,
         )
         signaled = {row[0] for row in await cursor.fetchall()}
@@ -1231,7 +1298,7 @@ class Database:
             "  SELECT id FROM signals WHERE created_at >= ? "
             "  AND (disposition IS NULL "
             "       OR disposition IN ('awaiting_approval', 'risk_rejected', "
-            "                          'llm_rejected', 'expired'))"
+            "                          'llm_rejected', 'expired', 'time_blocked'))"
             ")",
             (today_start,),
         )
@@ -1241,7 +1308,7 @@ class Database:
             "WHERE created_at >= ? "
             "AND (disposition IS NULL "
             "     OR disposition IN ('awaiting_approval', 'risk_rejected', "
-            "                        'llm_rejected', 'expired'))",
+            "                        'llm_rejected', 'expired', 'time_blocked'))",
             (today_start,),
         )
         signals_deleted = cursor.rowcount
@@ -1943,7 +2010,12 @@ class Database:
     async def upsert_bulk_deals(
         self, deals: list[dict[str, Any]], deal_date: str | None = None,
     ) -> int:
-        """Persist bulk/block deals. `deal_date` defaults to today (IST).
+        """Persist bulk/block deals. Each row's date comes from its own
+        `deal_date` field when present (the consolidated NSE largedeal
+        endpoint returns deals from multiple past sessions); the caller-
+        supplied `deal_date` arg is a fallback when the payload omits
+        it, and that fallback defaults to today (IST).
+
         Returns the number of new rows inserted (duplicates ignored via
         unique constraint).
 
@@ -1955,9 +2027,9 @@ class Database:
         """
         if not deals:
             return 0
-        ts = deal_date or now_ist().strftime("%Y-%m-%d")
+        fallback_date = deal_date or now_ist().strftime("%Y-%m-%d")
         before = (await (await self.conn.execute(
-            "SELECT COUNT(*) FROM bulk_deals WHERE deal_date = ?", (ts,),
+            "SELECT COUNT(*) FROM bulk_deals",
         )).fetchone())[0]
         skipped_empty = 0
         for d in deals:
@@ -1970,19 +2042,37 @@ class Database:
             price_raw = d.get("trade_price")
             client = str(client_raw or "").strip()
             bs = str(bs_raw or "").strip()
-            qty_val = int(qty_raw or 0) or None
-            price_val = float(price_raw or 0.0) or None
-            # Reject rows that are symbol-only — likely a parser-vs-API
-            # schema mismatch, not a real deal worth persisting.
-            if not client and not bs and qty_val is None and price_val is None:
+            # Always store numeric values — NEVER NULL — so the
+            # UNIQUE(deal_date, symbol, client_name, buy_sell,
+            # quantity, trade_price) constraint actually dedupes
+            # (SQLite treats NULL != NULL in UNIQUE, so rows with
+            # a missing trade_price would otherwise accumulate
+            # one new copy per heartbeat on NSE responses that
+            # omit the price field).
+            try:
+                qty_val = int(float(str(qty_raw).replace(",", ""))) if qty_raw else 0
+            except (TypeError, ValueError):
+                qty_val = 0
+            try:
+                price_val = (
+                    float(str(price_raw).replace(",", "")) if price_raw else 0.0
+                )
+            except (TypeError, ValueError):
+                price_val = 0.0
+            # Reject rows where everything beyond symbol is empty —
+            # a NSE schema mismatch dropping payload keys would
+            # otherwise persist one symbol-only stub row per deal.
+            if not client and not bs and qty_val == 0 and price_val == 0.0:
                 skipped_empty += 1
                 continue
+            # Per-deal date when NSE gave us one — else fall back.
+            row_date = _normalize_iso_date(d.get("deal_date")) or fallback_date
             await self.conn.execute(
                 "INSERT OR IGNORE INTO bulk_deals "
                 "(deal_date, symbol, deal_type, client_name, buy_sell, "
                 " quantity, trade_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
-                    ts, sym,
+                    row_date, sym,
                     str(d.get("deal_type") or "bulk"),
                     client, bs, qty_val, price_val,
                 ),
@@ -1995,7 +2085,7 @@ class Database:
                 skipped_empty,
             )
         after = (await (await self.conn.execute(
-            "SELECT COUNT(*) FROM bulk_deals WHERE deal_date = ?", (ts,),
+            "SELECT COUNT(*) FROM bulk_deals",
         )).fetchone())[0]
         return after - before
 
@@ -2003,8 +2093,29 @@ class Database:
         """Persist FII/DII net flows for the day. `data` shape matches
         NSEOfficialSource.fetch_fii_dii output: {date, fii: {...}, dii: {...}}.
         Returns True when a row was written.
+
+        The `date` value from NSE arrives in display format (e.g.
+        "15-May-2026"). Normalise to ISO `YYYY-MM-DD` before storing so
+        `WHERE date >= date('now', '-30 day')` lookups and `ORDER BY
+        date DESC` work — string-compared, "15-May-2026" sorts before
+        "2026-04-16" and the institutional-flows dashboard reads
+        empty. Other date formats NSE has used historically
+        ("15-05-2026", "15/05/2026", "2026-05-15") are also accepted.
         """
         if not data or not data.get("date"):
+            return False
+        raw_date = str(data["date"]).strip()
+        iso_date: str | None = None
+        for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%b-%Y %H:%M"):
+            try:
+                iso_date = datetime.strptime(raw_date, fmt).strftime("%Y-%m-%d")
+                break
+            except ValueError:
+                continue
+        if iso_date is None:
+            logger.warning(
+                "upsert_fii_dii: skipping row with unparseable date %r", raw_date,
+            )
             return False
         fii = data.get("fii") or {}
         dii = data.get("dii") or {}
@@ -2015,7 +2126,7 @@ class Database:
             "(date, fii_buy, fii_sell, fii_net, dii_buy, dii_sell, dii_net) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                str(data["date"]),
+                iso_date,
                 float(fii.get("buy_value") or 0.0),
                 float(fii.get("sell_value") or 0.0),
                 float(fii.get("net_value") or 0.0),
@@ -2792,7 +2903,7 @@ class Database:
             "quantity", "stop_loss_price", "target_price", "order_id", "sl_order_id",
             "product", "mode", "status", "slippage",
         ]
-        optional_cols = ["estimated_costs", "expected_holding_days"]
+        optional_cols = ["estimated_costs", "expected_holding_days", "signal_id"]
         insert_cols = base_cols + [c for c in optional_cols if c in trade_columns] + ["created_at"]
         placeholders = ", ".join("?" for _ in insert_cols)
         col_names = ", ".join(insert_cols)
@@ -2810,6 +2921,29 @@ class Database:
             }[c]
             for c in insert_cols
         )
+
+        # Idempotency pre-check. The trades.signal_id UNIQUE index
+        # (migration 042) is the hard guarantee; this SELECT is the
+        # graceful-error path so callers get a DuplicateSignalError
+        # instead of a raw IntegrityError. trade-execute is the only
+        # writer that sets signal_id and it processes signals
+        # sequentially per heartbeat, so the TOCTOU window between
+        # this SELECT and the INSERT below is effectively zero. If a
+        # parallel writer ever appears, the UNIQUE index still catches
+        # the duplicate — the caller just sees an IntegrityError
+        # bubble up instead of the typed DuplicateSignalError.
+        sig_id = trade.get("signal_id")
+        if sig_id:
+            cur = await self.read_conn.execute(
+                "SELECT trade_id FROM trades WHERE signal_id = ?",
+                (int(sig_id),),
+            )
+            row = await cur.fetchone()
+            if row:
+                raise DuplicateSignalError(
+                    signal_id=int(sig_id),
+                    existing_trade_id=str(row[0]),
+                )
 
         await self.conn.execute("SAVEPOINT insert_trade")
         try:
@@ -2846,6 +2980,114 @@ class Database:
         await self.conn.execute(
             "UPDATE trades SET stop_loss_price = ? WHERE trade_id = ?",
             (new_sl, str(position_id)),
+        )
+        await self.conn.commit()
+
+    async def upsert_funds_snapshot(
+        self,
+        snapshot_date: str,
+        mode: str,
+        summary: dict[str, float],
+        raw_json: str | None = None,
+        holdings_invested: float = 0.0,
+        holdings_current: float = 0.0,
+    ) -> None:
+        """Insert today's funds/margins snapshot (or replace if it
+        already exists for the same date+mode).
+
+        Called by the funds-snapshot CRON skill so the user can track
+        daily cash movements without logging into Kite.
+        """
+        from yolovest.timezone import now_utc as _now_utc
+
+        captured_at = _now_utc().isoformat()
+        keys_in_order = (
+            "available_cash", "live_balance", "opening_balance",
+            "utilised_margin", "m2m_unrealised", "m2m_realised",
+            "payout", "collateral", "exposure", "span", "delivery", "net",
+        )
+        params: list[Any] = [
+            snapshot_date, captured_at, mode,
+        ]
+        params.extend(float(summary.get(k, 0.0) or 0.0) for k in keys_in_order)
+        params.extend([float(holdings_invested), float(holdings_current), raw_json])
+
+        col_list = (
+            "snapshot_date, captured_at, mode, " + ", ".join(keys_in_order)
+            + ", holdings_invested, holdings_current, raw_json"
+        )
+        placeholders = ", ".join(["?"] * (3 + len(keys_in_order) + 3))
+        await self.conn.execute(
+            f"INSERT INTO funds_snapshots ({col_list}) VALUES ({placeholders}) "
+            "ON CONFLICT(snapshot_date, mode) DO UPDATE SET "
+            "captured_at=excluded.captured_at, "
+            + ", ".join(f"{k}=excluded.{k}" for k in keys_in_order)
+            + ", holdings_invested=excluded.holdings_invested"
+            + ", holdings_current=excluded.holdings_current"
+            + ", raw_json=excluded.raw_json",
+            params,
+        )
+        await self.conn.commit()
+
+    async def get_funds_snapshots(
+        self, mode: str | None = None, days: int = 90,
+    ) -> list[dict[str, Any]]:
+        """Return funds snapshots (newest first) for the last N days.
+
+        Mode-scoped when supplied; paper / live snapshots are stored
+        independently so flipping modes doesn't corrupt either history.
+        """
+        from datetime import date as _date, timedelta as _td
+        since = (_date.today() - _td(days=days)).isoformat()
+        query = (
+            "SELECT id, snapshot_date, captured_at, mode, available_cash, "
+            "live_balance, opening_balance, utilised_margin, m2m_unrealised, "
+            "m2m_realised, payout, collateral, exposure, span, delivery, net, "
+            "holdings_invested, holdings_current "
+            "FROM funds_snapshots WHERE snapshot_date >= ?"
+        )
+        params: list[Any] = [since]
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        query += " ORDER BY snapshot_date DESC, captured_at DESC"
+        cur = await self.read_conn.execute(query, params)
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def increment_realized_partial_pnl(
+        self, position_id: int | str, partial_pnl: float,
+    ) -> None:
+        """Add a partial-booking PnL to the trade's running total.
+
+        Each partial close is recorded individually in audit_log (with
+        exit_qty, exit_price, etc.); the running sum lives on trades
+        so reads don't need a JOIN. The final close (full exit of the
+        remainder) populates `pnl` separately; UI surfaces
+        total = realized_partial_pnl + pnl.
+        """
+        await self.conn.execute(
+            "UPDATE trades "
+            "SET realized_partial_pnl = COALESCE(realized_partial_pnl, 0) + ? "
+            "WHERE trade_id = ?",
+            (float(partial_pnl), str(position_id)),
+        )
+        await self.conn.commit()
+
+    async def update_position_quantity(
+        self, position_id: int | str, new_quantity: int,
+    ) -> None:
+        """Resize an open position after a partial close.
+
+        Used by the user-initiated partial-close endpoint. The full
+        close path goes through `close_position` instead (which sets
+        status='closed'); this one keeps status='open' with the
+        remaining quantity. Callers are expected to have already
+        resized any broker-side SL / target / GTT to match.
+        """
+        await self.conn.execute(
+            "UPDATE trades SET quantity = ? WHERE trade_id = ?",
+            (int(new_quantity), str(position_id)),
         )
         await self.conn.commit()
 
@@ -3623,8 +3865,13 @@ class Database:
             query += " AND created_at < ?"
             params.append(next_day)
         if symbol:
-            query += " AND symbol = ?"
-            params.append(symbol)
+            # Substring match (case-insensitive) so the Trades page search
+            # acts like a filter rather than an exact-symbol picker —
+            # typing "REL" matches RELIANCE, RELINFRA, etc. SQLite LIKE
+            # is already case-insensitive for ASCII; symbol names are
+            # ASCII so no need for unicode-aware collation.
+            query += " AND symbol LIKE ?"
+            params.append(f"%{symbol}%")
 
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
@@ -4125,6 +4372,63 @@ class Database:
 
         return cursor.rowcount
 
+    async def update_pending_trade_levels(
+        self, trade_id: int, *,
+        entry_price: float, target_price: float, stop_loss_price: float,
+    ) -> bool:
+        """Re-anchor a pending trade's price levels in place.
+
+        Used by the per-heartbeat repricer when the underlying LTP
+        has drifted but stayed inside the drift band. The row's
+        `created_at` is intentionally NOT touched — the pending-age
+        expiry timer keeps ticking against the original queue time.
+        Returns True when the row was found and still pending.
+        """
+        cur = await self.conn.execute(
+            "UPDATE pending_trades SET "
+            "  entry_price = ?, target_price = ?, stop_loss_price = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (
+                round(float(entry_price), 2),
+                round(float(target_price), 2),
+                round(float(stop_loss_price), 2),
+                int(trade_id),
+            ),
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
+    async def expire_pending_trade(
+        self, trade_id: int, reason: str,
+    ) -> bool:
+        """Flip a single pending trade to status='expired' with a
+        reason logged via signal disposition. Used by the per-heartbeat
+        repricer when the LTP has already moved past target / SL / the
+        drift band so the queued levels no longer make sense.
+        """
+        cur = await self.conn.execute(
+            "SELECT symbol FROM pending_trades "
+            "WHERE id = ? AND status = 'pending'",
+            (int(trade_id),),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return False
+        await self.conn.execute(
+            "UPDATE pending_trades SET status = 'expired', "
+            "  decided_by = 'system', decided_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (now_utc().isoformat(), int(trade_id)),
+        )
+        await self.conn.commit()
+        try:
+            await self.update_signal_disposition(
+                row[0], "expired", f"pending repriced out: {reason}",
+            )
+        except Exception:
+            pass
+        return True
+
     # ------------------------------------------------------------------
     # Storage Stats & Manual Cleanup
     # ------------------------------------------------------------------
@@ -4261,6 +4565,16 @@ class Database:
             "ssl", "tls",
             "http 5",  # 500, 502, 503, 504 — server-side, retry-safe
             " 502", " 503", " 504",
+            # Broker / data-provider auth failures. A logged-out Kite
+            # session would otherwise mass-quarantine every symbol of
+            # the universe over three consecutive heartbeats — every
+            # historical_data() call returns "Incorrect api_key or
+            # access_token" but none of those symbols are actually
+            # broken.
+            "incorrect `api_key`", "incorrect `access_token`",
+            "api_key or access_token", "access token", "token expired",
+            "tokenexception", "skipping kite call",
+            "token previously rejected",
         )
         return any(marker in msg for marker in transient_markers)
 
@@ -4887,9 +5201,15 @@ class Database:
         return {"orphaned_files_deleted": deleted}
 
     async def list_backups(self, backup_dir: str) -> list[dict[str, Any]]:
-        """List available backup files with size and timestamp."""
-        import os
+        """List available backup files with size, timestamp, and lock state.
 
+        A backup is considered locked when a sibling sentinel file
+        `<filename>.lock` exists in the same directory. Locked backups
+        are skipped by the daily prune path and refused by the manual
+        delete endpoint until explicitly unlocked. Storing the lock as
+        a sentinel file (instead of a DB row) means it survives a
+        volume restore and can be inspected with `ls`.
+        """
         backup_path = Path(backup_dir)
         if not backup_path.is_dir():
             return []
@@ -4901,13 +5221,47 @@ class Database:
                 "filename": f.name,
                 "size_bytes": stat.st_size,
                 "created_at": datetime.fromtimestamp(stat.st_mtime, tz=IST).isoformat(),
+                "locked": (backup_path / f"{f.name}.lock").exists(),
             })
         return backups
+
+    async def set_backup_lock(
+        self, backup_dir: str, filename: str, locked: bool,
+    ) -> dict[str, Any]:
+        """Lock or unlock a backup so the daily prune / manual delete
+        paths skip it. Same path-traversal guards as `delete_backup`.
+        Idempotent: locking an already-locked backup is a no-op.
+        """
+        backup_path = Path(backup_dir).resolve()
+        if not backup_path.is_dir():
+            raise ValueError(f"Backup directory does not exist: {backup_dir}")
+
+        if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
+            raise ValueError(f"Invalid backup filename: {filename!r}")
+        if not (filename.startswith("yolovest_") and filename.endswith(".db")):
+            raise ValueError(
+                f"Refusing to lock {filename!r}: not a recognised backup file",
+            )
+
+        target = (backup_path / filename).resolve()
+        if backup_path not in target.parents:
+            raise ValueError(f"Path escape attempt: {filename!r}")
+        if not target.is_file():
+            raise FileNotFoundError(f"Backup not found: {filename}")
+
+        sentinel = backup_path / f"{filename}.lock"
+        if locked:
+            sentinel.touch(exist_ok=True)
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                sentinel.unlink()
+        return {"filename": filename, "locked": locked}
 
     async def delete_backup(self, backup_dir: str, filename: str) -> dict[str, Any]:
         """Delete a single backup file. Validates the name belongs to the
         backup directory and matches the standard yolovest_*.db pattern so
         a crafted path can't escape into other parts of the filesystem.
+        Refuses to delete locked backups — caller must unlock first.
         """
         backup_path = Path(backup_dir).resolve()
         if not backup_path.is_dir():
@@ -4928,8 +5282,27 @@ class Database:
         if not target.is_file():
             raise FileNotFoundError(f"Backup not found: {filename}")
 
+        if (backup_path / f"{filename}.lock").exists():
+            raise PermissionError(
+                f"Backup {filename!r} is locked; unlock it before deleting",
+            )
+
         size_bytes = target.stat().st_size
         target.unlink()
+        # Best-effort: also delete the matching model snapshot dir if it
+        # exists, so the freed-bytes report reflects what actually went
+        # away. Keyed off the timestamp portion (yolovest_<ts>.db ->
+        # models_<ts>).
+        import shutil as _shutil
+        ts = filename.removeprefix("yolovest_").removesuffix(".db")
+        model_dir = backup_path / f"models_{ts}"
+        if model_dir.is_dir():
+            try:
+                model_size = sum(p.stat().st_size for p in model_dir.rglob("*") if p.is_file())
+                _shutil.rmtree(model_dir)
+                size_bytes += model_size
+            except OSError as e:
+                logger.warning("Failed to prune model dir %s: %s", model_dir.name, e)
         return {"filename": filename, "size_bytes": size_bytes}
 
     # ------------------------------------------------------------------

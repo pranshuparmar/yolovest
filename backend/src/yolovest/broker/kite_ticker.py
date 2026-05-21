@@ -72,6 +72,14 @@ class KiteTickerClient:
         self._subscribed_tokens: set[int] = set()
         self._connected: bool = False
         self._lock = asyncio.Lock()
+        # Flips True when we detect the WebSocket upgrade was rejected
+        # with HTTP 403 — meaning the access_token the ticker was
+        # constructed with is no longer accepted. KiteTicker's built-in
+        # 50-attempt reconnect loop will otherwise hammer the server
+        # forever; once this flag is set we tear the ticker down and
+        # leave it down until the broker re-auths and explicitly
+        # restarts the ticker.
+        self._auth_failed: bool = False
 
     @property
     def connected(self) -> bool:
@@ -81,6 +89,11 @@ class KiteTickerClient:
         """Spawn the Twisted reactor thread and connect."""
         if self._ticker is not None:
             return
+        # Fresh start clears the previous auth-failure latch — caller
+        # is responsible for having supplied a valid access_token
+        # before calling start() again (the broker re-auth path
+        # constructs a new KiteTickerClient with the fresh token).
+        self._auth_failed = False
         try:
             from kiteconnect import KiteTicker
         except ImportError as e:  # pragma: no cover
@@ -240,12 +253,57 @@ class KiteTickerClient:
     def _on_close(self, _ws: Any, code: int, reason: str) -> None:
         self._connected = False
         logger.warning("KiteTicker: closed code=%d reason=%s", code, reason)
+        self._maybe_handle_auth_failure(reason)
 
     def _on_error(self, _ws: Any, code: int, reason: str) -> None:
         logger.warning("KiteTicker: error code=%d reason=%s", code, reason)
+        self._maybe_handle_auth_failure(reason)
 
     def _on_reconnect(self, _ws: Any, attempts: int) -> None:
+        # The kiteconnect ticker's reconnect runs on its Twisted thread
+        # so the auth-failure tear-down (which marshals to the asyncio
+        # loop via run_coroutine_threadsafe) may race with this. If the
+        # flag is set, just log and let the pending shutdown complete.
+        if self._auth_failed:
+            logger.debug(
+                "KiteTicker: reconnect attempt %d ignored — auth failed",
+                attempts,
+            )
+            return
         logger.info("KiteTicker: reconnect attempt %d", attempts)
+
+    def _maybe_handle_auth_failure(self, reason: str) -> None:
+        """When the WebSocket upgrade was rejected with HTTP 403, the
+        access_token this ticker holds is dead. KiteTicker's internal
+        reconnect loop will otherwise retry forever (we've seen 40+
+        attempts in production); detect the case once and schedule a
+        clean shutdown on the asyncio loop. The broker re-auth path
+        is the only thing that brings the ticker back up.
+
+        Runs on the Twisted reactor thread, so any actual shutdown
+        has to be marshalled back to the asyncio loop.
+        """
+        if self._auth_failed:
+            return  # already handled
+        marker = reason.lower() if reason else ""
+        if "403" not in marker and "forbidden" not in marker:
+            return
+        self._auth_failed = True
+        logger.error(
+            "KiteTicker: WebSocket upgrade rejected (%s) — access_token "
+            "is dead, stopping reconnect loop. Ticker stays down until "
+            "broker re-authenticates and explicitly restarts it.",
+            reason,
+        )
+        if self._loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self.stop(), self._loop)
+        except Exception:
+            logger.debug(
+                "KiteTicker: failed to schedule stop() after auth fail",
+                exc_info=True,
+            )
 
     def _on_order_update(self, _ws: Any, order: dict[str, Any]) -> None:
         if self._order_update_cb is None or self._loop is None:

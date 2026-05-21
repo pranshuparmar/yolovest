@@ -66,52 +66,22 @@ runs the heal step on the next start.
 ensures the top-level symlinks exist, creating any that are missing.
 Idempotent and safe to re-run.
 
-### 4. Continuous cert-heal sidecar
-
-A `cert-heal` service runs the same heal script in a loop every
-`INTERVAL_SEC` seconds (default 15). This catches the case where
-acme-companion removes the top-level symlinks as part of an attempted
-renewal — for example when the ACME HTTP-01 challenge fails because
-Let's Encrypt can't reach port 80, the symlinks get cleaned up but
-not restored. The sidecar restores them within seconds, keeping HTTPS
-serving even while the underlying renewal problem is investigated.
+Combined with the healthcheck above, this is the full recovery
+loop: a botched mid-life renewal that leaves the symlinks missing
+flips nginx-proxy unhealthy within ~3 minutes (60s interval × 3
+retries), Docker's `restart: always` restarts the container, and
+the entrypoint heal recreates the symlinks before nginx boots.
 
 If you ever see `Verification error... Timeout during connect` in
 the letsencrypt container's logs, that's the trigger for this
 failure mode — check that port 80 is reachable from the public
 internet so ACME challenges can complete.
 
-### 5. Periodic volume backups
-
-A `cert-backup` sidecar runs as part of the compose stack. It
-snapshots the `certs` named volume into `./backups/certs/` as a
-timestamped tar.gz every 24h and prunes snapshots older than the
-retention window. No host cron required — the container handles
-scheduling itself.
-
-The first snapshot is written immediately on container start, so a
-fresh `docker compose up` produces a backup within seconds.
-
-Tunable via env in `docker-compose.yml`:
-
-```yaml
-cert-backup:
-  environment:
-    - INTERVAL_SEC=86400    # seconds between snapshots
-    - RETENTION_DAYS=14     # prune older than this
-```
-
-Force a fresh snapshot:
-
-```sh
-docker compose restart cert-backup
-```
-
-Inspect what's been backed up:
-
-```sh
-ls -lh ./backups/certs/
-```
+If you ever lose the `certs` named volume (rare — would need an
+explicit `docker volume rm` or disk corruption), acme-companion
+re-issues from Let's Encrypt automatically on next boot. The
+default rate limit (50 certs per registered domain per week) is
+well above what a single-domain deploy could ever burn through.
 
 ## Manual recovery
 
@@ -133,23 +103,28 @@ exit
 docker restart nginx-proxy
 ```
 
-### Restore a backed-up volume (after wipe or corruption)
+### Re-issue from Let's Encrypt (after volume loss)
+
+If the `certs` named volume was deleted or corrupted:
 
 ```sh
-# Stop the proxy and acme-companion so nothing is writing during restore.
-docker compose stop nginx-proxy letsencrypt
+docker compose up -d
+```
 
-# Locate the most recent snapshot.
-LATEST=$(ls -t backups/certs/certs-*.tar.gz | head -1)
+acme-companion notices there's no cert for `LETSENCRYPT_HOST` and
+runs the ACME challenge to issue a fresh one. Typical end-to-end
+time is under a minute. The only prerequisite is that port 80 is
+reachable from the public internet so the HTTP-01 challenge can
+complete.
 
-# Restore into the named volume.
+If you want a one-off snapshot before risky maintenance:
+
+```sh
 docker run --rm \
-    -v yolovest_certs:/target \
-    -v "$(realpath "$LATEST")":/snapshot.tar.gz:ro \
+    -v yolovest_certs:/source:ro \
+    -v "$PWD/backups/certs":/backup \
     alpine:3 \
-    sh -c 'cd /target && tar -xzf /snapshot.tar.gz'
-
-docker compose start nginx-proxy letsencrypt
+    sh -c 'cd /source && tar -czf "/backup/certs-$(date -u +%Y%m%dT%H%M%SZ).tar.gz" .'
 ```
 
 Verify HTTPS works:

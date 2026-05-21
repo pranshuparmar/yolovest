@@ -26,10 +26,46 @@ import math
 from typing import Any
 
 from yolovest.costs import compute_transaction_costs
+from yolovest.data.db import DuplicateSignalError
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 from yolovest.timezone import now_ist
 
 logger = logging.getLogger(__name__)
+
+
+def _reanchor_levels(
+    signal: dict[str, Any], fill_price: float,
+) -> tuple[float, float, float]:
+    """Shift `target_price` and `stop_loss_price` by the entry-slippage
+    delta so they sit at the same ATR-multiplier distance from the
+    actual fill that they sat from the predicted entry.
+
+    Without this, a small adverse slippage (e.g. SELL filled 0.2%
+    below the predicted entry) silently flips the trade's intended
+    R:R — the SL distance widens and the target distance shrinks even
+    though the model's geometry was 2:1.
+
+    Returns (new_target, new_stop_loss, delta). When fill_price isn't
+    available (zero / non-finite / no slippage), returns the original
+    levels and delta=0 so the caller can skip any modify_order step.
+    """
+    try:
+        entry = float(signal.get("entry_price") or 0)
+        fill = float(fill_price or 0)
+        target = float(signal.get("target_price") or 0)
+        sl = float(signal.get("stop_loss_price") or 0)
+    except (TypeError, ValueError):
+        return (
+            float(signal.get("target_price") or 0),
+            float(signal.get("stop_loss_price") or 0),
+            0.0,
+        )
+    if entry <= 0 or fill <= 0 or target <= 0 or sl <= 0:
+        return target, sl, 0.0
+    delta = fill - entry
+    if delta == 0:
+        return target, sl, 0.0
+    return round(target + delta, 2), round(sl + delta, 2), delta
 
 
 def _signal_dedup_key(signal: dict[str, Any], mode: str = "paper") -> str:
@@ -148,21 +184,29 @@ class TradeExecuteSkill(SkillBase):
 
         slippage = abs(fill_price - entry)
 
+        # Reanchor target/SL to the actual fill so the simulated trade
+        # is managed at the same ATR-distance from the fill that the
+        # model intended from the predicted entry.
+        reanchored_target, reanchored_sl, _ = _reanchor_levels(
+            {**signal, "entry_price": entry}, fill_price,
+        )
+
         # Estimate transaction costs for realistic paper PnL
         product = signal.get("product", "MIS")
         est_costs = compute_transaction_costs(
-            fill_price, signal["target_price"], actual_qty,
+            fill_price, reanchored_target, actual_qty,
             product=product, cost_config=self.ctx.config.transaction_costs,
         )
 
         trade = {
             "symbol": signal["symbol"],
             "signal_type": signal["signal_type"],
+            "signal_id": signal.get("signal_id"),
             "entry_price": entry,
             "fill_price": round(fill_price, 2),
             "quantity": actual_qty,
-            "stop_loss_price": signal["stop_loss_price"],
-            "target_price": signal["target_price"],
+            "stop_loss_price": reanchored_sl,
+            "target_price": reanchored_target,
             "product": signal.get("product", "MIS"),
             "status": "open",
             "mode": "paper",
@@ -174,7 +218,22 @@ class TradeExecuteSkill(SkillBase):
         if is_scaled:
             trade["scaled_entry"] = True
 
-        trade_id = await self.ctx.db.insert_trade(trade)
+        try:
+            trade_id = await self.ctx.db.insert_trade(trade)
+        except DuplicateSignalError as exc:
+            logger.warning(
+                "trade-execute: PAPER signal_id=%d already produced trade %s — "
+                "skipping (DB UNIQUE caught the retry)",
+                exc.signal_id, exc.existing_trade_id,
+            )
+            return SkillResult(
+                success=True, skill_name=self.name,
+                data={
+                    "skipped": True, "reason": "duplicate_signal_db",
+                    "signal_id": exc.signal_id,
+                    "existing_trade_id": exc.existing_trade_id,
+                },
+            )
         trade["trade_id"] = trade_id
         await self.ctx.notify.send_trade_alert(trade)
         await self.broadcast("trade_executed", {
@@ -347,13 +406,30 @@ class TradeExecuteSkill(SkillBase):
                         ) / actual_qty
                         order_id = leg1_order_id  # primary order for tracking
 
+                    # Reanchor target/SL to the actual fill so the
+                    # resting SL and the downstream GTT/MIS-OCO target
+                    # sit at the same ATR-distance from the fill that
+                    # the model intended from the predicted entry.
+                    reanchored_target, reanchored_sl, delta = _reanchor_levels(
+                        signal, fill_price,
+                    )
+                    if delta:
+                        logger.info(
+                            "trade-execute: reanchored levels for %s by ₹%.2f "
+                            "(entry %.2f → fill %.2f): SL %.2f → %.2f, target %.2f → %.2f",
+                            signal["symbol"], delta,
+                            signal["entry_price"], fill_price,
+                            signal["stop_loss_price"], reanchored_sl,
+                            signal["target_price"], reanchored_target,
+                        )
+
                     # Place SL-M (stop-loss market) order for actual filled quantity
                     sl_order_id = await self.ctx.broker.place_order(
                         symbol=signal["symbol"],
                         side=sl_side,
                         quantity=actual_qty,
                         order_type="SL-M",
-                        trigger_price=signal["stop_loss_price"],
+                        trigger_price=reanchored_sl,
                         product=product,
                         tag="yv-sl",
                     )
@@ -363,11 +439,12 @@ class TradeExecuteSkill(SkillBase):
                     trade = {
                         "symbol": signal["symbol"],
                         "signal_type": signal["signal_type"],
+                        "signal_id": signal.get("signal_id"),
                         "entry_price": signal["entry_price"],
                         "fill_price": fill_price,
                         "quantity": actual_qty,
-                        "stop_loss_price": signal["stop_loss_price"],
-                        "target_price": signal["target_price"],
+                        "stop_loss_price": reanchored_sl,
+                        "target_price": reanchored_target,
                         "order_id": order_id,
                         "sl_order_id": sl_order_id,
                         "product": product,
@@ -483,14 +560,51 @@ class TradeExecuteSkill(SkillBase):
                     fill_price = order_status.get("average_price") or signal["entry_price"]
                     slippage = abs(fill_price - signal["entry_price"])
 
+                    # Reanchor target/SL to the actual fill. The SL was
+                    # placed before the fill was known, so modify it in
+                    # place via kite.modify_order. Target is enforced
+                    # downstream by GTT/MIS-OCO using the trade dict's
+                    # target_price below.
+                    reanchored_target, reanchored_sl, delta = _reanchor_levels(
+                        signal, fill_price,
+                    )
+                    if delta and sl_order_id:
+                        try:
+                            await self.ctx.broker.modify_sl_order(
+                                sl_order_id, reanchored_sl,
+                            )
+                            logger.info(
+                                "trade-execute: reanchored levels for %s by ₹%.2f "
+                                "(entry %.2f → fill %.2f): SL %.2f → %.2f, "
+                                "target %.2f → %.2f",
+                                signal["symbol"], delta,
+                                signal["entry_price"], fill_price,
+                                signal["stop_loss_price"], reanchored_sl,
+                                signal["target_price"], reanchored_target,
+                            )
+                        except Exception:
+                            # Modify failed — fall back to original SL.
+                            # Position-monitor's client-side detection
+                            # remains a safety net so we're not
+                            # exposed; just log loudly.
+                            logger.warning(
+                                "trade-execute: failed to reanchor SL for %s "
+                                "(order_id=%s); keeping original %.2f",
+                                signal["symbol"], sl_order_id,
+                                signal["stop_loss_price"], exc_info=True,
+                            )
+                            reanchored_sl = signal["stop_loss_price"]
+                            reanchored_target = signal["target_price"]
+
                     trade = {
                         "symbol": signal["symbol"],
                         "signal_type": signal["signal_type"],
+                        "signal_id": signal.get("signal_id"),
                         "entry_price": signal["entry_price"],
                         "fill_price": fill_price,
                         "quantity": actual_qty,
-                        "stop_loss_price": signal["stop_loss_price"],
-                        "target_price": signal["target_price"],
+                        "stop_loss_price": reanchored_sl,
+                        "target_price": reanchored_target,
                         "order_id": order_id,
                         "sl_order_id": sl_order_id,
                         "product": product,
@@ -520,7 +634,47 @@ class TradeExecuteSkill(SkillBase):
                     # COMPLETE/filled from Kite means the order filled — position is "open"
                     trade["status"] = "open"
 
-                trade_id = await self.ctx.db.insert_trade(trade)
+                try:
+                    trade_id = await self.ctx.db.insert_trade(trade)
+                except DuplicateSignalError as exc:
+                    # The signal_id already attaches to an existing
+                    # trade — this LIVE execution is a duplicate. Best
+                    # effort: cancel the broker order(s) we just placed
+                    # so the position doesn't get doubled. The existing
+                    # trade row still tracks the original execution.
+                    logger.error(
+                        "trade-execute: LIVE signal_id=%d already produced trade %s — "
+                        "cancelling duplicate broker orders %s / %s",
+                        exc.signal_id, exc.existing_trade_id,
+                        trade.get("order_id"), trade.get("sl_order_id"),
+                    )
+                    for oid in (trade.get("order_id"), trade.get("sl_order_id")):
+                        if oid:
+                            try:
+                                await self.ctx.broker.cancel_order(oid)
+                            except Exception:
+                                logger.warning(
+                                    "trade-execute: failed to cancel duplicate "
+                                    "order %s", oid, exc_info=True,
+                                )
+                    try:
+                        await self.ctx.notify.send(
+                            f"Duplicate signal execution caught at DB UNIQUE — "
+                            f"signal_id={exc.signal_id} maps to trade "
+                            f"{exc.existing_trade_id}; cancelled broker orders "
+                            f"{trade.get('order_id')} / {trade.get('sl_order_id')}",
+                            alert_type="errors",
+                        )
+                    except Exception:
+                        pass
+                    return SkillResult(
+                        success=True, skill_name=self.name,
+                        data={
+                            "skipped": True, "reason": "duplicate_signal_db",
+                            "signal_id": exc.signal_id,
+                            "existing_trade_id": exc.existing_trade_id,
+                        },
+                    )
                 trade["trade_id"] = trade_id
 
                 # For CNC trades, attach a broker-side OCO GTT for target +
@@ -668,6 +822,7 @@ class TradeExecuteSkill(SkillBase):
         trade = {
             "symbol": symbol,
             "signal_type": signal["signal_type"],
+            "signal_id": signal.get("signal_id"),
             "entry_price": signal["entry_price"],
             "fill_price": fill_price,
             "quantity": actual_qty,
@@ -681,7 +836,26 @@ class TradeExecuteSkill(SkillBase):
             "slippage": slippage,
             "origin": "system",
         }
-        trade_id = await self.ctx.db.insert_trade(trade)
+        try:
+            trade_id = await self.ctx.db.insert_trade(trade)
+        except DuplicateSignalError as exc:
+            # Reconcile path also competes with the normal path. If
+            # the signal_id is already attached to a trade, the
+            # existing row already covers the broker order we
+            # rediscovered — nothing to do here.
+            logger.warning(
+                "trade-execute: reconcile saw broker order for signal_id=%d, "
+                "but trade %s already attached — leaving as-is",
+                exc.signal_id, exc.existing_trade_id,
+            )
+            return SkillResult(
+                success=True, skill_name=self.name,
+                data={
+                    "skipped": True, "reason": "duplicate_signal_db",
+                    "signal_id": exc.signal_id,
+                    "existing_trade_id": exc.existing_trade_id,
+                },
+            )
         trade["trade_id"] = trade_id
         try:
             await self.ctx.notify.send_trade_alert(trade)

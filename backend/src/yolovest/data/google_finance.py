@@ -248,8 +248,16 @@ class GoogleFinanceScraper:
                     continue
                 seen_headlines.add(headline)
 
+                # Word-boundary match so ITC doesn't snag BITCOIN /
+                # POLITICS. Mirror the regex used by the other news
+                # scrapers.
+                headline_upper = headline.upper()
                 matched_symbols = [
-                    s for s in symbols if s.upper() in headline.upper()
+                    s for s in symbols
+                    if re.search(
+                        rf"(?<![A-Z0-9]){re.escape(s.upper())}(?![A-Z0-9])",
+                        headline_upper,
+                    )
                 ]
                 articles.append(
                     NewsArticle(

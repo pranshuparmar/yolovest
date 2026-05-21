@@ -402,7 +402,8 @@ def sweep_thresholds(
     bars_meta: list[BarMeta],
     config: BacktestConfig | None = None,
     grid: tuple[float, ...] = _DEFAULT_THRESHOLD_GRID,
-    min_trades: int = 10,
+    min_trades: int = 100,
+    min_class_share: float = 0.10,
 ) -> tuple[float, float, BacktestResult]:
     """Find the (buy_threshold, sell_threshold) pair that maximises Sharpe
     on the walk-forward test predictions.
@@ -423,8 +424,16 @@ def sweep_thresholds(
     producing fewer than `min_trades` are ignored so an over-restrictive
     threshold pair doesn't win by trivially having zero variance.
 
+    `min_class_share` enforces that both BUY and SELL produce at least
+    that fraction of total trades in the candidate cell. Without it the
+    sweep happily picks asymmetric pairs like (buy=0.80, sell=0.70) that
+    fire 528 SELLs and 0 BUYs over 7 days in production — what looks
+    great on the holdout's Sharpe collapses to a single-class model
+    in live trading. The drift-watch class-collapse alert is the
+    downstream symptom this floor prevents. Set to 0.0 to disable.
+
     Falls back to (0.5, 0.5, run_walk_forward_backtest(argmax)) when no
-    grid cell clears `min_trades` (typically a model that just doesn't
+    grid cell clears the floors (typically a model that just doesn't
     have enough conviction on this corpus).
     """
     cfg = config or BacktestConfig()
@@ -453,6 +462,19 @@ def sweep_thresholds(
             result = run_walk_forward_backtest(preds, bars_meta, cfg)
             if result.total_trades < min_trades:
                 continue
+            # Class-collapse floor. Reject cells where one side
+            # produces less than `min_class_share` of total trades
+            # — those translate to "0 BUY signals in 7 days" in
+            # production even when Sharpe looks great on the holdout.
+            if min_class_share > 0.0:
+                buy_count = sum(1 for p in preds if p == _LABEL_BUY)
+                sell_count = sum(1 for p in preds if p == _LABEL_SELL)
+                total_nh = buy_count + sell_count
+                if total_nh > 0:
+                    buy_share = buy_count / total_nh
+                    sell_share = sell_count / total_nh
+                    if buy_share < min_class_share or sell_share < min_class_share:
+                        continue
             if best_result is None:
                 best_buy, best_sell, best_result = buy_thresh, sell_thresh, result
                 continue
@@ -464,7 +486,7 @@ def sweep_thresholds(
                 best_buy, best_sell, best_result = buy_thresh, sell_thresh, result
 
     if best_result is None:
-        # No cell met min_trades — fall back to argmax baseline.
+        # No cell met the floors — fall back to argmax baseline.
         baseline_preds = [
             _LABEL_BUY if p[_LABEL_BUY] >= p[_LABEL_SELL] and p[_LABEL_BUY] >= p[_LABEL_HOLD]
             else _LABEL_SELL if p[_LABEL_SELL] >= p[_LABEL_HOLD]
@@ -476,3 +498,29 @@ def sweep_thresholds(
 
     assert best_buy is not None and best_sell is not None
     return best_buy, best_sell, best_result
+
+
+def apply_thresholds(
+    probas: list[list[float]],
+    buy_thresh: float,
+    sell_thresh: float,
+) -> list[int]:
+    """Convert per-sample class-probability vectors to discrete
+    BUY/HOLD/SELL predictions using the same gating rule that
+    `sweep_thresholds` evaluates.
+
+    Public so callers can replay a chosen (buy, sell) cutoff pair on a
+    held-out slice for honest out-of-sample reporting after the sweep
+    picked the cutoffs on a separate tuning slice.
+    """
+    out: list[int] = []
+    for p in probas:
+        buy_prob = p[_LABEL_BUY] if len(p) > _LABEL_BUY else 0.0
+        sell_prob = p[_LABEL_SELL] if len(p) > _LABEL_SELL else 0.0
+        if buy_prob >= buy_thresh and buy_prob >= sell_prob:
+            out.append(_LABEL_BUY)
+        elif sell_prob >= sell_thresh and sell_prob > buy_prob:
+            out.append(_LABEL_SELL)
+        else:
+            out.append(_LABEL_HOLD)
+    return out

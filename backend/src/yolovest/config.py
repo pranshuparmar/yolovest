@@ -97,6 +97,15 @@ class MarketDataConfig(BaseModel):
     sentiment_ttl_hours: int = 48  # sentiment older than this is ignored in scanning
     backfill_days: int = 1095  # daily-bar history window for backfill-data and ingest-universe
     intraday_backfill_days: int = 365  # 5-minute-bar history window for backfill-intraday
+    # Reject a symbol from signal generation when its latest daily bar
+    # is older than this many trading days behind the most recent
+    # completed trading day. Default 1 covers the normal "mid-session
+    # ingest just hasn't run yet" case while still catching the
+    # FEDERALBNK-style "data is 2+ trading days stale" silence the
+    # YFinance provider used to flow through unchecked. 0 = strict
+    # (latest bar must be the most recent completed session). Set to
+    # a high number to disable the gate.
+    max_signal_data_age_trading_days: int = 1
 
 
 class HeartbeatConfig(BaseModel):
@@ -169,6 +178,14 @@ class ATRMultipliers(BaseModel):
 
     target: float = Field(default=2.0, gt=0)
     stop_loss: float = Field(default=1.0, gt=0)
+    # Cap on the ATR value (as a fraction of entry price) used when
+    # computing target/SL distance. Only relevant for the intraday
+    # bucket today — a high-ATR stock (e.g. JAINREC at ~11.6% daily
+    # ATR) gets a 6-7% intraday target with the default 0.6× multiplier,
+    # which is unreachable in a half-day session. Clamping caps the
+    # implied target distance at ~max_atr_pct × multiplier (e.g. 0.035
+    # × 0.6 = ~2.1% max target distance). 0 = no cap (legacy behaviour).
+    max_atr_pct_for_target: float = Field(default=0.0, ge=0, le=0.5)
 
 
 class HoldingPeriodConfig(BaseModel):
@@ -179,7 +196,14 @@ class HoldingPeriodConfig(BaseModel):
     """
 
     intraday: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=0.6, stop_loss=0.3),
+        default_factory=lambda: ATRMultipliers(
+            target=0.6, stop_loss=0.3,
+            # 3.5% caps the implied target distance at ~2.1% for high-ATR
+            # stocks. Median NSE large-caps have 1-2% daily ATR and stay
+            # well under the cap; only the volatile tail (small caps,
+            # F&O momentum names) gets clamped.
+            max_atr_pct_for_target=0.035,
+        ),
     )
     short_swing: ATRMultipliers = Field(
         default_factory=lambda: ATRMultipliers(target=1.5, stop_loss=0.75),
@@ -202,6 +226,15 @@ class VolatilityConfig(BaseModel):
     max_atr_pct: float = Field(default=0.05, gt=0)
     ideal_min_atr_pct: float = Field(default=0.015, ge=0)
     ideal_max_atr_pct: float = Field(default=0.03, gt=0)
+    # Hard eligibility cap for the intraday bucket. When `atr_pct >
+    # this`, the stock is refused as intraday material — either routed
+    # to swing (balanced mode where swing is allowed), or dropped
+    # outright (pure intraday strategy mode). Different lever from
+    # `max_atr_pct_for_target` on the multipliers config: that one
+    # *caps* the geometry on a stock that still trades intraday; this
+    # one *refuses* intraday entirely for stocks too volatile to
+    # square off in a half-day session. 0 = disabled.
+    max_atr_pct_for_intraday_eligibility: float = Field(default=0.05, ge=0, le=0.5)
 
 
 # Mode presets: (min_days, max_days) range per strategy mode.
@@ -526,7 +559,27 @@ class RiskConfig(BaseModel):
     weekly_loss_sizing_reduction: float = Field(default=0.50, gt=0, le=1)
     mandatory_stop_loss: bool = True
     trailing_sl_enabled: bool = True
+    # Legacy trigger expressed as a multiple of risk_per_share. Hard
+    # to reason about because it depends on the R:R ratio of each
+    # signal: 1.5 fires at 75% of target for a 2:1 R:R signal but
+    # at 150% (= never) for a 1:1 signal. Kept for backwards-compat
+    # with deployments that explicitly tuned this, but the runtime
+    # prefers the per-mode target-pct knobs below when set.
     trailing_sl_trigger_multiple: float = Field(default=1.5, gt=0)
+    # Per-strategy-bucket trailing trigger expressed as a fraction of
+    # target distance covered (0.0–1.0). 0.35 = "once price has moved
+    # 35% of the way from entry to target, start trailing." Bucket-
+    # split because intraday and swing have very different time
+    # horizons — an intraday position has 5-6 hours to reach the
+    # trigger; a swing position has 2-5 days, so intraday warrants a
+    # more eager trigger. None = fall back to the legacy
+    # trailing_sl_trigger_multiple semantics above.
+    trailing_sl_trigger_target_pct_intraday: float | None = Field(
+        default=0.35, ge=0.0, le=1.0,
+    )
+    trailing_sl_trigger_target_pct_swing: float | None = Field(
+        default=0.50, ge=0.0, le=1.0,
+    )
     trailing_sl_step_pct: float = Field(default=0.01, gt=0, lt=1)
     # Early-exit buffer applied to the target check. Heartbeats run every
     # 15 min, so a price that gets within this percentage of target but
@@ -540,6 +593,19 @@ class RiskConfig(BaseModel):
     kill_switch_enabled: bool = True
     min_confidence_buy: float = Field(default=0.60, ge=0, le=1)
     min_confidence_sell: float = Field(default=0.75, ge=0, le=1)
+    # Per-strategy-mode floors. Intraday and swing have very different
+    # signal characteristics (volatility, holding window, R:R geometry,
+    # short-availability), so the same probability floor rarely fits
+    # both well. When set, these REPLACE the global floor above for
+    # signals matching that holding bucket. `None` falls back to the
+    # global value, preserving behaviour for users who haven't
+    # configured per-mode floors. "Intraday" = `holding_period ==
+    # "intraday"`; everything else (short_swing / week / long) routes
+    # to the swing pair.
+    min_confidence_buy_intraday: float | None = Field(default=None, ge=0, le=1)
+    min_confidence_sell_intraday: float | None = Field(default=None, ge=0, le=1)
+    min_confidence_buy_swing: float | None = Field(default=None, ge=0, le=1)
+    min_confidence_sell_swing: float | None = Field(default=None, ge=0, le=1)
     skip_sell_on_holdings: bool = True  # position-monitor handles exits; no SELL on held symbols
     max_trades_per_day: int = Field(default=5, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
@@ -558,6 +624,39 @@ class RiskConfig(BaseModel):
     # are too slow or the test stack doesn't support estimate_margin.
     margin_usage_enabled: bool = True
     weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
+    # Cap how far apart the model's PnL-tuned BUY and SELL probability
+    # thresholds may be at inference time. The walk-forward sweep that
+    # picks these thresholds can land on highly asymmetric pairs (e.g.
+    # BUY=0.80, SELL=0.70 from the user's most recent retrain) when one
+    # class happens to pay better on the holdout slice — and then the
+    # production model never fires that class. We shrink both
+    # thresholds toward their midpoint until the gap is at most this
+    # value. Default 0.05 (5 percentage points) keeps the model's
+    # learned preference but prevents the "0 BUY signals in 7 days"
+    # class-collapse the drift-watch tonight alert catches. Set to a
+    # large number (e.g. 1.0) to disable; set to 0.0 to force exactly
+    # symmetric thresholds.
+    tuned_threshold_max_diff: float = Field(default=0.05, ge=0, le=1.0)
+    # Hard overrides on the model's tuned probability thresholds.
+    # When set, these REPLACE the saved tuned values entirely (the
+    # diff cap above no longer applies). Use when the model's saved
+    # thresholds are unreachable in production — e.g. the tuner saved
+    # buy=0.80 but the model never outputs P(BUY) > 0.50, so no BUY
+    # signals fire regardless of the diff cap. Setting
+    # buy_threshold_override=0.45 then lets every P(BUY) >= 0.45
+    # through. None = use the model's saved tuned threshold (default).
+    # Both checks remain ANDed with `min_confidence_buy` /
+    # `min_confidence_sell`, so those are still the absolute floor.
+    buy_threshold_override: float | None = Field(default=None, ge=0, le=1.0)
+    sell_threshold_override: float | None = Field(default=None, ge=0, le=1.0)
+    # Minimum cost-adjusted reward:risk ratio required to take a signal.
+    # Computes (target − entry) × qty − round-trip-costs as net win and
+    # (entry − sl) × qty + costs as net loss (sign-flipped for SELL),
+    # then rejects when net_win / net_loss < this threshold. Catches the
+    # "0.6 × ATR target on a ₹180 stock at 38 qty" signals where the
+    # gross 2:1 collapses to 1.3:1 after brokerage + STT + GST, leaving
+    # no margin for slippage. Set to 0 to disable.
+    min_net_rr: float = Field(default=1.5, ge=0, le=10)
     holding_expiry: HoldingExpiryConfig = Field(default_factory=HoldingExpiryConfig)
     partial_profit: PartialProfitConfig = Field(default_factory=PartialProfitConfig)
     conviction_sizing: ConvictionSizingConfig = Field(default_factory=ConvictionSizingConfig)
@@ -568,6 +667,64 @@ class RiskConfig(BaseModel):
     institutional_flow: InstitutionalFlowConfig = Field(default_factory=InstitutionalFlowConfig)
     exit_tweaks: ExitTweaksConfig = Field(default_factory=ExitTweaksConfig)
     reentry: ReentryConfig = Field(default_factory=ReentryConfig)
+
+    def resolve_min_confidence(
+        self, holding_period: str, signal_type: str,
+    ) -> float:
+        """Pick the per-mode floor when set, else fall back to the
+        global `min_confidence_buy` / `min_confidence_sell`.
+
+        Routes `holding_period == "intraday"` to the intraday pair;
+        everything else (short_swing / week / long) routes to the
+        swing pair.
+        """
+        is_intraday = holding_period == "intraday"
+        is_buy = signal_type == "BUY"
+        if is_intraday:
+            per_mode = (
+                self.min_confidence_buy_intraday if is_buy
+                else self.min_confidence_sell_intraday
+            )
+        else:
+            per_mode = (
+                self.min_confidence_buy_swing if is_buy
+                else self.min_confidence_sell_swing
+            )
+        if per_mode is not None:
+            return float(per_mode)
+        return float(
+            self.min_confidence_buy if is_buy else self.min_confidence_sell
+        )
+
+    def resolve_trailing_trigger(
+        self, holding_period: str, risk_per_share: float, target_distance: float,
+    ) -> float:
+        """Return the profit-in-rupees threshold at which trailing-SL
+        should start firing, given a position's holding bucket.
+
+        New semantic (preferred): `trailing_sl_trigger_target_pct_*`
+        expresses the trigger as a fraction of target distance, so
+        0.5 = "start trailing once we've covered half the way from
+        entry to target." This is the same scale users see on the
+        progress bars in PositionsTable and is independent of the
+        signal's R:R ratio.
+
+        Legacy fallback: when the per-mode target-pct is None, we
+        keep the old `trailing_sl_trigger_multiple × risk_per_share`
+        behaviour so deployments that explicitly tuned the legacy
+        knob keep working.
+
+        Always returns rupees-of-profit threshold so the three
+        trailing paths (client-side / GTT / MIS) can stay symmetric.
+        """
+        is_intraday = holding_period == "intraday"
+        per_mode_pct = (
+            self.trailing_sl_trigger_target_pct_intraday if is_intraday
+            else self.trailing_sl_trigger_target_pct_swing
+        )
+        if per_mode_pct is not None and target_distance > 0:
+            return float(per_mode_pct) * float(target_distance)
+        return float(self.trailing_sl_trigger_multiple) * float(risk_per_share)
 
 
 class MarketHoursConfig(BaseModel):

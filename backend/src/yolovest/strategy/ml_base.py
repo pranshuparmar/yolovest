@@ -27,6 +27,22 @@ class MLBase(ABC):
         """Generate a swing trading signal for a symbol."""
         ...
 
+    def get_effective_thresholds(
+        self, model_type: str,
+    ) -> dict[str, float] | None:
+        """Return the model's currently-applied (buy, sell) probability
+        thresholds with any post-load adjustments (e.g. asymmetry cap).
+
+        Default returns None — callers should treat that as "use the
+        default argmax behaviour". Subclasses that ship a tuned-
+        threshold model override this; balanced-mode signal generation
+        uses the returned numbers to compare margins-above-threshold
+        across the intraday and swing models instead of raw confidence
+        (which is not comparable when the two models are trained on
+        different class balances).
+        """
+        return None
+
     @abstractmethod
     async def train(
         self, model_type: str, X: Any, y: Any, params: dict[str, Any]  # noqa: N803

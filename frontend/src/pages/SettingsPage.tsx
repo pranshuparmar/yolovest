@@ -135,6 +135,20 @@ const READ_ONLY_KEYS = new Set([
   "market_hours.timezone",
 ]);
 
+// Nullable numeric fields. When null, the model falls back to a global
+// default (documented in the tooltip). Renders as an empty input with a
+// "(global)" placeholder; clearing the input sends null back to the API.
+const NULLABLE_NUMBER_KEYS = new Set([
+  "risk.min_confidence_buy_intraday",
+  "risk.min_confidence_sell_intraday",
+  "risk.min_confidence_buy_swing",
+  "risk.min_confidence_sell_swing",
+  "risk.buy_threshold_override",
+  "risk.sell_threshold_override",
+  "risk.trailing_sl_trigger_target_pct_intraday",
+  "risk.trailing_sl_trigger_target_pct_swing",
+]);
+
 // ---------------------------------------------------------------------------
 // Section labels
 // ---------------------------------------------------------------------------
@@ -173,6 +187,8 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "market_data.daily_fallback": "Daily Fallback",
   "market_data.intraday_provider": "Intraday Provider",
   "market_data.kite_data_enabled": "Kite Data (paid plan)",
+  "market_data.kite_websocket_enabled": "Kite WebSocket Feed",
+  "market_data.max_signal_data_age_trading_days": "Max Signal Data Age (trading days)",
   "market_data.news_enabled": "News Sources",
   "market_data.scrapers_enabled": "Web Scrapers",
   "market_data.cache_ttl_minutes": "Cache TTL (min)",
@@ -201,6 +217,7 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "strategy.allowed_holding_periods": "Allowed Holding Periods",
   "strategy.holding_periods.intraday.target": "Intraday Target (ATR×)",
   "strategy.holding_periods.intraday.stop_loss": "Intraday Stop Loss (ATR×)",
+  "strategy.holding_periods.intraday.max_atr_pct_for_target": "Intraday ATR Cap (target geometry)",
   "strategy.holding_periods.short_swing.target": "Short Swing Target (ATR×)",
   "strategy.holding_periods.short_swing.stop_loss": "Short Swing Stop Loss (ATR×)",
   "strategy.holding_periods.week.target": "Weekly Target (ATR×)",
@@ -211,6 +228,7 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "strategy.volatility.max_atr_pct": "Max ATR%",
   "strategy.volatility.ideal_min_atr_pct": "Ideal Min ATR%",
   "strategy.volatility.ideal_max_atr_pct": "Ideal Max ATR%",
+  "strategy.volatility.max_atr_pct_for_intraday_eligibility": "Max ATR% for Intraday Eligibility",
   "strategy.indicators.rsi": "RSI",
   "strategy.indicators.macd": "MACD",
   "strategy.indicators.bollinger_bands": "Bollinger Bands",
@@ -234,6 +252,8 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "strategy.feedback.sources.dry_runs": "Source: Dry Runs",
   "strategy.feedback.sources.trades": "Source: Trades",
   "strategy.class_balance_enabled": "Class-Balanced Training",
+  "strategy.class_balance_min_pct": "Class Balance Min Share",
+  "strategy.post_train_class_check_enabled": "Post-Train Class Check",
   "risk.max_risk_per_trade_pct": "Max Risk / Trade",
   "risk.max_portfolio_exposure_pct": "Max Portfolio Exposure",
   "risk.max_open_positions": "Max Open Positions",
@@ -246,11 +266,17 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.weekly_loss_sizing_reduction": "Weekly Loss Size Reduction",
   "risk.mandatory_stop_loss": "Mandatory Stop Loss",
   "risk.trailing_sl_enabled": "Trailing Stop Loss",
-  "risk.trailing_sl_trigger_multiple": "Trailing SL Trigger (× risk)",
+  "risk.trailing_sl_trigger_multiple": "Trailing SL Trigger (× risk, legacy)",
+  "risk.trailing_sl_trigger_target_pct_intraday": "Trailing SL Trigger — Intraday (% of target)",
+  "risk.trailing_sl_trigger_target_pct_swing": "Trailing SL Trigger — Swing (% of target)",
   "risk.trailing_sl_step_pct": "Trailing SL Step",
   "risk.target_early_exit_pct": "Target Early-Exit Buffer",
   "risk.min_confidence_buy": "Min Confidence (BUY)",
   "risk.min_confidence_sell": "Min Confidence (SELL)",
+  "risk.min_confidence_buy_intraday": "Min Confidence (BUY · Intraday)",
+  "risk.min_confidence_sell_intraday": "Min Confidence (SELL · Intraday)",
+  "risk.min_confidence_buy_swing": "Min Confidence (BUY · Swing)",
+  "risk.min_confidence_sell_swing": "Min Confidence (SELL · Swing)",
   "risk.skip_sell_on_holdings": "Skip SELL on Holdings",
   "risk.max_trades_per_day": "Max Trades / Day",
   "risk.kill_switch_enabled": "Kill Switch",
@@ -263,6 +289,10 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.symbol_cooldown_days": "Symbol Cooldown (days)",
   "risk.symbol_repeat_lookback_days": "Repeat Symbol Lookback (days)",
   "risk.symbol_repeat_min_confidence": "Repeat Symbol Min Confidence",
+  "risk.tuned_threshold_max_diff": "Tuned Threshold Asymmetry Cap",
+  "risk.buy_threshold_override": "Tuned Threshold Override (BUY)",
+  "risk.sell_threshold_override": "Tuned Threshold Override (SELL)",
+  "risk.min_net_rr": "Min Cost-Adjusted R:R",
   // Regime gate (new)
   "risk.max_risk_rejected_retries_per_day": "Risk-Rejected Retry Cap / Day",
   "risk.regime_gate.enabled": "Regime Gate",
@@ -352,6 +382,8 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "market_hours.square_off_extension": "Square Off Extension",
   "market_hours.intraday_cutoff": "Intraday Cutoff",
   "market_hours.timezone": "Timezone",
+  "market_hours.holidays": "Market Holidays",
+  "market_hours.early_close_days": "Early Close Days",
   "database.backup_enabled": "Backups Enabled",
   "database.retention.ohlcv_days": "OHLCV Retention (days)",
   "database.retention.audit_log_days": "Audit Log Retention (days)",
@@ -386,6 +418,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "market_data.daily_fallback": "Fallback if primary provider fails. Only yfinance is currently supported.",
   "market_data.intraday_provider": "Source for intraday data. Only tvDatafeed is currently supported.",
   "market_data.kite_data_enabled": "Use paid Kite Connect data plan as primary data source.",
+  "market_data.kite_websocket_enabled": "Subscribe to KiteTicker WebSocket for sub-second LTP updates. Position-monitor reads from the WS cache before falling back to REST, reducing per-cycle latency and rate-limiter pressure. Requires Kite to be authenticated; falls back silently if not.",
+  "market_data.max_signal_data_age_trading_days": "Reject signals whose latest daily bar is older than this many trading days. Catches stale-data flow (provider outages, weekend gaps, dead symbols) before they reach risk-check. Set to 1 for strict freshness; 2 to tolerate a one-day NSE bhav-copy delay.",
   "market_data.news_enabled": "Fetch news from MoneyControl, ET Markets, and LiveMint RSS feeds.",
   "market_data.scrapers_enabled": "Fetch data from Screener.in, Trendlyne, Google Finance, and NSE.",
   "market_data.cache_ttl_minutes": "How long to cache fetched data before re-fetching.",
@@ -413,6 +447,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "strategy.ema_periods": "Exponential moving average periods used in technical analysis.",
   "strategy.allowed_holding_periods": "Which holding periods the strategy is allowed to use.",
   "strategy.holding_periods.intraday.target": "ATR multiplier for intraday profit target. target = entry ± N × ATR.",
+  "strategy.holding_periods.intraday.max_atr_pct_for_target": "Cap on the daily ATR (as fraction of entry price) used when computing the intraday target / SL distance. High-ATR stocks would otherwise get unreachable targets (e.g. an 11% ATR stock at the default 0.6× multiplier asks for a 6-7% intraday move). Capping at 0.035 (default) limits the implied target distance to ~2.1% while leaving median large-caps (1-2% ATR) untouched. Set to 0 to disable the cap.",
   "strategy.holding_periods.intraday.stop_loss": "ATR multiplier for intraday stop loss. SL = entry ∓ N × ATR.",
   "strategy.holding_periods.short_swing.target": "ATR multiplier for 2–5 day swing profit target.",
   "strategy.holding_periods.short_swing.stop_loss": "ATR multiplier for 2–5 day swing stop loss.",
@@ -424,6 +459,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "strategy.volatility.max_atr_pct": "Maximum ATR% — above this the stock is too volatile/risky.",
   "strategy.volatility.ideal_min_atr_pct": "Ideal range lower bound. Stocks in the ideal range score highest.",
   "strategy.volatility.ideal_max_atr_pct": "Ideal range upper bound. ATR% = ATR / price (e.g. 0.02 = 2%).",
+  "strategy.volatility.max_atr_pct_for_intraday_eligibility": "Hard eligibility cap for the intraday bucket. Stocks with daily ATR% above this are refused as intraday material (routed to swing in balanced mode, dropped in pure intraday mode). Different lever from the per-bucket ATR cap above — that one clamps the geometry on a stock that still trades intraday; this one refuses intraday entirely for stocks too volatile to square off in a half-day session. Default 0.05 (5%). Set to 0 to disable.",
   "strategy.indicators.rsi": "Relative Strength Index — momentum oscillator (overbought/oversold).",
   "strategy.indicators.macd": "Moving Average Convergence Divergence — trend and momentum.",
   "strategy.indicators.bollinger_bands": "Bollinger Bands — volatility bands around moving average.",
@@ -447,6 +483,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "strategy.feedback.sources.dry_runs": "Include scored dry run results in feedback.",
   "strategy.feedback.sources.trades": "Include closed trade PnL and slippage in feedback.",
   "strategy.class_balance_enabled": "Apply inverse-frequency class weights at training time so rare classes (typically BUY under 2:1 R/R path-aware labelling) aren't buried by the HOLD majority. Disable to recover the unweighted classifier.",
+  "strategy.class_balance_min_pct": "Refuse to save a freshly-trained model when any of {BUY, HOLD, SELL} accounts for less than this percentage of training labels. Catches the 'BUY is functionally extinct in this data' failure mode at train time instead of letting a sterile model reach production. Units: percentage (0–33). Default 3.0 = each class must be at least 3% of labels. Set to 0 to disable.",
+  "strategy.post_train_class_check_enabled": "After saving a fresh model, run inference on recent in-training samples and verify each of {BUY, HOLD, SELL} wins argmax at least once. Belt-and-braces for cases where label balance is fine but the model still never predicts a class (calibration collapse, feature dominance). Cheap — one matmul on a few hundred samples.",
   "risk.max_risk_per_trade_pct": "Maximum capital risked per trade (e.g. 0.02 = 2%).",
   "risk.max_portfolio_exposure_pct": "Maximum total portfolio exposure. Remainder stays as cash.",
   "risk.max_open_positions": "Maximum simultaneous open positions.",
@@ -459,11 +497,17 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "risk.weekly_loss_sizing_reduction": "Reduce position sizes by this factor when weekly breaker triggers.",
   "risk.mandatory_stop_loss": "Every trade must have a stop loss. Cannot be disabled in production.",
   "risk.trailing_sl_enabled": "Automatically trail stop loss upward as price moves in your favor.",
-  "risk.trailing_sl_trigger_multiple": "Activate trailing SL when profit reaches this multiple of risk.",
+  "risk.trailing_sl_trigger_multiple": "Legacy: activate trailing SL when profit reaches this multiple of risk_per_share. Hard to reason about because the threshold depends on each signal's R:R ratio (1.5 fires at 75% of target for a 2:1 setup but at 150% — never — for a 1:1). Kept for deployments that explicitly tuned it; the per-bucket target-% knobs below take precedence when set.",
+  "risk.trailing_sl_trigger_target_pct_intraday": "Start trailing the stop loss when an intraday position has covered this fraction of the entry-to-target distance (0–1). 0.35 (default) = SL starts ratcheting once price has moved 35% of the way to target. Intraday default is more eager than swing because the session is short and you can't afford to wait until 50% of target to start locking gains. Leave blank to fall back to the legacy × risk knob above.",
+  "risk.trailing_sl_trigger_target_pct_swing": "Start trailing the stop loss when a swing position (short_term / week / long) has covered this fraction of the entry-to-target distance (0–1). 0.50 (default) = halfway to target. Swing horizons are 2-66 days so the trigger can sit higher than intraday without missing the move. Leave blank to fall back to the legacy × risk knob above.",
   "risk.trailing_sl_step_pct": "Trail the stop loss in steps of this percentage.",
   "risk.target_early_exit_pct": "Exit when price is within this percentage of target. Heartbeats run every 15 min; without a buffer a price that gets within a paisa of target but never touches it waits a full cycle and may reverse. Default 0.15% catches ~₹0.15 on a ₹100 stock.",
-  "risk.min_confidence_buy": "Minimum ML confidence for a BUY signal (0–1).",
-  "risk.min_confidence_sell": "Minimum ML confidence for a SELL signal (0–1). Set higher than BUY to avoid exit noise.",
+  "risk.min_confidence_buy": "Global fallback: minimum ML confidence for a BUY signal (0–1). Used when the per-mode floor below is unset.",
+  "risk.min_confidence_sell": "Global fallback: minimum ML confidence for a SELL signal (0–1). Used when the per-mode floor below is unset. Set higher than BUY to avoid exit noise.",
+  "risk.min_confidence_buy_intraday": "Intraday BUY floor (0–1). Applied on top of the model's tuned threshold for intraday signals. Leave blank to fall back to the global Min Confidence (BUY).",
+  "risk.min_confidence_sell_intraday": "Intraday SELL floor (0–1). Applied on top of the model's tuned threshold for intraday signals. Indian retail intraday is BUY-biased (no overnight short, positive index drift) — a higher SELL floor here filters borderline shorts. Leave blank to fall back to the global Min Confidence (SELL).",
+  "risk.min_confidence_buy_swing": "Swing BUY floor (0–1). Applied on top of the model's tuned threshold for short_swing / week / long holding signals. Leave blank to fall back to the global Min Confidence (BUY).",
+  "risk.min_confidence_sell_swing": "Swing SELL floor (0–1). Applied on top of the model's tuned threshold for short_swing / week / long holding signals. Leave blank to fall back to the global Min Confidence (SELL).",
   "risk.skip_sell_on_holdings": "Don't generate SELL signals for symbols you already hold — position-monitor handles exits.",
   "risk.max_trades_per_day": "Maximum trades per day including re-entries.",
   "risk.kill_switch_enabled": "Allow /stop and /kill commands to halt all trading.",
@@ -476,6 +520,10 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "risk.symbol_cooldown_days": "Hard block on re-trading a symbol for this many days after last trade.",
   "risk.symbol_repeat_lookback_days": "Window during which repeat symbols need elevated confidence.",
   "risk.symbol_repeat_min_confidence": "Confidence required to re-trade a symbol within the lookback window — set higher than the per-direction BUY/SELL thresholds.",
+  "risk.tuned_threshold_max_diff": "Cap on how far apart the model's PnL-tuned BUY and SELL probability thresholds may be at inference. The walk-forward sweep can land on highly asymmetric pairs (e.g. BUY=0.80 SELL=0.70) when one class happens to pay better on the holdout, and then the production model never fires the other class. Pulls both thresholds toward their midpoint until the gap is at most this value. Default 0.05 (5 pp). Set to 1.0 to disable; 0.0 to force exactly symmetric tuned values.",
+  "risk.buy_threshold_override": "Hard override of the model's tuned BUY probability threshold. When set, REPLACES the saved tuned value entirely (the asymmetry cap above no longer applies). Use when the model's saved threshold is unreachable in production — e.g. tuner saved 0.80 but the calibrator never outputs P(BUY) > 0.50. Still ANDed with the per-mode Min Confidence floor. Leave blank to use the model's saved tuned threshold.",
+  "risk.sell_threshold_override": "Hard override of the model's tuned SELL probability threshold. Same semantics as the BUY override. Leave blank to use the model's saved tuned threshold.",
+  "risk.min_net_rr": "Minimum cost-adjusted reward:risk ratio required to take a signal. Computes (target − entry) × qty − round-trip-costs as net win and (entry − sl) × qty + costs as net loss (sign-flipped for SELL), then rejects when net_win / net_loss < this threshold. Catches signals where the gross 2:1 R:R collapses to 1.3:1 after brokerage + STT + GST, leaving no margin for slippage. Default 1.5. Set to 0 to disable.",
   "risk.max_risk_rejected_retries_per_day": "Cap how many times a symbol with retryable dispositions (risk_rejected, expired, trade_execute_failed, skill_error) can regenerate per day. Prevents log spam from chronically-failing setups; default 5.",
   // Regime gate
   "risk.regime_gate.enabled": "Refuse BUYs on broadly-red days and SELLs on broadly-green days. Computed once per heartbeat from today's cross-sectional breadth. Default off — calibrate against your universe first.",
@@ -564,6 +612,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "market_hours.square_off_extension": "Extra window for square-off orders after order_end.",
   "market_hours.intraday_cutoff": "No new intraday (MIS) signals after this time. Swing/CNC signals are unaffected.",
   "market_hours.timezone": "Timezone for all market hour calculations.",
+  "market_hours.holidays": "JSON list of NSE holiday dates (YYYY-MM-DD strings). Heartbeat skips these. Also editable via the /holiday Telegram command.",
+  "market_hours.early_close_days": "JSON list of half-day sessions: [{\"date\": \"YYYY-MM-DD\", \"close\": \"HH:MM\"}]. Used for Diwali muhurat and shortened sessions; market-hours checker honours the truncated close on these days.",
   "database.backup_enabled": "Enable daily automatic database backups.",
   "database.retention.ohlcv_days": "Keep OHLCV price data for this many days.",
   "database.retention.audit_log_days": "Keep audit log entries for this many days.",
@@ -829,6 +879,44 @@ function TextField({
   );
 }
 
+function NullableNumberField({
+  label,
+  description,
+  fullKey,
+  value,
+  hint,
+  onChange,
+}: {
+  label: string;
+  description?: string;
+  fullKey?: string;
+  value: number | null;
+  hint?: string | null;
+  onChange: (val: number | null) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between py-2.5 gap-4">
+      <FieldLabel label={label} description={description} fullKey={fullKey} hint={hint} />
+      <input
+        type="number"
+        step={0.05}
+        placeholder="(global)"
+        value={value === null ? "" : value}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === "") {
+            onChange(null);
+          } else {
+            const parsed = v.includes(".") ? parseFloat(v) : parseInt(v, 10);
+            onChange(Number.isFinite(parsed) ? parsed : null);
+          }
+        }}
+        className="w-28 bg-gray-800 border border-gray-700 rounded px-2.5 py-1.5 text-sm text-gray-200 text-right focus:border-blue-500 focus:outline-none"
+      />
+    </div>
+  );
+}
+
 function JsonField({
   label,
   description,
@@ -873,6 +961,12 @@ function ConfigField({
   }
   if (SELECT_OPTIONS[fullKey] && typeof value === "string") {
     return <SelectField label={label} description={description} fullKey={fullKey} value={value} options={SELECT_OPTIONS[fullKey]} onChange={(v) => onChange(fullKey, v)} />;
+  }
+  if (NULLABLE_NUMBER_KEYS.has(fullKey)) {
+    const numOrNull = value === null || value === undefined
+      ? null
+      : typeof value === "number" ? value : null;
+    return <NullableNumberField label={label} description={description} fullKey={fullKey} value={numOrNull} hint={hint} onChange={(v) => onChange(fullKey, v)} />;
   }
   if (typeof value === "boolean") {
     return <ToggleField label={label} description={description} fullKey={fullKey} checked={value} onChange={(v) => onChange(fullKey, v)} />;

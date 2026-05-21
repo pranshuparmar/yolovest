@@ -88,27 +88,43 @@ class HeartbeatOrchestrator:
         """Get an instantiated skill by name."""
         return self._skills.get(name)
 
-    async def run_heartbeat(self) -> dict[str, Any]:
+    async def run_heartbeat(self, *, source: str = "scheduled") -> dict[str, Any]:
         """Execute one heartbeat cycle.
 
         Returns a dict with skill results and metadata. SkillResult values are
         keyed by skill name; metadata keys include 'skipped', 'aborted',
         'signal_pipeline', 'consecutive_skips', 'symbol'.
+
+        `source` is "scheduled" for the auto-loop's invocation and
+        "manual" when triggered by the user via the heartbeat-pipeline
+        skill. Manual triggers that race with a running heartbeat
+        skip without bumping `_consecutive_skips` — that counter is
+        meant to detect a scheduled cycle overrunning its 15-min
+        budget, not a user clicking Run twice.
         """
         # Mutex: skip if already running
         if self._lock.locked():
-            self._consecutive_skips += 1
-            logger.warning(
-                "Heartbeat skipped (still running). Consecutive skips: %d",
-                self._consecutive_skips,
-            )
-            if self._consecutive_skips >= self._max_consecutive_skips:
-                await self._ctx.notify.send(
-                    f"CRITICAL: {self._consecutive_skips} consecutive heartbeats "
-                    f"skipped due to overrun.",
-                    alert_type="errors",
+            if source == "scheduled":
+                self._consecutive_skips += 1
+                logger.warning(
+                    "Heartbeat skipped (still running). Consecutive skips: %d",
+                    self._consecutive_skips,
                 )
-            return {"skipped": True, "consecutive_skips": self._consecutive_skips}
+                if self._consecutive_skips >= self._max_consecutive_skips:
+                    await self._ctx.notify.send(
+                        f"CRITICAL: {self._consecutive_skips} consecutive heartbeats "
+                        f"skipped due to overrun.",
+                        alert_type="errors",
+                    )
+            else:
+                logger.info(
+                    "Heartbeat (%s) skipped — scheduled cycle still running",
+                    source,
+                )
+            return {
+                "skipped": True, "source": source,
+                "consecutive_skips": self._consecutive_skips,
+            }
 
         async with self._lock:
             self._consecutive_skips = 0
@@ -121,25 +137,21 @@ class HeartbeatOrchestrator:
             "market_hours": self._ctx.market_hours.is_market_hours(),
         })
 
-        # Sweep abandoned pending trades before anything else. Risk-check
-        # counts pending notional and pending count toward exposure /
-        # max_open_positions / max_trades_per_day, so a forgotten pending
-        # silently locks those budgets and chokes off signal generation
-        # for the rest of the day. Previously this only ran when the
-        # dashboard polled /api/pending-trades, which Telegram-only users
-        # never trigger.
-        try:
-            expiry_min = self._ctx.config.execution.pending_expiry_minutes
-            expired_count = await self._ctx.db.expire_pending_trades(
-                max_age_minutes=expiry_min,
-            )
-            if expired_count:
-                logger.info(
-                    "Heartbeat: auto-expired %d pending trade(s) (>%dmin old)",
-                    expired_count, expiry_min,
-                )
-        except Exception:
-            logger.debug("Pending-trade auto-expiry failed", exc_info=True)
+        # Sweep abandoned pending trades, then re-anchor the survivors
+        # to the latest LTP, before health-check runs. Risk-check counts
+        # pending notional + pending count toward exposure /
+        # max_open_positions / max_trades_per_day, so a forgotten
+        # pending silently locks those budgets and chokes off the day's
+        # signals. Both steps run as registered skills now — that keeps
+        # the audit-log + skill_completed broadcasts symmetric with
+        # the rest of the pipeline and lets the user trigger them on
+        # demand from Telegram /run or the dashboard Skills page.
+        results["expire-pending-trades"] = await self._run_skill(
+            "expire-pending-trades",
+        )
+        results["reprice-pending-trades"] = await self._run_skill(
+            "reprice-pending-trades",
+        )
 
         # --- Step 1: health-check (ABORT on failure) ---
         health_result = await self._run_skill("health-check")
@@ -323,8 +335,16 @@ class HeartbeatOrchestrator:
         # Check risk approval and use adjusted signal
         if risk_result.data and not risk_result.data.get("approved", True):
             reason = risk_result.data.get("rejection_reason", "")
+            # Time-deferred rejections (currently only the
+            # pre-order-window block) shouldn't burn a
+            # max_risk_rejected_retries_per_day slot — the underlying
+            # condition is "wait N minutes", not "this signal is bad".
+            # The `time_blocked` disposition is treated as retryable
+            # by the dedup query but excluded from the cap count.
+            is_deferred = bool(risk_result.data.get("deferred"))
+            disposition = "time_blocked" if is_deferred else "risk_rejected"
             logger.info("risk-check rejected signal %d: %s", index, reason)
-            await self._set_disposition(signal, "risk_rejected", reason)
+            await self._set_disposition(signal, disposition, reason)
             return results
         if risk_result.data and risk_result.data.get("signal"):
             signal = risk_result.data["signal"]  # use risk-adjusted signal (position size)
@@ -601,11 +621,33 @@ class HeartbeatOrchestrator:
             if self._watchdog:
                 self._watchdog.record_heartbeat()
 
-            # Determine interval based on market hours
+            # Determine interval based on market hours. Off-hours uses
+            # the longer cadence (60-min default) — but we also clamp
+            # against "time until next order window" so an 8:00 AM
+            # heartbeat doesn't lock the next cycle to 9:00 AM and
+            # leave the start of the order window unmonitored. We anchor
+            # on order_start (not market.open) because risk-check rejects
+            # every signal with "Outside order window" before then —
+            # firing the first cycle at 09:15 when order_start=09:20
+            # generates signals that all get risk-blocked and consume
+            # one max_risk_rejected_retries_per_day slot each.
             if self._ctx.market_hours.is_market_hours():
                 interval = self._ctx.config.heartbeat.market_hours_interval_min * 60
             else:
                 interval = self._ctx.config.heartbeat.off_hours_interval_min * 60
+                try:
+                    open_in = self._ctx.market_hours.seconds_until_next_order_window()
+                except Exception:
+                    open_in = float("inf")
+                # +2s of slack so is_order_window() reads True when
+                # the next loop iteration runs.
+                if open_in > 0 and open_in + 2 < interval:
+                    logger.info(
+                        "Heartbeat: shortening off-hours sleep from %ds to %ds "
+                        "so the first market-hours cycle fires at order_start",
+                        int(interval), int(open_in + 2),
+                    )
+                    interval = open_in + 2
 
             # Sleep for remaining interval (subtract elapsed time)
             elapsed = time.monotonic() - start

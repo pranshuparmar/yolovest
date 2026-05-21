@@ -17,8 +17,8 @@ export function LoginPage() {
       if (!ok) {
         setError("Invalid password");
       }
-    } catch {
-      setError("Cannot connect to server");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Login failed");
     } finally {
       setLoading(false);
     }

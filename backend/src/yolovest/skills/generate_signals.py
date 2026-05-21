@@ -277,6 +277,36 @@ class GenerateSignalsSkill(SkillBase):
                     logger.info("Insufficient daily data for %s (%d bars)", symbol, len(daily_bars))
                     continue
 
+                # Staleness gate. If the latest persisted daily bar is
+                # more than `max_signal_data_age_trading_days` trading
+                # sessions behind the most recent completed session,
+                # signals built on this data would be reasoning about
+                # stale market state — reject so a delisted / fetch-
+                # broken symbol can't produce stale signals every
+                # heartbeat.
+                latest_bar_date = daily_bars[-1].timestamp.date()
+                expected_freshest = self.ctx.market_hours.most_recent_completed_trading_day(now)
+                missing = self.ctx.market_hours.trading_days_missing_after(
+                    latest_bar_date, expected_freshest,
+                )
+                max_age = self.ctx.config.market_data.max_signal_data_age_trading_days
+                if missing > max_age:
+                    filter_counts.setdefault("stale_data", 0)
+                    filter_counts["stale_data"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "stale_data",
+                        "detail": (
+                            f"latest bar {latest_bar_date} is {missing} trading "
+                            f"days behind {expected_freshest} (max {max_age})"
+                        ),
+                    })
+                    logger.info(
+                        "Skipping %s — latest bar %s is %d trading days "
+                        "behind %s (threshold %d)",
+                        symbol, latest_bar_date, missing, expected_freshest, max_age,
+                    )
+                    continue
+
                 features = compute_features(daily_bars, indicator_cfg)
                 if not features:
                     filter_counts["feature_computation_failed"] += 1
@@ -346,6 +376,44 @@ class GenerateSignalsSkill(SkillBase):
                 holding_period, product, expected_days = await self._decide_holding_period(
                     features, existing_positions=open_positions,
                 )
+
+                # Hard ATR-eligibility cap for intraday: a stock with daily
+                # ATR > volatility.max_atr_pct_for_intraday_eligibility (5%
+                # default) is too volatile to reliably square off in a
+                # half-day session. `_is_intraday_viable` already enforces
+                # this in balanced/dynamic mode (routing to swing); this
+                # block covers the pure intraday strategy mode where the
+                # `max_days == 0` shortcut bypasses that check.
+                if holding_period == "intraday":
+                    elig_cap = float(getattr(
+                        self.ctx.config.strategy.volatility,
+                        "max_atr_pct_for_intraday_eligibility",
+                        0.0,
+                    ))
+                    sym_atr_pct = float(features.get("atr_pct", 0.0))
+                    if elig_cap > 0 and sym_atr_pct > elig_cap:
+                        filter_counts.setdefault(
+                            "intraday_atr_ineligible", 0,
+                        )
+                        filter_counts["intraday_atr_ineligible"] += 1
+                        rejection_details.append({
+                            "symbol": symbol,
+                            "reason": "intraday_atr_ineligible",
+                            "detail": (
+                                f"atr_pct {sym_atr_pct * 100:.2f}% > "
+                                f"intraday eligibility cap "
+                                f"{elig_cap * 100:.2f}% — stock too volatile "
+                                f"to square off in a half-day session"
+                            ),
+                        })
+                        logger.info(
+                            "Intraday ATR ineligible: %s atr_pct=%.2f%% > "
+                            "cap %.2f%% — skipping",
+                            symbol, sym_atr_pct * 100, elig_cap * 100,
+                        )
+                        outcome_tracker[symbol] = False
+                        continue
+
                 use_intraday = holding_period == "intraday"
                 is_balanced = self.ctx.config.strategy.mode == "balanced"
 
@@ -447,13 +515,37 @@ class GenerateSignalsSkill(SkillBase):
                     outcome_tracker[symbol] = False
                     continue
 
-                # Adjust SELL signals: force to MIS/intraday if user doesn't hold the stock
+                # Adjust SELL signals: force to MIS/intraday if user doesn't
+                # hold the stock. Dropped when the per-symbol decision is
+                # swing (long_term / short_term modes, or balanced mode where
+                # the swing model won) — converting a swing-horizon SELL into
+                # an intraday MIS short would mix geometries.
                 from yolovest.strategy.holding_period import adjust_sell_for_holdings
 
-                holding_period, product, expected_days = adjust_sell_for_holdings(
+                adjusted = adjust_sell_for_holdings(
                     prediction.signal_type, holding_period, product,
                     symbol, held_symbols, expected_days,
                 )
+                if adjusted is None:
+                    filter_counts.setdefault("short_on_swing_horizon", 0)
+                    filter_counts["short_on_swing_horizon"] += 1
+                    rejection_details.append({
+                        "symbol": symbol, "reason": "short_on_swing_horizon",
+                        "detail": (
+                            f"SELL on non-held {symbol} with "
+                            f"holding_period='{holding_period}' would require "
+                            f"intraday/MIS — dropped (only intraday-decided "
+                            f"SELLs are eligible for retail shorting)"
+                        ),
+                    })
+                    logger.info(
+                        "Skipping SELL for non-held %s — would mix swing "
+                        "geometry (%s, %dd) with intraday MIS short",
+                        symbol, holding_period, expected_days,
+                    )
+                    outcome_tracker[symbol] = False
+                    continue
+                holding_period, product, expected_days = adjusted
 
                 # Intraday cutoff: skip intraday signals after configured time
                 if holding_period == "intraday":
@@ -478,6 +570,26 @@ class GenerateSignalsSkill(SkillBase):
 
                 entry = prediction.entry_price
                 atr = features.get("atr_14", entry * 0.02)
+                # Clamp the ATR used for intraday geometry. A high-ATR
+                # stock (e.g. JAINREC at ~11.6% daily ATR) would otherwise
+                # get a 6-7% intraday target with the default 0.6×
+                # multiplier — unreachable in a half-day. Capping at 3.5%
+                # (default) limits the implied target distance to ~2.1%
+                # while leaving median large-caps (1-2% ATR) untouched.
+                if holding_period == "intraday":
+                    max_atr_pct = float(
+                        self.ctx.config.strategy.holding_periods.intraday
+                            .max_atr_pct_for_target
+                    )
+                    if max_atr_pct > 0:
+                        atr_cap = entry * max_atr_pct
+                        if atr > atr_cap:
+                            logger.info(
+                                "Clamping intraday ATR for %s: %.2f → "
+                                "%.2f (entry=%.2f, max_atr_pct=%.3f)",
+                                symbol, atr, atr_cap, entry, max_atr_pct,
+                            )
+                            atr = atr_cap
                 target_mult, sl_mult = interpolate_atr_multipliers(
                     expected_days, self.ctx.config.strategy.holding_periods,
                 )
@@ -543,10 +655,12 @@ class GenerateSignalsSkill(SkillBase):
                 if is_reentry:
                     signal["reentry"] = True
 
-                # Step 5: Confidence filter (asymmetric per signal type)
-                base_threshold = (
-                    min_confidence_buy if prediction.signal_type == "BUY"
-                    else min_confidence_sell
+                # Step 5: Confidence filter (asymmetric per signal type
+                # AND per holding bucket — intraday and swing have very
+                # different signal characteristics so a single floor
+                # rarely fits both well).
+                base_threshold = risk_cfg.resolve_min_confidence(
+                    holding_period, prediction.signal_type,
                 )
                 effective_min = base_threshold
                 is_repeat = symbol in recently_traded
@@ -576,7 +690,13 @@ class GenerateSignalsSkill(SkillBase):
                     filter_counts["passed"] += 1
                     outcome_tracker[symbol] = True
                     signal.setdefault("mode", self.ctx.config.mode)
-                    await self.ctx.db.insert_signal(signal)
+                    signal_id = await self.ctx.db.insert_signal(signal)
+                    if signal_id:
+                        # Carry the row id forward so trade-execute can
+                        # write it on the trade and the UNIQUE index
+                        # rejects a duplicate execution of the same
+                        # signal under restart / retry races.
+                        signal["signal_id"] = signal_id
                     signals_generated.append(signal)
                     logger.info(
                         "PASSED %s for %s @ %.2f (%s)",
@@ -763,21 +883,44 @@ class GenerateSignalsSkill(SkillBase):
             logger.debug("Balanced: swing model failed for %s: %s", symbol, swing_pred)
             swing_pred = None
 
-        # Filter out HOLD signals (confidence is meaningless for HOLD)
-        intra_conf = intra_pred.confidence if intra_pred and intra_pred.signal_type != "HOLD" else -1
-        swing_conf = swing_pred.confidence if swing_pred and swing_pred.signal_type != "HOLD" else -1
+        # Filter out HOLD signals (confidence is meaningless for HOLD).
+        # Compare margin-above-threshold (not raw confidence): the
+        # intraday model is trained on balanced labels (~29/43/28)
+        # while swing is HOLD-dominated (~7/87/6), so raw confidence
+        # is not comparable across them. Margin = how far above the
+        # model's effective gating threshold the prediction sits,
+        # which normalises for the per-model calibration.
+        def _margin(pred: Any, model_type: str) -> float:
+            if pred is None or pred.signal_type == "HOLD":
+                return -1.0
+            thresholds = self.ctx.ml.get_effective_thresholds(model_type)
+            if not thresholds:
+                # Legacy model without tuned thresholds — fall back to
+                # raw confidence (matches the pre-tuning behaviour).
+                return float(pred.confidence)
+            key = pred.signal_type.lower()  # "buy" / "sell"
+            threshold = float(thresholds.get(key, 0.5))
+            return float(pred.confidence) - threshold
 
-        if intra_conf < 0 and swing_conf < 0:
+        intra_margin = _margin(intra_pred, "intraday")
+        swing_margin = _margin(swing_pred, "swing")
+
+        if intra_margin < 0 and swing_margin < 0:
             # Both HOLD or both failed — return the swing HOLD (or intraday if no swing)
             prediction = swing_pred or intra_pred
             return prediction, fallback_period, fallback_product, fallback_days
 
-        if intra_conf >= swing_conf:
+        if intra_margin >= swing_margin:
             # Intraday wins
             logger.debug(
-                "Balanced %s: intraday wins (%.2f %s) vs swing (%.2f %s)",
-                symbol, intra_conf, intra_pred.signal_type,
-                swing_conf, swing_pred.signal_type if swing_pred else "N/A",
+                "Balanced %s: intraday wins (margin=%.3f %s @ %.2f) vs swing "
+                "(margin=%.3f %s @ %.2f)",
+                symbol, intra_margin,
+                intra_pred.signal_type if intra_pred else "N/A",
+                intra_pred.confidence if intra_pred else 0,
+                swing_margin,
+                swing_pred.signal_type if swing_pred else "N/A",
+                swing_pred.confidence if swing_pred else 0,
             )
             return intra_pred, "intraday", "MIS", 0
         else:
@@ -794,9 +937,13 @@ class GenerateSignalsSkill(SkillBase):
             )
             label = "swing" if expected_days <= 5 else "positional" if expected_days <= 15 else "long_term"
             logger.debug(
-                "Balanced %s: swing wins (%.2f %s) vs intraday (%.2f %s) — %s (%dd)",
-                symbol, swing_conf, swing_pred.signal_type,
-                intra_conf, intra_pred.signal_type if intra_pred else "N/A",
+                "Balanced %s: swing wins (margin=%.3f %s @ %.2f) vs intraday "
+                "(margin=%.3f %s @ %.2f) — %s (%dd)",
+                symbol, swing_margin, swing_pred.signal_type,
+                swing_pred.confidence if swing_pred else 0,
+                intra_margin,
+                intra_pred.signal_type if intra_pred else "N/A",
+                intra_pred.confidence if intra_pred else 0,
                 label, expected_days,
             )
             return swing_pred, label, "CNC", expected_days

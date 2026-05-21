@@ -1,0 +1,11 @@
+-- Accumulated realised PnL from partial profit bookings on a trade.
+-- The final close path's `pnl` column covers only the remaining
+-- shares at full closure; this column captures every partial booking
+-- that happened earlier so total PnL per trade is
+--   total = realized_partial_pnl + pnl  (when status='closed')
+--         = realized_partial_pnl + unrealised_now  (when 'open')
+-- Without it, the partial-close action introduced earlier silently
+-- "loses" the booked profit when the user looks at trades.pnl.
+--
+-- Default 0 keeps existing closed-trade math identical.
+ALTER TABLE trades ADD COLUMN realized_partial_pnl REAL DEFAULT 0;

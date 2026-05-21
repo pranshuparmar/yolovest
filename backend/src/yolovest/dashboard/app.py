@@ -230,6 +230,143 @@ def _extract_utilised_margin(margins: dict[str, Any]) -> float:
     return 0.0
 
 
+def _compute_cdsl_status(holdings: list[dict[str, Any]]) -> dict[str, Any]:
+    """Inspect Kite holdings to figure out CDSL TPIN auth state.
+
+    Per Kite's holdings schema:
+      - quantity            = total qty held
+      - t1_quantity         = subset still in T+1 (can't be sold today)
+      - authorised_quantity = qty already authorised for sale today
+                              (via DDPI or daily CDSL TPIN)
+      - authorised_date     = "0001-01-01 ..." when never authorised
+
+    Deliverable today  = quantity - t1_quantity
+    Needs CDSL auth    = deliverable - authorised_quantity > 0
+
+    DDPI users see authorised_quantity == quantity for every row at
+    every check, so this returns needs_auth=False without ever
+    nagging them.
+
+    Empty holdings → needs_auth=False (nothing to sell).
+
+    NOTE: `needs_auth` here is "are there unauthorised holdings?",
+    not "should we alert the user?". The alert gate is computed
+    separately by `_compute_cdsl_alert_gate` so users who hold
+    long-term shares with no system exits aren't pinged daily.
+    """
+    total_holdings = 0
+    total_deliverable = 0
+    total_authorised = 0
+    pending_symbols: list[dict[str, Any]] = []
+
+    for h in holdings or []:
+        qty = int(h.get("quantity") or h.get("opening_quantity") or 0)
+        if qty <= 0:
+            continue
+        t1 = int(h.get("t1_quantity") or 0)
+        deliverable = max(0, qty - t1)
+        if deliverable <= 0:
+            continue
+        authorised = int(h.get("authorised_quantity") or 0)
+        unauth = max(0, deliverable - authorised)
+        total_holdings += qty
+        total_deliverable += deliverable
+        total_authorised += min(authorised, deliverable)
+        if unauth > 0:
+            pending_symbols.append({
+                "symbol": h.get("tradingsymbol"),
+                "isin": h.get("isin"),
+                "deliverable_qty": deliverable,
+                "authorised_qty": authorised,
+                "pending_qty": unauth,
+            })
+
+    needs_auth = total_authorised < total_deliverable
+    return {
+        "needs_auth": needs_auth,
+        "total_holdings": total_holdings,
+        "deliverable_qty": total_deliverable,
+        "authorised_qty": total_authorised,
+        "pending_qty": max(0, total_deliverable - total_authorised),
+        "pending_count": len(pending_symbols),
+        "pending_symbols": pending_symbols,
+        # When the user has holdings but nothing is pending auth, the
+        # most likely explanation is DDPI is set up. We can't be 100%
+        # certain (could also mean they auth'd earlier today) but this
+        # is the right hint to suppress the banner once a day after
+        # they auth.
+        "ddpi_likely_enabled": (
+            total_deliverable > 0 and total_authorised >= total_deliverable
+        ),
+    }
+
+
+async def _compute_cdsl_alert_gate(ctx: Any) -> dict[str, Any]:
+    """Decide whether a CDSL alert should actually fire.
+
+    Just having unauthorised holdings isn't enough — a long-term
+    investor who never sells shouldn't be nagged daily. We only
+    alert when something the system manages could try to place a
+    delivery (CNC) sell today:
+
+      - Open system-managed CNC position (could exit on target/SL).
+      - Active GTT at the broker (could fire on price crossing).
+      - Pending CNC SELL in the manual-approval queue.
+
+    Returns a dict the caller merges into the cdsl_status snapshot:
+        {
+            "has_active_cnc_exits": bool,
+            "active_cnc_positions": int,
+            "active_gtts": int,
+            "pending_cnc_sells": int,
+        }
+    """
+    active_positions = 0
+    active_gtts = 0
+    pending_cnc_sells = 0
+
+    try:
+        positions = await ctx.db.get_open_positions(mode=ctx.config.mode)
+        active_positions = sum(
+            1 for p in positions
+            if (p.get("product") or "").upper() == "CNC"
+            and (p.get("origin") or "system") == "system"
+        )
+    except Exception:
+        logger.debug("cdsl-gate: get_open_positions failed", exc_info=True)
+
+    try:
+        if hasattr(ctx.broker, "get_gtts") and await ctx.broker.is_authenticated():
+            gtts = await ctx.broker.get_gtts() or []
+            # Only count GTTs that aren't already terminal — Kite
+            # keeps cancelled/triggered ones in the list for a while.
+            active_gtts = sum(
+                1 for g in gtts
+                if str(g.get("status") or "").lower() == "active"
+            )
+    except Exception:
+        logger.debug("cdsl-gate: get_gtts failed", exc_info=True)
+
+    try:
+        pending = await ctx.db.get_pending_trades()
+        pending_cnc_sells = sum(
+            1 for p in pending
+            if (p.get("product") or "").upper() == "CNC"
+            and (p.get("signal_type") or "").upper() == "SELL"
+        )
+    except Exception:
+        logger.debug("cdsl-gate: get_pending_trades failed", exc_info=True)
+
+    return {
+        "has_active_cnc_exits": (
+            active_positions > 0 or active_gtts > 0 or pending_cnc_sells > 0
+        ),
+        "active_cnc_positions": active_positions,
+        "active_gtts": active_gtts,
+        "pending_cnc_sells": pending_cnc_sells,
+    }
+
+
 def _compute_holdings_breakdown(holdings: list[dict[str, Any]]) -> dict[str, float]:
     """Sum invested cost basis and current market value across delivery holdings."""
     invested = 0.0
@@ -625,6 +762,102 @@ def create_app(ctx: AppContext) -> FastAPI:
     # Portfolio Overview
     # ------------------------------------------------------------------
 
+    @app.get("/api/funds")
+    async def get_funds(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Live funds / margins snapshot from the broker.
+
+        Returns the raw broker.get_margins() payload alongside a parsed
+        summary so the UI can render the high-signal numbers without
+        knowing the Kite-specific schema. Used by the Funds page to
+        give a complete "what's in my account right now" view —
+        equivalent to Kite's Funds tab — so the user doesn't need to
+        log into Zerodha to check available cash, used margin, payout
+        balance, etc.
+        """
+        if not await ctx.broker.is_authenticated():
+            return {
+                "authenticated": False,
+                "raw": None,
+                "summary": {
+                    "available_cash": 0.0,
+                    "live_balance": 0.0,
+                    "opening_balance": 0.0,
+                    "utilised_margin": 0.0,
+                    "m2m_unrealised": 0.0,
+                    "m2m_realised": 0.0,
+                    "payout": 0.0,
+                    "collateral": 0.0,
+                    "exposure": 0.0,
+                    "span": 0.0,
+                    "delivery": 0.0,
+                    "net": 0.0,
+                },
+            }
+
+        try:
+            raw = await ctx.broker.get_margins()
+        except Exception as e:
+            logger.exception("get_funds: broker.get_margins failed")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Broker margins fetch failed: {e}",
+            ) from e
+
+        # Parse the Kite equity segment into a flat summary. Commodity
+        # is intentionally ignored — the platform is equity-only.
+        equity: dict[str, Any] = (raw or {}).get("equity", {}) or {}
+        avail: dict[str, Any] = equity.get("available", {}) or {}
+        util: dict[str, Any] = equity.get("utilised", {}) or {}
+
+        def _f(d: dict[str, Any], key: str) -> float:
+            try:
+                return float(d.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        summary = {
+            "available_cash": _f(avail, "cash"),
+            "live_balance": _f(avail, "live_balance"),
+            "opening_balance": _f(avail, "opening_balance"),
+            "adhoc_margin": _f(avail, "adhoc_margin"),
+            "intraday_payin": _f(avail, "intraday_payin"),
+            "collateral": _f(avail, "collateral"),
+            "utilised_margin": _f(util, "debits"),
+            "m2m_unrealised": _f(util, "m2m_unrealised"),
+            "m2m_realised": _f(util, "m2m_realised"),
+            "payout": _f(util, "payout"),
+            "exposure": _f(util, "exposure"),
+            "span": _f(util, "span"),
+            "delivery": _f(util, "delivery"),
+            "option_premium": _f(util, "option_premium"),
+            "turnover": _f(util, "turnover"),
+            "net": _f(equity, "net"),
+        }
+        return {
+            "authenticated": True,
+            "enabled": bool(equity.get("enabled", True)),
+            "raw": raw,
+            "summary": summary,
+        }
+
+    @app.get("/api/funds/history")
+    async def get_funds_history(
+        days: int = Query(90, ge=1, le=365),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Daily funds/margins history from the funds-snapshot CRON.
+
+        Mode-scoped to the current trading mode (paper / live). Used
+        by the Funds page to render the cash + holdings + used-margin
+        trail so the user can see daily movements without Kite.
+        """
+        snapshots = await ctx.db.get_funds_snapshots(
+            mode=ctx.config.mode, days=days,
+        )
+        return {"snapshots": snapshots, "count": len(snapshots)}
+
     @app.get("/api/portfolio")
     async def get_portfolio(user: str = Depends(verify_credentials)) -> dict[str, Any]:
         """Portfolio overview: capital, exposure, open positions, PnL.
@@ -689,15 +922,28 @@ def create_app(ctx: AppContext) -> FastAPI:
     @app.post("/api/positions/{trade_id}/close")
     async def close_position(
         trade_id: str,
+        qty: int | None = Query(
+            None, ge=1,
+            description="Optional partial-close quantity. Omit to close the whole position.",
+        ),
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Immediately exit a single open position at market.
 
-        Flow:
+        Full close (default — no `qty` param):
           1. Cancel any attached SL order at broker.
           2. Delete any attached GTT at broker (so it doesn't fire later).
           3. Place a MARKET exit order in the opposite direction.
           4. Close the trade row with realised PnL.
+
+        Partial close (`?qty=N` where N < current quantity):
+          1. Place a MARKET exit order for N shares.
+          2. Resize the broker-side SL / target / GTT to the remaining
+             quantity so the protection still matches the position.
+          3. Update trades.quantity to (current - N); trade stays open.
+          4. Log the partial realised PnL to audit_log (separate from
+             the trade's final pnl which still accrues against the
+             remaining shares).
 
         Live mode places a real order via the broker; paper mode simulates
         the exit using current LTP. Bypasses the normal manual-approval
@@ -713,9 +959,203 @@ def create_app(ctx: AppContext) -> FastAPI:
             )
 
         symbol = trade["symbol"]
-        qty = int(trade["quantity"])
+        full_qty = int(trade["quantity"])
+        is_partial = qty is not None and qty < full_qty
+        if qty is not None and qty > full_qty:
+            raise HTTPException(
+                status_code=400,
+                detail=f"qty={qty} exceeds current position size {full_qty}",
+            )
+        exit_qty = int(qty) if is_partial else full_qty
+        remaining_qty = full_qty - exit_qty
         exit_side = "SELL" if trade["signal_type"] == "BUY" else "BUY"
         product = trade.get("product", "MIS")
+
+        if is_partial:
+            # Partial-close path: place exit for `exit_qty`, then resize
+            # broker-side SL / target / GTT to `remaining_qty`. We do NOT
+            # cancel/delete the protection legs the way full-close does —
+            # the remaining shares still need them.
+            try:
+                exit_order_id = await ctx.broker.place_order(
+                    symbol=symbol, side=exit_side, quantity=exit_qty,
+                    order_type="MARKET", product=product,
+                    tag="yv-partial-close",
+                )
+            except Exception as e:
+                logger.exception(
+                    "close_position(partial): place exit failed for %s", trade_id,
+                )
+                msg = str(e)
+                if _is_cdsl_tpin_error(msg):
+                    # Defer to the frontend to render the CDSL action UI;
+                    # 412 Precondition Required nicely signals "do the
+                    # auth step first, then retry."
+                    cdsl = await _build_cdsl_response(
+                        msg,
+                        triggered_by={
+                            "symbol": symbol,
+                            "quantity": exit_qty,
+                            "side": exit_side,
+                            "source": "partial-close",
+                        },
+                    )
+                    raise HTTPException(status_code=412, detail=cdsl)
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Broker rejected partial-exit order: {e}",
+                )
+
+            # Wait briefly for fill
+            exit_price = None
+            for _ in range(10):
+                try:
+                    status = await ctx.broker.get_order_status(exit_order_id)
+                    exit_price = status.get("average_price")
+                    if exit_price and exit_price > 0:
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+            if not exit_price or exit_price <= 0:
+                try:
+                    exit_price = await ctx.market_data.get_ltp(symbol)
+                except Exception:
+                    exit_price = float(
+                        trade.get("fill_price") or trade["entry_price"] or 0
+                    )
+
+            entry = float(trade.get("fill_price") or trade["entry_price"])
+            gross_pnl = (
+                (exit_price - entry) * exit_qty
+                if trade["signal_type"] == "BUY"
+                else (entry - exit_price) * exit_qty
+            )
+            from yolovest.costs import resolve_round_trip_costs
+            costs, _src, _breakdown = await resolve_round_trip_costs(
+                ctx.broker, symbol=symbol, signal_type=trade["signal_type"],
+                entry_price=entry, exit_price=float(exit_price),
+                quantity=exit_qty, product=product,
+                cost_config=ctx.config.transaction_costs,
+            )
+            partial_pnl = round(gross_pnl - costs, 2)
+
+            # Resize broker-side protection to remaining_qty. GTT
+            # (CNC OCO) → modify with new quantity, target/SL prices
+            # unchanged. MIS broker-side SL → cancel + re-place at
+            # remaining_qty. Same template as
+            # position_monitor._check_partial_profit_booking's
+            # resize block, but without the move-to-breakeven step
+            # (that's a separate decision the user can take via the
+            # Tighten SL action).
+            gtt_id = trade.get("gtt_id")
+            if gtt_id and remaining_qty > 0 and hasattr(ctx.broker, "modify_gtt"):
+                tgt = float(trade.get("target_price") or 0)
+                cur_sl = float(trade.get("stop_loss_price") or 0)
+                if tgt > 0 and cur_sl > 0:
+                    buf = 0.005
+                    if exit_side == "SELL":
+                        sl_limit = cur_sl * (1 - buf)
+                        tgt_limit = tgt * (1 - buf * 0.5)
+                    else:
+                        sl_limit = cur_sl * (1 + buf)
+                        tgt_limit = tgt * (1 + buf * 0.5)
+                    try:
+                        await ctx.broker.modify_gtt(
+                            gtt_id=int(gtt_id), symbol=symbol, side=exit_side,
+                            quantity=remaining_qty,
+                            stoploss_trigger=cur_sl, stoploss_limit=sl_limit,
+                            target_trigger=tgt, target_limit=tgt_limit,
+                            last_price=float(exit_price),
+                        )
+                        await ctx.db.log_gtt_event(
+                            trade_id=trade_id, gtt_id=int(gtt_id), symbol=symbol,
+                            event_type="modified", status="active",
+                            details={
+                                "reason": "user_partial_close_resize",
+                                "quantity": remaining_qty,
+                                "sl_trigger": cur_sl, "sl_limit": sl_limit,
+                                "target_trigger": tgt, "target_limit": tgt_limit,
+                            },
+                        )
+                    except Exception:
+                        logger.exception(
+                            "close_position(partial): GTT resize failed for %s",
+                            trade_id,
+                        )
+
+            # For MIS broker-side SL / target LIMITs we cancel and let
+            # position-monitor re-attach them with the new qty on its
+            # next cycle. Resizing in place via cancel/replace here
+            # would duplicate trade_execute._attach_mis_target_limit
+            # logic for marginal benefit — position-monitor runs every
+            # 15 min and will reconcile.
+            if not gtt_id:
+                for oid_key in ("sl_order_id", "target_order_id"):
+                    oid = trade.get(oid_key)
+                    if not oid:
+                        continue
+                    try:
+                        await ctx.broker.cancel_order(oid)
+                    except Exception:
+                        logger.debug(
+                            "close_position(partial): cancel %s failed (terminal?)",
+                            oid_key, exc_info=True,
+                        )
+
+            # Resize the local trade row + record the partial PnL.
+            # trades.pnl stays NULL until the final closure of the
+            # remaining shares; trades.realized_partial_pnl accumulates
+            # the booked-along-the-way PnL so the UI can show
+            # total = realized_partial_pnl + (pnl or unrealised).
+            await ctx.db.update_position_quantity(trade_id, remaining_qty)
+            await ctx.db.increment_realized_partial_pnl(trade_id, partial_pnl)
+            try:
+                await ctx.db.log_audit(
+                    action_type="partial_close",
+                    skill_name="user_partial_close",
+                    output_summary={
+                        "trade_id": trade_id, "symbol": symbol,
+                        "exit_qty": exit_qty, "remaining_qty": remaining_qty,
+                        "exit_price": float(exit_price),
+                        "entry_price": entry,
+                        "partial_pnl": partial_pnl,
+                        "exit_order_id": exit_order_id,
+                    },
+                    duration_ms=0,
+                )
+            except Exception:
+                logger.debug("close_position(partial): audit log failed", exc_info=True)
+
+            try:
+                await ctx.notify.send(
+                    f"Partial close: {symbol} {exit_qty}/{full_qty} @ "
+                    f"₹{exit_price:.2f} (entry ₹{entry:.2f}) — "
+                    f"booked ₹{partial_pnl:+,.2f}. Remaining {remaining_qty} open.",
+                    alert_type="trade_exit",
+                )
+            except Exception:
+                logger.debug("close_position(partial): notify failed", exc_info=True)
+
+            logger.info(
+                "close_position(partial): %s %s qty=%d/%d exit=%.2f "
+                "partial_pnl=%.2f remaining=%d (order=%s)",
+                exit_side, symbol, exit_qty, full_qty, exit_price,
+                partial_pnl, remaining_qty, exit_order_id,
+            )
+
+            return {
+                "status": "partial",
+                "trade_id": trade_id,
+                "exit_qty": exit_qty,
+                "remaining_qty": remaining_qty,
+                "exit_price": float(exit_price),
+                "partial_pnl": partial_pnl,
+                "exit_order_id": exit_order_id,
+            }
+
+        # ---------- Full-close path (existing behaviour) ----------
+        qty = full_qty
 
         # Cancel any open SL / target (MIS LIMIT) orders so the exit isn't
         # double-placed and dangling orders don't fire after we've closed.
@@ -757,6 +1197,18 @@ def create_app(ctx: AppContext) -> FastAPI:
             )
         except Exception as e:
             logger.exception("close_position: place exit order failed for %s", trade_id)
+            msg = str(e)
+            if _is_cdsl_tpin_error(msg):
+                cdsl = await _build_cdsl_response(
+                    msg,
+                    triggered_by={
+                        "symbol": symbol,
+                        "quantity": qty,
+                        "side": exit_side,
+                        "source": "close-position",
+                    },
+                )
+                raise HTTPException(status_code=412, detail=cdsl)
             raise HTTPException(status_code=502, detail=f"Broker rejected exit order: {e}")
 
         # Wait briefly for fill, fall back to LTP-based estimate
@@ -815,6 +1267,373 @@ def create_app(ctx: AppContext) -> FastAPI:
             "pnl": pnl,
             "exit_order_id": exit_order_id,
         }
+
+    @app.post("/api/positions/{trade_id}/tighten-sl")
+    async def tighten_sl(
+        trade_id: str,
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Move the stop-loss to a tighter level on an open position.
+
+        Body: {"new_sl": float}
+
+        Routes through the right execution path based on what the trade
+        carries:
+          - `gtt_id` (CNC OCO GTT): calls broker.modify_gtt to lift the
+            SL leg in place. Target leg unchanged.
+          - `sl_order_id` (MIS broker-side SL): calls broker.modify_sl_order
+            to raise the trigger.
+          - Neither (legacy client-side managed): just updates the DB so
+            position-monitor's client-side exit uses the new level.
+
+        Validates that the new level is genuinely tighter (closer to LTP)
+        than the existing one — refuses to widen the SL via this endpoint
+        to prevent accidental risk increases. Use the order form to flip
+        a position outright.
+        """
+        body = await request.json()
+        try:
+            new_sl = float(body["new_sl"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(
+                status_code=400, detail=f"Body must include numeric new_sl: {e}",
+            ) from e
+        if new_sl <= 0:
+            raise HTTPException(status_code=400, detail="new_sl must be > 0")
+
+        trade = await ctx.db.get_trade(trade_id)
+        if not trade:
+            raise HTTPException(status_code=404, detail=f"No trade with id={trade_id}")
+        if trade.get("status") != "open":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trade {trade_id} is {trade.get('status')!r}, not open",
+            )
+
+        signal_type = trade["signal_type"]
+        current_sl = float(trade.get("stop_loss_price") or 0)
+        # Tighten = move SL toward LTP (higher for BUY, lower for SELL).
+        if current_sl > 0:
+            if signal_type == "BUY" and new_sl <= current_sl:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"new_sl {new_sl} must be above current SL {current_sl} "
+                        f"to tighten a BUY position"
+                    ),
+                )
+            if signal_type == "SELL" and new_sl >= current_sl:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"new_sl {new_sl} must be below current SL {current_sl} "
+                        f"to tighten a SELL position"
+                    ),
+                )
+
+        symbol = trade["symbol"]
+        path: str
+        gtt_id = trade.get("gtt_id")
+        sl_order_id = trade.get("sl_order_id")
+
+        if gtt_id and hasattr(ctx.broker, "modify_gtt"):
+            # CNC OCO: modify_gtt requires both legs supplied; target
+            # unchanged, SL trigger / SL limit moved. Mirrors
+            # position_monitor._maybe_trail_gtt_sl.
+            exit_side = "SELL" if signal_type == "BUY" else "BUY"
+            tgt = float(trade.get("target_price") or 0)
+            if tgt <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Trade has no target_price; cannot modify GTT",
+                )
+            buf = 0.005
+            if exit_side == "SELL":
+                sl_limit = new_sl * (1 - buf)
+                tgt_limit = tgt * (1 - buf * 0.5)
+            else:
+                sl_limit = new_sl * (1 + buf)
+                tgt_limit = tgt * (1 + buf * 0.5)
+            try:
+                ltp = await ctx.market_data.get_ltp(symbol)
+            except Exception:
+                ltp = float(trade.get("fill_price") or trade.get("entry_price") or 0)
+            await ctx.broker.modify_gtt(
+                gtt_id=int(gtt_id), symbol=symbol, side=exit_side,
+                quantity=int(trade["quantity"]),
+                stoploss_trigger=new_sl, stoploss_limit=sl_limit,
+                target_trigger=tgt, target_limit=tgt_limit,
+                last_price=float(ltp or 0),
+            )
+            await ctx.db.log_gtt_event(
+                trade_id=trade_id, gtt_id=int(gtt_id), symbol=symbol,
+                event_type="modified", status="active",
+                details={
+                    "reason": "user_tighten_sl",
+                    "sl_trigger": new_sl, "sl_limit": sl_limit,
+                    "target_trigger": tgt, "target_limit": tgt_limit,
+                    "previous_sl": current_sl,
+                },
+            )
+            path = "gtt"
+        elif sl_order_id and hasattr(ctx.broker, "modify_sl_order"):
+            # MIS broker-side SL: trigger lifted in place.
+            await ctx.broker.modify_sl_order(sl_order_id, new_sl)
+            path = "sl_order"
+        else:
+            # Legacy client-side managed — just update the DB; the
+            # next position-monitor cycle will exit at the new level.
+            path = "client_side"
+
+        await ctx.db.update_position_sl(trade_id, new_sl)
+        logger.info(
+            "tighten-sl: %s (trade_id=%s) SL %.2f → %.2f via %s",
+            symbol, trade_id, current_sl, new_sl, path,
+        )
+        return {
+            "ok": True, "trade_id": trade_id, "symbol": symbol,
+            "previous_sl": current_sl, "new_sl": new_sl, "path": path,
+        }
+
+    @app.post("/api/positions/{trade_id}/modify-target")
+    async def modify_target(
+        trade_id: str,
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Move the target price on an open position.
+
+        Symmetric to tighten-sl but with no direction restriction —
+        target can move in either direction since "extend the target"
+        and "take profits sooner" are both legitimate user intents.
+
+        Routes through:
+          - `gtt_id` (CNC OCO): modify_gtt with target trigger lifted,
+            SL leg unchanged.
+          - `target_order_id` (MIS resting LIMIT): modify_order with
+            new price.
+          - Neither: just updates the DB so position-monitor's
+            client-side exit uses the new level.
+        """
+        body = await request.json()
+        try:
+            new_target = float(body["new_target"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Body must include numeric new_target: {e}",
+            ) from e
+        if new_target <= 0:
+            raise HTTPException(status_code=400, detail="new_target must be > 0")
+
+        trade = await ctx.db.get_trade(trade_id)
+        if not trade:
+            raise HTTPException(status_code=404, detail=f"No trade with id={trade_id}")
+        if trade.get("status") != "open":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trade {trade_id} is {trade.get('status')!r}, not open",
+            )
+
+        signal_type = trade["signal_type"]
+        current_target = float(trade.get("target_price") or 0)
+        current_sl = float(trade.get("stop_loss_price") or 0)
+        symbol = trade["symbol"]
+        path: str
+        gtt_id = trade.get("gtt_id")
+        target_order_id = trade.get("target_order_id")
+
+        # Sanity: target must stay on the right side of LTP / entry,
+        # otherwise the OCO logic flips. For BUY target > entry/SL;
+        # for SELL target < entry/SL. We don't enforce this strictly
+        # (user might want to lower a BUY target to take profits at a
+        # tighter level, which is valid) but we DO refuse "target
+        # crosses SL" which makes the OCO unworkable.
+        if current_sl > 0:
+            if signal_type == "BUY" and new_target <= current_sl:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"BUY target {new_target} would be at/below SL {current_sl} "
+                        f"— move SL first via Tighten SL"
+                    ),
+                )
+            if signal_type == "SELL" and new_target >= current_sl:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"SELL target {new_target} would be at/above SL {current_sl} "
+                        f"— move SL first"
+                    ),
+                )
+
+        if gtt_id and hasattr(ctx.broker, "modify_gtt"):
+            exit_side = "SELL" if signal_type == "BUY" else "BUY"
+            buf = 0.005
+            if exit_side == "SELL":
+                sl_limit = current_sl * (1 - buf)
+                tgt_limit = new_target * (1 - buf * 0.5)
+            else:
+                sl_limit = current_sl * (1 + buf)
+                tgt_limit = new_target * (1 + buf * 0.5)
+            try:
+                ltp = await ctx.market_data.get_ltp(symbol)
+            except Exception:
+                ltp = float(trade.get("fill_price") or trade.get("entry_price") or 0)
+            await ctx.broker.modify_gtt(
+                gtt_id=int(gtt_id), symbol=symbol, side=exit_side,
+                quantity=int(trade["quantity"]),
+                stoploss_trigger=current_sl, stoploss_limit=sl_limit,
+                target_trigger=new_target, target_limit=tgt_limit,
+                last_price=float(ltp or 0),
+            )
+            await ctx.db.log_gtt_event(
+                trade_id=trade_id, gtt_id=int(gtt_id), symbol=symbol,
+                event_type="modified", status="active",
+                details={
+                    "reason": "user_modify_target",
+                    "sl_trigger": current_sl, "sl_limit": sl_limit,
+                    "target_trigger": new_target, "target_limit": tgt_limit,
+                    "previous_target": current_target,
+                },
+            )
+            path = "gtt"
+        elif target_order_id and hasattr(ctx.broker, "modify_order"):
+            await ctx.broker.modify_order(target_order_id, price=new_target)
+            path = "target_order"
+        else:
+            path = "client_side"
+
+        await ctx.db.conn.execute(
+            "UPDATE trades SET target_price = ? WHERE trade_id = ?",
+            (float(new_target), trade_id),
+        )
+        await ctx.db.conn.commit()
+
+        logger.info(
+            "modify-target: %s (trade_id=%s) target %.2f → %.2f via %s",
+            symbol, trade_id, current_target, new_target, path,
+        )
+        return {
+            "ok": True, "trade_id": trade_id, "symbol": symbol,
+            "previous_target": current_target,
+            "new_target": new_target, "path": path,
+        }
+
+    @app.get("/api/broker/orders")
+    async def get_broker_orders(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Today's full order book from the broker (open, executed,
+        cancelled, rejected, trigger-pending). Plus active GTTs.
+
+        Mirrors what Kite shows on the Orders tab so the user can
+        cancel / modify open orders without bouncing through Kite.
+        """
+        if not await ctx.broker.is_authenticated():
+            return {"authenticated": False, "orders": [], "gtts": []}
+        orders: list[dict[str, Any]] = []
+        gtts: list[dict[str, Any]] = []
+        try:
+            orders = list(await ctx.broker.get_orders() or [])
+        except Exception as e:
+            logger.exception("get_broker_orders: get_orders failed")
+            return {
+                "authenticated": True, "orders": [], "gtts": [],
+                "error": f"orders fetch failed: {e}",
+            }
+        try:
+            if hasattr(ctx.broker, "get_gtts"):
+                gtts = list(await ctx.broker.get_gtts() or [])
+        except Exception:
+            logger.debug("get_broker_orders: get_gtts failed", exc_info=True)
+        return {"authenticated": True, "orders": orders, "gtts": gtts}
+
+    @app.post("/api/broker/orders/{order_id}/cancel")
+    async def cancel_broker_order(
+        order_id: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Cancel a still-open broker order by id."""
+        try:
+            ok = await ctx.broker.cancel_order(order_id)
+        except Exception as e:
+            logger.exception("cancel_broker_order: %s failed", order_id)
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        return {"ok": bool(ok), "order_id": order_id}
+
+    @app.post("/api/broker/orders/{order_id}/modify")
+    async def modify_broker_order(
+        order_id: str,
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Modify an open broker order. Body accepts any subset of
+        {price, quantity, trigger_price, order_type}. None fields are
+        left unchanged.
+        """
+        body = await request.json()
+        price = body.get("price")
+        quantity = body.get("quantity")
+        trigger_price = body.get("trigger_price")
+        order_type = body.get("order_type")
+        if all(v is None for v in (price, quantity, trigger_price, order_type)):
+            raise HTTPException(
+                status_code=400,
+                detail="Body must include at least one of: price, quantity, trigger_price, order_type",
+            )
+        try:
+            await ctx.broker.modify_order(
+                order_id,
+                price=float(price) if price is not None else None,
+                quantity=int(quantity) if quantity is not None else None,
+                trigger_price=float(trigger_price) if trigger_price is not None else None,
+                order_type=str(order_type) if order_type is not None else None,
+            )
+        except Exception as e:
+            logger.exception("modify_broker_order: %s failed", order_id)
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        return {
+            "ok": True, "order_id": order_id,
+            "price": price, "quantity": quantity,
+            "trigger_price": trigger_price, "order_type": order_type,
+        }
+
+    @app.post("/api/broker/gtts/{gtt_id}/cancel")
+    async def cancel_broker_gtt(
+        gtt_id: int,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Delete a GTT order by id. Also clears the trades.gtt_id
+        link when the GTT belonged to a tracked trade so client-side
+        exit detection takes over.
+        """
+        if not hasattr(ctx.broker, "delete_gtt"):
+            raise HTTPException(status_code=400, detail="Broker does not support GTT")
+        try:
+            await ctx.broker.delete_gtt(int(gtt_id))
+        except Exception as e:
+            logger.exception("cancel_broker_gtt: %s failed", gtt_id)
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        # Best-effort: clear gtt_id on any trade carrying this GTT so
+        # position-monitor's ghost-recovery doesn't see a phantom link.
+        try:
+            cur = await ctx.db.conn.execute(
+                "SELECT trade_id, symbol FROM trades WHERE gtt_id = ?",
+                (int(gtt_id),),
+            )
+            rows = await cur.fetchall()
+            for r in rows:
+                await ctx.db.set_trade_gtt(r[0], None)
+                await ctx.db.log_gtt_event(
+                    trade_id=r[0], gtt_id=int(gtt_id), symbol=r[1],
+                    event_type="deleted", status="deleted",
+                    details={"reason": "user_cancel_via_order_book"},
+                )
+        except Exception:
+            logger.debug("cancel_broker_gtt: trade unlink failed", exc_info=True)
+        return {"ok": True, "gtt_id": gtt_id}
 
     @app.post("/api/positions/{trade_id}/convert")
     async def convert_position(
@@ -981,6 +1800,19 @@ def create_app(ctx: AppContext) -> FastAPI:
             pass
         holding_map = {h["tradingsymbol"]: h for h in (holdings or []) if h.get("quantity", 0) > 0}
 
+        # Map open system-managed trades by symbol so the recommendation
+        # payload can carry `trade_id` and `current_sl` — the Holdings UI
+        # uses these to power the in-row "Tighten SL" action without an
+        # extra round trip to look up the trade by symbol.
+        open_trades_for_symbol: dict[str, dict[str, Any]] = {}
+        try:
+            for tr in await ctx.db.get_open_positions(mode=ctx.config.mode):
+                sym = tr.get("symbol")
+                if sym and sym not in open_trades_for_symbol:
+                    open_trades_for_symbol[sym] = tr
+        except Exception:
+            logger.debug("review: failed to load open positions", exc_info=True)
+
         if requested:
             symbols = [s.upper() for s in requested]
         elif holding_map:
@@ -1000,6 +1832,7 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         for symbol in symbols:
             held = holding_map.get(symbol)
+            open_trade = open_trades_for_symbol.get(symbol)
             rec: dict[str, Any] = {
                 "symbol": symbol,
                 "held": held is not None,
@@ -1011,6 +1844,22 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "confidence": 0,
                 "signal_type": "HOLD",
                 "reasoning": "",
+                # Open-trade context so the "Tighten SL" button can act
+                # without an extra round trip. None when no system-tracked
+                # trade exists for this symbol (e.g. a holding the user
+                # acquired outside the system).
+                "trade_id": open_trade.get("trade_id") if open_trade else None,
+                "current_sl": (
+                    float(open_trade.get("stop_loss_price") or 0)
+                    if open_trade else 0
+                ),
+                "trade_signal_type": (
+                    open_trade.get("signal_type") if open_trade else None
+                ),
+                "entry_price": (
+                    float(open_trade.get("entry_price") or 0)
+                    if open_trade else 0
+                ),
             }
 
             entry = rec["average_price"]
@@ -1157,6 +2006,204 @@ def create_app(ctx: AppContext) -> FastAPI:
         logger.info("Unlocked holding: %s", symbol)
         return {"success": True, "symbol": symbol.upper(), "locked": False}
 
+    # CDSL TPIN authorisation is a Zerodha-side daily requirement for
+    # selling delivery (CNC) holdings unless the user has DDPI set up.
+    # The first sell of the day gets rejected with a message like
+    # "X shares need to be authorised at CDSL". We intercept that
+    # specific error and either programmatically kick off the auth
+    # flow (newer kiteconnect clients) or surface a static help URL.
+    _CDSL_HELP_URL = "https://kite.zerodha.com/#holdings"
+    _CDSL_DDPI_URL = "https://zerodha.com/cdsl-tpin/"
+
+    def _is_cdsl_tpin_error(msg: str) -> bool:
+        msg_lower = (msg or "").lower()
+        return (
+            "cdsl" in msg_lower
+            or "authoris" in msg_lower  # matches both "authorise" + "authorisation"
+            or "tpin" in msg_lower
+        )
+
+    async def _build_cdsl_response(
+        error_msg: str,
+        *,
+        triggered_by: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build a structured error response for the CDSL TPIN case.
+
+        Tries to call broker.initiate_holdings_auth so the UI can open
+        a Kite session URL directly into the authorisation flow.
+        Falls back to the static Kite holdings page when the
+        kiteconnect library version doesn't expose the method.
+
+        When `triggered_by` is provided (= a real sell order just
+        failed, not a proactive button click), also pings Telegram so
+        the user sees the same alert outside the UI. Per-symbol-per-day
+        dedup via system_state keeps repeated clicks on the same
+        failing order from spamming the channel.
+        """
+        auth_url: str | None = None
+        request_id: str | None = None
+        try:
+            kite_holdings = await ctx.broker.get_holdings() or []
+            # Kite's initiate_holdings_auth wants [{isin, quantity}].
+            payload = [
+                {
+                    "isin": h.get("isin"),
+                    "quantity": int(h.get("quantity") or 0),
+                }
+                for h in kite_holdings
+                if h.get("isin") and (h.get("quantity") or 0) > 0
+            ]
+            auth = await ctx.broker.initiate_holdings_auth(
+                holdings=payload or None,
+            )
+            if isinstance(auth, dict):
+                auth_url = auth.get("redirect_url") or None
+                request_id = auth.get("request_id") or None
+        except Exception:
+            logger.debug(
+                "initiate_holdings_auth failed — using static URL",
+                exc_info=True,
+            )
+
+        resolved_url = auth_url or _CDSL_HELP_URL
+
+        # Fire Telegram alert only on reactive failures (real sell got
+        # rejected). The proactive endpoint doesn't pass triggered_by
+        # because the user is already engaged with the UI.
+        if triggered_by:
+            try:
+                from yolovest.timezone import now_ist as _now_ist
+                sym = (triggered_by.get("symbol") or "?").upper()
+                today = _now_ist().date().isoformat()
+                dedup_key = f"cdsl_alert_sent:{today}:{sym}"
+                already = await ctx.db.get_system_state(dedup_key)
+                if not already:
+                    qty = triggered_by.get("quantity")
+                    side = (triggered_by.get("side") or "").upper()
+                    src = triggered_by.get("source") or "order"
+                    qty_blurb = f" ({side} x{qty})" if qty else ""
+                    msg = (
+                        f"⚠ CDSL TPIN required — {sym}{qty_blurb} sell rejected\n\n"
+                        f"Source: {src}\n"
+                        f"{error_msg}\n\n"
+                        f"Authorise: {resolved_url}\n"
+                        f"Skip daily TPIN (DDPI): {_CDSL_DDPI_URL}"
+                    )
+                    await ctx.notify.send(msg, alert_type="errors")
+                    await ctx.db.set_system_state(dedup_key, "1")
+            except Exception:
+                logger.debug(
+                    "CDSL reactive Telegram alert failed", exc_info=True,
+                )
+
+        return {
+            "success": False,
+            "error": error_msg,
+            "error_type": "cdsl_tpin_required",
+            "auth_url": resolved_url,
+            "auth_url_static": auth_url is None,
+            "request_id": request_id,
+            "ddpi_help_url": _CDSL_DDPI_URL,
+            "hint": (
+                "CDSL TPIN authorisation is required to sell delivery (CNC) "
+                "holdings. Open the auth URL, complete TPIN, then retry. "
+                "For a permanent fix (no daily TPIN), set up DDPI via "
+                "the DDPI link."
+            ),
+        }
+
+    @app.get("/api/broker/cdsl-status")
+    async def get_cdsl_status(
+        refresh: bool = Query(False, description="Force a live broker fetch"),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Current CDSL TPIN authorisation status across the user's
+        holdings. Used by the dashboard banner (and the cdsl-auth-check
+        CRON skill) to alert when CNC sells will require TPIN today.
+
+        By default returns the cached snapshot from system_state
+        (refreshed by the CRON skill at market open, ~9:20 IST).
+        Pass `refresh=true` to force a live fetch — useful from the
+        banner's "Refresh" button after the user has completed the
+        auth flow in another tab.
+        """
+        import json as _json
+
+        if not refresh:
+            cached = await ctx.db.get_system_state("cdsl_auth_status")
+            if cached:
+                try:
+                    return _json.loads(cached)
+                except (ValueError, TypeError):
+                    pass
+
+        if not await ctx.broker.is_authenticated():
+            return {
+                "authenticated": False, "needs_auth": False,
+                "checked_at": None,
+                "pending_symbols": [], "pending_count": 0,
+                "ddpi_likely_enabled": False,
+            }
+
+        try:
+            holdings = await ctx.broker.get_holdings()
+        except Exception as e:
+            logger.warning("cdsl-status: get_holdings failed: %s", e)
+            return {
+                "authenticated": True, "needs_auth": False,
+                "checked_at": None,
+                "error": str(e),
+                "pending_symbols": [], "pending_count": 0,
+                "ddpi_likely_enabled": False,
+            }
+
+        status = _compute_cdsl_status(holdings or [])
+        gate = await _compute_cdsl_alert_gate(ctx)
+        from yolovest.timezone import now_utc as _now_utc
+        result = {
+            "authenticated": True,
+            **status,
+            **gate,
+            # alert_needed: the field the UI banner and CRON skill key
+            # off. Unauthorised holdings alone don't trigger an alert —
+            # there has to be something that might try to sell today.
+            "alert_needed": status["needs_auth"] and gate["has_active_cnc_exits"],
+            "checked_at": _now_utc().isoformat(),
+        }
+        # Persist the latest live read so the next dashboard tick
+        # gets a fresh value without re-hitting the broker.
+        try:
+            await ctx.db.set_system_state(
+                "cdsl_auth_status", _json.dumps(result),
+            )
+        except Exception:
+            logger.debug("cdsl-status: cache write failed", exc_info=True)
+        return result
+
+    @app.post("/api/broker/holdings-auth")
+    async def initiate_holdings_authorisation(
+        body: dict[str, Any] | None = None,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Proactively start the CDSL TPIN flow without waiting for a
+        failed sell order. Useful as a one-click "authorize my
+        holdings for today" action before the user starts selling.
+
+        Body (optional): {"holdings": [{"isin": "INE...", "quantity": 5}, ...]}
+        When omitted, defaults to authorising every current holding.
+
+        Returns the same shape as the CDSL error response so the UI
+        can reuse the same "Open Auth" button component.
+        """
+        body = body or {}
+        explicit_holdings = body.get("holdings") if isinstance(body, dict) else None
+        return await _build_cdsl_response(
+            "Holdings authorisation initiated by user",
+        ) if explicit_holdings is None else (
+            await _build_cdsl_response("Authorising specified holdings")
+        )
+
     @app.post("/api/orders")
     async def place_manual_order(
         body: dict[str, Any],
@@ -1233,7 +2280,21 @@ def create_app(ctx: AppContext) -> FastAPI:
             return {"success": True, "order_id": order_id, "trade_id": trade_id}
         except Exception as e:
             logger.warning("Manual order failed: %s", e)
-            return {"success": False, "error": str(e)}
+            msg = str(e)
+            # CDSL TPIN: surface a structured response so the UI can
+            # render an "Authorize at CDSL" action button instead of
+            # just dumping the broker's raw error string.
+            if _is_cdsl_tpin_error(msg):
+                return await _build_cdsl_response(
+                    msg,
+                    triggered_by={
+                        "symbol": symbol,
+                        "quantity": quantity,
+                        "side": side,
+                        "source": "manual-order",
+                    },
+                )
+            return {"success": False, "error": msg}
 
     @app.get("/api/trades/today")
     async def get_todays_trades(
@@ -1649,6 +2710,28 @@ def create_app(ctx: AppContext) -> FastAPI:
             logger.warning("Gemini ping failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
+    @app.post("/api/integrations/zerodha/logout")
+    async def logout_zerodha(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Drop the cached Kite access token (and the persisted one) so
+        the broker reports as unauthenticated until the next manual
+        re-auth. Also stops the live tick stream if it was running on
+        the now-stale token — the ticker holds the token from process
+        boot and won't pick up a fresh one without a restart, so it's
+        cleaner to let the user re-auth and explicitly restart than to
+        keep a half-alive WS open.
+        """
+        await ctx.broker.logout()
+        ticker = getattr(ctx, "ticker", None)
+        if ticker is not None:
+            try:
+                await ticker.stop()
+            except Exception:
+                logger.debug("Ticker stop on logout failed", exc_info=True)
+            ctx.ticker = None  # type: ignore[assignment]
+        return {"success": True}
+
     @app.post("/api/integrations/zerodha/authenticate")
     async def authenticate_zerodha(
         body: dict[str, Any],
@@ -1938,6 +3021,21 @@ def create_app(ctx: AppContext) -> FastAPI:
             symbol=symbol, source=source, date_from=date_from, date_to=date_to,
             limit=limit, offset=offset,
         )
+        if symbol:
+            # Defensive post-filter: legacy rows scraped by the old
+            # substring matcher mis-tagged short symbols (e.g. ITC
+            # inside BITCOIN, BPL inside REPUBLIC). Drop rows whose
+            # headline doesn't contain the symbol as a standalone
+            # word. New rows will already pass; old rows get hidden
+            # without a destructive backfill.
+            import re as _re
+            pattern = _re.compile(
+                rf"(?<![A-Z0-9]){_re.escape(symbol.upper())}(?![A-Z0-9])"
+            )
+            articles = [
+                a for a in articles
+                if pattern.search((a.get("headline") or "").upper())
+            ]
         return articles
 
     @app.get("/api/sentiment/{symbol}")
@@ -2285,6 +3383,19 @@ def create_app(ctx: AppContext) -> FastAPI:
         except Exception:
             logger.debug("Failed to fetch LLM review counts", exc_info=True)
 
+        # Surface the cached CDSL TPIN status so the dashboard can
+        # render a "Authorise CDSL" banner without an extra round
+        # trip. Cache is populated by the cdsl-auth-check CRON skill
+        # at market open and by manual refresh from the banner.
+        cdsl_auth: dict[str, Any] | None = None
+        try:
+            import json as _json
+            raw = await ctx.db.get_system_state("cdsl_auth_status")
+            if raw:
+                cdsl_auth = _json.loads(raw)
+        except Exception:
+            logger.debug("Failed to read cached cdsl_auth_status", exc_info=True)
+
         return {
             "kill_switch_active": kill_switch,
             "kill_switch_mode": kill_switch_mode,
@@ -2295,6 +3406,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             "show_degraded_banner": ctx.config.dashboard.show_degraded_banner,
             "auto_approved_today": auto_approved_today,
             "llm_reviewed_today": llm_reviewed_today,
+            "cdsl_auth": cdsl_auth,
         }
 
     # ------------------------------------------------------------------
@@ -2408,6 +3520,67 @@ def create_app(ctx: AppContext) -> FastAPI:
             }
             for r in rows
         ]
+
+    @app.get("/api/ltp")
+    async def get_ltp_batch(
+        symbols: str = Query(..., description="Comma-separated symbol list"),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, float]:
+        """Best-effort LTP map for arbitrary symbols.
+
+        Order of preference per symbol — same chain that powers open
+        positions, so the trade-history table renders identical LTPs
+        for open and recently-closed rows:
+          1. KiteTicker cache (sub-second real-time when ticker is on
+             and the symbol is subscribed)
+          2. market_data.get_ltp() — live Kite REST quote (or jugaad /
+             yfinance fallback) for symbols the WS hasn't subscribed
+          3. Last OHLCV close from local DB as a final stale fallback
+             so an offline market still shows a price
+
+        Symbols that resolve to no price are omitted from the response.
+        REST fetches run concurrently so a 30-symbol page doesn't
+        serialise into a 30 × round-trip wait.
+        """
+        import asyncio as _asyncio
+        syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        result: dict[str, float] = {}
+        ticker = getattr(ctx, "ticker", None)
+
+        async def _resolve(sym: str) -> tuple[str, float | None]:
+            # 1) WS tick cache (subscribed symbols only).
+            if ticker is not None:
+                try:
+                    ltp = ticker.get_ltp(sym, max_age_sec=600.0)
+                    if ltp is not None and ltp > 0:
+                        return sym, float(ltp)
+                except Exception:
+                    pass
+            # 2) Live REST quote through the provider chain.
+            try:
+                ltp = await ctx.market_data.get_ltp(sym)
+                if ltp is not None and ltp > 0:
+                    return sym, float(ltp)
+            except Exception:
+                pass
+            # 3) Stale last-known close from local OHLCV.
+            try:
+                row = await ctx.db.read_conn.execute_fetchall(
+                    "SELECT close FROM ohlcv WHERE symbol = ? "
+                    "ORDER BY timestamp DESC LIMIT 1",
+                    (sym,),
+                )
+                if row and row[0][0] is not None:
+                    return sym, float(row[0][0])
+            except Exception:
+                pass
+            return sym, None
+
+        pairs = await _asyncio.gather(*[_resolve(s) for s in syms])
+        for sym, ltp in pairs:
+            if ltp is not None and ltp > 0:
+                result[sym] = ltp
+        return result
 
     @app.get("/api/symbol/{symbol}/trades")
     async def get_symbol_trades(
@@ -2565,17 +3738,49 @@ def create_app(ctx: AppContext) -> FastAPI:
         body: dict[str, Any],
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Replay historical signals against modified risk parameters."""
+        """Replay historical signals or executed trades against modified
+        risk parameters.
+
+        `source` ("signals" — default — or "trades") controls the
+        replay set. "trades" reads from the trades table so the user
+        can see "what if I'd applied tighter caps to my actual fills"
+        — useful when most signals never executed (paper mode quirks,
+        risk rejections, etc.) and the signal-derived view feels
+        misleadingly empty.
+        """
         max_exposure_pct = body.get("max_exposure_pct", ctx.config.risk.max_portfolio_exposure_pct)
         max_single_stock_pct = body.get("max_single_stock_pct", ctx.config.risk.max_single_stock_pct)
         max_positions = body.get("max_positions", ctx.config.risk.max_open_positions)
         initial_capital = body.get("initial_capital", 100000)
         date_from = body.get("date_from")  # YYYY-MM-DD or None
         date_to = body.get("date_to")  # YYYY-MM-DD or None
+        source = body.get("source", "signals")
 
-        signals = await ctx.db.get_historical_signals(
-            limit=500, date_from=date_from, date_to=date_to,
-        )
+        if source == "trades":
+            # Pull executed/closed trades for the current mode and
+            # reshape into the same dict structure the signal path
+            # uses below so the simulation loop stays unified.
+            raw = await ctx.db.get_trades_history(
+                start_date=date_from, end_date=date_to,
+                limit=2000, mode=ctx.config.mode,
+            )
+            # Closed trades carry pnl; open ones don't (skipped below).
+            raw.sort(key=lambda t: t.get("created_at") or "")
+            signals: list[dict[str, Any]] = []
+            for t in raw:
+                signals.append({
+                    "symbol": t.get("symbol"),
+                    "signal_type": t.get("signal_type"),
+                    "entry_price": t.get("fill_price") or t.get("entry_price"),
+                    "quantity": t.get("quantity"),
+                    "position_size": t.get("quantity"),
+                    "pnl": t.get("pnl"),
+                    "created_at": t.get("created_at"),
+                })
+        else:
+            signals = await ctx.db.get_historical_signals(
+                limit=500, date_from=date_from, date_to=date_to,
+            )
 
         # Simple simulation
         capital = float(initial_capital)
@@ -2642,6 +3847,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "initial_capital": initial_capital,
                 "date_from": date_from,
                 "date_to": date_to,
+                "source": source,
             },
             "signals_available": len(signals),
             "signals_without_pnl": signals_without_pnl,
@@ -2922,9 +4128,8 @@ def create_app(ctx: AppContext) -> FastAPI:
                     )
                     continue
 
-                threshold = (
-                    min_confidence_buy if prediction.signal_type == "BUY"
-                    else min_confidence_sell
+                threshold = cfg.risk.resolve_min_confidence(
+                    holding_period, prediction.signal_type,
                 )
                 if prediction.confidence < threshold:
                     filter_counts["low_confidence"] += 1
@@ -2940,15 +4145,42 @@ def create_app(ctx: AppContext) -> FastAPI:
                     )
                     continue
 
-                # Adjust SELL: force to MIS/intraday if user doesn't hold the stock
-                holding_period, product, expected_days = adjust_sell_for_holdings(
+                # Adjust SELL: force to MIS/intraday if user doesn't hold
+                # the stock. Drop when the per-symbol decision is swing —
+                # mirrors generate-signals so the dry-run preview matches.
+                _adjusted = adjust_sell_for_holdings(
                     prediction.signal_type, holding_period, product,
                     symbol, held_symbols, expected_days,
                 )
+                if _adjusted is None:
+                    filter_counts.setdefault("short_on_swing_horizon", 0)
+                    filter_counts["short_on_swing_horizon"] += 1
+                    rejection_details.append({
+                        "symbol": symbol,
+                        "reason": "short_on_swing_horizon",
+                        "detail": (
+                            f"SELL on non-held {symbol} with "
+                            f"holding_period='{holding_period}' would require "
+                            f"intraday/MIS — dropped"
+                        ),
+                    })
+                    continue
+                holding_period, product, expected_days = _adjusted
 
-                # Apply ATR multipliers interpolated for holding duration
+                # Apply ATR multipliers interpolated for holding duration.
+                # Mirror generate-signals: clamp intraday ATR at
+                # holding_periods.intraday.max_atr_pct_for_target so the
+                # dry-run preview shows the same target/SL geometry the
+                # live engine would produce.
                 entry = prediction.entry_price
                 atr = features.get("atr_14", entry * 0.02)
+                if holding_period == "intraday":
+                    max_atr_pct = float(
+                        cfg.strategy.holding_periods.intraday
+                            .max_atr_pct_for_target
+                    )
+                    if max_atr_pct > 0:
+                        atr = min(atr, entry * max_atr_pct)
                 target_mult, sl_mult = interpolate_atr_multipliers(
                     expected_days, cfg.strategy.holding_periods,
                 )
@@ -3098,6 +4330,37 @@ def create_app(ctx: AppContext) -> FastAPI:
             logger.info("Unquarantined symbol %s", symbol.upper())
         return {"success": removed, "symbol": symbol.upper()}
 
+    @app.post("/api/quarantined-symbols/bulk-unblock")
+    async def bulk_unquarantine_symbols(
+        body: dict[str, Any],
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Unquarantine many symbols in one round-trip.
+
+        Body: {"symbols": ["AAA", "BBB", ...]} (max 500). Returns
+        per-symbol success status. Used by the Data Management page's
+        multi-select bulk action when an auth outage or transient
+        upstream incident sent a wave of valid symbols into quarantine.
+        """
+        raw = body.get("symbols") or []
+        if not isinstance(raw, list):
+            raise HTTPException(status_code=400, detail="`symbols` must be a list")
+        if len(raw) > 500:
+            raise HTTPException(status_code=400, detail="Too many symbols (max 500)")
+        symbols = [str(s).strip().upper() for s in raw if str(s).strip()]
+        results: dict[str, bool] = {}
+        for sym in symbols:
+            try:
+                results[sym] = bool(await ctx.db.unquarantine_symbol(sym))
+            except Exception:
+                logger.warning("Failed to unquarantine %s", sym, exc_info=True)
+                results[sym] = False
+        removed = sum(1 for ok in results.values() if ok)
+        logger.info(
+            "Bulk-unquarantined %d/%d symbols", removed, len(symbols),
+        )
+        return {"success": True, "removed": removed, "results": results}
+
     @app.put("/api/quarantined-symbols/{symbol}/replacement")
     async def set_replacement_symbol(
         symbol: str,
@@ -3198,7 +4461,45 @@ def create_app(ctx: AppContext) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(e))
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
+        except PermissionError as e:
+            # Locked backup — refuse with 409 Conflict so the UI can
+            # prompt the user to unlock first.
+            raise HTTPException(status_code=409, detail=str(e))
         logger.info("Deleted backup %s (%d bytes)", filename, result["size_bytes"])
+        return {"success": True, **result}
+
+    @app.post("/api/backups/{filename}/lock")
+    async def lock_backup(
+        filename: str, _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Mark a backup as locked so the daily prune + manual delete
+        paths skip it. Idempotent.
+        """
+        backup_dir = ctx.config.database.backup_dir
+        try:
+            result = await ctx.db.set_backup_lock(backup_dir, filename, locked=True)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        logger.info("Locked backup %s", filename)
+        return {"success": True, **result}
+
+    @app.post("/api/backups/{filename}/unlock")
+    async def unlock_backup(
+        filename: str, _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Clear the lock sentinel on a backup so it's eligible for
+        prune / delete again. Idempotent.
+        """
+        backup_dir = ctx.config.database.backup_dir
+        try:
+            result = await ctx.db.set_backup_lock(backup_dir, filename, locked=False)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        logger.info("Unlocked backup %s", filename)
         return {"success": True, **result}
 
     @app.post("/api/bulk-delete/{group}")
@@ -3509,6 +4810,21 @@ def create_app(ctx: AppContext) -> FastAPI:
                 detail=f"Validation failed: {e}",
             )
 
+        # Capture old values BEFORE persisting so the diff log shows
+        # what each key actually changed from. `db_values` was loaded
+        # above before the overlay was applied, so it still holds the
+        # pre-update state.
+        old_values: dict[str, str | None] = {}
+        for k in updates:
+            # Note: read from the freshly-loaded snapshot (it was
+            # mutated by the overlay; use ctx.config flattened instead
+            # to be robust).
+            try:
+                v = await ctx.db.get_config(k)
+            except Exception:
+                v = None
+            old_values[k] = v
+
         # Persist to DB
         await ctx.db.set_config_bulk(str_updates)
 
@@ -3537,7 +4853,18 @@ def create_app(ctx: AppContext) -> FastAPI:
                 ctx.broker._mode = new_config.mode
                 logger.info("Broker mode synced to: %s", new_config.mode)
 
-        logger.info("Config updated via UI: %s", list(updates.keys()))
+        # Emit per-key diff so the audit trail records what each key
+        # actually changed from -> to (instead of just the key list).
+        for k, new_v in str_updates.items():
+            old_v = old_values.get(k)
+            if old_v == new_v:
+                continue
+            logger.info(
+                "Config updated via UI: %s: %r -> %r",
+                k,
+                old_v if old_v is not None else "<unset>",
+                new_v,
+            )
 
         sections = config_to_ui_sections(ctx.config)
         return {"status": "ok", "updated": list(updates.keys()), "sections": sections}

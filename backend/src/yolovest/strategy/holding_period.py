@@ -91,7 +91,18 @@ def _is_intraday_viable(
 
     Relaxed from the original: requires decent volatility OR high volume
     (not both), and allows until 2:30 PM instead of 2:00 PM.
+
+    Hard eligibility cap (`max_atr_pct_for_intraday_eligibility`): refuses
+    intraday for stocks too volatile to square off in a half-day session
+    (e.g. 11%+ daily ATR small-caps). Returns False so the caller routes
+    to swing instead.
     """
+    eligibility_cap = getattr(
+        volatility_config, "max_atr_pct_for_intraday_eligibility", 0.0,
+    )
+    if eligibility_cap > 0 and atr_pct > eligibility_cap:
+        return False
+
     has_volatility = atr_pct >= volatility_config.min_atr_pct  # 0.5% min (was ideal 1.5%)
     has_good_volatility = atr_pct >= volatility_config.ideal_min_atr_pct  # 1.5% ideal
     has_volume = rel_vol >= 1.2  # relaxed from 1.5
@@ -356,16 +367,33 @@ def adjust_sell_for_holdings(
     symbol: str,
     held_symbols: set[str],
     expected_days: int = 0,
-) -> tuple[str, str, int]:
+) -> tuple[str, str, int] | None:
     """Adjust SELL signals based on whether the user holds the stock.
 
-    - If the user holds the stock, SELL can use any product/period (selling owned shares).
-    - If the user does NOT hold the stock, it's a short sell — force to MIS/intraday
-      (Indian equity rules: retail short selling must be squared off same day).
+    - If the user holds the stock, SELL can use any product/period
+      (selling owned shares).
+    - If the user does NOT hold the stock, it's a short sell. Indian
+      retail rules require intraday/MIS — but we only ALLOW that when
+      the per-symbol decision already chose `holding_period ==
+      "intraday"`. A swing-model SELL converted to intraday would mix
+      geometries: swing ATR-multiplier target/SL clamped onto an
+      intraday horizon. Dropping is the right call instead.
     - BUY signals are never affected.
 
+    Mode interaction (informational — this function checks
+    `holding_period` directly rather than the strategy mode):
+      * `intraday` mode: every signal already decides intraday →
+        all non-held SELLs route through as MIS shorts. (unchanged)
+      * `balanced` mode: the per-symbol balanced predictor picks
+        intraday vs swing. Only intraday-winners survive a non-held
+        SELL; swing-winners are dropped.
+      * `short_term` / `long_term` modes: holding_period is never
+        "intraday" → all non-held SELLs are dropped.
+
     Returns:
-        (holding_period, product, expected_days)
+        (holding_period, product, expected_days), or None when the
+        signal should be dropped because a non-held SELL on a swing
+        horizon would have to be converted to intraday/MIS.
     """
     if signal_type != "SELL":
         return (holding_period, product, expected_days)
@@ -373,7 +401,12 @@ def adjust_sell_for_holdings(
     if symbol in held_symbols:
         return (holding_period, product, expected_days)
 
-    # Short sell — must be intraday MIS (no overnight short positions for retail)
+    # Non-held SELL = short candidate. Only keep when the per-symbol
+    # decision already chose intraday — otherwise we'd be silently
+    # repurposing a swing setup as an intraday short.
+    if holding_period != "intraday":
+        return None
+
     return ("intraday", "MIS", 0)
 
 

@@ -116,6 +116,16 @@ class ZerodhaBroker(BrokerBase):
         self._circuit_breaker = BrokerCircuitBreaker(
             failure_threshold=5, cooldown_sec=30.0,
         )
+        # Per-symbol tick-size cache built from kite.instruments("NSE")
+        # on first use. NSE equity tick sizes are not uniform — most are
+        # 0.05 but several (price < 250, F&O underlyings) use 0.10, and
+        # a handful of penny stocks use 0.01. Sending an order with a
+        # price/trigger that isn't a multiple of the symbol's tick size
+        # gets rejected by Kite with "Tick size for this script is X.YY".
+        # Default to 0.05 on cache miss to match the legacy behaviour
+        # for the common case.
+        self._tick_size_cache: dict[str, float] = {}
+        self._tick_size_cache_warmed: bool = False
         # Paper mode state
         self._paper_orders: dict[str, dict[str, Any]] = {}
         self._paper_order_counter = 0
@@ -157,6 +167,28 @@ class ZerodhaBroker(BrokerBase):
                 return True
             logger.exception("Kite authentication failed")
             return False
+
+    async def logout(self) -> None:
+        """Drop the cached access token and clear the persisted one so
+        the next is_authenticated() check returns False and the UI
+        flips to "Not authenticated".
+
+        Idempotent. Does NOT call any Kite logout endpoint — Kite
+        Connect's REST API has no per-token invalidate, tokens expire
+        at the next 6:00 AM IST cycle regardless. What we're doing
+        here is purely local: forget the token, invalidate the auth
+        cache, and wipe the system_state row that restore_session()
+        reads from on next boot.
+        """
+        self._access_token = None
+        self._auth_cache_valid_until = 0.0
+        self._kite = None
+        if self._db is not None:
+            try:
+                await self._db.set_system_state("kite_access_token", "")
+            except Exception:
+                logger.debug("Failed to clear persisted Kite token", exc_info=True)
+        logger.info("Kite session cleared locally")
 
     async def restore_session(self) -> bool:
         """Restore Kite session from persisted access token (after restart)."""
@@ -354,8 +386,54 @@ class ZerodhaBroker(BrokerBase):
 
     @staticmethod
     def _tick_round(price: float, tick: float = 0.05) -> float:
-        """Snap a price to the instrument's tick grid (NSE equity default 0.05)."""
+        """Snap a price to a tick grid. Caller is responsible for
+        passing the right tick; defaults to 0.05 (the most common NSE
+        equity tick) when the per-symbol tick is unknown.
+        """
+        if tick <= 0:
+            tick = 0.05
         return round(round(price / tick) * tick, 2)
+
+    async def _ensure_tick_size_cache(self) -> None:
+        """Lazy-warm the per-symbol tick-size cache from
+        kite.instruments("NSE"). Returns once the cache is populated;
+        safe to call repeatedly — subsequent calls are no-ops.
+
+        The instrument master is ~5MB and only downloaded once per
+        broker lifetime. On failure (no auth, transient), cache stays
+        empty and callers fall back to the default 0.05 tick. Better to
+        place an order with a wrong tick that Kite rejects with a clear
+        message than to silently block trading on a transient API hiccup.
+        """
+        if self._tick_size_cache_warmed or self._kite is None:
+            return
+        try:
+            async with self._rate_limiter:
+                instruments = await asyncio.to_thread(self._kite.instruments, "NSE")
+            for inst in instruments:
+                sym = inst.get("tradingsymbol")
+                tick = inst.get("tick_size")
+                if sym and tick:
+                    self._tick_size_cache[sym] = float(tick)
+            self._tick_size_cache_warmed = True
+            distinct = sorted({round(v, 2) for v in self._tick_size_cache.values()})
+            logger.info(
+                "Tick-size cache warmed: %d symbols, distinct ticks=%s",
+                len(self._tick_size_cache), distinct,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to warm tick-size cache; falling back to 0.05 default",
+                exc_info=True,
+            )
+
+    def _tick_for(self, symbol: str) -> float:
+        """Return the cached tick size for `symbol`, or 0.05 on miss."""
+        return self._tick_size_cache.get(symbol, 0.05)
+
+    def _tick_round_for(self, symbol: str, price: float) -> float:
+        """Snap `price` to the symbol's tick grid using the warmed cache."""
+        return self._tick_round(price, self._tick_for(symbol))
 
     async def _live_place_order(
         self,
@@ -382,6 +460,11 @@ class ZerodhaBroker(BrokerBase):
         if self._kite is None:
             raise RuntimeError("Not authenticated")
 
+        # Warm the per-symbol tick-size cache once. After this returns,
+        # _tick_round_for uses the symbol's real tick instead of the
+        # 0.05 default.
+        await self._ensure_tick_size_cache()
+
         # Convert MARKET → LIMIT at LTP ± buffer (Zerodha API restriction).
         # Try sources in order: market_data (ingester), kite.ltp (paid), kite.ohlc (paid).
         if order_type == "MARKET":
@@ -390,10 +473,10 @@ class ZerodhaBroker(BrokerBase):
                 buffer = 0.005 if self._kite_data_enabled else 0.01
                 if side == "BUY":
                     raw = ltp * (1 + buffer)
-                    price = self._tick_round(raw)
+                    price = self._tick_round_for(symbol, raw)
                 else:
                     raw = ltp * (1 - buffer)
-                    price = self._tick_round(raw)
+                    price = self._tick_round_for(symbol, raw)
                 order_type = "LIMIT"
                 logger.info(
                     "MARKET→LIMIT conversion: %s %s LTP=%.2f → price=%.2f",
@@ -432,9 +515,9 @@ class ZerodhaBroker(BrokerBase):
         # default; values computed from ATR, percentages, or model outputs
         # rarely land on the tick grid.
         if price is not None:
-            price = self._tick_round(price)
+            price = self._tick_round_for(symbol, price)
         if trigger_price is not None:
-            trigger_price = self._tick_round(trigger_price)
+            trigger_price = self._tick_round_for(symbol, trigger_price)
 
         kite_side = "BUY" if side == "BUY" else "SELL"
         params: dict[str, Any] = {
@@ -468,6 +551,15 @@ class ZerodhaBroker(BrokerBase):
     # Order Management
     # ------------------------------------------------------------------
 
+    # Order statuses where cancellation is a no-op — the order is
+    # already in a final state at the broker. Kite returns either
+    # "Order cannot be cancelled as it is being processed" (transition
+    # state) or a hard error from these; we treat them as
+    # already-cancelled rather than logging a traceback.
+    _TERMINAL_ORDER_STATUSES = {
+        "CANCELLED", "COMPLETE", "REJECTED", "AMO REQ RECEIVED",
+    }
+
     async def cancel_order(self, order_id: str) -> bool:
         if self._mode == "paper":
             if order_id in self._paper_orders:
@@ -475,13 +567,53 @@ class ZerodhaBroker(BrokerBase):
                 return True
             return False
 
+        # Pre-check status — when the user (or a parallel skill) has
+        # already cancelled this order, Kite responds with
+        # "Order cannot be cancelled as it is being processed"
+        # which is just transition-state noise. Skip the call if
+        # the order is already terminal.
+        try:
+            status_info = await self.get_order_status(order_id)
+            status = (status_info.get("status") or "").upper()
+            if status in self._TERMINAL_ORDER_STATUSES:
+                logger.debug(
+                    "cancel_order %s: already in terminal state %s, skipping",
+                    order_id, status,
+                )
+                return True
+        except Exception:
+            # Best-effort — if we can't read status, fall through to
+            # the cancel attempt and let it surface any real error.
+            logger.debug(
+                "cancel_order %s: status pre-check failed, attempting cancel anyway",
+                order_id, exc_info=True,
+            )
+
         try:
             async with self._rate_limiter:
                 await asyncio.to_thread(
                     self._kite.cancel_order, variety="regular", order_id=order_id
                 )
             return True
-        except Exception:
+        except Exception as exc:
+            # Common race: a parallel actor (Kite web UI, broker
+            # auto-square-off, another heartbeat) cancelled or
+            # completed the order while we were preparing. Kite
+            # returns "Order cannot be cancelled as it is being
+            # processed" — that's terminal-state ambiguity, not a
+            # real failure. Demote to INFO so logs stay quiet.
+            msg = str(exc).lower()
+            if (
+                "being processed" in msg
+                or "already" in msg
+                or "cannot be cancelled" in msg
+            ):
+                logger.info(
+                    "cancel_order %s: broker reports order already settling "
+                    "(%s) — treating as cancelled",
+                    order_id, exc,
+                )
+                return True
             logger.exception("Failed to cancel order %s", order_id)
             return False
 
@@ -574,6 +706,132 @@ class ZerodhaBroker(BrokerBase):
         await self._retry_api_call(_modify)
         return True
 
+    async def modify_order(
+        self,
+        order_id: str,
+        *,
+        price: float | None = None,
+        quantity: int | None = None,
+        trigger_price: float | None = None,
+        order_type: str | None = None,
+    ) -> bool:
+        """Generic order modification — adjust price / qty / trigger /
+        order_type on a still-open broker order.
+
+        Used by the dashboard's order-book "Modify" action so the user
+        can move a queued LIMIT price or resize an SL trigger without
+        going to Kite. Tick rounding applies the same way as the
+        original place_order. None-valued fields are passed through
+        unchanged.
+        """
+        if self._mode == "paper":
+            logger.info(
+                "[PAPER] Modify order %s price=%s qty=%s trigger=%s type=%s",
+                order_id, price, quantity, trigger_price, order_type,
+            )
+            if order_id in self._paper_orders:
+                po = self._paper_orders[order_id]
+                if price is not None:
+                    po["price"] = price
+                if quantity is not None:
+                    po["quantity"] = int(quantity)
+                if trigger_price is not None:
+                    po["trigger_price"] = trigger_price
+                if order_type is not None:
+                    po["order_type"] = order_type
+            return True
+
+        if not self._kite:
+            raise RuntimeError("Not authenticated")
+
+        # Round to symbol tick (same path as place_order)
+        if price is not None:
+            try:
+                # Best-effort symbol resolution from kite.orders(); skip
+                # cache warm if it fails — broker still rejects on
+                # bad tick which surfaces as an error to the caller.
+                async with self._rate_limiter:
+                    orders = await asyncio.to_thread(self._kite.orders)
+                sym = next(
+                    (o.get("tradingsymbol") for o in orders if o.get("order_id") == order_id),
+                    None,
+                )
+                if sym:
+                    price = self._tick_round_for(sym, float(price))
+            except Exception:
+                logger.debug(
+                    "modify_order: tick-rounding lookup failed for %s",
+                    order_id, exc_info=True,
+                )
+        if trigger_price is not None and price is not None:
+            # Mirror place_order's logic — trigger uses same tick as price
+            trigger_price = self._tick_round_for(sym, float(trigger_price)) if sym else trigger_price
+
+        kwargs: dict[str, Any] = {"variety": "regular", "order_id": order_id}
+        if price is not None:
+            kwargs["price"] = price
+        if quantity is not None:
+            kwargs["quantity"] = int(quantity)
+        if trigger_price is not None:
+            kwargs["trigger_price"] = trigger_price
+        if order_type is not None:
+            kwargs["order_type"] = order_type
+
+        def _modify() -> None:
+            self._kite.modify_order(**kwargs)
+
+        await self._retry_api_call(_modify)
+        return True
+
+    async def get_orders(self) -> list[dict[str, Any]]:
+        """Return every order from today (open / executed / cancelled /
+        rejected / trigger-pending). Mirrors Kite's order book.
+        """
+        if self._mode == "paper":
+            return list(self._paper_orders.values())
+        async with self._rate_limiter:
+            orders = await asyncio.to_thread(self._kite.orders)
+        return list(orders)
+
+    async def initiate_holdings_auth(
+        self, holdings: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Kick off the CDSL TPIN authorisation flow for a list of
+        holdings the user is about to sell.
+
+        Returns a dict from kiteconnect (typically
+        `{"request_id": ..., "redirect_url": ...}`) that the UI can
+        open in a new tab so the user can complete CDSL TPIN entry.
+        Returns None when the kiteconnect client doesn't expose this
+        method (older library version) or when called in paper mode.
+
+        `holdings` shape (per Kite docs):
+            [{"isin": "INE...", "quantity": 5}, ...]
+        When omitted, defaults to authorising EVERY current holding
+        (Kite accepts the empty/None call to mean "all holdings").
+        """
+        if self._mode == "paper":
+            return None
+        if not self._kite or not hasattr(self._kite, "initiate_holdings_auth"):
+            return None
+
+        def _call() -> Any:
+            kwargs: dict[str, Any] = {}
+            if holdings:
+                kwargs["holdings"] = holdings
+            return self._kite.initiate_holdings_auth(**kwargs)
+
+        try:
+            async with self._rate_limiter:
+                result = await asyncio.to_thread(_call)
+            return result if isinstance(result, dict) else None
+        except Exception:
+            logger.warning(
+                "initiate_holdings_auth failed — falling back to static URL",
+                exc_info=True,
+            )
+            return None
+
     # ------------------------------------------------------------------
     # GTT (Good Till Triggered) orders
     # ------------------------------------------------------------------
@@ -612,11 +870,12 @@ class ZerodhaBroker(BrokerBase):
         if self._kite is None:
             raise RuntimeError("Not authenticated")
 
+        await self._ensure_tick_size_cache()
         kite_side = "BUY" if side == "BUY" else "SELL"
-        st_trig = self._tick_round(stoploss_trigger)
-        st_lim = self._tick_round(stoploss_limit)
-        tg_trig = self._tick_round(target_trigger)
-        tg_lim = self._tick_round(target_limit)
+        st_trig = self._tick_round_for(symbol, stoploss_trigger)
+        st_lim = self._tick_round_for(symbol, stoploss_limit)
+        tg_trig = self._tick_round_for(symbol, target_trigger)
+        tg_lim = self._tick_round_for(symbol, target_limit)
 
         legs = [
             {
@@ -641,7 +900,7 @@ class ZerodhaBroker(BrokerBase):
                 tradingsymbol=symbol,
                 exchange="NSE",
                 trigger_values=[st_trig, tg_trig],
-                last_price=float(self._tick_round(last_price)),
+                last_price=float(self._tick_round_for(symbol, last_price)),
                 orders=legs,
             )
 
@@ -684,11 +943,12 @@ class ZerodhaBroker(BrokerBase):
         if self._kite is None:
             raise RuntimeError("Not authenticated")
 
+        await self._ensure_tick_size_cache()
         kite_side = "BUY" if side == "BUY" else "SELL"
-        st_trig = self._tick_round(stoploss_trigger)
-        st_lim = self._tick_round(stoploss_limit)
-        tg_trig = self._tick_round(target_trigger)
-        tg_lim = self._tick_round(target_limit)
+        st_trig = self._tick_round_for(symbol, stoploss_trigger)
+        st_lim = self._tick_round_for(symbol, stoploss_limit)
+        tg_trig = self._tick_round_for(symbol, target_trigger)
+        tg_lim = self._tick_round_for(symbol, target_limit)
 
         legs = [
             {
@@ -714,7 +974,7 @@ class ZerodhaBroker(BrokerBase):
                 tradingsymbol=symbol,
                 exchange="NSE",
                 trigger_values=[st_trig, tg_trig],
-                last_price=float(self._tick_round(last_price)),
+                last_price=float(self._tick_round_for(symbol, last_price)),
                 orders=legs,
             )
 

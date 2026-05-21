@@ -116,19 +116,30 @@ class DatabaseMaintenanceSkill(SkillBase):
 
     @staticmethod
     def _prune_old_backups(backup_dir: str, keep: int = 7) -> int:
-        """Delete backup files older than the most recent `keep` backups."""
+        """Delete backup files older than the most recent `keep` backups.
+
+        Locked backups (those with a sibling `<filename>.lock` sentinel)
+        are skipped entirely — they're neither counted toward `keep` nor
+        deleted. So locking a backup is purely additive: the prune still
+        keeps the N most recent unlocked snapshots on top.
+        """
         backup_path = Path(backup_dir)
         if not backup_path.is_dir():
             return 0
 
-        backups = sorted(
+        all_backups = sorted(
             backup_path.glob("yolovest_*.db"),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
+        # Partition by lock state so locks float out of the rotation.
+        unlocked = [
+            p for p in all_backups
+            if not (backup_path / f"{p.name}.lock").exists()
+        ]
 
         pruned = 0
-        for old_backup in backups[keep:]:
+        for old_backup in unlocked[keep:]:
             try:
                 old_backup.unlink()
                 pruned += 1
@@ -140,7 +151,12 @@ class DatabaseMaintenanceSkill(SkillBase):
 
     @staticmethod
     def _prune_old_model_backups(backup_dir: str, keep: int = 7) -> int:
-        """Delete model backup directories older than the most recent `keep`."""
+        """Delete model backup directories older than the most recent `keep`.
+
+        A model directory is treated as locked when its matching
+        `yolovest_<ts>.db.lock` sentinel exists in the same backup
+        directory — so locking a DB backup also pins its model snapshot.
+        """
         backup_path = Path(backup_dir)
         if not backup_path.is_dir():
             return 0
@@ -150,11 +166,15 @@ class DatabaseMaintenanceSkill(SkillBase):
             key=lambda p: p.name,
             reverse=True,
         )
+        unlocked = [
+            d for d in model_dirs
+            if not (backup_path / f"yolovest_{d.name.removeprefix('models_')}.db.lock").exists()
+        ]
 
         pruned = 0
         import shutil
 
-        for old_dir in model_dirs[keep:]:
+        for old_dir in unlocked[keep:]:
             try:
                 shutil.rmtree(old_dir)
                 pruned += 1

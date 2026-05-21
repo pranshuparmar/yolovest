@@ -35,10 +35,20 @@ class XGBoostSignalModel(MLBase):
     for each. Models are serialized with joblib.
     """
 
-    def __init__(self, model_dir: str = "./models", db: Any = None) -> None:
+    def __init__(
+        self,
+        model_dir: str = "./models",
+        db: Any = None,
+        config: Any = None,
+    ) -> None:
         self.model_dir = Path(model_dir)
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.db = db
+        # Held weakly — only used to read the configured
+        # risk.tuned_threshold_max_diff at inference time. Hot-reload
+        # of config updates ctx.config in-place which this still
+        # tracks via the same reference.
+        self._config = config
 
         # Model slots
         self._intraday_model: Any | None = None
@@ -136,6 +146,83 @@ class XGBoostSignalModel(MLBase):
         if model_type == "swing":
             return self._swing_thresholds
         return None
+
+    def get_effective_thresholds(
+        self, model_type: str,
+    ) -> dict[str, float] | None:
+        """Public override of MLBase.get_effective_thresholds — see
+        base for semantics. Alias for the internal helper.
+        """
+        return self._get_effective_thresholds(model_type)
+
+    def _get_effective_thresholds(
+        self, model_type: str,
+    ) -> dict[str, float] | None:
+        """Return the model's tuned thresholds with config-driven
+        overrides + the max-diff cap applied. Resolution order:
+
+        1. If `risk.{buy,sell}_threshold_override` is set, that value
+           wins outright for the corresponding class. Use this when
+           the saved tuned thresholds are unreachable in production
+           (e.g. tuner saved buy=0.80 but the model's calibrated
+           P(BUY) rarely exceeds 0.50, so no BUY ever fires).
+        2. Otherwise start from the saved tuned values.
+        3. Apply the `tuned_threshold_max_diff` symmetry cap so a
+           wildly asymmetric saved pair can't class-collapse the model.
+
+        Public-ish so the balanced-mode chooser in generate_signals
+        can use the same numbers for its margin-above-threshold
+        comparison.
+        """
+        thresholds = self._get_thresholds(model_type)
+        if not thresholds:
+            return None
+        try:
+            buy = float(thresholds.get("buy", 0.5))
+            sell = float(thresholds.get("sell", 0.5))
+        except (TypeError, ValueError):
+            return thresholds
+
+        risk_cfg = getattr(self._config, "risk", None) if self._config else None
+        # Explicit overrides win — and they suppress the symmetry cap
+        # too, since the user has explicitly chosen these values.
+        buy_override = getattr(risk_cfg, "buy_threshold_override", None)
+        sell_override = getattr(risk_cfg, "sell_threshold_override", None)
+        if buy_override is not None or sell_override is not None:
+            out_buy = float(buy_override) if buy_override is not None else buy
+            out_sell = float(sell_override) if sell_override is not None else sell
+            logger.debug(
+                "Threshold override applied to %s: buy %.3f→%.3f, "
+                "sell %.3f→%.3f",
+                model_type, buy, out_buy, sell, out_sell,
+            )
+            return {"buy": round(out_buy, 4), "sell": round(out_sell, 4)}
+
+        # No override — apply the symmetry cap.
+        max_diff = float(
+            getattr(risk_cfg, "tuned_threshold_max_diff", 0.05)
+            if risk_cfg is not None else 0.05
+        )
+        diff = abs(buy - sell)
+        if diff <= max_diff:
+            return {"buy": buy, "sell": sell}
+        # Shrink both toward midpoint so the gap is exactly max_diff
+        # while preserving the direction the model learned (i.e. if
+        # tuned buy was higher, it stays higher).
+        midpoint = (buy + sell) / 2.0
+        half_gap = max_diff / 2.0
+        if buy > sell:
+            new_buy = midpoint + half_gap
+            new_sell = midpoint - half_gap
+        else:
+            new_buy = midpoint - half_gap
+            new_sell = midpoint + half_gap
+        logger.debug(
+            "Threshold-diff cap applied to %s: buy %.3f→%.3f, sell %.3f→%.3f "
+            "(max_diff=%.2f)",
+            model_type, buy, new_buy, sell, new_sell, max_diff,
+        )
+        return {"buy": round(new_buy, 4), "sell": round(new_sell, 4)}
 
     def _set_thresholds(
         self, model_type: str, thresholds: dict[str, float] | None,
@@ -389,7 +476,11 @@ class XGBoostSignalModel(MLBase):
         # P(BUY) >= buy_thresh AND >= P(SELL); SELL if P(SELL) >=
         # sell_thresh AND > P(BUY); else HOLD. Legacy models without
         # tuned thresholds keep their argmax label.
-        thresholds = self._get_thresholds(model_type)
+        # `_get_effective_thresholds` applies the configured
+        # tuned_threshold_max_diff cap so a wildly asymmetric (buy,
+        # sell) pair from the threshold sweep can't class-collapse
+        # the model in production.
+        thresholds = self._get_effective_thresholds(model_type)
         if thresholds and len(chosen_probas) >= 3:
             buy_prob = chosen_probas[_LABEL_BUY]
             sell_prob = chosen_probas[_LABEL_SELL]
@@ -609,7 +700,8 @@ class XGBoostSignalModel(MLBase):
             # the end so the metrics reflect actual costs / sizing /
             # slippage rather than the legacy +1%/-0.5% fiction.
             from yolovest.strategy.walk_forward_backtest import (
-                BacktestConfig, BarMeta, run_walk_forward_backtest, sweep_thresholds,
+                BacktestConfig, BarMeta, apply_thresholds as _apply_thresholds,
+                run_walk_forward_backtest, sweep_thresholds,
             )
 
             collected_preds: list[int] = []
@@ -692,24 +784,72 @@ class XGBoostSignalModel(MLBase):
                     product=backtest_product,
                     max_concurrent_positions=backtest_max_positions,
                 )
-                bt = run_walk_forward_backtest(
-                    preds=collected_preds,
-                    bars_meta=collected_meta,
-                    config=bt_cfg,
+
+                # Chronological tuning / reporting split. The CV-test
+                # predictions accumulated above are in chronological
+                # order across folds, so the last `holdout_frac` slice
+                # is a strict future of the tuning slice. We pick
+                # thresholds on the tuning slice and report metrics on
+                # the holdout slice — without this, sweep_thresholds
+                # picks the (buy, sell) cell that maximises Sharpe on
+                # the exact same predictions we then report, which is
+                # in-sample optimisation and inflates the headline
+                # numbers dramatically (the user saw argmax→tuned go
+                # from 17.69 → 28.96 on intraday and 6.01 → 17.00 on
+                # swing, almost entirely from this).
+                _holdout_frac = 0.30
+                _split = int(len(collected_preds) * (1.0 - _holdout_frac))
+                # Tiny corpora can't support a holdout — fall back to
+                # the legacy in-sample path when we don't have at least
+                # enough samples on each side for the sweep's
+                # min_trades floor to fire honestly.
+                _min_each_side = 200
+                _can_split = (
+                    _split >= _min_each_side
+                    and (len(collected_preds) - _split) >= _min_each_side
                 )
 
-                # Threshold sweep: search the 2D (buy, sell) cutoff space
-                # for the pair that maximises Sharpe on the same fold-test
-                # predictions. The trained model still picks argmax at
-                # inference by default — but if a tuned pair is saved
-                # alongside the artifact, _predict applies it instead.
-                # This converts "win the log-loss minimisation" into "win
-                # the PnL maximisation" without retraining.
-                tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
-                    probas=collected_probas,
-                    bars_meta=collected_meta,
-                    config=bt_cfg,
-                )
+                if _can_split:
+                    # Tune on the chronological first slice; report on
+                    # the strict-future holdout slice for both baseline
+                    # and tuned, so the two numbers are apples-to-apples.
+                    tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
+                        probas=collected_probas[:_split],
+                        bars_meta=collected_meta[:_split],
+                        config=bt_cfg,
+                    )
+                    # Tuned: replay chosen cutoffs on the holdout.
+                    _holdout_tuned_preds = _apply_thresholds(
+                        collected_probas[_split:], tuned_buy, tuned_sell,
+                    )
+                    tuned_bt = run_walk_forward_backtest(
+                        preds=_holdout_tuned_preds,
+                        bars_meta=collected_meta[_split:],
+                        config=bt_cfg,
+                    )
+                    # Argmax baseline on the same holdout slice.
+                    bt = run_walk_forward_backtest(
+                        preds=collected_preds[_split:],
+                        bars_meta=collected_meta[_split:],
+                        config=bt_cfg,
+                    )
+                    _holdout_used = True
+                else:
+                    # Not enough samples to split — fall back to legacy
+                    # in-sample tuning so tests / small corpora still
+                    # produce a number. The metrics dict flags this so
+                    # it's visible on the dashboard.
+                    bt = run_walk_forward_backtest(
+                        preds=collected_preds,
+                        bars_meta=collected_meta,
+                        config=bt_cfg,
+                    )
+                    tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
+                        probas=collected_probas,
+                        bars_meta=collected_meta,
+                        config=bt_cfg,
+                    )
+                    _holdout_used = False
                 # When tuned thresholds beat the argmax baseline, report
                 # the tuned metrics as the headline numbers — that's what
                 # live trading will actually see. Keep the argmax sharpe
@@ -741,6 +881,7 @@ class XGBoostSignalModel(MLBase):
                     "tuned_sell_threshold": tuned_sell,
                     "argmax_sharpe": bt.sharpe,
                     "tuned_sharpe": tuned_bt.sharpe,
+                    "threshold_holdout_used": _holdout_used,
                 }
             else:
                 # Legacy synthetic metrics — kept for tests / older callers

@@ -122,6 +122,17 @@ class PositionMonitorSkill(SkillBase):
         # position. Mutates local_positions in place.
         await self._reconcile_gtts(local_positions)
 
+        # Heal orphan broker-side exits. Positions whose DB row has no
+        # gtt_id / target_order_id / sl_order_id but whose symbol has an
+        # active GTT or open SL/LIMIT exit at the broker would otherwise
+        # cascade through client-side detection and double-place an
+        # exit, leaving the broker's resting order to fire afterwards
+        # for a duplicate transaction. Pull the broker state once, then
+        # either heal the DB row when the orphan can be safely matched
+        # back, or flag the position as "broker-partial-protected" so
+        # client-side stays quiet until the user investigates.
+        await self._reconcile_orphan_broker_exits(local_positions)
+
         discrepancies = self._reconcile(local_positions, broker_positions)
 
         # Recover ghost positions: local DB says open, broker says closed.
@@ -225,6 +236,19 @@ class PositionMonitorSkill(SkillBase):
                     await self._maybe_trail_mis_sl(
                         pos, entry, sl, current_price, risk_per_share, target,
                     )
+                await self.ctx.db.update_unrealized_pnl(
+                    pos["trade_id"], current_price,
+                )
+                continue
+
+            # Broker has a resting exit we couldn't safely pair up
+            # (e.g. an MIS SL exists but the matching target LIMIT was
+            # never placed, or the row is missing both order_ids).
+            # _reconcile_orphan_broker_exits set this transient marker
+            # — defer to the broker so a client-side exit can't
+            # double-place, but keep the warning visible in the audit
+            # log so the user notices.
+            if pos.get("_broker_partial_protected"):
                 await self.ctx.db.update_unrealized_pnl(
                     pos["trade_id"], current_price,
                 )
@@ -346,9 +370,18 @@ class PositionMonitorSkill(SkillBase):
                     profit = current_price - entry
                 else:
                     profit = entry - current_price
-                profit_multiple = profit / risk_per_share
+                # Threshold is per-bucket target-progress %; resolver
+                # converts back to a rupees-of-profit value the
+                # comparison can use directly.
+                target_distance = abs(target - entry) if target > 0 else 0.0
+                trigger_profit = cfg.resolve_trailing_trigger(
+                    holding_period=pos.get("expected_holding_period", "")
+                    or pos.get("holding_period", ""),
+                    risk_per_share=risk_per_share,
+                    target_distance=target_distance,
+                )
 
-                if profit_multiple >= cfg.trailing_sl_trigger_multiple:
+                if profit >= trigger_profit:
                     # Calculate new trailing SL. Tighten the step when
                     # we're already close to target so a final pullback
                     # can't surrender the gain.
@@ -505,10 +538,39 @@ class PositionMonitorSkill(SkillBase):
         """Compare local DB positions with broker positions."""
         discrepancies = []
 
-        # Build lookup by symbol for broker positions
+        # Build lookup by symbol for broker positions. Filter out the
+        # noise rows Kite's positions endpoint includes that don't
+        # represent real open exposure:
+        #   - CNC with qty < 0 = a delivery sale that just happened
+        #     today; the user sold N shares from holdings and Kite
+        #     surfaces the sell-side as a position row. Indian retail
+        #     can't short CNC so this is never a tradeable short.
+        #     Skipping it stops the "ONGC: on broker (qty=-5) but
+        #     not in local DB" alert from firing on every heartbeat
+        #     after a manual holdings sale.
+        #   - Round-tripped intraday positions where buy and sell
+        #     quantities net to zero AND no overnight balance: those
+        #     are closed for the day, nothing to manage.
         broker_by_symbol: dict[str, dict[str, Any]] = {}
         for bp in broker:
             sym = bp.get("tradingsymbol") or bp.get("symbol", "")
+            qty = bp.get("quantity", bp.get("net_quantity", 0)) or 0
+            product = (bp.get("product") or "").upper()
+            if product == "CNC" and qty < 0:
+                logger.debug(
+                    "reconcile: skipping CNC sell artefact %s qty=%d "
+                    "(delivery sale, not a real position)", sym, qty,
+                )
+                continue
+            buy_q = int(bp.get("buy_quantity") or 0)
+            sell_q = int(bp.get("sell_quantity") or 0)
+            overnight = int(bp.get("overnight_quantity") or 0)
+            if qty == 0 and buy_q > 0 and buy_q == sell_q and overnight == 0:
+                logger.debug(
+                    "reconcile: skipping round-tripped intraday %s "
+                    "(buy=%d sell=%d net=0)", sym, buy_q, sell_q,
+                )
+                continue
             broker_by_symbol[sym] = bp
 
         # Check each local position against broker
@@ -528,9 +590,17 @@ class PositionMonitorSkill(SkillBase):
             bp = broker_by_symbol[symbol]
             broker_qty = bp.get("quantity", bp.get("net_quantity", 0))
             local_qty = pos.get("quantity", 0)
-            if broker_qty != local_qty:
+            # Kite's positions API returns net_quantity SIGNED — short
+            # positions come back negative. We store quantity as a
+            # positive int + a separate signal_type ("BUY" or "SELL").
+            # Translate to the broker's sign convention before
+            # comparing so a 440-share SELL doesn't spuriously look
+            # like a mismatch with broker_qty=-440.
+            direction = -1 if pos.get("signal_type", "BUY") == "SELL" else 1
+            local_qty_signed = int(local_qty) * direction
+            if broker_qty != local_qty_signed:
                 discrepancies.append(
-                    f"{symbol}: qty mismatch (local={local_qty}, broker={broker_qty})"
+                    f"{symbol}: qty mismatch (local={local_qty_signed}, broker={broker_qty})"
                 )
 
         # Check for broker positions not in local DB
@@ -919,6 +989,152 @@ class PositionMonitorSkill(SkillBase):
         "triggered", "cancelled", "rejected", "expired", "disabled", "deleted",
     }
 
+    @staticmethod
+    def _classify_exit_order(
+        order: dict[str, Any], signal_type: str,
+    ) -> str | None:
+        """Classify a broker open order as 'sl', 'target', or None for
+        the purpose of orphan-exit reconciliation. An "exit" order is
+        one whose transaction_type opposes the position's entry side —
+        SELL for a BUY position, BUY for a SELL position — and whose
+        order_type matches the leg pattern we place at entry time
+        (SL/SL-M for the stop, LIMIT for the target).
+        """
+        order_type = (order.get("order_type") or "").upper()
+        side = (order.get("transaction_type") or "").upper()
+        expected_exit_side = "SELL" if signal_type == "BUY" else "BUY"
+        if side != expected_exit_side:
+            return None
+        if order_type in ("SL", "SL-M"):
+            return "sl"
+        if order_type == "LIMIT":
+            return "target"
+        return None
+
+    async def _reconcile_orphan_broker_exits(
+        self, positions: list[dict[str, Any]],
+    ) -> None:
+        """For positions whose DB row claims no broker-side exit is
+        attached, look at the broker's current GTT list and pending
+        orders. If we find a resting exit for the symbol, either heal
+        the DB row (when we can match it cleanly) or flag the in-memory
+        row as `_broker_partial_protected` so the client-side exit
+        path stays quiet for this cycle.
+
+        Paper mode is a no-op (paper broker doesn't manage broker-side
+        exits).
+        """
+        if not positions or self.ctx.config.mode == "paper":
+            return
+        candidates = [
+            p for p in positions
+            if not p.get("gtt_id")
+            and not (p.get("target_order_id") and p.get("sl_order_id"))
+        ]
+        if not candidates:
+            return
+
+        try:
+            gtts = await self.ctx.broker.get_gtts()
+        except Exception:
+            logger.debug("orphan reconcile: get_gtts failed", exc_info=True)
+            gtts = []
+        try:
+            pending = await self.ctx.broker.get_pending_orders()
+        except Exception:
+            logger.debug("orphan reconcile: get_pending_orders failed", exc_info=True)
+            pending = []
+
+        gtts_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for g in gtts or []:
+            status = (g.get("status") or "").lower()
+            if status not in self._GTT_LIVE_STATES:
+                continue
+            cond = g.get("condition") or {}
+            sym = cond.get("tradingsymbol") or g.get("tradingsymbol")
+            if sym:
+                gtts_by_symbol.setdefault(str(sym), []).append(g)
+
+        pending_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for o in pending or []:
+            sym = o.get("tradingsymbol")
+            if sym:
+                pending_by_symbol.setdefault(str(sym), []).append(o)
+
+        for pos in candidates:
+            symbol = pos.get("symbol") or ""
+            sig_type = pos.get("signal_type", "BUY")
+            product = (pos.get("product") or "").upper()
+
+            # --- CNC: heal from broker GTT list ---
+            if product == "CNC":
+                hits = gtts_by_symbol.get(symbol, [])
+                if hits:
+                    gtt_id = 0
+                    for g in hits:
+                        try:
+                            gtt_id = int(g.get("id") or g.get("trigger_id") or 0)
+                            if gtt_id:
+                                break
+                        except (TypeError, ValueError):
+                            continue
+                    if gtt_id:
+                        logger.warning(
+                            "position-monitor: orphan broker GTT %d for %s — "
+                            "healing local row to skip client-side exit",
+                            gtt_id, symbol,
+                        )
+                        pos["gtt_id"] = gtt_id
+                        try:
+                            await self.ctx.db.set_trade_gtt(pos["trade_id"], gtt_id)
+                        except Exception:
+                            logger.debug(
+                                "orphan reconcile: set_trade_gtt heal failed",
+                                exc_info=True,
+                            )
+                        continue
+
+            # --- MIS: heal full pair, or flag partial ---
+            if product == "MIS":
+                orders = pending_by_symbol.get(symbol, [])
+                target_oid: str | None = None
+                sl_oid: str | None = None
+                for o in orders:
+                    kind = self._classify_exit_order(o, sig_type)
+                    oid = o.get("order_id")
+                    if kind == "target" and not target_oid and oid:
+                        target_oid = str(oid)
+                    elif kind == "sl" and not sl_oid and oid:
+                        sl_oid = str(oid)
+                if target_oid and sl_oid:
+                    logger.warning(
+                        "position-monitor: orphan broker MIS OCO pair for %s "
+                        "(target=%s, sl=%s) — healing local row",
+                        symbol, target_oid, sl_oid,
+                    )
+                    pos["target_order_id"] = target_oid
+                    pos["sl_order_id"] = sl_oid
+                    try:
+                        await self.ctx.db.set_trade_target_order_id(
+                            pos["trade_id"], target_oid,
+                        )
+                        await self.ctx.db.set_trade_sl_order_id(
+                            pos["trade_id"], sl_oid,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "orphan reconcile: MIS heal failed", exc_info=True,
+                        )
+                    continue
+                if target_oid or sl_oid:
+                    logger.warning(
+                        "position-monitor: orphan partial broker exit for %s "
+                        "(target=%s, sl=%s) — deferring client-side exit to "
+                        "avoid duplicates; investigate at broker",
+                        symbol, target_oid or "—", sl_oid or "—",
+                    )
+                    pos["_broker_partial_protected"] = True
+
     async def _reconcile_gtts(self, positions: list[dict[str, Any]]) -> None:
         """For each open position with a `gtt_id`, look up the GTT at the
         broker and update `gtt_status`. Wipe `gtt_id` when the GTT is no
@@ -1010,8 +1226,20 @@ class PositionMonitorSkill(SkillBase):
             profit = current_price - entry
         else:
             profit = entry - current_price
-        profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0
-        if profit_multiple < cfg.trailing_sl_trigger_multiple:
+        target = float(pos.get("target_price") or 0.0)
+        target_distance = abs(target - entry) if target > 0 else 0.0
+        # trades table only carries `expected_holding_days`; derive the
+        # bucket directly. 0 days == intraday by definition.
+        holding_bucket = (
+            "intraday" if int(pos.get("expected_holding_days") or 0) == 0
+            else "swing"
+        )
+        trigger_profit = cfg.resolve_trailing_trigger(
+            holding_period=holding_bucket,
+            risk_per_share=risk_per_share,
+            target_distance=target_distance,
+        )
+        if profit < trigger_profit:
             return
 
         # Mirror the client-side trailing-SL tightening near target.
@@ -1105,8 +1333,19 @@ class PositionMonitorSkill(SkillBase):
             profit = current_price - entry
         else:
             profit = entry - current_price
-        profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0
-        if profit_multiple < cfg.trailing_sl_trigger_multiple:
+        target_distance = abs(target - entry) if target > 0 else 0.0
+        # trades table only carries `expected_holding_days`; derive the
+        # bucket directly. 0 days == intraday by definition.
+        holding_bucket = (
+            "intraday" if int(pos.get("expected_holding_days") or 0) == 0
+            else "swing"
+        )
+        trigger_profit = cfg.resolve_trailing_trigger(
+            holding_period=holding_bucket,
+            risk_per_share=risk_per_share,
+            target_distance=target_distance,
+        )
+        if profit < trigger_profit:
             return
 
         step_pct = cfg.trailing_sl_step_pct

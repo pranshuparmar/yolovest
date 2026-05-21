@@ -3,6 +3,7 @@ import {
   useIntegrations,
   usePingGemini,
   useAuthenticateZerodha,
+  useLogoutZerodha,
   useTestTelegram,
   useSendTelegram,
   useChangePassword,
@@ -46,14 +47,16 @@ function ActionButton({
   onClick: () => void;
   loading: boolean;
   children: React.ReactNode;
-  variant?: "default" | "primary";
+  variant?: "default" | "primary" | "danger";
 }) {
   const base =
     "px-3 py-1.5 rounded text-sm font-medium disabled:opacity-50 transition-colors";
   const styles =
     variant === "primary"
       ? `${base} bg-emerald-600 hover:bg-emerald-700 text-white`
-      : `${base} bg-gray-700 hover:bg-gray-600 text-gray-200`;
+      : variant === "danger"
+        ? `${base} bg-red-700 hover:bg-red-600 text-white`
+        : `${base} bg-gray-700 hover:bg-gray-600 text-gray-200`;
   return (
     <button onClick={onClick} disabled={loading} className={styles}>
       {loading ? "..." : children}
@@ -75,6 +78,7 @@ export function IntegrationsPage() {
 
   const pingGemini = usePingGemini();
   const authZerodha = useAuthenticateZerodha();
+  const logoutZerodha = useLogoutZerodha();
   const testTelegram = useTestTelegram();
   const sendTelegram = useSendTelegram();
   const updateConfig = useUpdateConfig();
@@ -200,6 +204,7 @@ export function IntegrationsPage() {
               <ActionButton
                 onClick={() => toggleEnabled("llm.enabled", gemini.enabled)}
                 loading={updateConfig.isPending}
+                variant={gemini.enabled ? "danger" : "default"}
               >
                 {gemini.enabled ? "Mark Inactive" : "Mark Active"}
               </ActionButton>
@@ -248,12 +253,38 @@ export function IntegrationsPage() {
 
           <div className="mt-auto pt-3 border-t border-gray-800 space-y-2">
             {zerodha.login_url && (
-              <a
-                href={zerodha.login_url}
-                className="block text-center px-3 py-1.5 rounded text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
-              >
-                {zerodha.connected ? "Re-authenticate Kite" : "Login to Kite"}
-              </a>
+              zerodha.connected ? (
+                // Authenticated: compact Re-auth + Logout pair, same
+                // layout shape as the Telegram card's two-button row.
+                <div className="flex gap-2">
+                  <a
+                    href={zerodha.login_url}
+                    className="px-3 py-1.5 rounded text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
+                  >
+                    Re-auth
+                  </a>
+                  <ActionButton
+                    onClick={() => {
+                      if (!window.confirm(
+                        "Drop the cached Kite token? Trading will be blocked until you re-authenticate, and the live tick stream will stop.",
+                      )) return;
+                      logoutZerodha.mutate();
+                    }}
+                    loading={logoutZerodha.isPending}
+                    variant="danger"
+                  >
+                    Logout
+                  </ActionButton>
+                </div>
+              ) : (
+                // Not authenticated: full-width Login call to action.
+                <a
+                  href={zerodha.login_url}
+                  className="block text-center px-3 py-1.5 rounded text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
+                >
+                  Login to Kite
+                </a>
+              )
             )}
             <div className="flex gap-2">
               <input
@@ -333,6 +364,7 @@ export function IntegrationsPage() {
                   toggleEnabled("notifications.telegram.enabled", telegram.enabled)
                 }
                 loading={updateConfig.isPending}
+                variant={telegram.enabled ? "danger" : "default"}
               >
                 {telegram.enabled ? "Mark Inactive" : "Mark Active"}
               </ActionButton>

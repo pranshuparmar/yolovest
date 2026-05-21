@@ -61,6 +61,10 @@ export interface Trade {
   estimated_costs: number | null;
   pnl: number | null;
   exit_price: number | null;
+  // Accumulated realised PnL from partial-close bookings, if any.
+  // Total PnL surfaced to the user is realized_partial_pnl + (pnl ?? 0).
+  // Null/undefined on rows from before migration 043.
+  realized_partial_pnl?: number | null;
   created_at: string;
   closed_at: string | null;
 }
@@ -455,6 +459,33 @@ export interface SystemState {
   show_degraded_banner?: boolean;
   auto_approved_today?: number;
   llm_reviewed_today?: number;
+  // Set by the cdsl-auth-check CRON skill (and live refreshes from
+  // the banner's button). Null when never checked. Drives the
+  // CdslAuthBanner — see components/CdslAuthBanner.tsx.
+  cdsl_auth?: {
+    authenticated: boolean;
+    needs_auth?: boolean;
+    // True iff needs_auth AND has_active_cnc_exits. This is the
+    // gate the UI banner / Telegram alert keys off — having
+    // unauthorised holdings alone doesn't trigger the alert if
+    // nothing the system manages might try to sell today.
+    alert_needed?: boolean;
+    has_active_cnc_exits?: boolean;
+    active_cnc_positions?: number;
+    active_gtts?: number;
+    pending_cnc_sells?: number;
+    pending_qty?: number;
+    pending_count?: number;
+    pending_symbols?: Array<{
+      symbol: string;
+      isin?: string;
+      deliverable_qty: number;
+      authorised_qty: number;
+      pending_qty: number;
+    }>;
+    checked_at?: string | null;
+    ddpi_likely_enabled?: boolean;
+  } | null;
 }
 
 export interface NSESymbol {
@@ -622,6 +653,9 @@ export interface RiskSimParams {
   initial_capital: number;
   date_from?: string;
   date_to?: string;
+  /** Replay set: `signals` (default) replays generated signals, `trades`
+   * replays actually-executed trades from the trades table. */
+  source?: "signals" | "trades";
 }
 
 export interface RiskSimResult {
@@ -689,6 +723,10 @@ export interface BackupEntry {
   filename: string;
   size_bytes: number;
   created_at: string;
+  /** When true, the backup is pinned via a sibling .lock sentinel —
+   * the daily prune and manual delete will both skip it until the
+   * lock is cleared. */
+  locked: boolean;
 }
 
 export interface ResetResult {

@@ -109,6 +109,26 @@ def setup_logging(config: "AppConfig | None" = None) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("google_genai").setLevel(logging.WARNING)
 
+    # Drop asyncio's transport-layer "socket.send() raised exception"
+    # warning. It fires when a WebSocket peer drops without a proper
+    # close handshake — the underlying socket is in a half-closed
+    # state, our broadcast_ws send hits BrokenPipe at the OS layer,
+    # asyncio logs the generic warning, and our application-level
+    # try/except discards the dead client one line later. The warning
+    # is redundant noise; the prune is happening correctly. A single
+    # dashboard tab walking off can produce hundreds of these per
+    # heartbeat (one per broadcast event × one per dead client).
+    class _DropAsyncioSocketSendWarning(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return "socket.send() raised exception" not in record.getMessage()
+
+    asyncio_logger = logging.getLogger("asyncio")
+    if not any(
+        isinstance(f, _DropAsyncioSocketSendWarning)
+        for f in asyncio_logger.filters
+    ):
+        asyncio_logger.addFilter(_DropAsyncioSocketSendWarning())
+
 
 class _StubDB:
     """Minimal database stub when no real DB yet)."""
@@ -152,6 +172,25 @@ class _StubBroker:
 
     async def modify_sl_order(self, order_id: str, new_trigger_price: float) -> bool:
         raise NotImplementedError("No broker configured")
+
+    async def modify_order(
+        self,
+        order_id: str,
+        *,
+        price: float | None = None,
+        quantity: int | None = None,
+        trigger_price: float | None = None,
+        order_type: str | None = None,
+    ) -> bool:
+        raise NotImplementedError("No broker configured")
+
+    async def get_orders(self) -> list[dict[str, object]]:
+        return []
+
+    async def initiate_holdings_auth(
+        self, holdings: list[dict[str, object]] | None = None,
+    ) -> dict[str, object] | None:
+        return None
 
     def get_login_url(self) -> str:
         return ""
@@ -319,7 +358,7 @@ def _build_ml(config: AppConfig, db: Any) -> Any:
         from yolovest.strategy.ml_signal import XGBoostSignalModel
 
         model_dir = getattr(config.strategy, "model_dir", "./models")
-        return XGBoostSignalModel(model_dir=model_dir, db=db)
+        return XGBoostSignalModel(model_dir=model_dir, db=db, config=config)
     except Exception:
         logger.warning("Failed to build ML provider, signals will be unavailable")
         return None
@@ -644,8 +683,11 @@ async def async_main(args: argparse.Namespace) -> None:
     # is gated by an `await asyncio.sleep(2)` so models almost always
     # finish loading before the first inference is needed anyway.
 
-    # Build orchestrator (skills are instantiated internally)
+    # Build orchestrator (skills are instantiated internally) and
+    # expose it on ctx so the heartbeat-pipeline skill can invoke
+    # run_heartbeat on demand.
     orchestrator = HeartbeatOrchestrator(ctx)
+    ctx.orchestrator = orchestrator
 
     # Build heartbeat watchdog
     from yolovest.watchdog import HeartbeatWatchdog

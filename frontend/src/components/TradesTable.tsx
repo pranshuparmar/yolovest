@@ -2,7 +2,8 @@ import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import type { Trade } from "../types/api";
 import { parseUTC, getTimezone } from "../utils/datetime";
-import { useLtpStream } from "../hooks/useLtpStream";
+import { useLtpStream, useLtpBatch } from "../hooks/useLtpStream";
+import { useMemo } from "react";
 import { SymbolLink } from "./SymbolLink";
 
 function fmt(n: number, d = 2) {
@@ -20,8 +21,15 @@ export function TradesTable({
   compact?: boolean;
 }) {
   const navigate = useNavigate();
-  // Live LTP — useful for OPEN rows. Closed rows show — instead.
+  // Live LTP map. The ticker only feeds OPEN-position symbols, so for
+  // closed-trade rows we poll the batched /api/ltp endpoint to fill
+  // in last-known prices (cached locally; refreshes every 30s).
   const ltps = useLtpStream();
+  const symbols = useMemo(
+    () => Array.from(new Set(trades.map((t) => t.symbol).filter(Boolean))),
+    [trades],
+  );
+  useLtpBatch(symbols);
 
   if (trades.length === 0) {
     return <p className="text-gray-500 text-sm py-4">No trades found</p>;
@@ -83,33 +91,50 @@ export function TradesTable({
               <td className="py-2 pr-4">
                 <span className="text-xs text-gray-400">{t.status}</span>
               </td>
-              <td
-                className={clsx(
-                  "py-2 pr-4",
-                  t.pnl !== null && t.pnl > 0
-                    ? "text-emerald-400"
-                    : t.pnl !== null && t.pnl < 0
-                      ? "text-red-400"
-                      : "text-gray-500"
-                )}
-              >
-                {t.pnl !== null ? (
-                  <>
-                    <div>₹{fmt(t.pnl)}</div>
-                    {t.exit_price !== null && (
-                      <div className="text-[10px] text-gray-500 leading-tight">
-                        Gross ₹{fmt(
-                          (t.signal_type === "BUY"
-                            ? (t.exit_price - t.fill_price)
-                            : (t.fill_price - t.exit_price)) * t.quantity,
-                        )}
-                      </div>
+              {/* PnL column: shows TOTAL (final + any partial bookings).
+                  When the trade had partial bookings, surfaces the
+                  breakdown as a secondary line so the user can see
+                  where the money came from. */}
+              {(() => {
+                const partial = t.realized_partial_pnl ?? 0;
+                const total = (t.pnl ?? 0) + partial;
+                const displayValue = t.pnl !== null || partial !== 0 ? total : null;
+                return (
+                  <td
+                    className={clsx(
+                      "py-2 pr-4",
+                      displayValue !== null && displayValue > 0
+                        ? "text-emerald-400"
+                        : displayValue !== null && displayValue < 0
+                          ? "text-red-400"
+                          : "text-gray-500"
                     )}
-                  </>
-                ) : (
-                  "—"
-                )}
-              </td>
+                  >
+                    {displayValue !== null ? (
+                      <>
+                        <div>₹{fmt(displayValue)}</div>
+                        {partial !== 0 && (
+                          <div className="text-[10px] text-gray-500 leading-tight">
+                            Partial ₹{fmt(partial)}
+                            {t.pnl !== null && ` + Final ₹${fmt(t.pnl)}`}
+                          </div>
+                        )}
+                        {partial === 0 && t.exit_price !== null && (
+                          <div className="text-[10px] text-gray-500 leading-tight">
+                            Gross ₹{fmt(
+                              (t.signal_type === "BUY"
+                                ? (t.exit_price - t.fill_price)
+                                : (t.fill_price - t.exit_price)) * t.quantity,
+                            )}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                );
+              })()}
               <td className="py-2 text-gray-500 text-xs whitespace-nowrap">
                 {parseUTC(t.created_at).toLocaleDateString("en-IN", {
                   timeZone: getTimezone(),

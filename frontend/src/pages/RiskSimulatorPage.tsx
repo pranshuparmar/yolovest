@@ -23,6 +23,7 @@ export function RiskSimulatorPage() {
   const [initialCapital, setInitialCapital] = useState(100000);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [source, setSource] = useState<"signals" | "trades">("signals");
   const [configApplied, setConfigApplied] = useState(false);
 
   useEffect(() => {
@@ -50,6 +51,7 @@ export function RiskSimulatorPage() {
       initial_capital: initialCapital,
       date_from: dateFrom || undefined,
       date_to: dateTo || undefined,
+      source,
     });
   };
 
@@ -59,8 +61,26 @@ export function RiskSimulatorPage() {
     <div className="space-y-6">
       <h2 className="text-lg font-semibold">Risk Simulator</h2>
       <p className="text-sm text-gray-400">
-        Replay historical signals against modified risk parameters to see how outcomes would change.
+        Replay historical signals — or actually executed trades — against modified risk parameters to see how outcomes would change.
       </p>
+
+      {/* Source toggle — signals (all generated) vs executed trades */}
+      <div className="inline-flex rounded-lg border border-gray-800 bg-gray-900 p-0.5">
+        {(["signals", "trades"] as const).map((s) => (
+          <button
+            key={s}
+            onClick={() => setSource(s)}
+            className={clsx(
+              "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
+              source === s
+                ? "bg-emerald-900/40 text-emerald-400"
+                : "text-gray-400 hover:text-gray-200",
+            )}
+          >
+            {s === "signals" ? "Signals (all generated)" : "Executed Trades"}
+          </button>
+        ))}
+      </div>
 
       {/* Parameters */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -121,7 +141,8 @@ export function RiskSimulatorPage() {
       {r && (
         <div className="space-y-4">
           <p className="text-xs text-gray-500">
-            Simulated against {simulate.data?.signals_available ?? "?"} historical signals
+            Simulated against {simulate.data?.signals_available ?? "?"} historical{" "}
+            {(simulate.data?.params.source ?? "signals") === "trades" ? "trades" : "signals"}
             {simulate.data?.params.date_from && (
               <> from {simulate.data.params.date_from}</>
             )}

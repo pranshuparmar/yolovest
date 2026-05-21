@@ -41,7 +41,24 @@ export async function apiFetch<T>(
   }
 
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`);
+    // Try to parse the FastAPI error body so structured detail (e.g.
+    // the CDSL TPIN authorisation prompt) is available to callers.
+    // detail can be a string or an object — for objects we attach
+    // the parsed body to the Error so consumers can branch on it.
+    let detail: unknown = null;
+    try {
+      const body = await res.json();
+      detail = body?.detail ?? body;
+    } catch {
+      // not JSON, fall through to generic message
+    }
+    const detailMsg = typeof detail === "string"
+      ? detail
+      : `API error: ${res.status} ${res.statusText}`;
+    const err = new Error(detailMsg) as Error & { status?: number; detail?: unknown };
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
   }
 
   return res.json();

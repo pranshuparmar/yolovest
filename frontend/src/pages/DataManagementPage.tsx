@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   useStorageStats,
   useCleanupTable,
@@ -6,9 +6,11 @@ import {
   useCreateBackup,
   useRestoreBackup,
   useDeleteBackup,
+  useSetBackupLock,
   useResetAllData,
   useQuarantinedSymbols,
   useUnquarantineSymbol,
+  useBulkUnquarantineSymbols,
   useSetReplacementSymbol,
   useBulkDelete,
   useRotationCooldown,
@@ -333,14 +335,67 @@ function RotationCooldownSection() {
 function QuarantinedSymbolsSection() {
   const { data: symbols, isLoading } = useQuarantinedSymbols();
   const unquarantine = useUnquarantineSymbol();
+  const bulkUnquarantine = useBulkUnquarantineSymbols();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  // Drop stale entries from the selection set whenever the listing
+  // shrinks (after a bulk unblock or single unblock).
+  const visible = useMemo(
+    () => new Set((symbols ?? []).map((s) => s.symbol)),
+    [symbols],
+  );
+  useEffect(() => {
+    setSelected((prev) => {
+      const next = new Set<string>();
+      for (const s of prev) if (visible.has(s)) next.add(s);
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visible]);
+
+  const toggle = (sym: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(sym)) next.delete(sym);
+      else next.add(sym);
+      return next;
+    });
+  const allSelected = !!symbols && symbols.length > 0 && selected.size === symbols.length;
+  const toggleAll = () => {
+    if (allSelected) setSelected(new Set());
+    else setSelected(new Set((symbols ?? []).map((s) => s.symbol)));
+  };
+  const runBulkUnblock = () => {
+    const picks = Array.from(selected);
+    if (picks.length === 0) return;
+    if (!window.confirm(`Unquarantine ${picks.length} symbol${picks.length > 1 ? "s" : ""}? They will be included in the next scan.`)) return;
+    bulkUnquarantine.mutate(picks, {
+      onSuccess: () => setSelected(new Set()),
+    });
+  };
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-      <div className="px-4 py-3 border-b border-gray-800">
-        <h3 className="text-sm font-semibold text-gray-300">Quarantined Symbols</h3>
-        <p className="text-xs text-gray-500 mt-0.5">
-          Symbols auto-blocked after 3 consecutive data fetch failures. Set a replacement symbol to use an alternative instead of skipping.
-        </p>
+      <div className="px-4 py-3 border-b border-gray-800 flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-300">Quarantined Symbols</h3>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Symbols auto-blocked after 3 consecutive data fetch failures. Set a replacement symbol to use an alternative instead of skipping.
+          </p>
+        </div>
+        {selected.size > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-400">
+              {selected.size} selected
+            </span>
+            <button
+              onClick={runBulkUnblock}
+              disabled={bulkUnquarantine.isPending}
+              className="px-3 py-1 rounded text-xs font-medium bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-30 transition-colors"
+            >
+              {bulkUnquarantine.isPending ? "Unblocking..." : `Unblock ${selected.size}`}
+            </button>
+          </div>
+        )}
       </div>
       {isLoading ? (
         <div className="h-20 animate-pulse bg-gray-800 m-4 rounded" />
@@ -353,6 +408,15 @@ function QuarantinedSymbolsSection() {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+                <th className="py-2 px-3 text-center w-8">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleAll}
+                    aria-label="Select all quarantined symbols"
+                    className="accent-amber-500 cursor-pointer"
+                  />
+                </th>
                 <th className="py-2 px-4 text-left">Symbol</th>
                 <th className="py-2 px-4 text-right">Failures</th>
                 <th className="py-2 px-4 text-left">Replacement</th>
@@ -364,6 +428,15 @@ function QuarantinedSymbolsSection() {
             <tbody>
               {symbols.map((s) => (
                 <tr key={s.symbol} className="border-b border-gray-800 hover:bg-gray-800/30">
+                  <td className="py-2 px-3 text-center">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(s.symbol)}
+                      onChange={() => toggle(s.symbol)}
+                      aria-label={`Select ${s.symbol}`}
+                      className="accent-amber-500 cursor-pointer"
+                    />
+                  </td>
                   <td className="py-2 px-4 font-medium text-gray-200">
                     <SymbolLink symbol={s.symbol} className="text-gray-200" />
                   </td>
@@ -412,6 +485,7 @@ export function DataManagementPage() {
   const createBackup = useCreateBackup();
   const restoreBackup = useRestoreBackup();
   const deleteBackup = useDeleteBackup();
+  const setBackupLock = useSetBackupLock();
   const resetAll = useResetAllData();
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [resetStep, setResetStep] = useState<"idle" | "warn" | "confirm">("idle");
@@ -551,7 +625,19 @@ export function DataManagementPage() {
             <tbody>
               {backups.map((b) => (
                 <tr key={b.filename} className="border-b border-gray-800 hover:bg-gray-800/30">
-                  <td className="py-2 px-4 font-mono text-gray-300 text-xs">{b.filename}</td>
+                  <td className="py-2 px-4 font-mono text-gray-300 text-xs">
+                    <span className="inline-flex items-center gap-2">
+                      {b.filename}
+                      {b.locked && (
+                        <span
+                          className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-900/40 text-amber-400"
+                          title="Locked — exempt from daily prune and manual delete"
+                        >
+                          LOCKED
+                        </span>
+                      )}
+                    </span>
+                  </td>
                   <td className="py-2 px-4 text-right text-gray-400">{formatBytes(b.size_bytes)}</td>
                   <td className="py-2 px-4 text-right text-gray-400">{formatDateTime(b.created_at)}</td>
                   <td className="py-2 px-4 text-right">
@@ -608,6 +694,29 @@ export function DataManagementPage() {
                     ) : (
                       <div className="flex items-center justify-end gap-1.5">
                         <button
+                          onClick={() => {
+                            setBackupLock.mutate(
+                              { filename: b.filename, locked: !b.locked },
+                              {
+                                onSuccess: () => setLastResult(
+                                  b.locked
+                                    ? `Unlocked ${b.filename}`
+                                    : `Locked ${b.filename} — exempt from prune & delete`,
+                                ),
+                              },
+                            );
+                          }}
+                          disabled={setBackupLock.isPending}
+                          className={b.locked
+                            ? "px-2 py-0.5 rounded text-xs font-medium bg-amber-900/40 text-amber-400 hover:bg-amber-900/60 transition-colors disabled:opacity-50"
+                            : "px-2 py-0.5 rounded text-xs font-medium bg-gray-800 hover:bg-amber-900/30 text-gray-400 hover:text-amber-400 transition-colors disabled:opacity-50"}
+                          title={b.locked
+                            ? "Click to unlock — backup will be eligible for prune/delete again"
+                            : "Click to lock — prevents auto-prune and manual delete"}
+                        >
+                          {b.locked ? "Unlock" : "Lock"}
+                        </button>
+                        <button
                           onClick={() => { setRestoreConfirm(b.filename); setDeleteConfirm(null); }}
                           className="px-2 py-0.5 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
                         >
@@ -615,7 +724,9 @@ export function DataManagementPage() {
                         </button>
                         <button
                           onClick={() => { setDeleteConfirm(b.filename); setRestoreConfirm(null); }}
-                          className="px-2 py-0.5 rounded text-xs font-medium bg-gray-800 hover:bg-red-900/40 text-gray-400 hover:text-red-400 transition-colors"
+                          disabled={b.locked}
+                          title={b.locked ? "Unlock first to delete" : undefined}
+                          className="px-2 py-0.5 rounded text-xs font-medium bg-gray-800 hover:bg-red-900/40 text-gray-400 hover:text-red-400 transition-colors disabled:opacity-40 disabled:hover:bg-gray-800 disabled:hover:text-gray-400 disabled:cursor-not-allowed"
                         >
                           Delete
                         </button>

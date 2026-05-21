@@ -20,6 +20,8 @@ const TradesPage = lazy(() => import("./pages/TradesPage").then(m => ({ default:
 const TradeDetailPage = lazy(() => import("./pages/TradeDetailPage").then(m => ({ default: m.TradeDetailPage })));
 const WatchlistPage = lazy(() => import("./pages/WatchlistPage").then(m => ({ default: m.WatchlistPage })));
 const HoldingsPage = lazy(() => import("./pages/HoldingsPage").then(m => ({ default: m.HoldingsPage })));
+const FundsPage = lazy(() => import("./pages/FundsPage").then(m => ({ default: m.FundsPage })));
+const OrdersPage = lazy(() => import("./pages/OrdersPage").then(m => ({ default: m.OrdersPage })));
 const SymbolPage = lazy(() => import("./pages/SymbolPage").then(m => ({ default: m.SymbolPage })));
 const AnalyticsPage = lazy(() => import("./pages/AnalyticsPage").then(m => ({ default: m.AnalyticsPage })));
 const ReportsPage = lazy(() => import("./pages/ReportsPage").then(m => ({ default: m.ReportsPage })));
@@ -104,6 +106,8 @@ function LazyRoutes() {
       <Route path="/trades/:tradeId" element={<TradeDetailPage />} />
       <Route path="/watchlist" element={<WatchlistPage />} />
       <Route path="/holdings" element={<HoldingsPage />} />
+      <Route path="/funds" element={<FundsPage />} />
+      <Route path="/orders" element={<OrdersPage />} />
       <Route path="/news" element={<NewsFeedPage />} />
       <Route path="/calendar" element={<EconomicCalendarPage />} />
       <Route path="/predictions" element={<PredictionsPage />} />
