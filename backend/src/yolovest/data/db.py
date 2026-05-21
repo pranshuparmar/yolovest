@@ -5174,23 +5174,37 @@ class Database:
         }
 
     async def cleanup_orphaned_models(self, model_dir: str) -> dict[str, Any]:
-        """Remove .pkl files on disk that have no matching DB record (retired or deleted)."""
+        """Remove .pkl files on disk that have NO matching DB row.
+
+        "Orphan" means a file with no `model_versions` record at all —
+        not "retired and therefore unused". Retired models keep their
+        `.pkl` on disk until `cleanup_retired_models` deletes them
+        based on `retraining.retired_model_cleanup_days`, which is the
+        age-gated path that respects the configured grace period for
+        rollback / re-shadow. The previous behaviour (deleting any
+        file not in production/shadow status) nuked retired model
+        artifacts on the very next maintenance run, making the
+        `retired_model_cleanup_days` setting silently meaningless.
+        """
         model_path = Path(model_dir)
         if not model_path.is_dir():
             return {"orphaned_files_deleted": 0}
 
-        # Get all known versions from DB
+        # Get every version on record, regardless of status. A file
+        # whose version appears here is owned by the DB lifecycle —
+        # promotion / retirement / age-based cleanup are responsible
+        # for its eventual deletion, not this skill.
         cursor = await self.conn.execute(
-            "SELECT version FROM model_versions WHERE status IN ('production', 'shadow')"
+            "SELECT version FROM model_versions"
         )
         rows = await cursor.fetchall()
-        active_versions = {row[0] for row in rows}
+        known_versions = {row[0] for row in rows}
 
         deleted = 0
         for pkl_file in model_path.glob("*.pkl"):
             # Extract version from filename (e.g., intraday_v20260325_180000.pkl → intraday_v20260325_180000)
             version = pkl_file.stem
-            if version not in active_versions:
+            if version not in known_versions:
                 try:
                     pkl_file.unlink()
                     deleted += 1
