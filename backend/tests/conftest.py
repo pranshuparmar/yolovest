@@ -248,6 +248,19 @@ def mock_db() -> AsyncMock:
     db.record_fetch_success = AsyncMock()
     db.unquarantine_symbol = AsyncMock(return_value=True)
     db.is_quarantined = AsyncMock(return_value=False)
+    # generate-signals pre-loop reads: empty stubs so the per-symbol
+    # loop doesn't crash on AsyncMock-returns-coroutine for missing
+    # methods. Override per-test for behaviour-specific scenarios.
+    db.get_combined_watchlist = AsyncMock(return_value=[])
+    db.get_quarantine_replacements = AsyncMock(return_value={})
+    db.get_news_articles = AsyncMock(return_value=[])
+    db.get_vix_timeline = AsyncMock(return_value=[])
+    db.get_fno_timeline = AsyncMock(return_value={})
+    db.get_ohlcv = AsyncMock(return_value=[])
+    db.get_system_state = AsyncMock(return_value=None)
+    db.record_signal_outcome = AsyncMock()
+    db.insert_signal = AsyncMock(return_value="S-test001")
+    db.insert_shadow_prediction = AsyncMock()
     return db
 
 

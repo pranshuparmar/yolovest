@@ -3914,7 +3914,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         from yolovest.costs import compute_transaction_costs
         from yolovest.data.features import IndicatorConfig, compute_features
         from yolovest.skills.generate_signals import _format_class_probs
-        from yolovest.strategy.holding_period import adjust_sell_for_holdings, decide_holding_period, interpolate_atr_multipliers
+        # holding-period decision and target/SL geometry now live inside
+        # the shared signal_evaluator — no direct imports needed here.
         from yolovest.timezone import IST
 
         run_id = str(uuid.uuid4())[:8]
@@ -3981,22 +3982,34 @@ def create_app(ctx: AppContext) -> FastAPI:
                 },
             }
 
-        # Step 2: Generate signals from shortlisted stocks
+        # Step 2: Generate signals from shortlisted stocks via the
+        # shared evaluator. Same code path the production heartbeat
+        # uses — dry-run and live trading agree by construction.
+        from yolovest.strategy.signal_evaluator import evaluate_symbol_signal
+
         signals_out: list[dict[str, Any]] = []
         ml_unavailable = ctx.ml is None
 
-        # Build held symbols set for SELL signal adjustment
+        # Build held + locked symbol sets (the evaluator needs both
+        # for SELL adjustment and lock skip)
         open_positions = await ctx.db.get_open_positions()
         held_symbols = {p["symbol"] for p in open_positions}
-        min_confidence_buy = cfg.risk.min_confidence_buy
-        min_confidence_sell = cfg.risk.min_confidence_sell
+        locked_symbols = set(await ctx.db.get_locked_symbols())
 
         if ml_unavailable:
             logger.warning("Dry-run: ML model not loaded — cannot generate signals. "
                            "Train a model first via the model-retrain skill.")
 
-        # Diagnostics: track why stocks get filtered out
-        filter_counts = {
+        # Market regime (same source generate-signals reads from)
+        regime_state = None
+        if cfg.strategy.market_regime.enabled:
+            regime_state = await ctx.db.get_system_state("market_regime")
+
+        # Diagnostics: track why stocks get filtered out. Buckets
+        # mirror the SignalEvaluation.outcome enum + the pre-
+        # evaluator gates (insufficient_bars / feature_computation
+        # _failed / ml_unavailable / error).
+        filter_counts: dict[str, int] = {
             "insufficient_bars": 0,
             "feature_computation_failed": 0,
             "ml_unavailable": 0,
@@ -4060,181 +4073,59 @@ def create_app(ctx: AppContext) -> FastAPI:
                 except Exception:
                     logger.debug("LTP unavailable for dry-run %s, using bar close", symbol)
 
-                # Decide holding period based on features and selected strategy mode
-                now_time = dt.now(IST).time()
-                holding_period, product, expected_days = decide_holding_period(
-                    features, allowed_periods, cfg.strategy.volatility, now_time,
+                evaluation = await evaluate_symbol_signal(
+                    ctx, symbol, features,
+                    current_price=current_price,
+                    held_symbols=held_symbols,
+                    locked_symbols=locked_symbols,
+                    now_time=dt.now(IST).time(),
+                    effective_mode=effective_mode,
+                    allowed_periods=allowed_periods,
                     mode_days_range=mode_days_range,
+                    existing_positions=open_positions,
+                    market_regime=regime_state,
                 )
-                use_intraday = holding_period == "intraday"
-                is_balanced = effective_mode == "balanced"
 
-                if is_balanced:
-                    # Balanced mode: run both models, pick higher confidence
-                    import asyncio as _aio
-
-                    intra_feat = {**features}
-                    intraday_bars = await ctx.db.get_ohlcv(symbol, "5minute", days=1)
-                    if intraday_bars:
-                        intra_feat["close"] = intraday_bars[-1].close
-
-                    intra_pred, swing_pred = await _aio.gather(
-                        ctx.ml.predict_intraday(symbol, intra_feat, current_price=current_price),
-                        ctx.ml.predict_swing(symbol, features, current_price=current_price),
-                        return_exceptions=True,
-                    )
-                    if isinstance(intra_pred, BaseException):
-                        intra_pred = None
-                    if isinstance(swing_pred, BaseException):
-                        swing_pred = None
-
-                    # Compare margin-above-threshold (not raw confidence)
-                    # — mirrors generate_signals._predict_balanced. The
-                    # intraday model is balanced-label and produces
-                    # higher raw confidences than swing (HOLD-dominated),
-                    # so raw-confidence comparison would systematically
-                    # pick intraday and the dry-run would show 100% MIS.
-                    def _margin(pred: Any, model_type: str) -> float:
-                        if pred is None or pred.signal_type == "HOLD":
-                            return -1.0
-                        thresholds = ctx.ml.get_effective_thresholds(model_type)
-                        if not thresholds:
-                            return float(pred.confidence)
-                        key = pred.signal_type.lower()
-                        return float(pred.confidence) - float(thresholds.get(key, 0.5))
-
-                    intra_margin = _margin(intra_pred, "intraday")
-                    swing_margin = _margin(swing_pred, "swing")
-
-                    if intra_margin < 0 and swing_margin < 0:
-                        prediction = swing_pred or intra_pred
-                    elif intra_margin >= swing_margin:
-                        prediction = intra_pred
-                        holding_period, product, expected_days = "intraday", "MIS", 0
-                    else:
-                        prediction = swing_pred
-                        _, product, expected_days = decide_holding_period(
-                            features, ["short_term", "long_term"],
-                            cfg.strategy.volatility, now_time,
-                            mode_days_range=(max(1, mode_days_range[0]) if mode_days_range else 1, mode_days_range[1] if mode_days_range else 15),
-                        )
-                        holding_period = "swing" if expected_days <= 5 else "positional" if expected_days <= 15 else "long_term"
-                        product = "CNC"
-                    use_intraday = holding_period == "intraday"
-                elif use_intraday:
-                    prediction = await ctx.ml.predict_intraday(
-                        symbol, features, current_price=current_price,
-                    )
-                else:
-                    prediction = await ctx.ml.predict_swing(
-                        symbol, features, current_price=current_price,
-                    )
-
-                if prediction.signal_type == "HOLD":
-                    filter_counts["hold_signal"] += 1
+                if evaluation.outcome != "passed":
+                    bucket = evaluation.outcome
+                    filter_counts.setdefault(bucket, 0)
+                    filter_counts[bucket] += 1
                     rejection_details.append({
                         "symbol": symbol,
-                        "reason": "hold_signal",
-                        "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
-                    })
-                    logger.info(
-                        "Dry-run: HOLD signal for %s (%s)",
-                        symbol, _format_class_probs(prediction),
-                    )
-                    continue
-
-                threshold = cfg.risk.resolve_min_confidence(
-                    holding_period, prediction.signal_type,
-                )
-                if prediction.confidence < threshold:
-                    filter_counts["low_confidence"] += 1
-                    rejection_details.append({
-                        "symbol": symbol,
-                        "reason": "low_confidence",
-                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {threshold}",
-                    })
-                    logger.info(
-                        "Dry-run: Low confidence for %s: %s @ %.2f < %.2f (%s)",
-                        symbol, prediction.signal_type, prediction.confidence, threshold,
-                        _format_class_probs(prediction),
-                    )
-                    continue
-
-                # Adjust SELL: force to MIS/intraday if user doesn't hold
-                # the stock. Drop when the per-symbol decision is swing —
-                # mirrors generate-signals so the dry-run preview matches.
-                _adjusted = adjust_sell_for_holdings(
-                    prediction.signal_type, holding_period, product,
-                    symbol, held_symbols, expected_days,
-                )
-                if _adjusted is None:
-                    filter_counts.setdefault("short_on_swing_horizon", 0)
-                    filter_counts["short_on_swing_horizon"] += 1
-                    rejection_details.append({
-                        "symbol": symbol,
-                        "reason": "short_on_swing_horizon",
-                        "detail": (
-                            f"SELL on non-held {symbol} with "
-                            f"holding_period='{holding_period}' would require "
-                            f"intraday/MIS — dropped"
-                        ),
+                        "reason": bucket,
+                        "detail": evaluation.detail,
                     })
                     continue
-                holding_period, product, expected_days = _adjusted
 
-                # Apply ATR multipliers interpolated for holding duration.
-                # Mirror generate-signals: clamp intraday ATR at
-                # holding_periods.intraday.max_atr_pct_for_target so the
-                # dry-run preview shows the same target/SL geometry the
-                # live engine would produce.
-                entry = prediction.entry_price
-                atr = features.get("atr_14", entry * 0.02)
-                if holding_period == "intraday":
-                    max_atr_pct = float(
-                        cfg.strategy.holding_periods.intraday
-                            .max_atr_pct_for_target
-                    )
-                    if max_atr_pct > 0:
-                        atr = min(atr, entry * max_atr_pct)
-                target_mult, sl_mult = interpolate_atr_multipliers(
-                    expected_days, cfg.strategy.holding_periods,
-                )
-
-                if prediction.signal_type == "BUY":
-                    target_price = round(max(entry + target_mult * atr, 0.01), 2)
-                    stop_loss_price = round(max(entry - sl_mult * atr, 0.01), 2)
-                elif prediction.signal_type == "SELL":
-                    target_price = round(max(entry - target_mult * atr, 0.01), 2)
-                    stop_loss_price = round(max(entry + sl_mult * atr, 0.01), 2)
-                else:
-                    target_price = prediction.target_price
-                    stop_loss_price = prediction.stop_loss_price
-
-                # Estimate transaction costs
+                # Passed all evaluator gates. Compute transaction costs
+                # (dry-run-only — production builds the signal dict
+                # without these as risk-check needs the raw figures).
                 est_costs = compute_transaction_costs(
-                    entry, target_price, prediction.position_size,
-                    product=product, cost_config=cfg.transaction_costs,
+                    evaluation.entry_price, evaluation.target_price,
+                    evaluation.prediction.position_size,
+                    product=evaluation.product,
+                    cost_config=cfg.transaction_costs,
                 )
 
                 filter_counts["passed"] += 1
                 logger.info(
                     "Dry-run: PASSED %s for %s @ %.2f (%s)",
-                    prediction.signal_type, symbol,
-                    prediction.confidence,
-                    _format_class_probs(prediction),
+                    evaluation.signal_type, symbol,
+                    evaluation.confidence,
+                    _format_class_probs(evaluation.prediction),
                 )
                 signals_out.append({
                     "symbol": symbol,
-                    "signal_type": prediction.signal_type,
-                    "entry_price": entry,
-                    "target_price": target_price,
-                    "stop_loss_price": stop_loss_price,
-                    "confidence_score": prediction.confidence,
-                    "position_size": prediction.position_size,
-                    "model_version": prediction.model_version,
-                    "holding_period": holding_period,
-                    "expected_holding_days": expected_days,
-                    "product": product,
+                    "signal_type": evaluation.signal_type,
+                    "entry_price": evaluation.entry_price,
+                    "target_price": evaluation.target_price,
+                    "stop_loss_price": evaluation.stop_loss_price,
+                    "confidence_score": evaluation.confidence,
+                    "position_size": evaluation.prediction.position_size,
+                    "model_version": evaluation.model_version,
+                    "holding_period": evaluation.holding_period,
+                    "expected_holding_days": evaluation.expected_days,
+                    "product": evaluation.product,
                     "estimated_costs": est_costs,
                     "composite_score": stock.get("composite_score"),
                     "technical_score": stock.get("technical_score"),
