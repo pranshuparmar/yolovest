@@ -538,10 +538,39 @@ class PositionMonitorSkill(SkillBase):
         """Compare local DB positions with broker positions."""
         discrepancies = []
 
-        # Build lookup by symbol for broker positions
+        # Build lookup by symbol for broker positions. Filter out the
+        # noise rows Kite's positions endpoint includes that don't
+        # represent real open exposure:
+        #   - CNC with qty < 0 = a delivery sale that just happened
+        #     today; the user sold N shares from holdings and Kite
+        #     surfaces the sell-side as a position row. Indian retail
+        #     can't short CNC so this is never a tradeable short.
+        #     Skipping it stops the "ONGC: on broker (qty=-5) but
+        #     not in local DB" alert from firing on every heartbeat
+        #     after a manual holdings sale.
+        #   - Round-tripped intraday positions where buy and sell
+        #     quantities net to zero AND no overnight balance: those
+        #     are closed for the day, nothing to manage.
         broker_by_symbol: dict[str, dict[str, Any]] = {}
         for bp in broker:
             sym = bp.get("tradingsymbol") or bp.get("symbol", "")
+            qty = bp.get("quantity", bp.get("net_quantity", 0)) or 0
+            product = (bp.get("product") or "").upper()
+            if product == "CNC" and qty < 0:
+                logger.debug(
+                    "reconcile: skipping CNC sell artefact %s qty=%d "
+                    "(delivery sale, not a real position)", sym, qty,
+                )
+                continue
+            buy_q = int(bp.get("buy_quantity") or 0)
+            sell_q = int(bp.get("sell_quantity") or 0)
+            overnight = int(bp.get("overnight_quantity") or 0)
+            if qty == 0 and buy_q > 0 and buy_q == sell_q and overnight == 0:
+                logger.debug(
+                    "reconcile: skipping round-tripped intraday %s "
+                    "(buy=%d sell=%d net=0)", sym, buy_q, sell_q,
+                )
+                continue
             broker_by_symbol[sym] = bp
 
         # Check each local position against broker
