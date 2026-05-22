@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
-import { useConfig, useUpdateConfig } from "../hooks/queries";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { useConfig, useConfigDefaults, useUpdateConfig } from "../hooks/queries";
 import clsx from "clsx";
 
 // ---------------------------------------------------------------------------
@@ -1021,14 +1021,37 @@ function SectionCard({
 // Main page
 // ---------------------------------------------------------------------------
 
+// Compare two config values structurally. Booleans / numbers / strings
+// are sometimes loaded from the DB as their string forms (e.g. "0.02"
+// vs 0.02 from a default AppConfig), so the comparison normalises via
+// JSON.stringify rather than ===.
+function valuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  // Tolerate numeric strings vs numbers
+  if (typeof a === "number" && typeof b === "string") return String(a) === b;
+  if (typeof a === "string" && typeof b === "number") return a === String(b);
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
 export default function SettingsPage() {
   const { data, isLoading, error } = useConfig();
+  const { data: defaultsData } = useConfigDefaults();
   const updateMutation = useUpdateConfig();
 
   const [activeTab, setActiveTab] = useState("general");
   const [edited, setEdited] = useState<Record<string, unknown>>({});
   const [localConfig, setLocalConfig] = useState<Record<string, Record<string, unknown>>>({});
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  // "Diff from default" mode is per-tab so toggling on the Risk tab
+  // doesn't hide unchanged keys on the General tab when the user
+  // navigates back.
+  const [diffOnlyTabs, setDiffOnlyTabs] = useState<Record<string, boolean>>({});
 
   // Flatten all config into a single lookup for virtual sections
   const flatConfig: Record<string, unknown> = {};
@@ -1037,6 +1060,27 @@ export default function SettingsPage() {
       flatConfig[k] = v;
     }
   }
+
+  // Flat lookup of defaults (same key format as flatConfig)
+  const flatDefaults: Record<string, unknown> = useMemo(() => {
+    const out: Record<string, unknown> = {};
+    if (defaultsData?.sections) {
+      for (const section of Object.values(defaultsData.sections)) {
+        for (const [k, v] of Object.entries(section as Record<string, unknown>)) {
+          out[k] = v;
+        }
+      }
+    }
+    return out;
+  }, [defaultsData]);
+
+  const isDifferentFromDefault = useCallback(
+    (key: string): boolean => {
+      if (!(key in flatDefaults)) return false; // unknown key — treat as "same"
+      return !valuesEqual(flatConfig[key], flatDefaults[key]);
+    },
+    [flatConfig, flatDefaults],
+  );
 
   useEffect(() => {
     if (data?.sections) {
@@ -1165,10 +1209,39 @@ export default function SettingsPage() {
         })}
       </div>
 
+      {/* Per-tab toolbar */}
+      <PerTabToolbar
+        currentTab={currentTab}
+        getEntries={getEntries}
+        isDifferentFromDefault={isDifferentFromDefault}
+        flatDefaults={flatDefaults}
+        diffOnly={!!diffOnlyTabs[currentTab.id]}
+        onToggleDiff={() =>
+          setDiffOnlyTabs((prev) => ({
+            ...prev,
+            [currentTab.id]: !prev[currentTab.id],
+          }))
+        }
+        onReset={(changedKeys) => {
+          if (changedKeys.length === 0) return;
+          if (
+            !window.confirm(
+              `Reset ${changedKeys.length} setting(s) on the "${currentTab.label}" tab back to default? ` +
+                `Changes are staged and won't take effect until you press Save.`,
+            )
+          )
+            return;
+          changedKeys.forEach((k) => handleChange(k, flatDefaults[k]));
+        }}
+      />
+
       {/* Tab content */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {currentTab.sections.map((sectionKey) => {
-          const entries = getEntries(sectionKey);
+          let entries = getEntries(sectionKey);
+          if (diffOnlyTabs[currentTab.id]) {
+            entries = entries.filter(([k]) => isDifferentFromDefault(k));
+          }
           if (entries.length === 0) return null;
           const title = SECTION_LABELS[sectionKey] ?? sectionKey;
           return (
@@ -1182,6 +1255,71 @@ export default function SettingsPage() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function PerTabToolbar({
+  currentTab,
+  getEntries,
+  isDifferentFromDefault,
+  flatDefaults,
+  diffOnly,
+  onToggleDiff,
+  onReset,
+}: {
+  currentTab: Tab;
+  getEntries: (sectionKey: string) => [string, unknown][];
+  isDifferentFromDefault: (key: string) => boolean;
+  flatDefaults: Record<string, unknown>;
+  diffOnly: boolean;
+  onToggleDiff: () => void;
+  onReset: (changedKeys: string[]) => void;
+}) {
+  // All keys on this tab, across virtual + real sections, deduped.
+  const tabKeys = useMemo(() => {
+    const seen = new Set<string>();
+    for (const sectionKey of currentTab.sections) {
+      for (const [k] of getEntries(sectionKey)) seen.add(k);
+    }
+    return Array.from(seen);
+  }, [currentTab, getEntries]);
+
+  const changedKeys = useMemo(
+    () => tabKeys.filter((k) => isDifferentFromDefault(k)),
+    [tabKeys, isDifferentFromDefault],
+  );
+
+  const defaultsLoaded = Object.keys(flatDefaults).length > 0;
+
+  return (
+    <div className="flex items-center justify-end gap-2 text-xs">
+      <span className="text-gray-500">
+        {changedKeys.length} of {tabKeys.length} differ from default
+      </span>
+      <button
+        type="button"
+        onClick={onToggleDiff}
+        disabled={!defaultsLoaded}
+        className={clsx(
+          "px-2.5 py-1 rounded border transition-colors disabled:opacity-40",
+          diffOnly
+            ? "bg-blue-900/40 border-blue-700 text-blue-300"
+            : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700",
+        )}
+        title="Show only settings that differ from their default value"
+      >
+        {diffOnly ? "Showing diff" : "Diff from default"}
+      </button>
+      <button
+        type="button"
+        onClick={() => onReset(changedKeys)}
+        disabled={!defaultsLoaded || changedKeys.length === 0}
+        className="px-2.5 py-1 rounded border bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 transition-colors disabled:opacity-40 disabled:hover:bg-gray-800"
+        title="Stage all settings on this tab to their default values (still requires Save)"
+      >
+        Reset tab to default
+      </button>
     </div>
   );
 }

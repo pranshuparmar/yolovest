@@ -4898,6 +4898,17 @@ def create_app(ctx: AppContext) -> FastAPI:
         sections = config_to_ui_sections(ctx.config)
         return {"sections": sections}
 
+    @app.get("/api/config/defaults")
+    async def get_config_defaults(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Return the default values for every DB-editable config key,
+        in the same {section: {key: value}} shape as /api/config so the
+        frontend can diff current vs default and offer a per-tab reset."""
+        from yolovest.config import AppConfig, config_to_ui_sections
+        defaults = config_to_ui_sections(AppConfig())
+        return {"sections": defaults}
+
     @app.put("/api/config")
     async def update_config(
         request: Request,

@@ -686,6 +686,8 @@ export const api = {
   // Config (UI-editable settings)
   getConfig: () => apiFetch<ConfigSections>("/api/config"),
 
+  getConfigDefaults: () => apiFetch<ConfigSections>("/api/config/defaults"),
+
   updateConfig: (updates: Record<string, unknown>) =>
     apiFetch<ConfigUpdateResult>("/api/config", {
       method: "PUT",

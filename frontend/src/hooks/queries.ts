@@ -1119,6 +1119,14 @@ export function useConfig() {
   });
 }
 
+export function useConfigDefaults() {
+  return useQuery({
+    queryKey: ["config-defaults"],
+    queryFn: api.getConfigDefaults,
+    staleTime: Infinity, // defaults never change at runtime
+  });
+}
+
 export function useUpdateConfig() {
   const qc = useQueryClient();
   return useMutation({
