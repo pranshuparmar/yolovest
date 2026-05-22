@@ -99,6 +99,18 @@ export function QuickReviewFloater() {
     review.mutate([s]);
   };
 
+  // Clear input + active symbol + result so the floater returns to
+  // the "type a symbol" baseline. Used by the cross button, by
+  // pressing Enter on an empty input, and indirectly when the user
+  // selects a different symbol (the new selection overwrites).
+  const clearAll = () => {
+    setInput("");
+    setActiveSym("");
+    setShowSuggestions(false);
+    review.reset();
+    inputRef.current?.focus();
+  };
+
   const reco = review.data?.recommendations.find((r) => r.symbol === activeSym);
   const bars = quickCtx.data?.bars ?? [];
   const lastBar = bars[bars.length - 1];
@@ -180,7 +192,14 @@ export function QuickReviewFloater() {
                   onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
-                      if (suggestions.length > 0 && showSuggestions) {
+                      // Enter on an empty input is the keyboard
+                      // shortcut for clear — equivalent to clicking
+                      // the × button. Otherwise: pick the top
+                      // suggestion when one is visible, else run
+                      // whatever's typed.
+                      if (!input.trim()) {
+                        clearAll();
+                      } else if (suggestions.length > 0 && showSuggestions) {
                         runReview(suggestions[0]);
                       } else {
                         runReview();
@@ -188,8 +207,19 @@ export function QuickReviewFloater() {
                     }
                   }}
                   placeholder="Type a symbol (e.g. RELIANCE, TCS)…"
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-3 pr-9 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
                 />
+                {(input || activeSym) && (
+                  <button
+                    type="button"
+                    onClick={clearAll}
+                    aria-label="Clear input and result"
+                    title="Clear (Enter on empty input also works)"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center text-gray-500 hover:text-gray-200 hover:bg-gray-700 rounded transition-colors text-lg leading-none"
+                  >
+                    ×
+                  </button>
+                )}
                 {showSuggestions && suggestions.length > 0 && (
                   <div className="absolute z-10 mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg shadow-xl max-h-56 overflow-y-auto">
                     {suggestions.map((s) => (
