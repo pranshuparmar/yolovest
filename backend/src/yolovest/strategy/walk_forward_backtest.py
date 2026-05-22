@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -397,6 +398,54 @@ _DEFAULT_THRESHOLD_GRID: tuple[float, ...] = (
 )
 
 
+def _sharpe_from_returns(returns: list[float], annualization: int) -> float:
+    """Stdlib Sharpe — sample stdev (n-1 denom), zero when degenerate."""
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    mean = sum(returns) / n
+    var = sum((r - mean) ** 2 for r in returns) / (n - 1)
+    stdev = math.sqrt(var)
+    if stdev <= 0:
+        return 0.0
+    return (mean / stdev) * math.sqrt(annualization)
+
+
+def _bootstrap_sharpe_lower_bound(
+    returns: list[float],
+    annualization: int,
+    n_iter: int,
+    percentile: float,
+    seed: int = 42,
+) -> float:
+    """Resample returns with replacement n_iter times; return the
+    requested lower-percentile Sharpe (default 25th).
+
+    This is the "robust Sharpe" used by sweep_thresholds: a threshold
+    pair whose point-Sharpe is high purely because the validation
+    slice was lucky (one or two outsized winners propping up the mean)
+    will see its bootstrapped lower bound collapse, while one with a
+    consistent edge across resamples keeps a high lower bound. Picks
+    the same family of threshold pairs on average but is far more
+    resistant to the small-N curve-fitting failure mode.
+
+    Seeded so the same training data deterministically picks the same
+    threshold pair across runs (matches the rest of the ML pipeline's
+    random_state=42 convention).
+    """
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    rng = random.Random(seed)
+    sharpes: list[float] = []
+    for _ in range(n_iter):
+        sample = [returns[rng.randint(0, n - 1)] for _ in range(n)]
+        sharpes.append(_sharpe_from_returns(sample, annualization))
+    sharpes.sort()
+    idx = max(0, min(n_iter - 1, int(n_iter * percentile / 100.0)))
+    return sharpes[idx]
+
+
 def sweep_thresholds(
     probas: list[list[float]],
     bars_meta: list[BarMeta],
@@ -404,9 +453,11 @@ def sweep_thresholds(
     grid: tuple[float, ...] = _DEFAULT_THRESHOLD_GRID,
     min_trades: int = 100,
     min_class_share: float = 0.10,
+    bootstrap_iterations: int = 200,
+    bootstrap_percentile: float = 25.0,
 ) -> tuple[float, float, BacktestResult]:
-    """Find the (buy_threshold, sell_threshold) pair that maximises Sharpe
-    on the walk-forward test predictions.
+    """Find the (buy_threshold, sell_threshold) pair with the best
+    bootstrapped lower-bound Sharpe on the walk-forward test predictions.
 
     probas: per-sample class probability vector [P(SELL), P(HOLD), P(BUY)],
       same length as bars_meta. Comes directly from the calibrator's
@@ -417,12 +468,22 @@ def sweep_thresholds(
         BUY  if P(BUY)  >= buy_thresh  and P(BUY)  >= P(SELL)
         SELL if P(SELL) >= sell_thresh and P(SELL) >  P(BUY)
         else HOLD
-    runs the existing real-PnL backtest, and records Sharpe.
+    runs the existing real-PnL backtest, and ranks cells by the
+    `bootstrap_percentile`-th percentile of bootstrapped Sharpe.
 
-    Returns (buy_thresh, sell_thresh, backtest_result) for the cell with
-    the best Sharpe — tiebreaker is win_rate, then total_trades. Cells
-    producing fewer than `min_trades` are ignored so an over-restrictive
-    threshold pair doesn't win by trivially having zero variance.
+    Why bootstrap and not point Sharpe? Sharpe on a 100-500 trade
+    validation slice is noisy enough that the cell with the highest
+    point-Sharpe often won that race because one or two outsized
+    winners happened to land in its trade set. Bootstrapping (200
+    resamples by default, 25th percentile lower bound) discounts cells
+    whose edge collapses under resampling. Same family of cells wins
+    on a robust dataset; lucky cells get filtered out on a noisy one.
+
+    Returns (buy_thresh, sell_thresh, backtest_result) for the best
+    cell — tiebreaker is point Sharpe, then win_rate, then total_trades.
+    Cells producing fewer than `min_trades` are ignored so an
+    over-restrictive threshold pair doesn't win by trivially having
+    zero variance.
 
     `min_class_share` enforces that both BUY and SELL produce at least
     that fraction of total trades in the candidate cell. Without it the
@@ -431,6 +492,9 @@ def sweep_thresholds(
     great on the holdout's Sharpe collapses to a single-class model
     in live trading. The drift-watch class-collapse alert is the
     downstream symptom this floor prevents. Set to 0.0 to disable.
+
+    Set `bootstrap_iterations=0` to disable bootstrapping and revert
+    to point-Sharpe ranking (legacy behaviour).
 
     Falls back to (0.5, 0.5, run_walk_forward_backtest(argmax)) when no
     grid cell clears the floors (typically a model that just doesn't
@@ -446,6 +510,7 @@ def sweep_thresholds(
     best_buy: float | None = None
     best_sell: float | None = None
     best_result: BacktestResult | None = None
+    best_lower_sharpe: float = float("-inf")
 
     for buy_thresh in grid:
         for sell_thresh in grid:
@@ -475,15 +540,32 @@ def sweep_thresholds(
                     sell_share = sell_count / total_nh
                     if buy_share < min_class_share or sell_share < min_class_share:
                         continue
+
+            # Robust ranking: bootstrap the returns and rank on the
+            # lower percentile. Falls through to point Sharpe when
+            # bootstrap is disabled.
+            if bootstrap_iterations > 0 and result.returns:
+                lower_sharpe = _bootstrap_sharpe_lower_bound(
+                    result.returns,
+                    annualization=cfg.annualization_factor,
+                    n_iter=bootstrap_iterations,
+                    percentile=bootstrap_percentile,
+                )
+            else:
+                lower_sharpe = result.sharpe
+
             if best_result is None:
                 best_buy, best_sell, best_result = buy_thresh, sell_thresh, result
+                best_lower_sharpe = lower_sharpe
                 continue
-            # Maximise Sharpe; tiebreak on win_rate, then trade count.
+            # Maximise lower-bound Sharpe; tiebreaker on point Sharpe,
+            # then win_rate, then trade count.
             if (
-                (result.sharpe, result.win_rate, result.total_trades)
-                > (best_result.sharpe, best_result.win_rate, best_result.total_trades)
+                (lower_sharpe, result.sharpe, result.win_rate, result.total_trades)
+                > (best_lower_sharpe, best_result.sharpe, best_result.win_rate, best_result.total_trades)
             ):
                 best_buy, best_sell, best_result = buy_thresh, sell_thresh, result
+                best_lower_sharpe = lower_sharpe
 
     if best_result is None:
         # No cell met the floors — fall back to argmax baseline.
@@ -497,6 +579,14 @@ def sweep_thresholds(
         return 0.5, 0.5, baseline
 
     assert best_buy is not None and best_sell is not None
+    logger.info(
+        "sweep_thresholds: chose buy=%.2f / sell=%.2f — "
+        "point Sharpe=%.3f, bootstrap-lower=%.3f (p%.0f, %d iters), "
+        "trades=%d, win_rate=%.2f",
+        best_buy, best_sell, best_result.sharpe, best_lower_sharpe,
+        bootstrap_percentile, bootstrap_iterations,
+        best_result.total_trades, best_result.win_rate,
+    )
     return best_buy, best_sell, best_result
 
 
