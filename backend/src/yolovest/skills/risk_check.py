@@ -129,6 +129,33 @@ class RiskCheckSkill(SkillBase):
                 f"limit={cfg.max_trades_per_day})",
             )
 
+        # Per-product daily cap (MIS vs CNC). Optional; when set,
+        # acts on top of the combined cap so users can have e.g. 10
+        # MIS entries per day but only 1 CNC.
+        signal_product = (signal.get("product") or "MIS").upper()
+        if signal_product == "MIS":
+            product_limit = cfg.max_mis_trades_per_day
+            product_executed = portfolio.get("mis_trades_today", 0)
+        elif signal_product == "CNC":
+            product_limit = cfg.max_cnc_trades_per_day
+            product_executed = portfolio.get("cnc_trades_today", 0)
+        else:
+            product_limit = None
+            product_executed = 0
+        if product_limit is not None:
+            product_pending = sum(
+                1 for t in pending
+                if (t.get("product") or "MIS").upper() == signal_product
+            )
+            effective_product_today = product_executed + product_pending
+            if effective_product_today >= product_limit:
+                return self._reject(
+                    signal,
+                    f"Max {signal_product} trades/day reached "
+                    f"({effective_product_today} = {product_executed} executed "
+                    f"+ {product_pending} pending, limit={product_limit})",
+                )
+
         # Loss cooldown — portfolio-wide (any losing trade pauses everything)
         if portfolio["minutes_since_last_loss"] < cfg.loss_cooldown_minutes:
             remaining = cfg.loss_cooldown_minutes - portfolio["minutes_since_last_loss"]

@@ -641,6 +641,15 @@ class RiskConfig(BaseModel):
     min_confidence_sell_swing: float | None = Field(default=None, ge=0, le=1)
     skip_sell_on_holdings: bool = True  # position-monitor handles exits; no SELL on held symbols
     max_trades_per_day: int = Field(default=5, ge=1)
+    # Per-product caps on top of max_trades_per_day. Both default to
+    # None (disabled — only the combined cap applies). Set independently
+    # to allow asymmetric policies: e.g. 10 MIS entries per day for an
+    # active intraday workflow but only 1 CNC entry per day for slow,
+    # deliberate delivery positions. The combined max_trades_per_day
+    # still acts as an overall backstop; raise it if the sum of the
+    # per-product caps exceeds the current combined value.
+    max_mis_trades_per_day: int | None = Field(default=None, ge=1)
+    max_cnc_trades_per_day: int | None = Field(default=None, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
     # Risk-rejected signals get re-evaluated each heartbeat (most
     # reasons — exposure, drift, depth, correlation, cooldown — are

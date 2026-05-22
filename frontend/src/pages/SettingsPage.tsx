@@ -279,6 +279,8 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.min_confidence_sell_swing": "Min Confidence (SELL · Swing)",
   "risk.skip_sell_on_holdings": "Skip SELL on Holdings",
   "risk.max_trades_per_day": "Max Trades / Day",
+  "risk.max_mis_trades_per_day": "Max MIS Trades / Day",
+  "risk.max_cnc_trades_per_day": "Max CNC Trades / Day",
   "risk.kill_switch_enabled": "Kill Switch",
   "risk.llm_review_enabled": "LLM Trade Review",
   "risk.llm_fallback_to_rules": "Fallback to Rules if LLM Down",
@@ -509,7 +511,9 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "risk.min_confidence_buy_swing": "Swing BUY floor (0–1). Applied on top of the model's tuned threshold for short_swing / week / long holding signals. Leave blank to fall back to the global Min Confidence (BUY).",
   "risk.min_confidence_sell_swing": "Swing SELL floor (0–1). Applied on top of the model's tuned threshold for short_swing / week / long holding signals. Leave blank to fall back to the global Min Confidence (SELL).",
   "risk.skip_sell_on_holdings": "Don't generate SELL signals for symbols you already hold — position-monitor handles exits.",
-  "risk.max_trades_per_day": "Maximum trades per day including re-entries.",
+  "risk.max_trades_per_day": "Maximum combined trades per day across MIS and CNC, including re-entries. Acts as an overall cap on top of the per-product limits below.",
+  "risk.max_mis_trades_per_day": "Optional per-product cap on intraday (MIS) entries per day. When blank, only the combined Max Trades / Day applies. Useful when you want a different MIS budget than CNC — e.g. 10 MIS entries for an active intraday workflow.",
+  "risk.max_cnc_trades_per_day": "Optional per-product cap on delivery (CNC) entries per day. When blank, only the combined Max Trades / Day applies. Useful for users who hold inventory deliberately and want a tighter CNC budget — e.g. 1 CNC entry per day.",
   "risk.kill_switch_enabled": "Allow /stop and /kill commands to halt all trading.",
   "risk.llm_review_enabled": "Gemini reviews each trade before execution (APPROVE/REJECT/RESIZE).",
   "risk.llm_fallback_to_rules": "Use rules-only risk check if LLM is unavailable.",
@@ -683,7 +687,13 @@ function formatHint(fullKey: string): string | null {
 function InfoIcon({
   description, fullKey,
 }: { description?: string; fullKey?: string }) {
-  const [open, setOpen] = useState(false);
+  // Two independent open states. Hover reveals on desktop without
+  // requiring a click; click pins so the tooltip stays open and works
+  // on mobile (where hover doesn't exist). Either state being true
+  // shows the tooltip.
+  const [hovering, setHovering] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const visible = hovering || pinned;
   const hasDescription = !!description;
   // Always render the icon — every setting should have one so the user
   // can at least see the canonical dotted key (useful for /run, docs,
@@ -692,7 +702,11 @@ function InfoIcon({
     ? description
     : `Config key: ${fullKey}\nDescription not yet written — file an issue if unclear.`;
   return (
-    <span className="relative inline-flex shrink-0">
+    <span
+      className="relative inline-flex shrink-0"
+      onMouseEnter={() => setHovering(true)}
+      onMouseLeave={() => setHovering(false)}
+    >
       <button
         type="button"
         className={clsx(
@@ -701,13 +715,14 @@ function InfoIcon({
             ? "bg-gray-800 border border-gray-600 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
             : "bg-gray-900 border border-dashed border-gray-700 text-gray-600 hover:text-gray-400 hover:border-gray-500",
         )}
-        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-        onBlur={() => setOpen(false)}
+        onClick={(e) => { e.stopPropagation(); setPinned((v) => !v); }}
+        onBlur={() => setPinned(false)}
+        aria-label={hasDescription ? "Show description" : "Show config key"}
       >
         i
       </button>
-      {open && (
-        <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-50 w-56 px-2.5 py-1.5 rounded bg-gray-700 border border-gray-600 text-[11px] text-gray-200 leading-snug shadow-lg whitespace-pre-line">
+      {visible && (
+        <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-50 w-56 px-2.5 py-1.5 rounded bg-gray-700 border border-gray-600 text-[11px] text-gray-200 leading-snug shadow-lg whitespace-pre-line pointer-events-none">
           {tooltip}
         </span>
       )}

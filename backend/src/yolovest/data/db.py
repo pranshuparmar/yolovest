@@ -2548,13 +2548,20 @@ class Database:
         exposure_pct = system_position_value / system_capital if system_capital > 0 else 0
         available_cash = system_capital - system_position_value
 
-        # Today's trades count
+        # Today's trades count — overall + per product so risk-check
+        # can enforce per-product caps (max_mis_trades_per_day /
+        # max_cnc_trades_per_day) independently of the combined cap.
         cursor = await self.conn.execute(
-            f"SELECT COUNT(*) FROM trades WHERE created_at >= ?{mode_clause}",
+            f"SELECT COUNT(*), "
+            f"SUM(CASE WHEN UPPER(product) = 'MIS' THEN 1 ELSE 0 END), "
+            f"SUM(CASE WHEN UPPER(product) = 'CNC' THEN 1 ELSE 0 END) "
+            f"FROM trades WHERE created_at >= ?{mode_clause}",
             [today_start, *mode_params],
         )
         row = await cursor.fetchone()
-        trades_today = row[0] if row else 0
+        trades_today = (row[0] or 0) if row else 0
+        mis_trades_today = (row[1] or 0) if row else 0
+        cnc_trades_today = (row[2] or 0) if row else 0
 
         # Daily realized PnL
         cursor = await self.conn.execute(
@@ -2668,6 +2675,8 @@ class Database:
             "weekly_pnl": round(float(weekly_pnl), 2),
             "weekly_charges": round(float(weekly_charges), 2),
             "trades_today": trades_today,
+            "mis_trades_today": mis_trades_today,
+            "cnc_trades_today": cnc_trades_today,
             "minutes_since_last_loss": minutes_since_last_loss,
             # Broker-synced breakdown
             "available_funds": round(breakdown["available_cash"], 2),
