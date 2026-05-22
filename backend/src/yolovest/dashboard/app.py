@@ -519,9 +519,9 @@ async def _apply_order_postback(
     elif leg == "sl":
         if status == "COMPLETE":
             # Broker-side SL fired — position is closed at broker. Cancel
-            # any resting target leg so it doesn't try to sell on a now-
-            # empty position. Ghost recovery (next heartbeat) closes the
-            # DB row with the actual fill price.
+            # the resting target leg and close the DB row inline using
+            # the fill price from the postback. Ghost recovery is the
+            # safety net if anything below raises.
             target_oid = trade.get("target_order_id")
             if target_oid:
                 try:
@@ -529,7 +529,7 @@ async def _apply_order_postback(
                     await ctx.db.set_trade_target_order_id(trade_id, None)
                 except Exception:
                     logger.debug("%s: target cancel after SL fill failed", log_prefix, exc_info=True)
-            logger.info("%s: SL fired — broker exit registered, ghost recovery will close DB row", log_prefix)
+            await _close_on_exit_fill(ctx, trade, body, leg="sl", log_prefix=log_prefix)
         elif status == "REJECTED":
             logger.warning("%s: SL order REJECTED — position is unprotected!", log_prefix)
             await ctx.notify.send(
@@ -541,7 +541,7 @@ async def _apply_order_postback(
     elif leg == "target":
         if status == "COMPLETE":
             # Target LIMIT filled — same shape as SL fill: cancel the
-            # other leg, let ghost recovery close the row.
+            # other leg and close the DB row inline.
             sl_oid = trade.get("sl_order_id")
             if sl_oid:
                 try:
@@ -549,7 +549,82 @@ async def _apply_order_postback(
                     await ctx.db.set_trade_sl_order_id(trade_id, None)
                 except Exception:
                     logger.debug("%s: SL cancel after target fill failed", log_prefix, exc_info=True)
-            logger.info("%s: target LIMIT filled — broker exit registered", log_prefix)
+            await _close_on_exit_fill(ctx, trade, body, leg="target", log_prefix=log_prefix)
+
+
+async def _close_on_exit_fill(
+    ctx: AppContext,
+    trade: dict[str, Any],
+    body: dict[str, Any],
+    leg: str,
+    log_prefix: str,
+) -> None:
+    """Close the DB row immediately when a broker-side exit leg (SL or
+    target) reports COMPLETE, using the fill price from the postback
+    body. Heartbeat ghost-recovery remains the backstop for postbacks
+    that get dropped (Kite doesn't retry).
+
+    Idempotent: if the trade is already marked closed (e.g. duplicate
+    postback via both HTTP + WebSocket channels), this returns early.
+    """
+    trade_id = trade.get("trade_id")
+    if (trade.get("status") or "").lower() == "closed":
+        return
+
+    try:
+        exit_price = float(body.get("average_price") or 0)
+    except (TypeError, ValueError):
+        exit_price = 0.0
+    if exit_price <= 0:
+        # No fill price in the postback — let ghost recovery handle it
+        # using kite.trades() lookup. Don't synthesize a number.
+        logger.info(
+            "%s: %s COMPLETE without average_price; deferring to ghost recovery",
+            log_prefix, leg.upper(),
+        )
+        return
+
+    entry = float(trade.get("fill_price") or trade.get("entry_price") or 0)
+    qty = int(trade.get("quantity") or 0)
+    if entry <= 0 or qty <= 0:
+        logger.warning(
+            "%s: cannot close on %s fill — entry=%.2f qty=%d invalid",
+            log_prefix, leg.upper(), entry, qty,
+        )
+        return
+
+    signal_type = trade.get("signal_type", "BUY")
+    if signal_type == "BUY":
+        gross_pnl = (exit_price - entry) * qty
+    else:
+        gross_pnl = (entry - exit_price) * qty
+
+    product = trade.get("product", "MIS")
+    try:
+        from yolovest.costs import resolve_round_trip_costs
+
+        costs, _src, breakdown = await resolve_round_trip_costs(
+            ctx.broker, symbol=trade["symbol"], signal_type=signal_type,
+            entry_price=entry, exit_price=exit_price, quantity=qty,
+            product=product, cost_config=ctx.config.transaction_costs,
+        )
+    except Exception:
+        logger.exception("%s: cost resolution failed, using gross PnL", log_prefix)
+        costs, breakdown = 0.0, None
+
+    pnl = round(gross_pnl - costs, 2)
+    try:
+        await ctx.db.close_position(
+            trade_id, exit_price, pnl, realized_costs=breakdown,
+        )
+    except Exception:
+        logger.exception("%s: close_position failed after %s fill", log_prefix, leg.upper())
+        return
+
+    logger.info(
+        "%s: %s filled @ %.2f, closed inline — pnl ₹%.0f (gross ₹%.0f, costs ₹%.0f)",
+        log_prefix, leg.upper(), exit_price, pnl, gross_pnl, costs,
+    )
 
 
 async def _compute_total_capital(broker: Any) -> float:
