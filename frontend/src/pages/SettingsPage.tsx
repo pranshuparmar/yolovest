@@ -7,6 +7,30 @@ import clsx from "clsx";
 // populates this once defaults are loaded.
 const DefaultsContext = createContext<Record<string, unknown>>({});
 
+// Field type registry built from the originally-loaded /api/config
+// response. JSON loses Python's int/float distinction (both → Number
+// in JS), but `_parse_db_value` on the backend preserves int values as
+// JSON integers and floats as JSON numbers with a fractional part. We
+// capture that distinction at first load so NumberField knows whether
+// to allow decimals — preventing leaks like 10.5 being saved to a
+// max_trades_per_day field and crashing Pydantic.
+type FieldKind = "int" | "float";
+const FieldTypesContext = createContext<Record<string, FieldKind>>({});
+
+// Explicit fallback list for fields whose value is null on both the
+// live config and the defaults endpoint, so the heuristic can't
+// classify them. Currently the Optional[int] caps; extend whenever a
+// new Optional[int] field is added.
+const EXPLICIT_INT_KEYS: ReadonlySet<string> = new Set([
+  "risk.max_mis_trades_per_day",
+  "risk.max_cnc_trades_per_day",
+]);
+
+function inferFieldType(value: unknown): FieldKind | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Number.isInteger(value) ? "int" : "float";
+}
+
 // Per-key fallback semantics for Optional fields. When the field's
 // own default is None, the system uses one of these at runtime:
 //   - a reference to another config key (string starting with "ref:")
@@ -968,38 +992,56 @@ function NumberField({
   hint?: string | null;
   onChange: (val: number) => void;
 }) {
+  // Field type is captured once from the original server data so
+  // edits can't corrupt the int/float classification. Falls back to
+  // a heuristic on the current value when registry has no entry.
+  const fieldTypes = useContext(FieldTypesContext);
+  const kind: FieldKind =
+    (fullKey && fieldTypes[fullKey]) ||
+    (Number.isInteger(value) ? "int" : "float");
+  const isInt = kind === "int";
+
   // Track the raw input string so the user can transiently clear the
-  // box while typing (e.g. backspacing to type "0.5") without us
-  // propagating NaN to the parent. We only fire onChange when the
-  // input parses to a finite number — clearing the box leaves the
-  // committed value unchanged, which is the right behaviour for
-  // required-float fields (clearing would otherwise serialise to null
-  // and crash Pydantic on save).
+  // box while typing without leaking NaN/null. Only commit when the
+  // parsed value is finite AND matches the field's int/float kind.
   const [draft, setDraft] = useState<string>(String(value));
-  // Re-sync draft when the upstream value changes (e.g. via Reset to
-  // default or Discard) — the input doesn't get stuck on a stale draft.
   useEffect(() => {
     setDraft(String(value));
   }, [value]);
+
   return (
     <div className="flex items-center justify-between py-2.5 gap-4">
       <FieldLabel label={label} description={description} fullKey={fullKey} hint={hint} />
       <input
         type="number"
-        step={value % 1 !== 0 ? 0.001 : 1}
+        step={isInt ? 1 : value % 1 !== 0 ? 0.001 : 1}
         value={draft}
         onChange={(e) => {
           const v = e.target.value;
           setDraft(v);
-          if (v === "") return; // keep committed value; don't propagate empty
-          const parsed = v.includes(".") ? parseFloat(v) : parseInt(v, 10);
-          if (Number.isFinite(parsed)) onChange(parsed);
+          if (v === "") return;
+          if (isInt) {
+            // Decimals would parse via Math.floor / parseInt and
+            // silently truncate the user's input — better to refuse
+            // them outright so the backend doesn't get a value the
+            // user didn't actually type. The committed value stays
+            // until the user enters a valid integer.
+            if (v.includes(".") || v.includes("e") || v.includes("E")) return;
+            const parsed = parseInt(v, 10);
+            if (Number.isFinite(parsed) && String(parsed) === v.replace(/^\+/, "")) {
+              onChange(parsed);
+            }
+          } else {
+            const parsed = v.includes(".") ? parseFloat(v) : parseInt(v, 10);
+            if (Number.isFinite(parsed)) onChange(parsed);
+          }
         }}
         onBlur={() => {
-          // If the user leaves the field blank, snap the visible
-          // draft back to the last committed value so the input
-          // doesn't show "" while the underlying state is a number.
-          if (draft === "" || !Number.isFinite(Number(draft))) {
+          // Snap visible draft back to committed value when invalid
+          // so the input doesn't sit in a "10.5" state while the
+          // committed integer is 10.
+          if (draft === "" || !Number.isFinite(Number(draft))
+              || (isInt && draft.includes("."))) {
             setDraft(String(value));
           }
         }}
@@ -1052,21 +1094,35 @@ function NullableNumberField({
   hint?: string | null;
   onChange: (val: number | null) => void;
 }) {
+  // For Optional[int] fields the registry pegs them as "int" even
+  // when the current value is null; check it. Falls back to "float"
+  // for the historical Optional[float] confidence/threshold keys.
+  const fieldTypes = useContext(FieldTypesContext);
+  const kind: FieldKind = (fullKey && fieldTypes[fullKey]) || "float";
+  const isInt = kind === "int";
   return (
     <div className="flex items-center justify-between py-2.5 gap-4">
       <FieldLabel label={label} description={description} fullKey={fullKey} hint={hint} />
       <input
         type="number"
-        step={0.05}
+        step={isInt ? 1 : 0.05}
         placeholder="(global)"
         value={value === null ? "" : value}
         onChange={(e) => {
           const v = e.target.value;
           if (v === "") {
             onChange(null);
+            return;
+          }
+          if (isInt) {
+            if (v.includes(".") || v.includes("e") || v.includes("E")) return;
+            const parsed = parseInt(v, 10);
+            if (Number.isFinite(parsed) && String(parsed) === v.replace(/^\+/, "")) {
+              onChange(parsed);
+            }
           } else {
             const parsed = v.includes(".") ? parseFloat(v) : parseInt(v, 10);
-            onChange(Number.isFinite(parsed) ? parsed : null);
+            if (Number.isFinite(parsed)) onChange(parsed);
           }
         }}
         className="w-28 bg-gray-800 border border-gray-700 rounded px-2.5 py-1.5 text-sm text-gray-200 text-right focus:border-blue-500 focus:outline-none"
@@ -1218,6 +1274,32 @@ export default function SettingsPage() {
       flatConfig[k] = v;
     }
   }
+
+  // Field-type registry built once from server data so subsequent
+  // local edits can't corrupt the int/float classification. Falls back
+  // to defaults if the live config hasn't carried a value yet (some
+  // Optional fields).
+  const fieldTypes = useMemo<Record<string, FieldKind>>(() => {
+    const out: Record<string, FieldKind> = {};
+    const collect = (sections: Record<string, Record<string, unknown>> | undefined) => {
+      if (!sections) return;
+      for (const sec of Object.values(sections)) {
+        for (const [k, v] of Object.entries(sec)) {
+          if (k in out) continue;
+          const t = inferFieldType(v);
+          if (t) out[k] = t;
+        }
+      }
+    };
+    collect(data?.sections as Record<string, Record<string, unknown>> | undefined);
+    collect(defaultsData?.sections as Record<string, Record<string, unknown>> | undefined);
+    // Explicit overrides for fields the heuristic can't classify
+    // (Optional[int] with default None has no carrying value).
+    for (const k of EXPLICIT_INT_KEYS) {
+      out[k] = "int";
+    }
+    return out;
+  }, [data, defaultsData]);
 
   // Flat lookup of defaults (same key format as flatConfig)
   const flatDefaults: Record<string, unknown> = useMemo(() => {
@@ -1411,6 +1493,7 @@ export default function SettingsPage() {
           Each section uses break-inside-avoid so it never splits
           across columns mid-card. */}
       <DefaultsContext.Provider value={flatDefaults}>
+      <FieldTypesContext.Provider value={fieldTypes}>
       <div className="columns-1 lg:columns-2 gap-4 [column-fill:balance]">
         {currentTab.sections.map((sectionKey) => {
           let entries = getEntries(sectionKey);
@@ -1436,6 +1519,7 @@ export default function SettingsPage() {
           );
         })}
       </div>
+      </FieldTypesContext.Provider>
       </DefaultsContext.Provider>
     </div>
   );
