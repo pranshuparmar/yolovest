@@ -154,11 +154,19 @@ export function QuickReviewFloater() {
       {open && (
         <div
           className="fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-2 sm:p-6"
-          onClick={() => setOpen(false)}
+          // Dismiss only when the mouse press STARTED on the backdrop
+          // itself. Using onClick triggered the close when the user
+          // dragged a text selection from inside the popup out into the
+          // backdrop — the resulting click event targets the backdrop
+          // even though the gesture started on content. onMouseDown +
+          // identity check on currentTarget catches "started outside"
+          // intent without firing on "drag-released outside".
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setOpen(false);
+          }}
         >
           <div
             className="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-3xl min-h-[60vh] max-h-[90vh] sm:my-10 overflow-hidden flex flex-col"
-            onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
               <div className="flex items-center gap-2">
