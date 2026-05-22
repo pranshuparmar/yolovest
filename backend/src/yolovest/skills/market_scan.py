@@ -60,6 +60,7 @@ class MarketScanSkill(SkillBase):
 
         # Step 3: Filter out banned / corporate action stocks
         filtered = self._apply_exclusion_filters(liquid)
+        count_after_exclusion = len(filtered)
 
         # Exclude symbols in rotation cooldown — they failed to produce signals
         # for consecutive heartbeats, so give them a break and free slots.
@@ -72,6 +73,7 @@ class MarketScanSkill(SkillBase):
                     "market-scan: rotation cooldown excluded %d/%d symbols: %s",
                     before - len(filtered), before, sorted(cooldown),
                 )
+        count_after_rotation = len(filtered)
 
         # Step 4: Enrich with technical indicators from OHLCV bars
         filtered = await self._enrich_with_features(filtered)
@@ -155,8 +157,11 @@ class MarketScanSkill(SkillBase):
         await self.ctx.db.upsert_watchlist(shortlist)
 
         logger.info(
-            "market-scan: universe=%d, liquid=%d, shortlisted=%d — top: %s | sectors strong=%s weak=%s",
-            len(universe), len(filtered), len(shortlist),
+            "market-scan: universe=%d, liquid=%d, after_exclusion=%d, "
+            "after_rotation=%d, shortlisted=%d — top: %s | "
+            "sectors strong=%s weak=%s",
+            len(universe), len(liquid), count_after_exclusion,
+            count_after_rotation, len(shortlist),
             [s["symbol"] for s in shortlist[:5]],
             sector_analysis.get("strong", []),
             sector_analysis.get("weak", []),
@@ -164,7 +169,12 @@ class MarketScanSkill(SkillBase):
 
         result_data: dict[str, Any] = {
             "universe_size": len(universe),
-            "after_filters": len(filtered),
+            "liquid": len(liquid),
+            "after_exclusion": count_after_exclusion,
+            "after_rotation": count_after_rotation,
+            # Kept for backwards-compat with any downstream consumer
+            # reading the old field name; equals after_rotation.
+            "after_filters": count_after_rotation,
             "shortlist_size": len(shortlist),
             "top_stocks": [s["symbol"] for s in shortlist[:5]],
             "strong_sectors": sector_analysis.get("strong", []),
