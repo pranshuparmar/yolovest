@@ -1367,6 +1367,7 @@ class PositionMonitorSkill(SkillBase):
         try:
             await self.ctx.broker.modify_sl_order(sl_oid, new_sl)
             await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+            profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0.0
             logger.info(
                 "trailing SL via MIS modify: %s SL %.2f → %.2f (profit %.2fR)",
                 pos.get("symbol"), current_sl, new_sl, profit_multiple,
