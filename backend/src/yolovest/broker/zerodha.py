@@ -431,6 +431,21 @@ class ZerodhaBroker(BrokerBase):
         """Return the cached tick size for `symbol`, or 0.05 on miss."""
         return self._tick_size_cache.get(symbol, 0.05)
 
+    def tick_for(self, symbol: str) -> float:
+        """Public wrapper around the warmed per-symbol tick cache.
+        Concrete override of BrokerBase.tick_for. Falls back to 0.05
+        when the cache hasn't been warmed yet (e.g. before the first
+        order placement or while the broker isn't authenticated)."""
+        return self._tick_for(symbol)
+
+    def round_to_tick(self, symbol: str, price: float) -> float:
+        """Snap price to the per-symbol tick grid using the warmed
+        cache. Override of BrokerBase.round_to_tick so signal-time
+        target / SL match the grid that _live_place_order will enforce
+        at order placement — no more 34.43 targets on 0.05-tick stocks
+        that get silently rounded to 34.45 when the order goes out."""
+        return self._tick_round_for(symbol, price)
+
     def _tick_round_for(self, symbol: str, price: float) -> float:
         """Snap `price` to the symbol's tick grid using the warmed cache."""
         return self._tick_round(price, self._tick_for(symbol))

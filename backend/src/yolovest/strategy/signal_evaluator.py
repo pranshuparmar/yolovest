@@ -514,8 +514,19 @@ async def evaluate_symbol_signal(
             target_price, stop_loss_price,
         )
 
-    target_price = round(target_price, 2)
-    stop_loss_price = round(stop_loss_price, 2)
+    # Snap to the per-symbol tick grid. Without this, a signal on a
+    # 0.05-tick stock would show "target 34.43" in the DB / UI, but
+    # the order placed at the broker would round to 34.45 — a confusing
+    # discrepancy between the displayed and actual exit. Falls back to
+    # plain 2-decimal rounding when the broker doesn't expose the
+    # method (older mocks in tests).
+    rounder = getattr(ctx.broker, "round_to_tick", None)
+    if callable(rounder):
+        target_price = rounder(symbol, target_price)
+        stop_loss_price = rounder(symbol, stop_loss_price)
+    else:
+        target_price = round(target_price, 2)
+        stop_loss_price = round(stop_loss_price, 2)
 
     # Step 11: confidence floor (per-mode min_confidence)
     effective_min = cfg.risk.resolve_min_confidence(

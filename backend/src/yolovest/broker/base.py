@@ -193,3 +193,20 @@ class BrokerBase(ABC):
     def get_login_url(self) -> str:
         """Get the broker login URL for daily re-authentication."""
         return ""
+
+    def tick_for(self, symbol: str) -> float:
+        """Return the tick size for `symbol`. Default 0.05 (NSE equity
+        standard) when the implementation doesn't carry a per-symbol
+        map. Concrete brokers should override to expose the warmed
+        cache so prices upstream of order-placement (signal target /
+        SL, manual trade entry) can snap to the same grid the broker
+        will enforce."""
+        return 0.05
+
+    def round_to_tick(self, symbol: str, price: float) -> float:
+        """Snap `price` to the symbol's tick grid. Wrapper around
+        tick_for so callers don't need to know the tick size."""
+        tick = self.tick_for(symbol)
+        if tick <= 0:
+            tick = 0.05
+        return round(round(price / tick) * tick, 2)

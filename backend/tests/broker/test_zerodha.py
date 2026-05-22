@@ -252,20 +252,23 @@ class TestMarketProtection:
         assert kwargs["order_type"] == "LIMIT"
         assert "market_protection" not in kwargs
 
-    async def test_market_without_ltp_keeps_market_with_protection(self, live_broker):
+    async def test_market_without_ltp_aborts_instead_of_unprotected_market(self, live_broker):
+        # Previously fell back to a raw MARKET with market_protection=-1
+        # (exchange-defined band ~3-5% on thin names). That was
+        # downgraded to a hard abort because the LTP fetch failing
+        # usually signals a stale or unavailable data source — exactly
+        # the conditions where the exchange protection band is widest.
         async def _no_ltp(_symbol):
             return None
         live_broker._fetch_ltp_for_limit = _no_ltp  # type: ignore[assignment]
 
-        await live_broker._live_place_order(
-            symbol="RELIANCE", side="BUY", quantity=1,
-            order_type="MARKET", product="MIS",
-            price=None, trigger_price=None,
-        )
-
-        kwargs = live_broker._kite.place_order.call_args.kwargs
-        assert kwargs["order_type"] == "MARKET"
-        assert kwargs["market_protection"] == -1
+        with pytest.raises(RuntimeError, match="MARKET→LIMIT conversion failed"):
+            await live_broker._live_place_order(
+                symbol="RELIANCE", side="BUY", quantity=1,
+                order_type="MARKET", product="MIS",
+                price=None, trigger_price=None,
+            )
+        live_broker._kite.place_order.assert_not_called()
 
     async def test_slm_with_trigger_converts_to_sl_no_protection(self, live_broker):
         async def _ltp(_s):
