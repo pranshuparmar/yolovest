@@ -494,22 +494,43 @@ class GenerateSignalsSkill(SkillBase):
                     effective_min = max(base_threshold, repeat_min_conf)
 
                 if signal["confidence_score"] >= effective_min:
-                    # Re-entry: require higher confidence than original trade
+                    # Re-entry: ML probability typically decays as a
+                    # trend matures, so a strict "new > old" check
+                    # rejected most legitimate re-entries. New rule
+                    # uses (a) a tolerance multiplier against the
+                    # original confidence so a 0.85 entry can be
+                    # re-entered at 0.72 by default (0.85 × 0.85), and
+                    # (b) an absolute floor so we never re-enter on
+                    # weak conviction regardless of what the original
+                    # scored.
                     if is_reentry and reentry_cfg.require_higher_confidence:
                         orig_conf = await self._get_last_trade_confidence(symbol)
-                        if orig_conf is not None and prediction.confidence <= orig_conf:
+                        tol = reentry_cfg.confidence_tolerance
+                        floor = reentry_cfg.min_reentry_confidence
+                        relative_threshold = (
+                            (orig_conf * tol) if orig_conf is not None else 0.0
+                        )
+                        effective_threshold = max(floor, relative_threshold)
+                        if prediction.confidence < effective_threshold:
                             filter_counts.setdefault("reentry_low_confidence", 0)
                             filter_counts["reentry_low_confidence"] += 1
                             rejection_details.append({
                                 "symbol": symbol, "reason": "reentry_low_confidence",
                                 "detail": (
-                                    f"re-entry {prediction.signal_type} @ {prediction.confidence:.2f} "
-                                    f"<= original {orig_conf:.2f}"
+                                    f"re-entry {prediction.signal_type} @ "
+                                    f"{prediction.confidence:.2f} < threshold "
+                                    f"{effective_threshold:.2f} "
+                                    f"(orig {orig_conf if orig_conf is not None else 'n/a'}, "
+                                    f"tol {tol:.2f}, floor {floor:.2f})"
                                 ),
                             })
                             logger.info(
-                                "Re-entry blocked for %s: confidence %.2f <= original %.2f",
-                                symbol, prediction.confidence, orig_conf,
+                                "Re-entry blocked for %s: confidence %.2f < "
+                                "effective threshold %.2f (orig=%s tol=%.2f floor=%.2f)",
+                                symbol, prediction.confidence,
+                                effective_threshold,
+                                f"{orig_conf:.2f}" if orig_conf is not None else "n/a",
+                                tol, floor,
                             )
                             continue
 

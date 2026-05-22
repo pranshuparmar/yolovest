@@ -818,9 +818,16 @@ class XGBoostSignalModel(MLBase):
             # Final model trained on all data (with sample weights if available)
             model.fit(X_arr, y_arr, sample_weight=weights_arr, verbose=False)
 
-            # Calibrate probabilities (Platt scaling)
+            # Calibrate probabilities (Platt scaling). cv MUST be a
+            # TimeSeriesSplit — passing an int makes sklearn default to
+            # StratifiedKFold, which shuffles. Shuffled CV leaks future
+            # data into past calibration on time-series, silently
+            # corrupting every downstream probability the system reads.
+            calibration_n_splits = min(3, len(y_arr) // 50 or 2)
             calibrator = CalibratedClassifierCV(
-                model, method="sigmoid", cv=min(3, len(y_arr) // 50 or 2)
+                model,
+                method="sigmoid",
+                cv=TimeSeriesSplit(n_splits=max(2, calibration_n_splits)),
             )
             calibrator.fit(X_arr, y_arr)
 

@@ -438,6 +438,29 @@ class RiskCheckSkill(SkillBase):
                     inst_mult, signal["symbol"], position_size,
                 )
 
+        # Effective-risk re-clamp. The conviction / regime /
+        # institutional multipliers stack multiplicatively above, so a
+        # strongly-favourable signal (1.5 × 1.5 × 1.2 = 2.7×) can blow
+        # through max_risk_per_trade_pct in actual rupees-at-stake even
+        # when notional caps haven't fired. risk_uplift_cap is the
+        # ceiling on how far that stack is allowed to push effective
+        # risk above the base — default 1.5× means a 2% base risk can
+        # grow to 3% on a hot stack but no further.
+        if risk_per_share > 0 and position_size > 0:
+            effective_risk = position_size * risk_per_share
+            max_allowed_risk = (
+                capital * cfg.max_risk_per_trade_pct * cfg.risk_uplift_cap
+            )
+            if effective_risk > max_allowed_risk:
+                clamped = max(1, int(max_allowed_risk / risk_per_share))
+                logger.info(
+                    "risk-check: effective-risk clamp for %s — "
+                    "size %d -> %d (risk ₹%.0f -> ₹%.0f, cap %.2f× base)",
+                    signal["symbol"], position_size, clamped,
+                    effective_risk, max_allowed_risk, cfg.risk_uplift_cap,
+                )
+                position_size = clamped
+
         # Liquidity gate — refuse to be more than max_pct_of_top5 of
         # the order book's near-the-touch side. Stops you eating your
         # own slippage on thinly traded names.

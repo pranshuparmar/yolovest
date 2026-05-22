@@ -491,6 +491,18 @@ class ReentryConfig(BaseModel):
     min_price_move_pct: float = Field(default=0.02, ge=0, le=0.10)  # price must move 2% from exit
     max_reentries_per_symbol: int = Field(default=1, ge=1, le=3)  # max re-entries per symbol per day
     require_higher_confidence: bool = True  # new signal must have higher confidence than original
+    # Tolerance applied when require_higher_confidence is True. The
+    # original strict "new >= old" rule rejected legitimate re-entries
+    # because ML confidence typically decays as a trend matures — a
+    # breakout that scored 0.85 will score lower (e.g. 0.70) on the
+    # pullback re-entry even when the setup is just as valid. With
+    # tolerance 0.85, we accept new_conf >= orig_conf × 0.85.
+    confidence_tolerance: float = Field(default=0.85, ge=0.5, le=1.0)
+    # Absolute floor — re-entries below this confidence are rejected
+    # regardless of how the original compared. Belt-and-braces with
+    # confidence_tolerance: tolerance keeps quality high relative to
+    # the originating signal; floor keeps it high in absolute terms.
+    min_reentry_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
 
 
 class StrategyConfig(BaseModel):
@@ -536,6 +548,14 @@ class StrategyConfig(BaseModel):
 
 class RiskConfig(BaseModel):
     max_risk_per_trade_pct: float = Field(default=0.02, gt=0, lt=1)
+    # Ceiling on how far the chain of conviction / regime / institutional
+    # multipliers is allowed to push the per-trade RISK above
+    # max_risk_per_trade_pct. Default 1.5 means a 2% base risk can grow
+    # to 3% on a strongly-favourable stack but no higher — protects
+    # against multiplicative compounding (1.5 × 1.5 × 1.2 = 2.7× base)
+    # silently running 5%+ effective risk. Set to 1.0 to disable
+    # conviction up-sizing entirely; bumps above ~2.0 are not advised.
+    risk_uplift_cap: float = Field(default=1.5, ge=1.0, le=3.0)
     max_portfolio_exposure_pct: float = Field(default=0.60, gt=0, le=1)
     max_open_positions: int = Field(default=10, ge=1)
     max_single_stock_pct: float = Field(default=0.25, gt=0, le=1)
