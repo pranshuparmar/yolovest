@@ -205,16 +205,15 @@ class RiskCheckSkill(SkillBase):
             if corr_rejection:
                 return self._reject(signal, corr_rejection)
 
-        # Depth-imbalance gate — reject when the live order book
-        # strongly opposes the signal direction. Only meaningful with
-        # the paid Kite feed (jugaad/yfinance can't return depth qty).
+        # Depth-imbalance gate — scale position size down when the live
+        # order book opposes the signal. Only meaningful with the paid
+        # Kite feed (jugaad/yfinance can't return depth qty).
+        depth_size_multiplier = 1.0
         if (
             cfg.depth_gate.enabled
             and self.ctx.config.market_data.kite_data_enabled
         ):
-            depth_rejection = await self._check_depth_gate(signal, cfg.depth_gate)
-            if depth_rejection:
-                return self._reject(signal, depth_rejection)
+            depth_size_multiplier = await self._check_depth_gate(signal, cfg.depth_gate)
 
         # Regime gate — refuse BUYs on broadly-red days, SELLs on
         # broadly-green days. Computed once per heartbeat via a
@@ -410,6 +409,16 @@ class RiskCheckSkill(SkillBase):
             logger.info(
                 "risk-check: regime size multiplier %.2f for %s -> %d",
                 regime_size_multiplier, signal["symbol"], position_size,
+            )
+
+        # Depth-imbalance size reduction — book opposed the signal but
+        # not so severely that we veto entirely; enter smaller instead.
+        if depth_size_multiplier != 1.0 and position_size > 0:
+            scaled = int(position_size * depth_size_multiplier)
+            position_size = max(1, min(scaled, max_by_exposure))
+            logger.info(
+                "risk-check: depth-gate size multiplier %.2f for %s -> %d",
+                depth_size_multiplier, signal["symbol"], position_size,
             )
 
         # Institutional-flow conviction multiplier — uses NSE
@@ -711,10 +720,18 @@ class RiskCheckSkill(SkillBase):
         self,
         signal: dict[str, Any],
         cfg: Any,
-    ) -> str | None:
-        """Reject BUY when total_sell_quantity dominates the book and
-        SELL when total_buy_quantity dominates. Quote fetch failures
-        return None so the gate never blocks on infra issues.
+    ) -> float:
+        """Return a position-size multiplier in [min_size_multiplier, 1.0].
+
+        Neutral or favourable book → 1.0 (no change).
+        Opposed book → linearly scaled down toward cfg.min_size_multiplier.
+        Quote fetch failures → 1.0 so infra issues never silently shrink size.
+
+        Imbalance = (buy_qty - sell_qty) / (buy_qty + sell_qty), [-1, +1].
+        For a BUY signal the hostile extreme is -1.0 (all sell-side depth);
+        for a SELL signal it is +1.0. The neutral point for each direction
+        is 0.0 (balanced book). The multiplier ramps linearly from 1.0 at
+        the neutral point down to min_size_multiplier at the hostile extreme.
         """
         try:
             quote = await self.ctx.market_data.get_quote(signal["symbol"])
@@ -723,27 +740,33 @@ class RiskCheckSkill(SkillBase):
                 "risk-check: depth-gate quote fetch failed for %s",
                 signal["symbol"], exc_info=True,
             )
-            return None
+            return 1.0
 
         buy_qty = float(quote.get("total_buy_quantity") or 0)
         sell_qty = float(quote.get("total_sell_quantity") or 0)
         if buy_qty + sell_qty <= 0:
-            return None  # No depth available — let the trade through.
+            return 1.0  # No depth available — full size.
 
         imbalance = (buy_qty - sell_qty) / (buy_qty + sell_qty)
         signal_type = signal.get("signal_type", "BUY")
+        min_mult = cfg.min_size_multiplier
+        scale = 1.0 - min_mult  # range available for scaling
 
-        if signal_type == "BUY" and imbalance < cfg.min_imbalance_for_buy:
-            return (
-                f"Depth gate: book opposes BUY "
-                f"(imbalance={imbalance:+.2f}, threshold>={cfg.min_imbalance_for_buy:+.2f})"
+        if signal_type == "BUY":
+            # hostile direction is negative imbalance; neutral is 0.0
+            adverse = max(0.0, -imbalance)  # 0 when balanced/buy-heavy
+        else:
+            # hostile direction is positive imbalance; neutral is 0.0
+            adverse = max(0.0, imbalance)  # 0 when balanced/sell-heavy
+
+        multiplier = max(min_mult, 1.0 - adverse * scale)
+
+        if multiplier < 1.0:
+            logger.info(
+                "risk-check: depth-gate %s imbalance=%+.2f -> size multiplier=%.2f",
+                signal["symbol"], imbalance, multiplier,
             )
-        if signal_type == "SELL" and imbalance > cfg.max_imbalance_for_sell:
-            return (
-                f"Depth gate: book opposes SELL "
-                f"(imbalance={imbalance:+.2f}, threshold<={cfg.max_imbalance_for_sell:+.2f})"
-            )
-        return None
+        return multiplier
 
     async def _check_correlation_limit(
         self,

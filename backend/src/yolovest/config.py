@@ -335,7 +335,10 @@ class DepthGateConfig(BaseModel):
 
     Imbalance = (total_buy_qty - total_sell_qty) / (total_buy_qty +
     total_sell_qty). Ranges -1 (all sell pressure) to +1 (all buy
-    pressure). Rejects when the book strongly opposes the signal.
+    pressure). Instead of hard-blocking, unfavourable books reduce
+    position size down to min_size_multiplier (default 40% of normal).
+    Size scales linearly: neutral book → 1.0×, worst possible book →
+    min_size_multiplier×.
 
     Requires market_data.kite_data_enabled — only the paid feed exposes
     total_buy_quantity / total_sell_quantity. Off by default; enable
@@ -346,6 +349,7 @@ class DepthGateConfig(BaseModel):
     enabled: bool = False
     min_imbalance_for_buy: float = Field(default=-0.30, ge=-1.0, le=0.0)
     max_imbalance_for_sell: float = Field(default=0.30, ge=0.0, le=1.0)
+    min_size_multiplier: float = Field(default=0.4, ge=0.1, le=1.0)
 
 
 class LiquidityGateConfig(BaseModel):
