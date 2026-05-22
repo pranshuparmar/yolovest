@@ -7,6 +7,24 @@ import clsx from "clsx";
 // populates this once defaults are loaded.
 const DefaultsContext = createContext<Record<string, unknown>>({});
 
+// Per-key fallback semantics for Optional fields. When the field's
+// own default is None, the system uses one of these at runtime:
+//   - a reference to another config key (string starting with "ref:")
+//   - a fixed numeric default (number)
+//   - a descriptive note (string)
+// The InfoIcon tooltip surfaces this so "not set" doesn't read as a
+// dead end.
+const FALLBACK_DEFAULTS: Record<string, string | number> = {
+  "risk.min_confidence_buy_intraday": "ref:risk.min_confidence_buy",
+  "risk.min_confidence_sell_intraday": "ref:risk.min_confidence_sell",
+  "risk.min_confidence_buy_swing": "ref:risk.min_confidence_buy",
+  "risk.min_confidence_sell_swing": "ref:risk.min_confidence_sell",
+  "risk.buy_threshold_override": "uses the model's bootstrap-tuned threshold from the saved artifact",
+  "risk.sell_threshold_override": "uses the model's bootstrap-tuned threshold from the saved artifact",
+  "risk.max_mis_trades_per_day": "disabled — only the combined Max Trades / Day cap applies",
+  "risk.max_cnc_trades_per_day": "disabled — only the combined Max Trades / Day cap applies",
+};
+
 function formatDefaultValue(v: unknown): string {
   // Optional fields default to None. What "not set" means at runtime
   // depends on the field (some fall back to a general value, some
@@ -779,10 +797,29 @@ function InfoIcon({
   const baseTooltip = hasDescription
     ? description!
     : `Config key: ${fullKey}\nDescription not yet written — file an issue if unclear.`;
-  const tooltip =
-    fullKey && fullKey in defaults
-      ? `${baseTooltip}\n\nDefault: ${formatDefaultValue(defaults[fullKey])}`
-      : baseTooltip;
+  let defaultLine = "";
+  if (fullKey && fullKey in defaults) {
+    const raw = defaults[fullKey];
+    if (raw !== null && raw !== undefined) {
+      defaultLine = `Default: ${formatDefaultValue(raw)}`;
+    } else if (fullKey in FALLBACK_DEFAULTS) {
+      // Optional field whose default is None — surface the
+      // documented fallback so "not set" isn't a dead end.
+      const fallback = FALLBACK_DEFAULTS[fullKey];
+      if (typeof fallback === "string" && fallback.startsWith("ref:")) {
+        const refKey = fallback.slice(4);
+        const refValue = defaults[refKey];
+        defaultLine = refValue !== undefined && refValue !== null
+          ? `Default: not set — falls back to ${refKey} (${formatDefaultValue(refValue)})`
+          : `Default: not set — falls back to ${refKey}`;
+      } else {
+        defaultLine = `Default: ${fallback}`;
+      }
+    } else {
+      defaultLine = `Default: not set`;
+    }
+  }
+  const tooltip = defaultLine ? `${baseTooltip}\n\n${defaultLine}` : baseTooltip;
   return (
     <span
       className="relative inline-flex shrink-0"
