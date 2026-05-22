@@ -3635,12 +3635,12 @@ class Database:
             correct = sum(1 for p in preds if p.get("direction_correct"))
             accuracy = correct / total if total > 0 else 0
             avg_conf = (
-                sum(p.get("confidence", 0) for p in preds) / total if total > 0 else 0
+                sum((p.get("confidence") or 0) for p in preds) / total if total > 0 else 0
             )
             target_hits = sum(1 for p in preds if p.get("target_hit"))
             target_rate = target_hits / total if total > 0 else 0
             avg_pnl = (
-                sum(p.get("actual_pnl_pct", 0) for p in preds) / total
+                sum((p.get("actual_pnl_pct") or 0) for p in preds) / total
                 if total > 0
                 else 0
             )
