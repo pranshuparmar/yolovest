@@ -37,6 +37,7 @@ import type {
   SignalClassDistribution,
   InstitutionalFlows,
   SymbolContext,
+  SymbolQuickContext,
   RotationCooldown,
   CorrelationData,
   PriceAlert,
@@ -446,6 +447,9 @@ export const api = {
 
   symbolContext: (symbol: string) =>
     apiFetch<SymbolContext>(`/api/symbol/${symbol}/context`),
+
+  symbolQuickContext: (symbol: string) =>
+    apiFetch<SymbolQuickContext>(`/api/symbol/${symbol}/quick-context`),
 
   rotationCooldown: () =>
     apiFetch<RotationCooldown>("/api/rotation-cooldown"),

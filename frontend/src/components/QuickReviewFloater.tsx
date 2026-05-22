@@ -1,0 +1,422 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import clsx from "clsx";
+import {
+  useReviewHoldings,
+  useSymbolQuickContext,
+  useUniverseSymbols,
+} from "../hooks/queries";
+
+const RECENT_KEY = "quickReview.recent";
+const MAX_RECENT = 5;
+
+function loadRecent(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((s) => typeof s === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function pushRecent(sym: string): string[] {
+  const cur = loadRecent().filter((s) => s !== sym);
+  const next = [sym, ...cur].slice(0, MAX_RECENT);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  return next;
+}
+
+function fmt(n: number | null | undefined, d = 2): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return n.toLocaleString("en-IN", {
+    minimumFractionDigits: d,
+    maximumFractionDigits: d,
+  });
+}
+
+function fmtCompact(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  if (n >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
+  if (n >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return n.toFixed(0);
+}
+
+export function QuickReviewFloater() {
+  const [open, setOpen] = useState(false);
+  const [input, setInput] = useState("");
+  const [activeSym, setActiveSym] = useState<string>("");
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [recent, setRecent] = useState<string[]>(() => loadRecent());
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const { data: allSymbols } = useUniverseSymbols();
+  const quickCtx = useSymbolQuickContext(activeSym);
+  const review = useReviewHoldings();
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const isToggle =
+        (e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey);
+      if (isToggle) {
+        e.preventDefault();
+        setOpen((v) => !v);
+        return;
+      }
+      if (e.key === "Escape" && open) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  useEffect(() => {
+    if (open) {
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  }, [open]);
+
+  const suggestions = useMemo(() => {
+    if (!input || !allSymbols) return [];
+    const q = input.toUpperCase();
+    return allSymbols
+      .filter((s) => s.toUpperCase().startsWith(q))
+      .slice(0, 8);
+  }, [input, allSymbols]);
+
+  const runReview = (sym?: string) => {
+    const s = (sym ?? input).trim().toUpperCase();
+    if (!s) return;
+    setActiveSym(s);
+    setInput(s);
+    setShowSuggestions(false);
+    setRecent(pushRecent(s));
+    review.mutate([s]);
+  };
+
+  const reco = review.data?.recommendations.find((r) => r.symbol === activeSym);
+  const bars = quickCtx.data?.bars ?? [];
+  const lastBar = bars[bars.length - 1];
+  const prevBar = bars[bars.length - 2];
+  const sevenBackBar = bars.length >= 8 ? bars[bars.length - 8] : bars[0];
+  const ltp = quickCtx.data?.ltp ?? lastBar?.close ?? null;
+  const dayOpen = lastBar?.open ?? null;
+  const dayHigh = lastBar?.high ?? null;
+  const dayLow = lastBar?.low ?? null;
+  const prevClose = prevBar?.close ?? null;
+  const dayChange =
+    ltp != null && prevClose != null
+      ? ((ltp - prevClose) / prevClose) * 100
+      : null;
+  const sevenDayChange =
+    ltp != null && sevenBackBar?.close
+      ? ((ltp - sevenBackBar.close) / sevenBackBar.close) * 100
+      : null;
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="fixed bottom-6 right-6 z-40 h-12 w-12 sm:h-14 sm:w-14 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/40 transition-colors flex items-center justify-center"
+        title="Quick ML Review (⌘K / Ctrl+K)"
+        aria-label="Open Quick ML Review"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="h-6 w-6 sm:h-7 sm:w-7"
+        >
+          <path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z" strokeLinejoin="round" strokeLinecap="round" />
+        </svg>
+      </button>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-2 sm:p-6"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+              <div className="flex items-center gap-2">
+                <span className="text-emerald-400">⚡</span>
+                <h3 className="text-sm font-semibold text-gray-100">Quick ML Review</h3>
+                <kbd className="hidden sm:inline-block text-[10px] text-gray-500 border border-gray-700 rounded px-1.5 py-0.5">
+                  ⌘K
+                </kbd>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="text-gray-500 hover:text-gray-300 text-xl leading-none"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="p-4 space-y-3 overflow-y-auto">
+              <div className="relative">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={input}
+                  onChange={(e) => {
+                    setInput(e.target.value.toUpperCase());
+                    setShowSuggestions(true);
+                  }}
+                  onFocus={() => setShowSuggestions(true)}
+                  onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      if (suggestions.length > 0 && showSuggestions) {
+                        runReview(suggestions[0]);
+                      } else {
+                        runReview();
+                      }
+                    }
+                  }}
+                  placeholder="Type a symbol (e.g. RELIANCE, TCS)…"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+                />
+                {showSuggestions && suggestions.length > 0 && (
+                  <div className="absolute z-10 mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg shadow-xl max-h-56 overflow-y-auto">
+                    {suggestions.map((s) => (
+                      <button
+                        type="button"
+                        key={s}
+                        onMouseDown={() => runReview(s)}
+                        className="block w-full text-left px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {recent.length > 0 && !activeSym && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
+                    Recent
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {recent.map((s) => (
+                      <button
+                        type="button"
+                        key={s}
+                        onClick={() => runReview(s)}
+                        className="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {activeSym && (
+                <div className="space-y-3">
+                  <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-3">
+                    <div className="flex items-baseline justify-between gap-2 mb-2">
+                      <div className="flex items-baseline gap-2">
+                        <Link
+                          to={`/symbol/${activeSym}`}
+                          onClick={() => setOpen(false)}
+                          className="text-base font-semibold text-emerald-400 hover:underline"
+                        >
+                          {activeSym}
+                        </Link>
+                        {quickCtx.data?.sector && (
+                          <span className="text-xs text-gray-500">
+                            {quickCtx.data.sector}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-right">
+                        <div className="text-base font-mono text-gray-100">
+                          ₹{fmt(ltp)}
+                        </div>
+                        {dayChange != null && (
+                          <div
+                            className={clsx(
+                              "text-xs",
+                              dayChange > 0
+                                ? "text-emerald-400"
+                                : dayChange < 0
+                                  ? "text-red-400"
+                                  : "text-gray-400",
+                            )}
+                          >
+                            {dayChange >= 0 ? "+" : ""}
+                            {dayChange.toFixed(2)}%
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                      <div>
+                        <div className="text-gray-500">Open</div>
+                        <div className="text-gray-200 font-mono">₹{fmt(dayOpen)}</div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Prev Close</div>
+                        <div className="text-gray-200 font-mono">₹{fmt(prevClose)}</div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Day Range</div>
+                        <div className="text-gray-200 font-mono">
+                          ₹{fmt(dayLow)} – ₹{fmt(dayHigh)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">7d</div>
+                        <div
+                          className={clsx(
+                            "font-mono",
+                            sevenDayChange == null
+                              ? "text-gray-400"
+                              : sevenDayChange > 0
+                                ? "text-emerald-400"
+                                : sevenDayChange < 0
+                                  ? "text-red-400"
+                                  : "text-gray-400",
+                          )}
+                        >
+                          {sevenDayChange == null
+                            ? "—"
+                            : `${sevenDayChange >= 0 ? "+" : ""}${sevenDayChange.toFixed(2)}%`}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Avg Vol (20d)</div>
+                        <div className="text-gray-200 font-mono">
+                          {fmtCompact(quickCtx.data?.avg_volume_20d)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Today's Vol</div>
+                        <div className="text-gray-200 font-mono">
+                          {fmtCompact(lastBar?.volume)}
+                        </div>
+                      </div>
+                    </div>
+
+                    {(quickCtx.data?.quarantine.is_quarantined ||
+                      quickCtx.data?.is_locked ||
+                      quickCtx.data?.open_position ||
+                      quickCtx.data?.todays_signal) && (
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {quickCtx.data?.quarantine.is_quarantined && (
+                          <span
+                            className="text-[10px] px-2 py-0.5 rounded bg-rose-900/40 text-rose-300"
+                            title={quickCtx.data.quarantine.reason ?? "Quarantined"}
+                          >
+                            QUARANTINED
+                          </span>
+                        )}
+                        {quickCtx.data?.is_locked && (
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-amber-900/40 text-amber-300">
+                            LOCKED HOLDING
+                          </span>
+                        )}
+                        {quickCtx.data?.open_position && (
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-blue-900/40 text-blue-300">
+                            HOLDING {quickCtx.data.open_position.signal_type} ×
+                            {quickCtx.data.open_position.quantity} @ ₹
+                            {fmt(
+                              quickCtx.data.open_position.fill_price ??
+                                quickCtx.data.open_position.entry_price,
+                            )}
+                          </span>
+                        )}
+                        {quickCtx.data?.todays_signal && (
+                          <span
+                            className="text-[10px] px-2 py-0.5 rounded bg-gray-700 text-gray-300"
+                            title={
+                              quickCtx.data.todays_signal.disposition_reason ??
+                              undefined
+                            }
+                          >
+                            TODAY: {quickCtx.data.todays_signal.signal_type}{" "}
+                            {((quickCtx.data.todays_signal.confidence_score ?? 0) * 100).toFixed(0)}%{" "}
+                            →{" "}
+                            {quickCtx.data.todays_signal.disposition ?? "pending"}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    {review.isPending && (
+                      <div className="text-sm text-gray-500 py-2">Reviewing…</div>
+                    )}
+                    {review.isError && (
+                      <div className="text-sm text-red-400 py-2">
+                        Review failed:{" "}
+                        {review.error instanceof Error
+                          ? review.error.message
+                          : "unknown error"}
+                      </div>
+                    )}
+                    {!review.isPending && reco && (
+                      <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span
+                            className={clsx("px-2 py-0.5 rounded text-xs font-semibold", {
+                              "bg-red-900/40 text-red-400":
+                                reco.action === "SELL" || reco.action === "SHORT",
+                              "bg-emerald-900/40 text-emerald-400":
+                                reco.action === "BUY" || reco.action === "BUY_MORE",
+                              "bg-amber-900/40 text-amber-400":
+                                reco.action === "TIGHTEN_SL",
+                              "bg-gray-700 text-gray-300": reco.action === "HOLD",
+                            })}
+                          >
+                            {reco.action.replace("_", " ")}
+                          </span>
+                          <span className="text-xs text-gray-400">
+                            {(reco.confidence * 100).toFixed(0)}% confidence
+                          </span>
+                          {reco.target_price != null && (
+                            <span className="text-xs text-gray-500">
+                              · target ₹{fmt(reco.target_price)}
+                            </span>
+                          )}
+                          {reco.stop_loss_price != null && (
+                            <span className="text-xs text-gray-500">
+                              · SL ₹{fmt(reco.stop_loss_price)}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-300 leading-snug">
+                          {reco.reasoning}
+                        </div>
+                      </div>
+                    )}
+                    {!review.isPending && review.data && !reco && (
+                      <div className="text-sm text-gray-500 py-2">
+                        No recommendation returned for {activeSym}.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}

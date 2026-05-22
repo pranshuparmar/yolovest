@@ -655,6 +655,15 @@ export function useSymbolContext(symbol: string) {
   });
 }
 
+export function useSymbolQuickContext(symbol: string) {
+  return useQuery({
+    queryKey: ["symbol-quick-context", symbol],
+    queryFn: () => api.symbolQuickContext(symbol),
+    enabled: !!symbol,
+    staleTime: 30_000,
+  });
+}
+
 export function useRotationCooldown() {
   return useQuery({
     queryKey: ["rotation-cooldown"],

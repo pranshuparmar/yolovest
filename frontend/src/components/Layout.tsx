@@ -6,6 +6,7 @@ import {
   NotificationCenter,
   useNotifications,
 } from "./NotificationCenter";
+import { QuickReviewFloater } from "./QuickReviewFloater";
 import { useAuth } from "../hooks/useAuth";
 import { useTheme } from "../hooks/useTheme";
 
@@ -107,6 +108,7 @@ export function Layout() {
           <Outlet />
         </main>
       </div>
+      <QuickReviewFloater />
     </div>
   );
 }

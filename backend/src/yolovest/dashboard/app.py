@@ -3555,6 +3555,143 @@ def create_app(ctx: AppContext) -> FastAPI:
             "latest_signal": latest_signal,
         }
 
+    @app.get("/api/symbol/{symbol}/quick-context")
+    async def get_symbol_quick_context(
+        symbol: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Compact context for the floating Quick ML Review widget.
+
+        One round-trip: sector, last 8 daily bars (LTP/open/prev close/
+        7d perf/avg vol), quarantine + lock status, current open
+        position (if any), and today's signal disposition (if any).
+
+        Designed to be cheap: no bulk-deals, no TreeSHAP attribution —
+        the full /context endpoint covers that for the detail page.
+        """
+        sym = symbol.upper()
+
+        sector: str | None = None
+        try:
+            cur = await ctx.db.read_conn.execute(
+                "SELECT sector, industry FROM symbol_sectors WHERE symbol = ?",
+                (sym,),
+            )
+            row = await cur.fetchone()
+            if row:
+                sector = row[0] or row[1]
+        except Exception:
+            logger.debug("quick-context sector lookup failed", exc_info=True)
+
+        bars: list[dict[str, Any]] = []
+        try:
+            ohlcv_bars = await ctx.db.get_ohlcv(sym, "daily", days=20)
+            for b in ohlcv_bars[-10:]:
+                bars.append({
+                    "timestamp": b.timestamp.isoformat(),
+                    "open": b.open,
+                    "high": b.high,
+                    "low": b.low,
+                    "close": b.close,
+                    "volume": b.volume,
+                })
+        except Exception:
+            logger.debug("quick-context ohlcv lookup failed", exc_info=True)
+
+        avg_volume_20d: float | None = None
+        try:
+            all_bars = await ctx.db.get_ohlcv(sym, "daily", days=30)
+            recent_vols = [b.volume for b in all_bars[-20:] if b.volume]
+            if recent_vols:
+                avg_volume_20d = sum(recent_vols) / len(recent_vols)
+        except Exception:
+            logger.debug("quick-context avg volume lookup failed", exc_info=True)
+
+        ltp: float | None = None
+        try:
+            quote = await ctx.market_data.get_quote(sym)
+            ltp = float(quote.get("last_price") or 0) or None
+        except Exception:
+            logger.debug("quick-context LTP fetch failed", exc_info=True)
+
+        is_quarantined = False
+        quarantine_reason: str | None = None
+        try:
+            quarantined = await ctx.db.get_quarantined_symbols()
+            q_entry = next(
+                (q for q in quarantined if (q.get("symbol") or "").upper() == sym),
+                None,
+            )
+            if q_entry:
+                is_quarantined = True
+                quarantine_reason = q_entry.get("reason")
+        except Exception:
+            logger.debug("quick-context quarantine lookup failed", exc_info=True)
+
+        is_locked = False
+        try:
+            locked = await ctx.db.get_locked_holdings()
+            is_locked = any(
+                (h.get("symbol") or "").upper() == sym for h in locked
+            )
+        except Exception:
+            logger.debug("quick-context lock lookup failed", exc_info=True)
+
+        open_position: dict[str, Any] | None = None
+        try:
+            positions = await ctx.db.get_open_positions(mode=ctx.config.mode)
+            for p in positions:
+                if (p.get("symbol") or "").upper() == sym:
+                    open_position = {
+                        "signal_type": p.get("signal_type"),
+                        "quantity": p.get("quantity"),
+                        "fill_price": p.get("fill_price"),
+                        "entry_price": p.get("entry_price"),
+                        "target_price": p.get("target_price"),
+                        "stop_loss_price": p.get("stop_loss_price"),
+                        "product": p.get("product"),
+                    }
+                    break
+        except Exception:
+            logger.debug("quick-context open positions lookup failed", exc_info=True)
+
+        todays_signal: dict[str, Any] | None = None
+        try:
+            from yolovest.timezone import now_ist
+
+            today_str = now_ist().date().isoformat()
+            cur = await ctx.db.read_conn.execute(
+                "SELECT signal_type, confidence_score, disposition, "
+                "disposition_reason, created_at "
+                "FROM signals WHERE symbol = ? AND mode = ? "
+                "AND DATE(created_at) = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (sym, ctx.config.mode, today_str),
+            )
+            row = await cur.fetchone()
+            if row:
+                todays_signal = {
+                    "signal_type": row[0],
+                    "confidence_score": row[1],
+                    "disposition": row[2],
+                    "disposition_reason": row[3],
+                    "created_at": row[4],
+                }
+        except Exception:
+            logger.debug("quick-context todays signal lookup failed", exc_info=True)
+
+        return {
+            "symbol": sym,
+            "sector": sector,
+            "ltp": ltp,
+            "bars": bars,
+            "avg_volume_20d": avg_volume_20d,
+            "quarantine": {"is_quarantined": is_quarantined, "reason": quarantine_reason},
+            "is_locked": is_locked,
+            "open_position": open_position,
+            "todays_signal": todays_signal,
+        }
+
     @app.get("/api/symbol/{symbol}/ohlcv")
     async def get_symbol_ohlcv(
         symbol: str,

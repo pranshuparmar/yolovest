@@ -610,6 +610,39 @@ export interface SymbolLatestSignal {
   attribution: { feature: string; contribution: number }[];
 }
 
+export interface SymbolQuickContext {
+  symbol: string;
+  sector: string | null;
+  ltp: number | null;
+  bars: {
+    timestamp: string;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+  }[];
+  avg_volume_20d: number | null;
+  quarantine: { is_quarantined: boolean; reason: string | null };
+  is_locked: boolean;
+  open_position: {
+    signal_type: string;
+    quantity: number;
+    fill_price: number | null;
+    entry_price: number;
+    target_price: number;
+    stop_loss_price: number;
+    product: string;
+  } | null;
+  todays_signal: {
+    signal_type: string;
+    confidence_score: number | null;
+    disposition: string | null;
+    disposition_reason: string | null;
+    created_at: string;
+  } | null;
+}
+
 export interface RotationCooldown {
   enabled: boolean;
   no_signal_threshold: number;
