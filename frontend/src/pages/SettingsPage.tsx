@@ -968,16 +968,40 @@ function NumberField({
   hint?: string | null;
   onChange: (val: number) => void;
 }) {
+  // Track the raw input string so the user can transiently clear the
+  // box while typing (e.g. backspacing to type "0.5") without us
+  // propagating NaN to the parent. We only fire onChange when the
+  // input parses to a finite number — clearing the box leaves the
+  // committed value unchanged, which is the right behaviour for
+  // required-float fields (clearing would otherwise serialise to null
+  // and crash Pydantic on save).
+  const [draft, setDraft] = useState<string>(String(value));
+  // Re-sync draft when the upstream value changes (e.g. via Reset to
+  // default or Discard) — the input doesn't get stuck on a stale draft.
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
   return (
     <div className="flex items-center justify-between py-2.5 gap-4">
       <FieldLabel label={label} description={description} fullKey={fullKey} hint={hint} />
       <input
         type="number"
         step={value % 1 !== 0 ? 0.001 : 1}
-        value={value}
+        value={draft}
         onChange={(e) => {
           const v = e.target.value;
-          onChange(v.includes(".") ? parseFloat(v) : parseInt(v, 10));
+          setDraft(v);
+          if (v === "") return; // keep committed value; don't propagate empty
+          const parsed = v.includes(".") ? parseFloat(v) : parseInt(v, 10);
+          if (Number.isFinite(parsed)) onChange(parsed);
+        }}
+        onBlur={() => {
+          // If the user leaves the field blank, snap the visible
+          // draft back to the last committed value so the input
+          // doesn't show "" while the underlying state is a number.
+          if (draft === "" || !Number.isFinite(Number(draft))) {
+            setDraft(String(value));
+          }
         }}
         className="w-28 bg-gray-800 border border-gray-700 rounded px-2.5 py-1.5 text-sm text-gray-200 text-right focus:border-blue-500 focus:outline-none"
       />
