@@ -451,6 +451,9 @@ export const api = {
   symbolQuickContext: (symbol: string) =>
     apiFetch<SymbolQuickContext>(`/api/symbol/${symbol}/quick-context`),
 
+  recentTradedSymbols: (limit = 10) =>
+    apiFetch<string[]>(`/api/trades/recent-symbols?limit=${limit}`),
+
   rotationCooldown: () =>
     apiFetch<RotationCooldown>("/api/rotation-cooldown"),
 

@@ -727,6 +727,14 @@ class XGBoostSignalModel(MLBase):
                 # Histogram tree method: bins continuous features into a
                 # fixed number of buckets, avoiding the full sorted matrix.
                 "tree_method": params.get("tree_method", "hist"),
+                # Pin to a single thread. Inference runs inside
+                # asyncio.to_thread, and signal generation predicts
+                # across hundreds of symbols concurrently — letting
+                # XGBoost default to "all cores per call" oversubscribes
+                # the box (8 cores × 8 concurrent predicts = 64 OS
+                # threads thrashing each other). Override via params
+                # if you're training offline and want full parallelism.
+                "n_jobs": params.get("n_jobs", 1),
             }
 
             # Train on full data first

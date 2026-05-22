@@ -2371,6 +2371,27 @@ def create_app(ctx: AppContext) -> FastAPI:
                 )
             return {"success": False, "error": msg}
 
+    @app.get("/api/trades/recent-symbols")
+    async def get_recent_traded_symbols(
+        limit: int = Query(10, ge=1, le=50),
+        _user: str = Depends(verify_credentials),
+    ) -> list[str]:
+        """Distinct symbols ordered by most-recent trade time. Used by
+        the Quick ML Review floater as a sensible default before the
+        user types anything. Mode-scoped (matches everything else)."""
+        try:
+            cur = await ctx.db.read_conn.execute(
+                "SELECT symbol, MAX(created_at) AS last_seen FROM trades "
+                "WHERE mode = ? GROUP BY symbol "
+                "ORDER BY last_seen DESC LIMIT ?",
+                (ctx.config.mode, limit),
+            )
+            rows = await cur.fetchall()
+            return [r[0] for r in rows if r[0]]
+        except Exception:
+            logger.debug("recent-traded-symbols lookup failed", exc_info=True)
+            return []
+
     @app.get("/api/trades/today")
     async def get_todays_trades(
         user: str = Depends(verify_credentials),

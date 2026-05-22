@@ -664,6 +664,14 @@ export function useSymbolQuickContext(symbol: string) {
   });
 }
 
+export function useRecentTradedSymbols(limit = 10) {
+  return useQuery({
+    queryKey: ["recent-traded-symbols", limit],
+    queryFn: () => api.recentTradedSymbols(limit),
+    staleTime: 120_000,
+  });
+}
+
 export function useRotationCooldown() {
   return useQuery({
     queryKey: ["rotation-cooldown"],

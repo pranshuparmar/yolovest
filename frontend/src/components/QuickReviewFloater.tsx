@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import clsx from "clsx";
 import {
+  useRecentTradedSymbols,
   useReviewHoldings,
   useSymbolQuickContext,
   useUniverseSymbols,
@@ -53,6 +54,7 @@ export function QuickReviewFloater() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const { data: allSymbols } = useUniverseSymbols();
+  const { data: recentTradedSymbols } = useRecentTradedSymbols(10);
   const quickCtx = useSymbolQuickContext(activeSym);
   const review = useReviewHoldings();
 
@@ -143,7 +145,7 @@ export function QuickReviewFloater() {
           onClick={() => setOpen(false)}
         >
           <div
-            className="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col"
+            className="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-3xl min-h-[60vh] max-h-[90vh] sm:my-10 overflow-hidden flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
@@ -204,23 +206,56 @@ export function QuickReviewFloater() {
                 )}
               </div>
 
-              {recent.length > 0 && !activeSym && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
-                    Recent
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {recent.map((s) => (
-                      <button
-                        type="button"
-                        key={s}
-                        onClick={() => runReview(s)}
-                        className="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded"
-                      >
-                        {s}
-                      </button>
-                    ))}
-                  </div>
+              {!activeSym && (
+                <div className="space-y-3">
+                  {recent.length > 0 && (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
+                        Recent reviews
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {recent.map((s) => (
+                          <button
+                            type="button"
+                            key={s}
+                            onClick={() => runReview(s)}
+                            className="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded"
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {(recentTradedSymbols ?? []).length > 0 && (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
+                        From your trades
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(recentTradedSymbols ?? []).map((s) => (
+                          <button
+                            type="button"
+                            key={s}
+                            onClick={() => runReview(s)}
+                            className="text-xs bg-emerald-900/30 hover:bg-emerald-900/50 text-emerald-300 px-2 py-1 rounded border border-emerald-900/40"
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {recent.length === 0 &&
+                    (recentTradedSymbols ?? []).length === 0 && (
+                      <p className="text-xs text-gray-500 py-4 text-center">
+                        Type a symbol above to start. Press{" "}
+                        <kbd className="border border-gray-700 rounded px-1">⌘K</kbd>{" "}
+                        any time to reopen.
+                      </p>
+                    )}
                 </div>
               )}
 
