@@ -1,6 +1,22 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
 import { useConfig, useConfigDefaults, useUpdateConfig } from "../hooks/queries";
 import clsx from "clsx";
+
+// Defaults flow into the InfoIcon tooltip via context so we don't have
+// to thread the value through 5 field-component layers. SettingsPage
+// populates this once defaults are loaded.
+const DefaultsContext = createContext<Record<string, unknown>>({});
+
+function formatDefaultValue(v: unknown): string {
+  if (v === null || v === undefined) return "(unset)";
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "string") return v.length === 0 ? '""' : v;
+  if (Array.isArray(v)) return `[${v.map((x) => formatDefaultValue(x)).join(", ")}]`;
+  if (typeof v === "object") {
+    try { return JSON.stringify(v); } catch { return String(v); }
+  }
+  return String(v);
+}
 
 // ---------------------------------------------------------------------------
 // Tab definitions
@@ -26,7 +42,7 @@ const TABS: Tab[] = [
   {
     id: "risk",
     label: "Risk & Execution",
-    sections: ["risk", "execution", "transaction_costs"],
+    sections: ["risk", "_risk_mis", "_risk_cnc", "execution", "transaction_costs"],
   },
   {
     id: "schedule",
@@ -57,6 +73,23 @@ const STRATEGY_TOP_KEYS = [
   "scanning.min_avg_daily_volume",
 ];
 
+// Per-product risk settings — intraday/swing in the model maps 1:1 to
+// MIS/CNC at the broker, so these virtual sections group the knobs the
+// user actually thinks about as "MIS rules" vs "CNC rules".
+const RISK_MIS_KEYS = [
+  "risk.max_mis_trades_per_day",
+  "risk.min_confidence_buy_intraday",
+  "risk.min_confidence_sell_intraday",
+  "risk.trailing_sl_trigger_target_pct_intraday",
+];
+
+const RISK_CNC_KEYS = [
+  "risk.max_cnc_trades_per_day",
+  "risk.min_confidence_buy_swing",
+  "risk.min_confidence_sell_swing",
+  "risk.trailing_sl_trigger_target_pct_swing",
+];
+
 // All cron/schedule-related keys, pulled from various sections into one card
 const CRON_KEYS = [
   "heartbeat.auth_broker_cron",
@@ -74,6 +107,8 @@ const RELOCATED_KEYS = new Set([
   ...GENERAL_TOP_KEYS,
   ...CRON_KEYS,
   ...STRATEGY_TOP_KEYS,
+  ...RISK_MIS_KEYS,
+  ...RISK_CNC_KEYS,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -147,6 +182,8 @@ const NULLABLE_NUMBER_KEYS = new Set([
   "risk.sell_threshold_override",
   "risk.trailing_sl_trigger_target_pct_intraday",
   "risk.trailing_sl_trigger_target_pct_swing",
+  "risk.max_mis_trades_per_day",
+  "risk.max_cnc_trades_per_day",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -157,6 +194,8 @@ const SECTION_LABELS: Record<string, string> = {
   _general_top: "General",
   _strategy_top: "Strategy — Core",
   _cron_schedules: "Cron Schedules",
+  _risk_mis: "MIS (Intraday) Specific",
+  _risk_cnc: "CNC (Delivery) Specific",
   capital: "Capital",
   llm: "LLM (Gemini)",
   market_data: "Market Data",
@@ -695,12 +734,17 @@ function InfoIcon({
   const [pinned, setPinned] = useState(false);
   const visible = hovering || pinned;
   const hasDescription = !!description;
+  const defaults = useContext(DefaultsContext);
   // Always render the icon — every setting should have one so the user
   // can at least see the canonical dotted key (useful for /run, docs,
   // /symbol contexts) even when we haven't written a description yet.
-  const tooltip = hasDescription
-    ? description
+  const baseTooltip = hasDescription
+    ? description!
     : `Config key: ${fullKey}\nDescription not yet written — file an issue if unclear.`;
+  const tooltip =
+    fullKey && fullKey in defaults
+      ? `${baseTooltip}\n\nDefault: ${formatDefaultValue(defaults[fullKey])}`
+      : baseTooltip;
   return (
     <span
       className="relative inline-flex shrink-0"
@@ -1145,6 +1189,12 @@ export default function SettingsPage() {
     if (sectionKey === "_cron_schedules") {
       return CRON_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
     }
+    if (sectionKey === "_risk_mis") {
+      return RISK_MIS_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
+    if (sectionKey === "_risk_cnc") {
+      return RISK_CNC_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
     // Normal section — filter out relocated keys
     return Object.entries(localConfig[sectionKey] ?? {}).filter(([k]) => !RELOCATED_KEYS.has(k));
   }, [localConfig, flatConfig]);
@@ -1251,11 +1301,18 @@ export default function SettingsPage() {
       />
 
       {/* Tab content */}
+      <DefaultsContext.Provider value={flatDefaults}>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {currentTab.sections.map((sectionKey) => {
           let entries = getEntries(sectionKey);
           if (diffOnlyTabs[currentTab.id]) {
-            entries = entries.filter(([k]) => isDifferentFromDefault(k));
+            // Keep keys currently in the unsaved-changes buffer even if
+            // the user just typed them back to default — otherwise the
+            // field vanishes mid-edit, which is jarring. After Save or
+            // Discard, the buffer clears and the filter applies cleanly.
+            entries = entries.filter(
+              ([k]) => isDifferentFromDefault(k) || k in edited,
+            );
           }
           if (entries.length === 0) return null;
           const title = SECTION_LABELS[sectionKey] ?? sectionKey;
@@ -1270,6 +1327,7 @@ export default function SettingsPage() {
           );
         })}
       </div>
+      </DefaultsContext.Provider>
     </div>
   );
 }
@@ -1333,7 +1391,7 @@ function PerTabToolbar({
         className="px-2.5 py-1 rounded border bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 transition-colors disabled:opacity-40 disabled:hover:bg-gray-800"
         title="Stage all settings on this tab to their default values (still requires Save)"
       >
-        Reset tab to default
+        Reset to default
       </button>
     </div>
   );
