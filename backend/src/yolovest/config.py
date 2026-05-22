@@ -514,6 +514,15 @@ class StrategyConfig(BaseModel):
     ema_periods: list[int] = Field(default_factory=lambda: [9, 21, 50, 200])
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     min_training_samples: int = 200
+    # Number of symbols generate-signals evaluates concurrently per
+    # chunk. Each evaluation does DB reads (OHLCV + news), an LTP fetch,
+    # feature computation, and the ML predict — the dominant cost is
+    # I/O, so a chunk size of ~10 lets ~10 reads overlap while the ML
+    # predicts are running for the previous batch. Higher numbers
+    # increase memory pressure and risk hitting Kite's REST rate limit
+    # for LTP fetches; lower numbers reverts to near-sequential. Set to
+    # 1 to disable concurrency entirely (for debugging).
+    signal_generation_concurrency: int = Field(default=10, ge=1, le=50)
     market_regime: MarketRegimeConfig = Field(default_factory=MarketRegimeConfig)
     # Apply inverse-frequency class weights at training time so a
     # rare class (e.g. BUY under path-aware 2:1 R/R labelling) isn't
