@@ -8,7 +8,10 @@ import clsx from "clsx";
 const DefaultsContext = createContext<Record<string, unknown>>({});
 
 function formatDefaultValue(v: unknown): string {
-  if (v === null || v === undefined) return "(unset)";
+  // Optional fields default to None. What "not set" means at runtime
+  // depends on the field (some fall back to a general value, some
+  // disable the gate entirely) — the field's description explains it.
+  if (v === null || v === undefined) return "not set";
   if (typeof v === "boolean") return v ? "true" : "false";
   if (typeof v === "string") return v.length === 0 ? '""' : v;
   if (Array.isArray(v)) return `[${v.map((x) => formatDefaultValue(x)).join(", ")}]`;
@@ -81,6 +84,9 @@ const RISK_MIS_KEYS = [
   "risk.min_confidence_buy_intraday",
   "risk.min_confidence_sell_intraday",
   "risk.trailing_sl_trigger_target_pct_intraday",
+  "risk.exit_tweaks.time_stop_enabled",
+  "risk.exit_tweaks.intraday_stop_after_min",
+  "risk.exit_tweaks.intraday_stop_progress_threshold",
 ];
 
 const RISK_CNC_KEYS = [
@@ -1058,7 +1064,7 @@ function SectionCard({
   if (entries.length === 0) return null;
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg">
+    <div className="bg-gray-900 border border-gray-800 rounded-lg mb-4 break-inside-avoid">
       <div className="flex items-center justify-between px-5 pt-4 pb-2">
         <h3 className="text-sm font-semibold text-gray-200">{title}</h3>
         {changedCount > 0 && (
@@ -1300,9 +1306,13 @@ export default function SettingsPage() {
         }}
       />
 
-      {/* Tab content */}
+      {/* Tab content. CSS columns instead of CSS grid so a tall card
+          (e.g. the Risk Management list with 50+ rows) doesn't force
+          its neighbours to grow with empty space below short cards.
+          Each section uses break-inside-avoid so it never splits
+          across columns mid-card. */}
       <DefaultsContext.Provider value={flatDefaults}>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="columns-1 lg:columns-2 gap-4 [column-fill:balance]">
         {currentTab.sections.map((sectionKey) => {
           let entries = getEntries(sectionKey);
           if (diffOnlyTabs[currentTab.id]) {
