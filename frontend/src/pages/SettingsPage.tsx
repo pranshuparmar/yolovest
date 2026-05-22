@@ -40,7 +40,14 @@ const TABS: Tab[] = [
   {
     id: "strategy",
     label: "Strategy",
-    sections: ["_strategy_top", "strategy", "scanning", "retraining"],
+    sections: [
+      "_strategy_top",
+      "_strategy_mis",
+      "_strategy_cnc",
+      "strategy",
+      "scanning",
+      "retraining",
+    ],
   },
   {
     id: "risk",
@@ -74,6 +81,27 @@ const STRATEGY_TOP_KEYS = [
   "scanning.universe",
   "scanning.shortlist_size",
   "scanning.min_avg_daily_volume",
+];
+
+// Per-product strategy settings. ATR target/stop multipliers and the
+// intraday-only eligibility / bias knobs live here. Swing buckets
+// (short_swing / week / long) all map to CNC at the broker so they
+// share the CNC section.
+const STRATEGY_MIS_KEYS = [
+  "strategy.holding_periods.intraday.target",
+  "strategy.holding_periods.intraday.stop_loss",
+  "strategy.holding_periods.intraday.max_atr_pct_for_target",
+  "strategy.max_atr_pct_for_intraday_eligibility",
+  "strategy.bull_bias_intraday_pct",
+];
+
+const STRATEGY_CNC_KEYS = [
+  "strategy.holding_periods.short_swing.target",
+  "strategy.holding_periods.short_swing.stop_loss",
+  "strategy.holding_periods.week.target",
+  "strategy.holding_periods.week.stop_loss",
+  "strategy.holding_periods.long.target",
+  "strategy.holding_periods.long.stop_loss",
 ];
 
 // Per-product risk settings — intraday/swing in the model maps 1:1 to
@@ -113,6 +141,8 @@ const RELOCATED_KEYS = new Set([
   ...GENERAL_TOP_KEYS,
   ...CRON_KEYS,
   ...STRATEGY_TOP_KEYS,
+  ...STRATEGY_MIS_KEYS,
+  ...STRATEGY_CNC_KEYS,
   ...RISK_MIS_KEYS,
   ...RISK_CNC_KEYS,
 ]);
@@ -199,6 +229,8 @@ const NULLABLE_NUMBER_KEYS = new Set([
 const SECTION_LABELS: Record<string, string> = {
   _general_top: "General",
   _strategy_top: "Strategy — Core",
+  _strategy_mis: "MIS (Intraday) — Holding Geometry",
+  _strategy_cnc: "CNC (Delivery) — Holding Geometry",
   _cron_schedules: "Cron Schedules",
   _risk_mis: "MIS (Intraday) Specific",
   _risk_cnc: "CNC (Delivery) Specific",
@@ -1200,6 +1232,12 @@ export default function SettingsPage() {
     }
     if (sectionKey === "_risk_cnc") {
       return RISK_CNC_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
+    if (sectionKey === "_strategy_mis") {
+      return STRATEGY_MIS_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
+    if (sectionKey === "_strategy_cnc") {
+      return STRATEGY_CNC_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
     }
     // Normal section — filter out relocated keys
     return Object.entries(localConfig[sectionKey] ?? {}).filter(([k]) => !RELOCATED_KEYS.has(k));
