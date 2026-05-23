@@ -3193,6 +3193,88 @@ def create_app(ctx: AppContext) -> FastAPI:
                 logger.warning("Failed to load promoted model %s/%s: %s", model_type, version, e)
         return {"promoted": True, "model_type": model_type, "version": version}
 
+    @app.post("/api/ml-models/import")
+    async def import_model(
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Register a model artifact trained on another machine.
+
+        Workflow: train offline (python -m yolovest.train_offline),
+        copy the produced <version>.pkl into this server's models/ dir,
+        then POST here to register + (optionally) promote + hot-reload.
+
+        Body: {"model_type": "intraday"|"swing", "version": "<stem>",
+               "promote": bool}
+        `version` is the .pkl filename without extension (the artifact's
+        own version string). Metrics are read straight from the
+        artifact so the registry row matches what was trained.
+        """
+        body = await request.json()
+        model_type = body.get("model_type")
+        version = body.get("version")
+        promote = bool(body.get("promote", False))
+        if model_type not in ("intraday", "swing") or not version:
+            raise HTTPException(
+                status_code=400,
+                detail="model_type must be 'intraday' or 'swing' and version is required",
+            )
+
+        model_dir = _model_dir()
+        pkl_path = Path(model_dir) / f"{version}.pkl"
+        if not pkl_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"{version}.pkl not found in {model_dir}. Copy the "
+                    "trained artifact there first."
+                ),
+            )
+
+        # Read metrics + sanity-check the artifact loads + matches type.
+        try:
+            import joblib
+            artifact = await asyncio.to_thread(joblib.load, str(pkl_path))
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Failed to load artifact: {e}",
+            ) from e
+        if not isinstance(artifact, dict) or "model" not in artifact:
+            raise HTTPException(
+                status_code=400,
+                detail="Artifact is not a valid YoloVest model bundle.",
+            )
+        metrics = artifact.get("metrics") or {}
+
+        # Register as shadow first (mirrors the retrain path), then
+        # optionally promote. Hot-reload the running provider so the
+        # change takes effect without a server restart.
+        await ctx.db.save_model_version(
+            model_type, version, f"models/{version}.pkl", metrics,
+        )
+        loaded = False
+        if ctx.ml:
+            try:
+                if promote:
+                    await ctx.db.promote_model(model_type, version)
+                    await ctx.ml.load_model(model_type, version)
+                else:
+                    await ctx.ml.load_shadow_model(model_type, version)
+                loaded = True
+            except Exception as e:
+                logger.warning(
+                    "Imported model %s/%s registered but hot-reload failed: %s",
+                    model_type, version, e,
+                )
+        return {
+            "imported": True,
+            "model_type": model_type,
+            "version": version,
+            "promoted": promote,
+            "hot_reloaded": loaded,
+            "metrics": metrics,
+        }
+
     @app.post("/api/ml-models/{model_type}/{version}/reshadow")
     async def reshadow_model(
         model_type: str,

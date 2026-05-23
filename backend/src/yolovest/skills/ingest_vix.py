@@ -41,16 +41,25 @@ class IngestVixSkill(SkillBase):
         return True
 
     async def execute(self, **kwargs: Any) -> SkillResult:
-        # On a cold table, pull a year so the trailing-20d z-score is
-        # populated for every historical training sample. Once the
-        # table has data, the daily 30-day pull is enough.
+        # On a cold table, backfill enough history to cover the model's
+        # training window so VIX features aren't zero for ~80% of
+        # samples on a multi-year retrain (the vix_* triad is a
+        # broadcast feature — every (symbol, date) sample on a date
+        # without a VIX bar gets neutral 0.0). Match the daily-OHLCV
+        # training window (+ a 60-day pad for the trailing-20d z-score).
+        # Once the table has data, the daily 30-day pull is enough as a
+        # missed-day reconciliation guard.
         try:
             existing = await self.ctx.db.get_vix_timeline()
         except Exception:
             logger.exception("ingest-vix: get_vix_timeline failed")
             existing = []
 
-        days = 30 if len(existing) > 30 else 365
+        cold_start_days = max(
+            365,
+            int(self.ctx.config.retraining.max_training_days) + 60,
+        )
+        days = 30 if len(existing) > 30 else cold_start_days
         bars = await fetch_vix_history(days=days)
         if not bars:
             logger.warning("ingest-vix: no bars returned from yfinance")
