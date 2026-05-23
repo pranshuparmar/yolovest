@@ -39,6 +39,9 @@ def _fetch_sync(days: int) -> list[OHLCVBar]:
         logger.warning("yfinance not installed; VIX fetch skipped")
         return []
 
+    from yolovest.data.yfinance_provider import configure_yfinance_cache
+    configure_yfinance_cache()
+
     try:
         ticker = yf.Ticker(VIX_YF_TICKER)
         period = f"{days}d" if days <= 730 else "max"
