@@ -122,6 +122,12 @@ class BacktestResult:
     net_pnl: float
     final_capital: float
     returns: list[float] = field(default_factory=list)
+    # Daily-aggregated return series — the SAME series result.sharpe is
+    # computed from (per-day netted PnL / initial_capital). Exposed so
+    # the threshold sweep's bootstrap resamples the same quantity the
+    # point Sharpe measures; resampling the per-trade `returns` instead
+    # produced a "lower bound" that could exceed the point estimate.
+    daily_returns: list[float] = field(default_factory=list)
     # Count of non-HOLD predictions skipped because the portfolio
     # cap was already full. Reported so the user can see how much
     # opportunity the cap closes off (and decide whether
@@ -360,17 +366,20 @@ def run_walk_forward_backtest(
     # quant convention; annualises cleanly via sqrt(252)). Fall back to
     # per-trade returns × sqrt(annualization_factor) when entry_date
     # isn't available on the metadata (older callers / unit tests).
+    # `sharpe_series` is the exact series Sharpe is computed from — the
+    # bootstrap in sweep_thresholds resamples this so its lower bound
+    # is a true lower bound of the reported point Sharpe.
     if len(daily_pnl) > 1:
-        daily_rets = [n / cfg.initial_capital for n in daily_pnl.values()]
-        mean = sum(daily_rets) / len(daily_rets)
-        var = sum((r - mean) ** 2 for r in daily_rets) / (len(daily_rets) - 1)
+        sharpe_series = [n / cfg.initial_capital for n in daily_pnl.values()]
+        sharpe_annualization = 252
+    else:
+        sharpe_series = list(returns)
+        sharpe_annualization = cfg.annualization_factor
+    if len(sharpe_series) > 1:
+        mean = sum(sharpe_series) / len(sharpe_series)
+        var = sum((r - mean) ** 2 for r in sharpe_series) / (len(sharpe_series) - 1)
         stdev = math.sqrt(var) if var > 0 else 0.0
-        sharpe = (mean / stdev) * math.sqrt(252) if stdev > 0 else 0.0
-    elif len(returns) > 1:
-        mean = sum(returns) / len(returns)
-        var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
-        stdev = math.sqrt(var) if var > 0 else 0.0
-        sharpe = (mean / stdev) * math.sqrt(cfg.annualization_factor) if stdev > 0 else 0.0
+        sharpe = (mean / stdev) * math.sqrt(sharpe_annualization) if stdev > 0 else 0.0
     else:
         sharpe = 0.0
 
@@ -389,6 +398,7 @@ def run_walk_forward_backtest(
         net_pnl=round(net_pnl_total, 2),
         final_capital=round(capital, 2),
         returns=returns,
+        daily_returns=sharpe_series,
         signals_skipped_at_cap=signals_skipped_at_cap,
     )
 
@@ -541,13 +551,18 @@ def sweep_thresholds(
                     if buy_share < min_class_share or sell_share < min_class_share:
                         continue
 
-            # Robust ranking: bootstrap the returns and rank on the
-            # lower percentile. Falls through to point Sharpe when
-            # bootstrap is disabled.
-            if bootstrap_iterations > 0 and result.returns:
+            # Robust ranking: bootstrap the SAME series result.sharpe is
+            # computed from (daily-aggregated when available, else
+            # per-trade) so the lower bound is a true lower bound of the
+            # reported point Sharpe — not a different quantity that can
+            # exceed it. Falls through to point Sharpe when bootstrap
+            # is disabled or there's no series.
+            boot_series = result.daily_returns or result.returns
+            boot_annualization = 252 if result.daily_returns else cfg.annualization_factor
+            if bootstrap_iterations > 0 and boot_series:
                 lower_sharpe = _bootstrap_sharpe_lower_bound(
-                    result.returns,
-                    annualization=cfg.annualization_factor,
+                    boot_series,
+                    annualization=boot_annualization,
                     n_iter=bootstrap_iterations,
                     percentile=bootstrap_percentile,
                 )
