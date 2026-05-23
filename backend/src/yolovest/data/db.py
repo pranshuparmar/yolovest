@@ -4202,18 +4202,30 @@ class Database:
         timestamp = now_ist().strftime("%Y%m%d_%H%M%S")
         backup_path = str(Path(backup_dir) / f"yolovest_{timestamp}.db")
 
-        # VACUUM INTO creates a clean, defragmented copy atomically.
-        # It holds a read lock during the copy, so no writes can sneak in.
-        # The result is a standalone DB file (no WAL/SHM needed).
+        # VACUUM INTO creates a clean, defragmented, self-contained
+        # copy (no WAL/SHM needed). It fails with "cannot VACUUM - SQL
+        # statements in progress" when the connection has an open
+        # transaction — and our write connection usually does, because
+        # Python's deferred isolation auto-begins one on the first DML
+        # and leaves it open. The fix is simply to COMMIT first to
+        # close that transaction, then VACUUM on the SAME connection.
+        #
+        # NB: do NOT run VACUUM on a second connection to the same
+        # WAL-mode DB — the two connections contend and VACUUM hangs.
+        # Same-connection-after-commit is the reliable path.
         try:
+            await self.conn.commit()
             await self.conn.execute("VACUUM INTO ?", (backup_path,))
             logger.info("Database backup created (VACUUM INTO): %s", backup_path)
         except Exception as e:
-            # Fallback: checkpoint + copy (older SQLite without VACUUM INTO)
+            # Fallback: checkpoint + copy. Still produces a usable
+            # backup, just uncompacted and with a small torn-copy risk
+            # if a write lands during the copy.
             logger.warning(
                 "VACUUM INTO failed (%s), falling back to checkpoint + copy", e,
             )
             await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await self.conn.commit()
             shutil.copy2(self._db_path, backup_path)
             logger.info("Database backup created (file copy): %s", backup_path)
 
