@@ -214,7 +214,19 @@ def run_walk_forward_backtest(
         capital += net
 
     Returns sharpe / DD / win-rate / profit-factor computed off the
-    realised per-trade return series.
+    realised PnL.
+
+    KNOWN LIMITATION — label/exit circularity. The path-aware *label*
+    (model_retrain: "did target hit before SL over the window") and the
+    path-aware *exit* here use identical ATR target/SL geometry on the
+    same daily bars. So a correct out-of-sample prediction tautologically
+    "wins" in the sim — backtest win-rate ≈ model directional accuracy,
+    and with a 2:1 reward:risk that compounds into an optimistic Sharpe.
+    Daily OHLC also can't see intra-bar order (the same-bar tie → SL
+    rule is the conservative guard) and the sim can't model gap-through-
+    SL fills. Treat the absolute Sharpe as a RELATIVE ranking signal for
+    threshold selection, NOT a live-performance forecast — the
+    shadow-period live-accuracy gate is the real out-of-sample check.
     """
     cfg = config or BacktestConfig()
     if len(preds) != len(bars_meta):
@@ -243,13 +255,11 @@ def run_walk_forward_backtest(
     # k is the number of newly-completed positions.
     in_flight_exits: list[_date] = []
     signals_skipped_at_cap = 0
-    # Daily aggregation for honest Sharpe. Per-trade Sharpe with
-    # annualization_factor=252 inflates massively on high-frequency
-    # strategies (5 intraday trades/day × 252 days → annualization
-    # factor should be sqrt(5×252) not sqrt(252), but the standard
-    # quant convention is to compute returns on a DAILY equity curve
-    # and annualise by sqrt(252)). When entry_date is available on
-    # the bars_meta we use that.
+    # Daily PnL aggregation, keyed by entry_date. Net PnL of all trades
+    # entered on a given day is summed here; the Sharpe block below
+    # spreads this over the FULL trading-day calendar (idle days = 0%)
+    # so the √252 annualisation is honest. Computing Sharpe on only the
+    # active days and annualising by √252 inflates it ~√(252/active).
     daily_pnl: dict[str, float] = {}
     wins = 0
     losses = 0
@@ -283,6 +293,15 @@ def run_walk_forward_backtest(
         else:
             entry = meta.entry_close * (1 - cfg.entry_slippage_pct)
         exit_price = _path_aware_exit(entry, direction, meta)
+        # Exit slippage — fills are never at the exact target/SL price.
+        # A BUY exits by SELLING (slips down); a SELL exits by BUYING
+        # (slips up). Symmetric with entry slippage, applied to both
+        # winning (target) and losing (SL) exits so the metric isn't
+        # optimistic about fill quality.
+        if direction > 0:
+            exit_price *= (1 - cfg.entry_slippage_pct)
+        else:
+            exit_price *= (1 + cfg.entry_slippage_pct)
 
         # Size on fixed initial_capital, not on compounded capital.
         # Otherwise a high-win-rate simulated equity curve doubles
@@ -362,14 +381,27 @@ def run_walk_forward_backtest(
         else (math.inf if gross_profit > 0 else 0.0)
     )
 
-    # Sharpe: prefer the daily-aggregated equity-curve series (standard
-    # quant convention; annualises cleanly via sqrt(252)). Fall back to
-    # per-trade returns × sqrt(annualization_factor) when entry_date
-    # isn't available on the metadata (older callers / unit tests).
-    # `sharpe_series` is the exact series Sharpe is computed from — the
-    # bootstrap in sweep_thresholds resamples this so its lower bound
-    # is a true lower bound of the reported point Sharpe.
-    if len(daily_pnl) > 1:
+    # Sharpe over the FULL trading-day calendar of the backtest span,
+    # not just days that had trades. Every bars_meta sample carries an
+    # entry_date, so the distinct set of those dates IS the universe of
+    # trading days the strategy lived through. Days with no trade
+    # contribute a 0% return. Without this, a selective strategy that
+    # only fires on (say) 200 of 1000 days had its Sharpe computed over
+    # those 200 positively-biased days and then annualised by √252 as
+    # if it traded every session — a ~√(252/active_days) overstatement.
+    # Including idle days makes the √252 annualisation honest.
+    all_trading_days: set[str] = {
+        meta.entry_date[:10] for meta in bars_meta if meta.entry_date
+    }
+    if len(all_trading_days) > 1:
+        sharpe_series = [
+            daily_pnl.get(d, 0.0) / cfg.initial_capital
+            for d in sorted(all_trading_days)
+        ]
+        sharpe_annualization = 252
+    elif len(daily_pnl) > 1:
+        # No full calendar available (older callers without entry_date
+        # on every sample) — fall back to active-day aggregation.
         sharpe_series = [n / cfg.initial_capital for n in daily_pnl.values()]
         sharpe_annualization = 252
     else:
