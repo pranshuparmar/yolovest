@@ -304,6 +304,14 @@ class RiskCheckSkill(SkillBase):
             return self._reject(signal, "Invalid stop-loss (risk_per_share <= 0)")
 
         position_size = int(risk_amount / risk_per_share)
+        # Capture base size for the cumulative audit log below. Every
+        # gate that modifies position_size (slippage penalty, conviction,
+        # regime, depth, institutional flow, confidence-scaled slot,
+        # effective-risk clamp, margin shrink) effectively contributes
+        # a multiplier off this base — the final log line shows the
+        # net effect so "why was my size this number?" is a one-grep
+        # diagnosis instead of a trace through six skills.
+        base_position_size = position_size
 
         # Weekly circuit breaker — reduce sizing
         if portfolio["weekly_pnl_pct"] <= -cfg.weekly_loss_limit_pct:
@@ -487,6 +495,19 @@ class RiskCheckSkill(SkillBase):
                     effective_risk, max_allowed_risk, cfg.risk_uplift_cap,
                 )
                 position_size = clamped
+
+        # Cumulative size-multiplier audit. Logs the net effect of
+        # every gate that touched position_size since base_position_size
+        # was computed. Helps debug "why is my size X?" without
+        # threading through six separate skill log lines.
+        if base_position_size > 0:
+            net_mult = position_size / base_position_size
+            logger.info(
+                "risk-check: %s final size %d (base %d, net multiplier %.2fx, "
+                "confidence %.2f)",
+                signal["symbol"], position_size, base_position_size,
+                net_mult, float(signal.get("confidence_score") or 0),
+            )
 
         # Liquidity gate — refuse to be more than max_pct_of_top5 of
         # the order book's near-the-touch side. Stops you eating your

@@ -3315,6 +3315,53 @@ class Database:
 
         return result
 
+    async def get_live_metrics_for_model(
+        self, model_version: str, days: int = 14,
+    ) -> dict[str, Any]:
+        """Live (i.e. scored-against-actual) metrics for a specific
+        model version over the last `days` calendar days. Used by the
+        shadow-promotion gate so we can require the shadow to actually
+        outperform on real predictions, not just on backtest.
+
+        Returns: {total, scored, direction_accuracy, target_hit_rate,
+        avg_pnl_pct} — all zeros when there are no scored predictions
+        for the version (caller should treat that as "no live data
+        yet, fall back to backtest").
+        """
+        from datetime import timedelta
+        since = (now_utc() - timedelta(days=days)).isoformat()
+        cursor = await self.read_conn.execute(
+            "SELECT "
+            "  COUNT(*) AS total, "
+            "  SUM(CASE WHEN direction_correct IS NOT NULL THEN 1 ELSE 0 END) AS scored, "
+            "  SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) AS correct, "
+            "  SUM(CASE WHEN target_hit = 1 THEN 1 ELSE 0 END) AS targets_hit, "
+            "  AVG(actual_pnl_pct) AS avg_pnl "
+            "FROM predictions "
+            "WHERE model_version = ? AND created_at >= ?",
+            (model_version, since),
+        )
+        row = await cursor.fetchone()
+        if not row or not row[0]:
+            return {
+                "total": 0, "scored": 0,
+                "direction_accuracy": 0.0,
+                "target_hit_rate": 0.0,
+                "avg_pnl_pct": 0.0,
+            }
+        total = int(row[0] or 0)
+        scored = int(row[1] or 0)
+        correct = int(row[2] or 0)
+        targets_hit = int(row[3] or 0)
+        avg_pnl = float(row[4] or 0)
+        return {
+            "total": total,
+            "scored": scored,
+            "direction_accuracy": round(correct / scored, 4) if scored > 0 else 0.0,
+            "target_hit_rate": round(targets_hit / scored, 4) if scored > 0 else 0.0,
+            "avg_pnl_pct": round(avg_pnl, 4),
+        }
+
     async def get_unscored_predictions(self, mode: str | None = None) -> list[dict[str, Any]]:
         """Get predictions whose holding period has elapsed but haven't been scored.
 

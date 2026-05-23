@@ -4743,6 +4743,37 @@ def create_app(ctx: AppContext) -> FastAPI:
             "error": result.error,
         }
 
+    @app.get("/api/drift-suspension")
+    async def get_drift_suspension(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Return the current drift-watch suspension state. When non-
+        empty, generate-signals is paused until either a successful
+        model-retrain clears it or POST /api/drift-suspension with
+        empty body clears it manually."""
+        try:
+            reason = await ctx.db.get_system_state("signal_gen_suspended_by_drift")
+        except Exception:
+            reason = None
+        return {
+            "suspended": bool(reason),
+            "reason": reason or None,
+        }
+
+    @app.delete("/api/drift-suspension")
+    async def clear_drift_suspension(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Manually clear the drift-watch suspension flag without
+        running a retrain. Useful when the user inspected the drift,
+        decided it was a transient bad week, and wants to resume
+        signal generation immediately."""
+        try:
+            await ctx.db.set_system_state("signal_gen_suspended_by_drift", "")
+            return {"success": True, "suspended": False}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
     @app.post("/api/pending-trades/{trade_id}/approve")
     async def approve_pending_trade(
         trade_id: int,

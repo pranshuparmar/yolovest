@@ -56,6 +56,36 @@ class GenerateSignalsSkill(SkillBase):
         return bool(self.ctx.market_hours.is_market_hours())
 
     async def execute(self, **kwargs: Any) -> SkillResult:
+        # Drift-watch hard suspension. When drift_auto_suspend_enabled
+        # is on, drift-watch sets the signal_gen_suspended_by_drift
+        # flag after detecting >15pp win-rate decay or class collapse.
+        # Block all signal generation until the next successful
+        # model-retrain (which clears the flag) — the position monitor
+        # still runs so open trades keep their SL / target.
+        try:
+            suspension_reason = await self.ctx.db.get_system_state(
+                "signal_gen_suspended_by_drift",
+            )
+        except Exception:
+            suspension_reason = None
+        if suspension_reason:
+            logger.warning(
+                "generate-signals SUSPENDED by drift-watch (reason: %s) — "
+                "run model-retrain or clear the flag from the dashboard "
+                "to resume.",
+                suspension_reason,
+            )
+            return SkillResult(
+                success=True,
+                skill_name=self.name,
+                data={
+                    "suspended": True,
+                    "reason": suspension_reason,
+                    "signals": [],
+                    "filter_counts": {"drift_suspended": 1},
+                },
+            )
+
         watchlist = await self.ctx.db.get_combined_watchlist()
         # Apply quarantine policy to watchlist entries:
         #   - Quarantined + replacement → rewrite the entry's symbol

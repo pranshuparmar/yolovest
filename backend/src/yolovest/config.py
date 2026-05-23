@@ -578,14 +578,20 @@ class RiskConfig(BaseModel):
     # binding, instead of just 2-3 at the looser single-stock cap.
     # Set equal to max_single_stock_pct to disable.
     max_pct_per_signal: float = Field(default=0.10, gt=0, le=1)
-    # Scale the per-signal allocation by ML confidence. At 1.0 (default
-    # off, equal to max_pct_per_signal), every passing signal gets the
-    # full slot. With confidence_scaling on, a signal at confidence =
-    # base_threshold gets `min_factor` of the cap and a signal at 0.95+
-    # gets 100% — so a 0.95-conviction setup occupies twice the room
-    # of a 0.75-just-cleared-threshold one. Keeps high-conviction
-    # trades from being throttled by the same cap as marginal ones.
-    confidence_scaled_sizing_enabled: bool = True
+    # DEPRECATED in favour of `conviction_sizing` (below). Both knobs
+    # scale position size by ML confidence — keeping them both on
+    # double-modulates the same input with overlapping ranges, making
+    # "why is my size this number?" hard to audit. conviction_sizing is
+    # the canonical path because it scales position_size bidirectionally
+    # (can shrink OR expand), while confidence_scaled_sizing only acts
+    # as a one-sided pacing cap that clips conviction's upscaling.
+    #
+    # Default flipped to False (was True). Existing deployments that
+    # explicitly persisted True keep working — change is opt-out via
+    # Settings if you want the legacy stacked behaviour. The cumulative
+    # size_multiplier audit log in risk-check shows the combined effect
+    # of every multiplier in either case.
+    confidence_scaled_sizing_enabled: bool = False
     confidence_scaled_min_factor: float = Field(default=0.5, gt=0, le=1)
     daily_loss_limit_pct: float = Field(default=0.03, gt=0, lt=1)
     weekly_loss_limit_pct: float = Field(default=0.05, gt=0, lt=1)
@@ -624,6 +630,15 @@ class RiskConfig(BaseModel):
     llm_fallback_to_rules: bool = True
     max_same_sector_positions: int = Field(default=1, ge=1)
     kill_switch_enabled: bool = True
+    # Auto-suspend signal generation when drift-watch detects a >15pp
+    # win-rate decay or signal-class collapse. Drift-watch runs at 16:30
+    # IST daily; when this is on, the suspension flag blocks the next
+    # session's generate-signals from running until either (a) a manual
+    # retrain via /run model-retrain clears the flag, or (b) the user
+    # clears it via the dashboard / API. Off by default — opt-in safety
+    # net for users running unattended (drift-watch alerts are still
+    # delivered via Telegram regardless).
+    drift_auto_suspend_enabled: bool = False
     min_confidence_buy: float = Field(default=0.60, ge=0, le=1)
     min_confidence_sell: float = Field(default=0.75, ge=0, le=1)
     # Per-strategy-mode floors. Intraday and swing have very different

@@ -114,6 +114,35 @@ class DriftWatchSkill(SkillBase):
                 )
             if digest_lines:
                 sections.append("\n".join(digest_lines))
+
+            # Hard suspension of signal-gen when opt-in is enabled and
+            # the model is materially decayed (win-rate drop OR class
+            # collapse). Cleared by the next successful model retrain,
+            # or manually via the dashboard.
+            suspended = False
+            if self.ctx.config.risk.drift_auto_suspend_enabled:
+                reason_parts = []
+                if warning:
+                    reason_parts.append("win_rate_decay")
+                if class_warnings:
+                    reason_parts.append("class_collapse")
+                reason = "+".join(reason_parts) or "drift_detected"
+                try:
+                    await self.ctx.db.set_system_state(
+                        "signal_gen_suspended_by_drift", reason,
+                    )
+                    suspended = True
+                    sections.append(
+                        "Signal generation has been AUTO-SUSPENDED until "
+                        "the next successful model-retrain (or manual "
+                        "clear from the dashboard).",
+                    )
+                except Exception:
+                    logger.warning(
+                        "drift-watch: failed to set suspension flag",
+                        exc_info=True,
+                    )
+
             sections.append(
                 "Review the Model Drift page; consider /run model-retrain "
                 "if the decay is recent and persistent.",
@@ -140,6 +169,7 @@ class DriftWatchSkill(SkillBase):
                     "class_counts": class_counts,
                     "digest": digest_lines,
                     "mode": mode,
+                    "signal_gen_suspended": suspended,
                 },
             )
 

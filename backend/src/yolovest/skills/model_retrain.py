@@ -464,6 +464,34 @@ class ModelRetrainSkill(SkillBase):
         # Step 7: Check shadow promotions
         promotions = await self._check_shadow_promotions()
 
+        # Clear drift-watch suspension if any model successfully
+        # retrained. The next signal-gen cycle will then run normally;
+        # drift-watch will re-evaluate at 16:30 IST and re-suspend
+        # only if the new model still shows the same decay.
+        any_success = any(
+            isinstance(r, dict) and "error" not in r and "version" in r
+            for r in results.values()
+        )
+        if any_success:
+            try:
+                cur = await self.ctx.db.get_system_state(
+                    "signal_gen_suspended_by_drift",
+                )
+                if cur:
+                    await self.ctx.db.set_system_state(
+                        "signal_gen_suspended_by_drift", "",
+                    )
+                    logger.info(
+                        "model-retrain: cleared drift-watch suspension "
+                        "(was: %s) — signal generation resumes next cycle",
+                        cur,
+                    )
+            except Exception:
+                logger.debug(
+                    "model-retrain: failed to clear drift suspension",
+                    exc_info=True,
+                )
+
         # Step 9: Gemini failure analysis
         failure_analysis = None
         if predictions_vs_actual and self.ctx.config.llm.enabled:
@@ -1022,9 +1050,23 @@ class ModelRetrainSkill(SkillBase):
     async def _check_shadow_promotions(self) -> list[dict[str, Any]]:
         """Check if shadow models have completed trial period.
 
-        Shadow models that have run for >= shadow_mode_days are evaluated:
-        - If shadow metrics (Sharpe, win_rate) >= production metrics: promote
-        - Otherwise: retire the shadow model (rollback)
+        Shadow models that have run for >= shadow_mode_days are evaluated
+        on TWO independent gates:
+
+        1. Backtest Sharpe — the walk-forward number stored at training
+           time. Necessary but not sufficient: a model can backtest
+           great and then collapse in production due to a regime shift
+           or feature distribution drift.
+
+        2. Live direction accuracy — accumulated from the shadow's
+           scored predictions during the trial window. The shadow must
+           track production within a small tolerance (5pp by default)
+           so we don't promote a model whose live behaviour has already
+           degraded. When production has no live data yet (new install)
+           the live gate is skipped.
+
+        Both must pass for promotion. Either failing → retire the
+        shadow.
         """
         cfg = self.ctx.config.retraining
         shadow_models = await self.ctx.db.get_shadow_models_ready(cfg.shadow_mode_days)
@@ -1034,11 +1076,44 @@ class ModelRetrainSkill(SkillBase):
             model_type = shadow["model_type"]
             current = await self.ctx.db.get_production_model(model_type)
 
-            # Compare: shadow must beat current production on Sharpe ratio
+            # Backtest Sharpe — necessary gate.
             shadow_sharpe = shadow.get("sharpe_ratio", 0) or 0
             current_sharpe = (current.get("sharpe_ratio", 0) or 0) if current else 0
+            backtest_pass = shadow_sharpe >= current_sharpe
 
-            if shadow_sharpe >= current_sharpe:
+            # Live accuracy — sufficiency check on top. Skip when
+            # production has no scored predictions yet (e.g., fresh
+            # install / first promotion).
+            shadow_live = await self.ctx.db.get_live_metrics_for_model(
+                shadow["version"], days=cfg.shadow_mode_days,
+            )
+            current_live = (
+                await self.ctx.db.get_live_metrics_for_model(
+                    current["version"], days=cfg.shadow_mode_days,
+                )
+                if current else None
+            )
+            min_shadow_scored = 30  # need at least 30 scored predictions to trust the comparison
+            live_pass = True
+            live_reason = "no live data — backtest only"
+            if current_live and current_live["scored"] >= min_shadow_scored:
+                tolerance = 0.05  # 5pp
+                if shadow_live["scored"] < min_shadow_scored:
+                    live_pass = False
+                    live_reason = (
+                        f"only {shadow_live['scored']} scored shadow predictions "
+                        f"(need {min_shadow_scored}+)"
+                    )
+                else:
+                    diff = shadow_live["direction_accuracy"] - current_live["direction_accuracy"]
+                    live_pass = diff >= -tolerance
+                    live_reason = (
+                        f"shadow live acc {shadow_live['direction_accuracy']:.2%} vs "
+                        f"production {current_live['direction_accuracy']:.2%} "
+                        f"(diff {diff:+.2%}, tolerance ±{tolerance:.0%})"
+                    )
+
+            if backtest_pass and live_pass:
                 # Promote shadow to production
                 await self.ctx.db.promote_model(model_type, shadow["version"])
                 if self.ctx.ml:
@@ -1055,24 +1130,43 @@ class ModelRetrainSkill(SkillBase):
                     "action": "promoted",
                     "shadow_sharpe": shadow_sharpe,
                     "previous_sharpe": current_sharpe,
+                    "shadow_live_accuracy": shadow_live["direction_accuracy"],
+                    "production_live_accuracy": (
+                        current_live["direction_accuracy"] if current_live else None
+                    ),
+                    "live_reason": live_reason,
                 })
                 logger.info(
-                    "Promoted shadow model %s/%s (Sharpe: %.2f > %.2f)",
+                    "Promoted shadow model %s/%s (backtest Sharpe %.2f vs %.2f, %s)",
                     model_type, shadow["version"], shadow_sharpe, current_sharpe,
+                    live_reason,
                 )
             else:
                 # Retire underperforming shadow
                 await self.ctx.db.retire_model(model_type, shadow["version"])
+                fail_reason_parts = []
+                if not backtest_pass:
+                    fail_reason_parts.append(
+                        f"backtest Sharpe {shadow_sharpe:.2f} < {current_sharpe:.2f}"
+                    )
+                if not live_pass:
+                    fail_reason_parts.append(f"live: {live_reason}")
                 promotions.append({
                     "model_type": model_type,
                     "version": shadow["version"],
                     "action": "retired",
                     "shadow_sharpe": shadow_sharpe,
                     "production_sharpe": current_sharpe,
+                    "shadow_live_accuracy": shadow_live["direction_accuracy"],
+                    "production_live_accuracy": (
+                        current_live["direction_accuracy"] if current_live else None
+                    ),
+                    "live_reason": live_reason,
+                    "failed_gates": fail_reason_parts,
                 })
                 logger.info(
-                    "Retired shadow model %s/%s (Sharpe: %.2f < %.2f)",
-                    model_type, shadow["version"], shadow_sharpe, current_sharpe,
+                    "Retired shadow model %s/%s (%s)",
+                    model_type, shadow["version"], " | ".join(fail_reason_parts),
                 )
 
         return promotions
