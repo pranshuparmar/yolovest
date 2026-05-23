@@ -566,8 +566,19 @@ class ModelRetrainSkill(SkillBase):
             ema_periods=self.ctx.config.strategy.ema_periods,
         )
 
-        # Minimum window size for feature computation (need enough bars for indicators)
-        window_size = 50
+        # Minimum window size for feature computation. Must match the
+        # longest-lookback indicator (EMA-200) so every emitted sample
+        # carries the full feature set from its very first iteration.
+        # The previous value of 50 caused samples 50-199 to lack
+        # ema_200 → the discovery-and-backfill loop below would
+        # backfill them with 0.0, training the model to associate
+        # ema_200=0 with "early history" when at inference ema_200 is
+        # always non-zero. Inference distribution didn't match training.
+        # Bumping to 200 eliminates the train-inference mismatch.
+        # `window` is a per-iteration slice that's GC'd after
+        # compute_features returns, so the larger window doesn't
+        # accumulate memory across samples.
+        window_size = 200
         X: list[list[float]] = []
         y: list[int] = []
         sample_weights: list[float] = []
@@ -629,16 +640,22 @@ class ModelRetrainSkill(SkillBase):
                 continue
 
             # Compute sample weight for this symbol based on recent performance
-            sym_weight = 1.0
+            # Per-symbol failure flag — used INSIDE the per-bar loop
+            # below to apply the boost only to recent bars. The old
+            # behaviour upweighted every historical bar of a symbol
+            # whose recent accuracy was <50%, which overfits the
+            # model to that symbol's idiosyncratic past rather than
+            # learning from the conditions that produced the failures.
+            symbol_has_recent_failure = False
             if feedback_data and sym in feedback_data:
                 fb = feedback_data[sym]
-                # Upweight symbols where model accuracy was poor (< 50%)
                 pred_acc = fb.get("pred_accuracy", 0.5)
                 dry_acc = fb.get("dry_run_accuracy", 0.5)
-                # Use worst accuracy signal to determine weight
-                worst_acc = min(pred_acc, dry_acc)
-                if worst_acc < 0.5:
-                    sym_weight = weight_boost
+                if min(pred_acc, dry_acc) < 0.5:
+                    symbol_has_recent_failure = True
+            feedback_lookback_days = int(
+                self.ctx.config.strategy.feedback.lookback_days or 60
+            )
 
             # Convert rows to OHLCVBar objects for compute_features
             bars = [
@@ -787,20 +804,31 @@ class ModelRetrainSkill(SkillBase):
 
                 # Path-aware label: BUY iff target hits before SL when
                 # walking forward bar-by-bar, using the same ATR-based
-                # geometry the live trades use. Replaces the legacy
-                # close[i+N] vs close[i] ±0.5% rule, which was blind to
-                # intra-window SL hits and didn't match runtime exits.
-                current_close = bars[i].close
+                # geometry the live trades use.
+                #
+                # ENTRY PRICE: bars[i+1].open, NOT bars[i].close.
+                # The model sees features computed at bars[i].close
+                # (end of session i), but it can never actually enter
+                # at that price — the earliest a heartbeat fires the
+                # next morning is at the next session's open. Training
+                # on close-as-entry while live execution uses open-as-
+                # entry creates an overnight-gap mismatch — on volatile
+                # stocks the open can be 0.3-0.8% away from close, which
+                # is wider than a 0.3×ATR intraday SL. The model would
+                # see a "winning" pattern in training that in production
+                # is already stopped out before it can react.
+                current_close = bars[i].close  # kept for backtest path
+                next_open = bars[i + 1].open if i + 1 < len(bars) else current_close
                 future_close = bars[i + lookahead_bars].close
                 atr_pct = features.get("atr_pct") or 0.0
-                if current_close <= 0 or atr_pct <= 0:
+                if next_open <= 0 or atr_pct <= 0:
                     label = 1
                 else:
                     label = self._path_aware_label(
                         bars=bars,
                         start_idx=i,
                         lookahead=lookahead_bars,
-                        entry=current_close,
+                        entry=next_open,
                         target_pct=atr_pct * target_atr_mult,
                         sl_pct=atr_pct * sl_atr_mult,
                     )
@@ -821,13 +849,44 @@ class ModelRetrainSkill(SkillBase):
                     if k in MODEL_FEATURE_EXCLUSIONS:
                         continue
                     if k not in feature_names_set:
+                        # With window_size = 200 every iteration should
+                        # see the full feature set on entry — late-
+                        # appearing keys would mean a new optional feature
+                        # was added without a 0-default fallback in the
+                        # caller. Log so we notice the train-inference
+                        # distribution gap instead of silently backfilling.
+                        if X:
+                            logger.warning(
+                                "model-retrain: feature %s appeared at sample "
+                                "%d for %s — backfilling 0.0 into %d prior "
+                                "rows. Add a 0-default fallback at feature "
+                                "production to avoid this.",
+                                k, len(X), sym, len(X),
+                            )
                         feature_names.append(k)
                         feature_names_set.add(k)
                         for existing in X:
                             existing.append(0.0)
+                # Per-bar feedback weight. Apply weight_boost only to
+                # bars within the feedback-lookback window — those are
+                # the conditions that produced the recent failure. Older
+                # bars stay at 1.0 so the model isn't pushed to overfit
+                # this symbol's ancient history.
+                bar_weight = 1.0
+                if symbol_has_recent_failure and bars:
+                    try:
+                        latest_ts = bars[-1].timestamp
+                        this_ts = bars[i].timestamp
+                        age_days = (latest_ts - this_ts).days
+                        if 0 <= age_days <= feedback_lookback_days:
+                            bar_weight = weight_boost
+                    except Exception:
+                        # Bad timestamps fall through with no boost.
+                        pass
+
                 X.append([features.get(k, 0.0) for k in feature_names])
                 y.append(label)
-                sample_weights.append(sym_weight)
+                sample_weights.append(bar_weight)
                 # Capture the future-window high/low path so the
                 # walk-forward backtest can exit at SL or target with
                 # the same geometry as the path-aware label, instead of
@@ -837,7 +896,11 @@ class ModelRetrainSkill(SkillBase):
                 path_lows = [bars[k].low for k in range(i + 1, window_end + 1)]
                 bars_meta.append({
                     "symbol": sym,
-                    "entry_close": float(current_close),
+                    # Field name preserved for backwards-compat with
+                    # walk_forward_backtest; the value is now next-bar
+                    # open (the actual entry the model would see at
+                    # inference) instead of the same-bar close.
+                    "entry_close": float(next_open),
                     "exit_close": float(future_close),
                     "path_highs": path_highs,
                     "path_lows": path_lows,
@@ -1096,20 +1159,41 @@ class ModelRetrainSkill(SkillBase):
             min_shadow_scored = 30  # need at least 30 scored predictions to trust the comparison
             live_pass = True
             live_reason = "no live data — backtest only"
-            if current_live and current_live["scored"] >= min_shadow_scored:
+
+            def _as_int(v: Any) -> int:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return 0
+
+            def _as_float(v: Any) -> float:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            current_scored = _as_int(
+                current_live.get("scored") if isinstance(current_live, dict) else 0
+            )
+            shadow_scored = _as_int(
+                shadow_live.get("scored") if isinstance(shadow_live, dict) else 0
+            )
+            if current_scored >= min_shadow_scored:
                 tolerance = 0.05  # 5pp
-                if shadow_live["scored"] < min_shadow_scored:
+                if shadow_scored < min_shadow_scored:
                     live_pass = False
                     live_reason = (
-                        f"only {shadow_live['scored']} scored shadow predictions "
+                        f"only {shadow_scored} scored shadow predictions "
                         f"(need {min_shadow_scored}+)"
                     )
                 else:
-                    diff = shadow_live["direction_accuracy"] - current_live["direction_accuracy"]
+                    shadow_acc = _as_float(shadow_live.get("direction_accuracy"))
+                    current_acc = _as_float(current_live.get("direction_accuracy"))
+                    diff = shadow_acc - current_acc
                     live_pass = diff >= -tolerance
                     live_reason = (
-                        f"shadow live acc {shadow_live['direction_accuracy']:.2%} vs "
-                        f"production {current_live['direction_accuracy']:.2%} "
+                        f"shadow live acc {shadow_acc:.2%} vs "
+                        f"production {current_acc:.2%} "
                         f"(diff {diff:+.2%}, tolerance ±{tolerance:.0%})"
                     )
 
@@ -1130,9 +1214,13 @@ class ModelRetrainSkill(SkillBase):
                     "action": "promoted",
                     "shadow_sharpe": shadow_sharpe,
                     "previous_sharpe": current_sharpe,
-                    "shadow_live_accuracy": shadow_live["direction_accuracy"],
+                    "shadow_live_accuracy": _as_float(
+                        shadow_live.get("direction_accuracy")
+                        if isinstance(shadow_live, dict) else 0
+                    ),
                     "production_live_accuracy": (
-                        current_live["direction_accuracy"] if current_live else None
+                        _as_float(current_live.get("direction_accuracy"))
+                        if isinstance(current_live, dict) else None
                     ),
                     "live_reason": live_reason,
                 })
@@ -1157,9 +1245,13 @@ class ModelRetrainSkill(SkillBase):
                     "action": "retired",
                     "shadow_sharpe": shadow_sharpe,
                     "production_sharpe": current_sharpe,
-                    "shadow_live_accuracy": shadow_live["direction_accuracy"],
+                    "shadow_live_accuracy": _as_float(
+                        shadow_live.get("direction_accuracy")
+                        if isinstance(shadow_live, dict) else 0
+                    ),
                     "production_live_accuracy": (
-                        current_live["direction_accuracy"] if current_live else None
+                        _as_float(current_live.get("direction_accuracy"))
+                        if isinstance(current_live, dict) else None
                     ),
                     "live_reason": live_reason,
                     "failed_gates": fail_reason_parts,

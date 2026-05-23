@@ -24,7 +24,11 @@ MODEL_FEATURE_EXCLUSIONS: frozenset[str] = frozenset({
     "close", "open", "high", "low",
     # Raw indicator bands / cumulative values — model uses normalized
     # derivatives instead (bb_position, vwap_distance_pct, obv_change_5d).
-    "vwap", "atr_14", "obv",
+    # Legacy `vwap` is summed over the entire bars window — it's a year-long
+    # P/V average, not session VWAP. `mvwap_20d` is the proper 20-day
+    # rolling replacement (added alongside for forward compatibility;
+    # new model retrains pick up `mvwap_20d_distance_pct` automatically).
+    "vwap", "mvwap_20d", "atr_14", "obv",
     "bb_upper", "bb_middle", "bb_lower",
     "supertrend_upper", "supertrend_lower",
     # Raw EMA levels — model uses close_vs_ema*_pct ratios.
@@ -110,6 +114,15 @@ def compute_features(
         vwap = compute_vwap(bars)
         if vwap is not None:
             features["vwap"] = vwap
+        # 20-day MVWAP — the actually-useful price/volume anchor on
+        # daily bars. Kept alongside the legacy whole-window vwap so
+        # production models trained against the old feature don't
+        # silently see a distribution shift at inference (compute_features
+        # runs both, but model artifacts only consume the keys they
+        # were trained on).
+        mvwap = compute_mvwap_20d(bars)
+        if mvwap is not None:
+            features["mvwap_20d"] = mvwap
 
     if cfg.atr:
         atr = compute_atr(highs, lows, closes, period=14)
@@ -156,6 +169,15 @@ def compute_features(
         if "vwap" in features and features["vwap"] > 0:
             features["vwap_distance_pct"] = (
                 (_last_close - features["vwap"]) / features["vwap"]
+            )
+        # 20-day MVWAP distance — meaningful price/volume anchor for
+        # daily bars (institutional accumulation/distribution zone over
+        # the last month). The legacy vwap_distance_pct is preserved
+        # above so existing model artifacts still find their key, but
+        # new retrains will pick this up as a separate feature.
+        if "mvwap_20d" in features and features["mvwap_20d"] > 0:
+            features["mvwap_20d_distance_pct"] = (
+                (_last_close - features["mvwap_20d"]) / features["mvwap_20d"]
             )
         if "bb_upper" in features and "bb_lower" in features:
             band_width = features["bb_upper"] - features["bb_lower"]
@@ -331,11 +353,41 @@ def compute_bollinger_bands(
 
 
 def compute_vwap(bars: list[OHLCVBar]) -> float | None:
-    """Volume Weighted Average Price."""
+    """Volume Weighted Average Price.
+
+    LEGACY: this sums across the ENTIRE bars list (typically 365 daily
+    bars in the heartbeat path) — it's effectively a year-long P/V
+    weighted average, not session VWAP. Retained so existing model
+    artifacts keep finding `vwap_distance_pct` at inference. New
+    training should consume `mvwap_20d_distance_pct` from
+    compute_mvwap_20d below.
+    """
     if not bars:
         return None
     total_vp = sum(((b.high + b.low + b.close) / 3) * b.volume for b in bars)
     total_vol = sum(b.volume for b in bars)
+    if total_vol == 0:
+        return None
+    return total_vp / total_vol
+
+
+def compute_mvwap_20d(bars: list[OHLCVBar]) -> float | None:
+    """20-day moving Volume Weighted Average Price.
+
+    Proper price/volume anchor for daily-bar models — captures where
+    institutional accumulation / distribution has happened over the
+    last month. The 20-bar window matches the Bollinger period and
+    is short enough that the feature reacts to regime shifts, long
+    enough that one outlier session doesn't dominate.
+
+    Falls back to None when fewer than 5 bars are available to
+    prevent a degenerate same-day VWAP from sneaking through.
+    """
+    if not bars or len(bars) < 5:
+        return None
+    window = bars[-20:] if len(bars) >= 20 else bars
+    total_vp = sum(((b.high + b.low + b.close) / 3) * b.volume for b in window)
+    total_vol = sum(b.volume for b in window)
     if total_vol == 0:
         return None
     return total_vp / total_vol
