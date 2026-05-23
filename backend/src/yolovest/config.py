@@ -877,7 +877,19 @@ class TransactionCostConfig(BaseModel):
 
 
 class RetentionConfig(BaseModel):
+    # DAILY OHLCV retention. Must be >= retraining.max_training_days /
+    # market_data.backfill_days or the nightly maintenance silently
+    # truncates the model's training history (startup logs a warning
+    # if it's too short).
     ohlcv_days: int = 730
+    # INTRADAY OHLCV (5-minute etc.) retention — decoupled from daily.
+    # Intraday bars are ~75× heavier per day than daily and are NOT
+    # used for model training (the model trains on daily bars); they're
+    # only consumed operationally (volume-exhaustion exits, live
+    # monitoring). Keeping years of 5-min bars just bloats the DB, so
+    # this defaults to the intraday backfill window (365d) rather than
+    # inheriting the much longer daily retention.
+    intraday_ohlcv_days: int = 365
     audit_log_days: int = 365
     predictions_days: int = 365
     news_days: int = 90

@@ -4257,19 +4257,42 @@ class Database:
         predictions_days: int = 365,
         news_days: int = 180,
         economic_events_days: int = 365,
+        intraday_ohlcv_days: int | None = None,
     ) -> dict[str, Any]:
-        """Delete data older than retention periods."""
+        """Delete data older than retention periods.
+
+        Daily and intraday OHLCV are trimmed on SEPARATE windows.
+        Daily must cover the training history (`ohlcv_days`); intraday
+        (5-minute etc.) is heavy and only used operationally, so it
+        gets the shorter `intraday_ohlcv_days` (defaults to ohlcv_days
+        for backwards-compat when the caller doesn't pass it).
+        """
         from datetime import timedelta
 
         now = now_utc()
         deleted = {}
 
-        # OHLCV retention
+        # Daily OHLCV retention (the training-history window).
         cutoff = (now - timedelta(days=ohlcv_days)).isoformat()
         cursor = await self.conn.execute(
-            "DELETE FROM ohlcv WHERE timestamp < ?", (cutoff,)
+            "DELETE FROM ohlcv WHERE interval = 'daily' AND timestamp < ?",
+            (cutoff,),
         )
         deleted["ohlcv"] = cursor.rowcount
+
+        # Intraday OHLCV retention (decoupled — 5-min bars are ~75×
+        # heavier per day and not used for training). When the caller
+        # doesn't supply intraday_ohlcv_days, fall back to ohlcv_days
+        # so existing behaviour (single retention) is preserved.
+        intraday_window = (
+            intraday_ohlcv_days if intraday_ohlcv_days is not None else ohlcv_days
+        )
+        intraday_cutoff = (now - timedelta(days=intraday_window)).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM ohlcv WHERE interval != 'daily' AND timestamp < ?",
+            (intraday_cutoff,),
+        )
+        deleted["ohlcv_intraday"] = cursor.rowcount
 
         # Audit log retention
         cutoff = (now - timedelta(days=audit_days)).isoformat()

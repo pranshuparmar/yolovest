@@ -57,7 +57,9 @@ class TestDatabaseMaintenanceSkill:
 
         ctx.db.backup.assert_called_once()
         ctx.db.run_retention_cleanup.assert_called_once_with(
-            ohlcv_days=730, audit_days=365, predictions_days=365,
+            ohlcv_days=730,
+            intraday_ohlcv_days=ctx.config.database.retention.intraday_ohlcv_days,
+            audit_days=365, predictions_days=365,
             news_days=ctx.config.database.retention.news_days,
             economic_events_days=ctx.config.database.retention.economic_events_days,
         )

@@ -59,6 +59,7 @@ class DatabaseMaintenanceSkill(SkillBase):
             retention = self.ctx.config.database.retention
             deleted = await self.ctx.db.run_retention_cleanup(
                 ohlcv_days=retention.ohlcv_days,
+                intraday_ohlcv_days=retention.intraday_ohlcv_days,
                 audit_days=retention.audit_log_days,
                 predictions_days=retention.predictions_days,
                 news_days=retention.news_days,
