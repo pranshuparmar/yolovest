@@ -330,6 +330,11 @@ class ModelRetrainSkill(SkillBase):
                 # Real-PnL backtest config: intraday model uses MIS for
                 # cost calc (lower STT); swing model uses CNC.
                 train_params["bars_meta"] = bars_meta
+                # Lookahead window (in trading days) so the CV can purge
+                # train samples whose label window overlaps the test
+                # fold — without it the multi-bar label leaks across the
+                # train/test boundary.
+                train_params["lookahead_bars"] = lookahead
                 train_params["backtest_product"] = (
                     "MIS" if model_type == "intraday" else "CNC"
                 )
@@ -916,6 +921,26 @@ class ModelRetrainSkill(SkillBase):
                     # the same day get netted before the Sharpe stdev.
                     "entry_date": _sample_date,
                 })
+
+        # Global chronological sort. Samples are built symbol-by-symbol,
+        # so the arrays come out ordered [symbolA_all_dates,
+        # symbolB_all_dates, ...]. The walk-forward CV (TimeSeriesSplit)
+        # assumes row order == time order — without this sort the
+        # "folds" split by SYMBOL position, not date, training on future
+        # dates relative to the test fold (severe temporal leakage that
+        # inflates the backtest Sharpe and the tuned thresholds). Sort
+        # all parallel arrays by entry_date so the split is a genuine
+        # cross-sectional walk-forward. Stable sort keeps same-date
+        # samples in their original (symbol) order.
+        if bars_meta:
+            order = sorted(
+                range(len(bars_meta)),
+                key=lambda i: bars_meta[i].get("entry_date", ""),
+            )
+            X = [X[i] for i in order]
+            y = [y[i] for i in order]
+            sample_weights = [sample_weights[i] for i in order]
+            bars_meta = [bars_meta[i] for i in order]
 
         return X, y, feature_names, sample_weights, bars_meta
 

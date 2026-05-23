@@ -665,6 +665,10 @@ class XGBoostSignalModel(MLBase):
         bars_meta_raw = params.pop("bars_meta", None)
         backtest_product = params.pop("backtest_product", "MIS")
         backtest_max_positions = int(params.pop("backtest_max_positions", 0))
+        # Label lookahead in trading days — used to purge train samples
+        # whose label window overlaps the test fold (cross-sectional
+        # leakage). 0 disables purging.
+        lookahead_bars = int(params.pop("lookahead_bars", 0))
 
         import numpy as np
 
@@ -766,6 +770,49 @@ class XGBoostSignalModel(MLBase):
             synthetic_gross_loss = 0.0
 
             for train_idx, test_idx in tscv.split(X_arr):
+                # Purge: drop train samples whose label window overlaps
+                # the test fold. A train sample at date d has a label
+                # computed from bars up to ~d + lookahead trading days;
+                # if that reaches the test fold's date range the label
+                # peeked at test-period data → leakage. Samples are a
+                # cross-sectional panel (many symbols per day) so a
+                # fixed sample-count gap can't express a day-gap — we
+                # purge by date explicitly. Over-purge slightly
+                # (calendar-day conversion of trading days) rather than
+                # risk leaving any overlap.
+                if (
+                    lookahead_bars > 0
+                    and bars_meta_raw is not None
+                    and len(test_idx) > 0
+                ):
+                    from datetime import date as _date, timedelta as _td
+
+                    def _meta_date(i: int) -> "_date | None":
+                        raw = bars_meta_raw[int(i)].get("entry_date", "")
+                        try:
+                            return _date.fromisoformat(str(raw)[:10])
+                        except (ValueError, TypeError):
+                            return None
+
+                    test_dates = [d for d in (_meta_date(i) for i in test_idx) if d]
+                    if test_dates:
+                        test_min = min(test_dates)
+                        # trading days → calendar days (×7/5) + slack
+                        purge_calendar_days = int(lookahead_bars * 7 / 5) + 2
+                        cutoff = test_min - _td(days=purge_calendar_days)
+                        kept = [
+                            i for i in train_idx
+                            if (_meta_date(i) is None or _meta_date(i) < cutoff)
+                        ]
+                        purged = len(train_idx) - len(kept)
+                        if kept and purged > 0:
+                            train_idx = np.asarray(kept, dtype=train_idx.dtype)
+                            logger.debug(
+                                "CV purge: dropped %d train samples within "
+                                "%dd of test fold start %s",
+                                purged, purge_calendar_days, test_min,
+                            )
+
                 X_train, X_test = X_arr[train_idx], X_arr[test_idx]  # noqa: N806
                 y_train, y_test = y_arr[train_idx], y_arr[test_idx]
                 w_train = weights_arr[train_idx] if weights_arr is not None else None
