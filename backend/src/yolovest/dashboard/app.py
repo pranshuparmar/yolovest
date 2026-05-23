@@ -10,6 +10,7 @@ Security:
 - CSRF protection: state-changing endpoints require X-CSRF-Token header
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -21,11 +22,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import (
-    Depends, FastAPI, Header, HTTPException, Query, Request,
-    WebSocket, WebSocketDisconnect, status,
+    Depends, FastAPI, File, Header, HTTPException, Query, Request,
+    UploadFile, WebSocket, WebSocketDisconnect, status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
@@ -3193,6 +3194,71 @@ def create_app(ctx: AppContext) -> FastAPI:
                 logger.warning("Failed to load promoted model %s/%s: %s", model_type, version, e)
         return {"promoted": True, "model_type": model_type, "version": version}
 
+    @app.get("/api/ml-models/{version}/download")
+    async def download_model(
+        version: str, _user: str = Depends(verify_credentials),
+    ) -> FileResponse:
+        """Stream a trained model artifact (.pkl) to the browser so it
+        can be moved to another machine (e.g. import a model trained on
+        a higher-memory box)."""
+        model_dir = _model_dir()
+        if "/" in version or "\\" in version or ".." in version:
+            raise HTTPException(status_code=400, detail="Invalid version")
+        path = Path(model_dir) / f"{version}.pkl"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"{version}.pkl not found")
+        return FileResponse(
+            str(path), media_type="application/octet-stream",
+            filename=f"{version}.pkl",
+        )
+
+    @app.post("/api/ml-models/upload")
+    async def upload_model(
+        file: UploadFile = File(...),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Accept a trained .pkl uploaded from another machine and place
+        it in the models dir. Call POST /api/ml-models/import afterwards
+        to register + (optionally) promote + hot-reload it."""
+        import os
+
+        model_dir = _model_dir()
+        os.makedirs(model_dir, exist_ok=True)
+        name = os.path.basename(file.filename or "")
+        if not name.endswith(".pkl"):
+            raise HTTPException(status_code=400, detail="Expected a .pkl file")
+        if "/" in name or "\\" in name or ".." in name:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        dest = Path(model_dir) / name
+        size = 0
+        with open(dest, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                size += len(chunk)
+        # Sanity-check it loads as a YoloVest model bundle before
+        # reporting success — a bad file shouldn't sit around looking
+        # importable.
+        try:
+            import joblib
+            artifact = await asyncio.to_thread(joblib.load, str(dest))
+            if not isinstance(artifact, dict) or "model" not in artifact:
+                raise ValueError("not a YoloVest model bundle")
+        except Exception as e:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=400, detail=f"Invalid model artifact: {e}",
+            ) from e
+        version = name[:-4]  # strip .pkl
+        logger.info("Uploaded model artifact %s (%d bytes)", name, size)
+        return {
+            "success": True, "version": version, "filename": name,
+            "size_bytes": size,
+            "metrics": artifact.get("metrics", {}),
+        }
+
     @app.post("/api/ml-models/import")
     async def import_model(
         request: Request,
@@ -3200,9 +3266,10 @@ def create_app(ctx: AppContext) -> FastAPI:
     ) -> dict[str, Any]:
         """Register a model artifact trained on another machine.
 
-        Workflow: train offline (python -m yolovest.train_offline),
-        copy the produced <version>.pkl into this server's models/ dir,
-        then POST here to register + (optionally) promote + hot-reload.
+        Workflow: run the full app in a container on a higher-memory box,
+        retrain via the model-retrain skill, download the produced
+        <version>.pkl, then upload it here (POST /api/ml-models/upload)
+        and POST here to register + (optionally) promote + hot-reload.
 
         Body: {"model_type": "intraday"|"swing", "version": "<stem>",
                "promote": bool}
@@ -3857,7 +3924,6 @@ def create_app(ctx: AppContext) -> FastAPI:
         REST fetches run concurrently so a 30-symbol page doesn't
         serialise into a 30 × round-trip wait.
         """
-        import asyncio as _asyncio
         syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
         result: dict[str, float] = {}
         ticker = getattr(ctx, "ticker", None)
@@ -3891,7 +3957,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 pass
             return sym, None
 
-        pairs = await _asyncio.gather(*[_resolve(s) for s in syms])
+        pairs = await asyncio.gather(*[_resolve(s) for s in syms])
         for sym, ltp in pairs:
             if ltp is not None and ltp > 0:
                 result[sym] = ltp
@@ -4693,6 +4759,67 @@ def create_app(ctx: AppContext) -> FastAPI:
         logger.info("Deleted backup %s (%d bytes)", filename, result["size_bytes"])
         return {"success": True, **result}
 
+    def _safe_in_dir(base_dir: str, filename: str) -> Path:
+        """Resolve `filename` strictly inside `base_dir`. Rejects path
+        traversal (../, absolute paths, separators). Raises HTTP 400."""
+        if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        base = Path(base_dir).resolve()
+        target = (base / filename).resolve()
+        if base not in target.parents and target != base:
+            raise HTTPException(status_code=400, detail="Path traversal rejected")
+        return target
+
+    @app.get("/api/backups/{filename}/download")
+    async def download_backup(
+        filename: str, _user: str = Depends(verify_credentials),
+    ) -> FileResponse:
+        """Stream a backup .db file to the browser. Used to move a full
+        DB (data + settings) to another machine for offline retraining."""
+        backup_dir = ctx.config.database.backup_dir
+        path = _safe_in_dir(backup_dir, filename)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"Backup not found: {filename}")
+        return FileResponse(
+            str(path), media_type="application/octet-stream", filename=filename,
+        )
+
+    @app.post("/api/backups/upload")
+    async def upload_backup(
+        file: UploadFile = File(...),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Accept a backup .db uploaded from another machine, validate
+        it's a SQLite file, and place it in the backup dir so it can be
+        restored. Pairs with download_backup for cross-machine moves."""
+        import os
+
+        backup_dir = ctx.config.database.backup_dir
+        os.makedirs(backup_dir, exist_ok=True)
+        name = os.path.basename(file.filename or "")
+        if not name.endswith(".db"):
+            raise HTTPException(status_code=400, detail="Expected a .db file")
+        dest = _safe_in_dir(backup_dir, name)
+        # Validate SQLite magic header on the first chunk before
+        # committing the whole upload to disk.
+        first = await file.read(16)
+        if not first.startswith(b"SQLite format 3\x00"):
+            raise HTTPException(
+                status_code=400, detail="Not a valid SQLite database file",
+            )
+        size = len(first)
+        with open(dest, "wb") as out:
+            out.write(first)
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                size += len(chunk)
+        ctx.db.invalidate_storage_stats_cache()
+        logger.info("Uploaded backup %s (%d bytes)", name, size)
+        return {"success": True, "filename": name, "size_bytes": size}
+
     @app.post("/api/backups/{filename}/lock")
     async def lock_backup(
         filename: str, _user: str = Depends(verify_credentials),
@@ -5131,6 +5258,81 @@ def create_app(ctx: AppContext) -> FastAPI:
         sections = config_to_ui_sections(ctx.config)
         return {"sections": sections}
 
+    @app.get("/api/config/export")
+    async def export_config(
+        _user: str = Depends(verify_credentials),
+    ) -> JSONResponse:
+        """Download all DB-editable config as a flat {key: value} JSON
+        file. Import on another instance by uploading it (the Settings
+        importer PUTs these through the same validation as manual
+        edits). Excludes file-only keys (secrets, paths)."""
+        from yolovest.config import FILE_ONLY_KEYS, _flatten_model
+        from yolovest.timezone import now_ist as _now_ist
+        flat = {
+            k: v for k, v in _flatten_model(ctx.config).items()
+            if k not in FILE_ONLY_KEYS
+        }
+        ts = _now_ist().strftime("%Y%m%d_%H%M%S")
+        return JSONResponse(
+            content={"config": flat},
+            headers={
+                "Content-Disposition": f'attachment; filename="yolovest_config_{ts}.json"',
+            },
+        )
+
+    @app.post("/api/config/import")
+    async def import_config(
+        file: UploadFile = File(...),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Apply a config JSON exported from another instance. Runs
+        every key through the same Pydantic validation + apply path as
+        manual Settings edits. File-only keys in the upload are ignored."""
+        from yolovest.config import (
+            FILE_ONLY_KEYS, apply_db_config, config_to_ui_sections,
+        )
+
+        raw = await file.read()
+        try:
+            parsed = json.loads(raw)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
+        flat = parsed.get("config") if isinstance(parsed, dict) else None
+        if not isinstance(flat, dict):
+            raise HTTPException(
+                status_code=400,
+                detail='Expected {"config": {key: value, ...}}',
+            )
+        updates = {
+            k: v for k, v in flat.items() if k not in FILE_ONLY_KEYS
+        }
+        if not updates:
+            raise HTTPException(status_code=400, detail="No importable keys")
+        str_updates = {
+            k: (json.dumps(v) if isinstance(v, (list, dict, bool)) or v is None else str(v))
+            for k, v in updates.items()
+        }
+        # Validate the merged config BEFORE persisting (same order as
+        # PUT /api/config) so a bad value never lands in the DB.
+        db_values = await ctx.db.get_all_config()
+        db_values.update(str_updates)
+        try:
+            new_config = apply_db_config(ctx.config, db_values)
+        except Exception as e:
+            raise HTTPException(
+                status_code=422, detail=f"Config validation failed: {e}",
+            ) from e
+        await ctx.db.set_config_bulk(str_updates)
+        ctx.config = new_config
+        ctx.market_hours = MarketHoursChecker(ctx.config)
+        if hasattr(ctx.notify, "_config"):
+            ctx.notify._config = ctx.config
+        return {
+            "success": True,
+            "imported": len(updates),
+            "sections": config_to_ui_sections(ctx.config),
+        }
+
     @app.get("/api/config/defaults")
     async def get_config_defaults(
         _user: str = Depends(verify_credentials),
@@ -5351,7 +5553,6 @@ def create_app(ctx: AppContext) -> FastAPI:
             finally:
                 _running_skills.pop(skill_name, None)
 
-        import asyncio
         task = asyncio.create_task(_run_in_background())
         _running_skills[skill_name] = task
 

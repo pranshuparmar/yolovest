@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
-import { useConfig, useConfigDefaults, useUpdateConfig } from "../hooks/queries";
+import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext } from "react";
+import { useConfig, useConfigDefaults, useUpdateConfig, useImportConfig } from "../hooks/queries";
+import { api } from "../api/endpoints";
 import clsx from "clsx";
 
 // Defaults flow into the InfoIcon tooltip via context so we don't have
@@ -1265,6 +1266,8 @@ export default function SettingsPage() {
   const { data, isLoading, error } = useConfig();
   const { data: defaultsData } = useConfigDefaults();
   const updateMutation = useUpdateConfig();
+  const importConfigMutation = useImportConfig();
+  const configUploadRef = useRef<HTMLInputElement>(null);
 
   const [activeTab, setActiveTab] = useState("general");
   const [edited, setEdited] = useState<Record<string, unknown>>({});
@@ -1367,6 +1370,29 @@ export default function SettingsPage() {
     }
   }, [data]);
 
+  const handleExport = useCallback(() => {
+    api.exportConfig().catch((err) =>
+      setSaveMsg(`Error: ${err instanceof Error ? err.message : String(err)}`),
+    );
+  }, []);
+
+  const handleConfigImport = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setSaveMsg(null);
+    importConfigMutation.mutate(file, {
+      onSuccess: (result) => {
+        setEdited({});
+        setSaveMsg(`Imported ${result.imported} setting(s)`);
+        setTimeout(() => setSaveMsg(null), 4000);
+      },
+      onError: (err) => {
+        setSaveMsg(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      },
+    });
+  }, [importConfigMutation]);
+
   // Build entries for a section key — handles virtual sections
   const getEntries = useCallback((sectionKey: string): [string, unknown][] => {
     if (sectionKey === "_general_top") {
@@ -1417,6 +1443,28 @@ export default function SettingsPage() {
           <p className="text-xs text-gray-500 mt-0.5">Changes take effect immediately after saving.</p>
         </div>
         <div className="flex items-center gap-2">
+          <input
+            ref={configUploadRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleConfigImport}
+            className="hidden"
+          />
+          <button
+            onClick={handleExport}
+            className="px-3 py-1.5 rounded text-sm bg-gray-800 hover:bg-gray-700 text-gray-300"
+            title="Download all settings as a JSON file (e.g. to copy to another instance)"
+          >
+            Export
+          </button>
+          <button
+            onClick={() => configUploadRef.current?.click()}
+            disabled={importConfigMutation.isPending}
+            className="px-3 py-1.5 rounded text-sm bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-50"
+            title="Import settings from an exported JSON file"
+          >
+            {importConfigMutation.isPending ? "Importing..." : "Import"}
+          </button>
           {pendingCount > 0 && (
             <>
               <span className="text-xs text-amber-400">{pendingCount} unsaved</span>

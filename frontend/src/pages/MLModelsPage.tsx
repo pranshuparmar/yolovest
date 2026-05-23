@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { useMLModels, usePromoteModel, useDeleteModel, useReshadowModel, useRetireModel, useShadowComparison } from "../hooks/queries";
+import { useRef, useState } from "react";
+import { useMLModels, usePromoteModel, useDeleteModel, useReshadowModel, useRetireModel, useShadowComparison, useUploadModel, useImportModel } from "../hooks/queries";
+import { api } from "../api/endpoints";
 import clsx from "clsx";
 import type { MLModelInfo } from "../types/api";
 
@@ -45,6 +46,7 @@ function ModelCard({
   isReshadowing,
   onRetire,
   isRetiring,
+  onDownload,
   prodModel,
 }: {
   model: MLModelInfo;
@@ -58,6 +60,7 @@ function ModelCard({
   isReshadowing?: boolean;
   onRetire?: () => void;
   isRetiring?: boolean;
+  onDownload?: () => void;
   prodModel?: MLModelInfo;
 }) {
   const statusConfig = {
@@ -79,6 +82,15 @@ function ModelCard({
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {onDownload && model.version && (
+            <button
+              onClick={onDownload}
+              className="px-2.5 py-1 rounded text-xs font-medium bg-gray-800 text-gray-400 hover:bg-blue-900/40 hover:text-blue-400 transition-colors"
+              title="Download this model's .pkl to move it to another machine"
+            >
+              Download
+            </button>
+          )}
           {onPromote && (
             <button
               onClick={onPromote}
@@ -279,11 +291,56 @@ export function MLModelsPage() {
   const deleteModel = useDeleteModel();
   const reshadow = useReshadowModel();
   const retire = useRetireModel();
+  const uploadModel = useUploadModel();
+  const importModel = useImportModel();
   const [promotingVersion, setPromotingVersion] = useState<string | null>(null);
   const [deletingVersion, setDeletingVersion] = useState<string | null>(null);
   const [reshadowingVersion, setReshadowingVersion] = useState<string | null>(null);
   const [retiringVersion, setRetiringVersion] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const modelUploadRef = useRef<HTMLInputElement>(null);
+  const [uploadedVersion, setUploadedVersion] = useState<string | null>(null);
+  const [importType, setImportType] = useState<"intraday" | "swing">("swing");
+  const [importPromote, setImportPromote] = useState(false);
+  const [importMsg, setImportMsg] = useState<string | null>(null);
+
+  const handleModelDownload = (version: string) => {
+    api.downloadModel(version).catch((err) =>
+      setActionError(`Download failed: ${(err as Error).message}`),
+    );
+  };
+
+  const handleModelUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setImportMsg(null);
+    setActionError(null);
+    uploadModel.mutate(file, {
+      onSuccess: (r) => {
+        setUploadedVersion(r.version);
+        setImportMsg(`Uploaded ${r.filename} (${(r.size_bytes / 1024 / 1024).toFixed(1)} MB). Choose model type and import below.`);
+      },
+      onError: (err) => setActionError(`Upload failed: ${(err as Error).message}`),
+    });
+  };
+
+  const handleImport = () => {
+    if (!uploadedVersion) return;
+    setActionError(null);
+    importModel.mutate(
+      { model_type: importType, version: uploadedVersion, promote: importPromote },
+      {
+        onSuccess: (r) => {
+          setImportMsg(
+            `Imported ${r.version} as ${r.model_type}${r.promoted ? " (promoted to production)" : " (shadow)"}${r.hot_reloaded ? ", hot-reloaded" : ""}.`,
+          );
+          setUploadedVersion(null);
+        },
+        onError: (err) => setActionError(`Import failed: ${(err as Error).message}`),
+      },
+    );
+  };
 
   const productionModels = data?.production || {};
   const shadowModels = data?.shadow || [];
@@ -341,6 +398,61 @@ export function MLModelsPage() {
         </div>
       )}
 
+      {/* Import a model trained on another machine */}
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+        <h3 className="text-sm font-medium text-gray-300 mb-1">Import Model</h3>
+        <p className="text-xs text-gray-500 mb-3">
+          Trained on a higher-memory box? Upload the <code className="text-gray-400">.pkl</code> here,
+          then register it as intraday/swing — optionally promoting it straight to production.
+        </p>
+        <input
+          ref={modelUploadRef}
+          type="file"
+          accept=".pkl"
+          onChange={handleModelUpload}
+          className="hidden"
+        />
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={() => modelUploadRef.current?.click()}
+            disabled={uploadModel.isPending}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 disabled:opacity-50 transition-colors"
+          >
+            {uploadModel.isPending ? "Uploading..." : "Upload .pkl"}
+          </button>
+          {uploadedVersion && (
+            <>
+              <span className="text-xs font-mono text-gray-400">{uploadedVersion}</span>
+              <select
+                value={importType}
+                onChange={(e) => setImportType(e.target.value as "intraday" | "swing")}
+                className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-gray-200"
+              >
+                <option value="swing">swing</option>
+                <option value="intraday">intraday</option>
+              </select>
+              <label className="flex items-center gap-1.5 text-xs text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={importPromote}
+                  onChange={(e) => setImportPromote(e.target.checked)}
+                  className="rounded"
+                />
+                Promote to production
+              </label>
+              <button
+                onClick={handleImport}
+                disabled={importModel.isPending}
+                className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors"
+              >
+                {importModel.isPending ? "Importing..." : "Import"}
+              </button>
+            </>
+          )}
+        </div>
+        {importMsg && <p className="text-xs text-emerald-400 mt-2">{importMsg}</p>}
+      </div>
+
       {/* Production models */}
       <div>
         <h3 className="text-sm font-medium text-gray-400 mb-3">
@@ -359,7 +471,13 @@ export function MLModelsPage() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Object.entries(productionModels).map(([type, model]) => (
-              <ModelCard key={type} model={model} type={type} status="production" />
+              <ModelCard
+                key={type}
+                model={model}
+                type={type}
+                status="production"
+                onDownload={() => model.version && handleModelDownload(model.version)}
+              />
             ))}
           </div>
         )}
@@ -391,6 +509,7 @@ export function MLModelsPage() {
                 isRetiring={retire.isPending && retiringVersion === model.version}
                 onDelete={() => model.model_type && model.version && handleDelete(model.model_type, model.version)}
                 isDeleting={deleteModel.isPending && deletingVersion === model.version}
+                onDownload={() => model.version && handleModelDownload(model.version)}
               />
             ))}
           </div>
@@ -431,6 +550,7 @@ export function MLModelsPage() {
                 isReshadowing={reshadow.isPending && reshadowingVersion === model.version}
                 onDelete={() => model.model_type && model.version && handleDelete(model.model_type, model.version)}
                 isDeleting={deleteModel.isPending && deletingVersion === model.version}
+                onDownload={() => model.version && handleModelDownload(model.version)}
               />
             ))}
           </div>

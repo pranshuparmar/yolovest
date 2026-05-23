@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiFetch, apiDownload, apiUpload } from "./client";
 import type {
   HealthResponse,
   PortfolioState,
@@ -371,6 +371,22 @@ export const api = {
       method: "POST",
     }),
 
+  // Cross-machine model transfer (train on a big box, import here)
+  downloadModel: (version: string) =>
+    apiDownload(`/api/ml-models/${encodeURIComponent(version)}/download`, `${version}.pkl`),
+
+  uploadModel: (file: File) =>
+    apiUpload<{ success: boolean; version: string; filename: string; size_bytes: number; metrics: Record<string, unknown> }>(
+      "/api/ml-models/upload",
+      file,
+    ),
+
+  importModel: (data: { model_type: string; version: string; promote: boolean }) =>
+    apiFetch<{ imported: boolean; model_type: string; version: string; promoted: boolean; hot_reloaded: boolean; metrics: Record<string, unknown> }>(
+      "/api/ml-models/import",
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
   shadowComparison: (modelType: string) =>
     apiFetch<{ shadow: Record<string, number>; production: Record<string, number> }>(`/api/ml-models/${modelType}/shadow-comparison`),
 
@@ -558,6 +574,15 @@ export const api = {
       { method: "POST" },
     ),
 
+  downloadBackup: (filename: string) =>
+    apiDownload(`/api/backups/${encodeURIComponent(filename)}/download`, filename),
+
+  uploadBackup: (file: File) =>
+    apiUpload<{ success: boolean; filename: string; size_bytes: number }>(
+      "/api/backups/upload",
+      file,
+    ),
+
   changePassword: (newPassword: string) =>
     apiFetch<{ success: boolean }>("/api/change-password", {
       method: "POST",
@@ -701,4 +726,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ updates }),
     }),
+
+  exportConfig: () =>
+    apiDownload("/api/config/export", "yolovest_config.json"),
+
+  importConfig: (file: File) =>
+    apiUpload<{ success: boolean; imported: number; sections: ConfigSections }>(
+      "/api/config/import",
+      file,
+    ),
 };

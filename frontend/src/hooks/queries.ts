@@ -879,6 +879,43 @@ export function useSetBackupLock() {
   });
 }
 
+export function useUploadBackup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => api.uploadBackup(file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["backups"] });
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+    },
+  });
+}
+
+export function useUploadModel() {
+  return useMutation({
+    mutationFn: (file: File) => api.uploadModel(file),
+  });
+}
+
+export function useImportModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { model_type: string; version: string; promote: boolean }) =>
+      api.importModel(data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ml-models"] }),
+  });
+}
+
+export function useImportConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => api.importConfig(file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["config"] });
+      qc.invalidateQueries({ queryKey: ["config-defaults"] });
+    },
+  });
+}
+
 export function useChangePassword() {
   return useMutation({
     mutationFn: (newPassword: string) => api.changePassword(newPassword),

@@ -1124,17 +1124,24 @@ class Database:
     ) -> None:
         """Update disposition for the most recent signal for a symbol today.
 
-        Matches on the date-prefix substring (first 10 chars) of
-        created_at so the comparison works whether the row was stored
-        with SQLite's space-separator format (`2026-05-13 04:18:30`)
-        from `datetime('now')` or the ISO 'T' format from explicit
-        Python timestamps.
+        `insert_signal` stamps `created_at` via SQLite `datetime('now')`,
+        i.e. UTC in space-separated form (`2026-05-13 04:18:30`). We scope
+        to "today's IST trading session" by converting IST-midnight to its
+        UTC instant and matching `created_at >= that`. Comparing the
+        IST *calendar date* against the UTC date prefix used to silently
+        no-op during the 00:00–05:30 IST window (when the IST date is a day
+        ahead of UTC), leaving disposition stuck at the seeded value.
 
         When mode is provided, the update is scoped to rows of that
         mode so a live execution can't accidentally flip a stale paper
         signal's disposition (or vice versa).
         """
-        today_ist = now_ist().strftime("%Y-%m-%d")
+        ist_day_start = now_ist().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        # Match the space-separated UTC format that datetime('now') writes
+        # so the lexical string comparison is also chronological.
+        day_start_utc = ist_day_start.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
         mode_clause = " AND mode = ?" if mode else ""
         # ml_signal seeds position_size=1 as a placeholder; risk-check
         # determines the real number. Update both columns here so the
@@ -1144,7 +1151,7 @@ class Database:
         # position_size, leave it untouched via COALESCE.
         if position_size is not None and position_size > 0:
             params: tuple[Any, ...] = (
-                disposition, reason, int(position_size), symbol, today_ist,
+                disposition, reason, int(position_size), symbol, day_start_utc,
             )
             if mode:
                 params = params + (mode,)
@@ -1153,18 +1160,18 @@ class Database:
                 "SET disposition = ?, disposition_reason = ?, "
                 "    position_size = ? "
                 "WHERE id = (SELECT id FROM signals WHERE symbol = ? "
-                f"AND substr(created_at, 1, 10) = ?{mode_clause} "
+                f"AND created_at >= ?{mode_clause} "
                 "ORDER BY created_at DESC LIMIT 1)",
                 params,
             )
         else:
-            params = (disposition, reason, symbol, today_ist)
+            params = (disposition, reason, symbol, day_start_utc)
             if mode:
                 params = params + (mode,)
             await self.conn.execute(
                 "UPDATE signals SET disposition = ?, disposition_reason = ? "
                 "WHERE id = (SELECT id FROM signals WHERE symbol = ? "
-                f"AND substr(created_at, 1, 10) = ?{mode_clause} "
+                f"AND created_at >= ?{mode_clause} "
                 "ORDER BY created_at DESC LIMIT 1)",
                 params,
             )
