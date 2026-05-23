@@ -639,6 +639,21 @@ class RiskConfig(BaseModel):
     # net for users running unattended (drift-watch alerts are still
     # delivered via Telegram regardless).
     drift_auto_suspend_enabled: bool = False
+    # Block new entries in symbols with an earnings / board-meeting
+    # announcement scheduled within `earnings_blackout_days` calendar
+    # days. Earnings reactions routinely move stocks ±5-20% overnight,
+    # blowing through any ATR-based SL. The data comes from the
+    # `economic_events` table populated by ingest-data's NSE corp-
+    # actions scraper. 0 disables the gate.
+    earnings_blackout_days: int = Field(default=0, ge=0, le=10)
+    # Portfolio-level beta cap (vs NIFTY proxy = INDIA VIX / cross-
+    # sectional regime index). 0 disables. When > 0, risk-check
+    # computes the position-weighted beta of currently-open + this
+    # candidate signal and rejects if it'd push the portfolio over
+    # the cap. Use to prevent "every position is a high-beta tech name"
+    # correlated-drawdown scenarios. 1.5 is the standard "diversified"
+    # ceiling; 2.0 lets you concentrate further.
+    max_portfolio_beta: float = Field(default=0.0, ge=0.0, le=5.0)
     min_confidence_buy: float = Field(default=0.60, ge=0, le=1)
     min_confidence_sell: float = Field(default=0.75, ge=0, le=1)
     # Per-strategy-mode floors. Intraday and swing have very different

@@ -47,6 +47,14 @@ class RiskCheckSkill(SkillBase):
         super().__init__(context)
         self._regime: dict[str, float] | None = None
         self._regime_at: float = 0.0
+        # Per-heartbeat beta cache. Inputs to compute_symbol_beta are
+        # identical for every signal in the same cycle (last 60 days
+        # of daily bars across the universe), so caching here saves
+        # one full-universe scan per signal. Cleared on the next
+        # cycle by virtue of being instance state — same TTL pattern
+        # as _regime above.
+        self._beta_cache: dict[str, float | None] = {}
+        self._beta_cache_at: float = 0.0
 
     def should_run(self) -> bool:
         return True  # Always available — gating is per-signal
@@ -66,6 +74,24 @@ class RiskCheckSkill(SkillBase):
             self._regime = {"breadth": 0.5, "avg_return": 0.0, "sample_size": 0}
         self._regime_at = now
         return self._regime
+
+    async def _get_symbol_beta(self, symbol: str) -> float | None:
+        """Per-heartbeat cached beta lookup. Falls through to the DB
+        only on the first call per cycle per symbol."""
+        import time as _time
+        now = _time.monotonic()
+        if (now - self._beta_cache_at) >= self._regime_ttl_sec:
+            self._beta_cache = {}
+            self._beta_cache_at = now
+        if symbol in self._beta_cache:
+            return self._beta_cache[symbol]
+        try:
+            beta = await self.ctx.db.compute_symbol_beta(symbol)
+        except Exception:
+            logger.debug("compute_symbol_beta failed for %s", symbol, exc_info=True)
+            beta = None
+        self._beta_cache[symbol] = beta
+        return beta
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         signal = kwargs["signal"]
@@ -223,6 +249,35 @@ class RiskCheckSkill(SkillBase):
                 signal,
                 f"Sector limit ({stock_sector}: {cfg.max_same_sector_positions})",
             )
+
+        # Earnings blackout. Block new entries within N calendar days
+        # of a scheduled earnings / board-meeting announcement —
+        # results gaps routinely move stocks ±5-20% overnight, wider
+        # than any ATR-based SL can absorb. Off by default; opt in via
+        # risk.earnings_blackout_days.
+        if cfg.earnings_blackout_days > 0:
+            try:
+                events = await self.ctx.db.get_earnings_events(
+                    symbol=signal["symbol"],
+                    days=cfg.earnings_blackout_days,
+                )
+            except Exception:
+                logger.debug(
+                    "risk-check: earnings event lookup failed",
+                    exc_info=True,
+                )
+                events = []
+            if events:
+                next_event = events[0]
+                event_title = (
+                    next_event.get("title") or "earnings event"
+                )
+                return self._reject(
+                    signal,
+                    f"Earnings blackout: {signal['symbol']} has "
+                    f"\"{event_title}\" on {next_event.get('event_date')} "
+                    f"(within {cfg.earnings_blackout_days}-day window)",
+                )
 
         # Correlation-aware position limit (beyond simple sector counts)
         if cfg.correlation_limit.enabled:
@@ -508,6 +563,42 @@ class RiskCheckSkill(SkillBase):
                 signal["symbol"], position_size, base_position_size,
                 net_mult, float(signal.get("confidence_score") or 0),
             )
+
+        # Portfolio-beta cap. Sum of (notional × beta) over currently-
+        # open positions + this candidate signal must stay under
+        # max_portfolio_beta × total_capital. Catches the "every
+        # position is a high-beta tech name" failure mode where a
+        # single bad market day wipes through every SL simultaneously.
+        # Off by default; opt in via risk.max_portfolio_beta > 0.
+        if cfg.max_portfolio_beta > 0 and position_size > 0:
+            cap_value = capital * cfg.max_portfolio_beta
+            # Open positions' beta-weighted notional. Adopted positions
+            # count because they share market-day downside even if they
+            # weren't system-generated.
+            open_positions = await self.ctx.db.get_open_positions(
+                mode=self.ctx.config.mode,
+            )
+            beta_value = 0.0
+            for p in open_positions:
+                p_sym = p.get("symbol")
+                p_qty = float(p.get("quantity") or 0)
+                p_entry = float(p.get("fill_price") or p.get("entry_price") or 0)
+                if not p_sym or p_qty <= 0 or p_entry <= 0:
+                    continue
+                p_beta = await self._get_symbol_beta(p_sym) or 1.0
+                beta_value += p_qty * p_entry * abs(p_beta)
+            # Candidate signal's contribution
+            sig_beta = await self._get_symbol_beta(signal["symbol"]) or 1.0
+            candidate_value = entry * position_size * abs(sig_beta)
+            total = beta_value + candidate_value
+            if total > cap_value:
+                return self._reject(
+                    signal,
+                    f"Portfolio beta cap exceeded: open beta-weighted "
+                    f"₹{beta_value:,.0f} + candidate ₹{candidate_value:,.0f} "
+                    f"(β={sig_beta:.2f}) = ₹{total:,.0f} > "
+                    f"₹{cap_value:,.0f} (cap = {cfg.max_portfolio_beta:.1f}× capital)",
+                )
 
         # Liquidity gate — refuse to be more than max_pct_of_top5 of
         # the order book's near-the-touch side. Stops you eating your

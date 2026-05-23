@@ -3315,6 +3315,80 @@ class Database:
 
         return result
 
+    async def compute_symbol_beta(
+        self, symbol: str, lookback_days: int = 60,
+    ) -> float | None:
+        """Compute a symbol's beta against a cross-sectional market
+        proxy. The proxy is the equal-weight mean daily return of every
+        symbol with daily bars in the lookback window — the same proxy
+        compute_live_regime uses. Returns None when fewer than 20
+        overlapping (symbol, market) return pairs are available.
+
+        Formula: beta = cov(symbol_ret, market_ret) / var(market_ret).
+        Standard CAPM-style regression slope.
+
+        Used by the risk_check portfolio-beta gate. Cheap enough to
+        run on demand inside a heartbeat for the small candidate set,
+        but callers should cache per-heartbeat since the inputs are
+        the same for every signal in a cycle.
+        """
+        from datetime import timedelta
+        cutoff = (now_utc() - timedelta(days=lookback_days * 2)).isoformat()
+        # Pull all daily bars from the lookback window across the
+        # whole universe — same scope as compute_live_regime so the
+        # proxy is consistent.
+        cursor = await self.read_conn.execute(
+            "SELECT symbol, timestamp, close FROM ohlcv "
+            "WHERE interval = 'daily' AND timestamp >= ? "
+            "ORDER BY symbol, timestamp",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return None
+
+        # Build per-symbol close series + the market average per day.
+        by_sym: dict[str, list[tuple[str, float]]] = {}
+        for r in rows:
+            by_sym.setdefault(r[0], []).append((r[1][:10], float(r[2])))
+
+        # Per-day market mean return.
+        day_returns: dict[str, list[float]] = {}
+        for sym_closes in by_sym.values():
+            for i in range(1, len(sym_closes)):
+                prev = sym_closes[i - 1][1]
+                cur = sym_closes[i][1]
+                if prev > 0:
+                    ret = (cur - prev) / prev
+                    day_returns.setdefault(sym_closes[i][0], []).append(ret)
+        market_by_day = {
+            d: sum(rs) / len(rs) for d, rs in day_returns.items() if rs
+        }
+
+        # Symbol-specific paired series.
+        sym_series = by_sym.get(symbol, [])
+        if len(sym_series) < 2:
+            return None
+        sym_returns: list[tuple[float, float]] = []
+        for i in range(1, len(sym_series)):
+            d = sym_series[i][0]
+            prev = sym_series[i - 1][1]
+            cur = sym_series[i][1]
+            if prev > 0 and d in market_by_day:
+                sym_returns.append(((cur - prev) / prev, market_by_day[d]))
+
+        if len(sym_returns) < 20:
+            return None
+
+        n = len(sym_returns)
+        mean_s = sum(s for s, _ in sym_returns) / n
+        mean_m = sum(m for _, m in sym_returns) / n
+        cov = sum((s - mean_s) * (m - mean_m) for s, m in sym_returns) / n
+        var_m = sum((m - mean_m) ** 2 for _, m in sym_returns) / n
+        if var_m <= 0:
+            return None
+        return cov / var_m
+
     async def get_live_metrics_for_model(
         self, model_version: str, days: int = 14,
     ) -> dict[str, Any]:
