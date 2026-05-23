@@ -9,11 +9,24 @@ from yolovest.skills.position_monitor import PositionMonitorSkill
 
 @pytest.fixture
 def monitor_skill(app_context):
-    return PositionMonitorSkill(app_context)
+    # Disable partial-profit booking by default so target-hit tests
+    # measure full-exit behaviour. Individual tests that need partial-
+    # profit behaviour re-enable it locally.
+    app_context.config.risk.partial_profit.enabled = False
+    skill = PositionMonitorSkill(app_context)
+    # Default mocks for DB methods touched by position-monitor that
+    # aren't the focus of individual tests.
+    skill.ctx.db.get_locked_symbols = AsyncMock(return_value=set())
+    return skill
 
 
 @pytest.fixture
 def open_position():
+    # NOTE: deliberately no sl_order_id / target_order_id / gtt_id —
+    # the client-side target / SL detection in PositionMonitorSkill
+    # short-circuits when any broker-side exit is present. Tests that
+    # specifically need to verify broker-OCO behaviour set those keys
+    # locally on a copy of this fixture.
     return {
         "id": 1,
         "trade_id": "T-001",
@@ -23,7 +36,6 @@ def open_position():
         "stop_loss_price": 2450.0,
         "target_price": 2600.0,
         "quantity": 10,
-        "sl_order_id": "SL-001",
         "mode": "paper",
     }
 
@@ -313,6 +325,8 @@ class TestMisOcoEnforcement:
 
 class TestTrailingSL:
     async def test_trailing_sl_triggered(self, monitor_skill, open_position):
+        # Trailing-SL requires a broker-side SL order id to modify.
+        open_position["sl_order_id"] = "SL-001"
         monitor_skill.ctx.market_hours.is_market_hours = lambda: True
         monitor_skill.ctx.db.get_open_positions = AsyncMock(return_value=[open_position])
         monitor_skill.ctx.broker.get_positions = AsyncMock(return_value=[])

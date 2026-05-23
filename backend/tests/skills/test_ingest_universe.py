@@ -10,7 +10,25 @@ from yolovest.skills.ingest_universe import IngestUniverseSkill
 
 @pytest.fixture
 def skill(app_context):
-    return IngestUniverseSkill(app_context)
+    skill = IngestUniverseSkill(app_context)
+    # upsert_symbol_sectors is called after a successful live fetch to
+    # persist the Industry column. Default it to a benign success so
+    # individual tests don't have to mock it unless they care.
+    skill.ctx.db.upsert_symbol_sectors = AsyncMock(return_value=0)
+    # _resolve_universe_symbols runs the raw list through the
+    # quarantine resolver — default to identity so tests that don't
+    # care about quarantine still get their list back unchanged.
+    skill.ctx.db.resolve_symbols_with_replacements = AsyncMock(
+        side_effect=lambda syms: list(syms),
+    )
+    return skill
+
+
+def _as_details(syms: list[str]) -> list[dict[str, str]]:
+    """Helper: lift a list of plain ticker strings to the
+    {"symbol": "...", "industry": "..."} dict shape that
+    fetch_live_constituent_details returns."""
+    return [{"symbol": s, "industry": "Unknown"} for s in syms]
 
 
 class TestUniverseResolution:
@@ -24,7 +42,7 @@ class TestUniverseResolution:
         skill.ctx.db.get_system_state = AsyncMock(return_value=cached_payload)
 
         with patch(
-            "yolovest.skills.ingest_universe.fetch_live_constituents",
+            "yolovest.skills.ingest_universe.fetch_live_constituent_details",
             new=AsyncMock(),
         ) as mock_live:
             symbols = await skill._resolve_universe_symbols("nifty500")
@@ -42,8 +60,8 @@ class TestUniverseResolution:
         skill.ctx.db.set_system_state = AsyncMock()
 
         with patch(
-            "yolovest.skills.ingest_universe.fetch_live_constituents",
-            new=AsyncMock(return_value=["NEW1", "NEW2", "NEW3"]),
+            "yolovest.skills.ingest_universe.fetch_live_constituent_details",
+            new=AsyncMock(return_value=_as_details(["NEW1", "NEW2", "NEW3"])),
         ):
             symbols = await skill._resolve_universe_symbols("nifty500")
 
@@ -56,8 +74,8 @@ class TestUniverseResolution:
         skill.ctx.db.set_system_state = AsyncMock()
 
         with patch(
-            "yolovest.skills.ingest_universe.fetch_live_constituents",
-            new=AsyncMock(return_value=["A", "B", "C"]),
+            "yolovest.skills.ingest_universe.fetch_live_constituent_details",
+            new=AsyncMock(return_value=_as_details(["A", "B", "C"])),
         ):
             symbols = await skill._resolve_universe_symbols("nifty500")
 
@@ -69,7 +87,7 @@ class TestUniverseResolution:
         skill.ctx.db.set_system_state = AsyncMock()
 
         with patch(
-            "yolovest.skills.ingest_universe.fetch_live_constituents",
+            "yolovest.skills.ingest_universe.fetch_live_constituent_details",
             new=AsyncMock(return_value=None),  # live fetch failed
         ):
             symbols = await skill._resolve_universe_symbols("nifty500")
@@ -85,8 +103,8 @@ class TestUniverseResolution:
         skill.ctx.db.set_system_state = AsyncMock()
 
         with patch(
-            "yolovest.skills.ingest_universe.fetch_live_constituents",
-            new=AsyncMock(return_value=["X", "Y"]),
+            "yolovest.skills.ingest_universe.fetch_live_constituent_details",
+            new=AsyncMock(return_value=_as_details(["X", "Y"])),
         ):
             symbols = await skill._resolve_universe_symbols("nifty500")
 
@@ -104,8 +122,8 @@ class TestQuarantineReplacementsInResolution:
             return_value=["RELIANCE", "ETERNAL", "TCS"],
         )
         with patch(
-            "yolovest.skills.ingest_universe.fetch_live_constituents",
-            new=AsyncMock(return_value=["RELIANCE", "ZOMATO", "TCS"]),
+            "yolovest.skills.ingest_universe.fetch_live_constituent_details",
+            new=AsyncMock(return_value=_as_details(["RELIANCE", "ZOMATO", "TCS"])),
         ):
             symbols = await skill._resolve_universe_symbols("nifty500")
 
@@ -130,8 +148,8 @@ class TestDaysDefaultsToConfig:
         skill.ctx.market_data.get_ohlcv = AsyncMock(return_value=[])
 
         with patch(
-            "yolovest.skills.ingest_universe.fetch_live_constituents",
-            new=AsyncMock(return_value=["RELIANCE"]),
+            "yolovest.skills.ingest_universe.fetch_live_constituent_details",
+            new=AsyncMock(return_value=_as_details(["RELIANCE"])),
         ):
             result = await skill.execute()
 
@@ -158,8 +176,8 @@ class TestFailureTracking:
         )
 
         with patch(
-            "yolovest.skills.ingest_universe.fetch_live_constituents",
-            new=AsyncMock(return_value=["BADSYMBOL"]),
+            "yolovest.skills.ingest_universe.fetch_live_constituent_details",
+            new=AsyncMock(return_value=_as_details(["BADSYMBOL"])),
         ):
             await skill.execute()
 
@@ -184,8 +202,8 @@ class TestFailureTracking:
         )
 
         with patch(
-            "yolovest.skills.ingest_universe.fetch_live_constituents",
-            new=AsyncMock(return_value=["BADSYMBOL"]),
+            "yolovest.skills.ingest_universe.fetch_live_constituent_details",
+            new=AsyncMock(return_value=_as_details(["BADSYMBOL"])),
         ):
             result = await skill.execute()
 
@@ -206,8 +224,8 @@ class TestFailureTracking:
         skill.ctx.market_data.get_ohlcv = AsyncMock(return_value=bars)
 
         with patch(
-            "yolovest.skills.ingest_universe.fetch_live_constituents",
-            new=AsyncMock(return_value=["RELIANCE"]),
+            "yolovest.skills.ingest_universe.fetch_live_constituent_details",
+            new=AsyncMock(return_value=_as_details(["RELIANCE"])),
         ):
             await skill.execute()
 

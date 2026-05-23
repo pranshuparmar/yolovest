@@ -11,7 +11,17 @@ from yolovest.skills.risk_check import RiskCheckSkill
 def risk_skill(app_context):
     # Disable conviction sizing for predictable test sizing
     app_context.config.risk.conviction_sizing.enabled = False
-    return RiskCheckSkill(app_context)
+    skill = RiskCheckSkill(app_context)
+    # Default mocks for DB methods that risk-check calls but aren't
+    # the focus of individual tests. Without these the AsyncMock
+    # auto-magic returns another AsyncMock, which then crashes on
+    # numeric comparisons / iterations downstream.
+    skill.ctx.db.minutes_since_last_loss_for_symbol = AsyncMock(return_value=1e9)
+    skill.ctx.db.get_pending_trades = AsyncMock(return_value=[])
+    skill.ctx.db.get_earnings_events = AsyncMock(return_value=[])
+    skill.ctx.db.get_open_positions = AsyncMock(return_value=[])
+    skill.ctx.db.compute_symbol_beta = AsyncMock(return_value=None)
+    return skill
 
 
 @pytest.fixture
@@ -61,6 +71,11 @@ class TestRiskCheckApproval:
     ):
         risk_skill.ctx.db.get_portfolio_state = AsyncMock(return_value=healthy_portfolio)
         risk_skill.ctx.market_hours.is_order_window = lambda: True
+        # This test verifies the max-single-stock cap, so lift the
+        # per-signal pacing cap (max_pct_per_signal) out of the way —
+        # otherwise it binds first at 10% < 25% and the assertion
+        # would measure the wrong rule.
+        risk_skill.ctx.config.risk.max_pct_per_signal = 0.5
 
         result = await risk_skill.execute(signal=base_signal)
 
@@ -177,6 +192,11 @@ class TestRiskCheckRejections:
         could be 100% of capital, and the gate still passes."""
         # Manual mode is what triggers pending fetch
         risk_skill.ctx.config.execution.transaction_mode = "manual"
+        # Lift the position-count cap so this test isolates the
+        # *exposure* cap behaviour. Without this the test trips
+        # max_open_positions first (1 system + 3 pending > default 3).
+        risk_skill.ctx.config.risk.max_open_positions = 20
+        risk_skill.ctx.config.risk.max_trades_per_day = 20
 
         # Open positions only at 10% — by themselves not over the 60% cap
         healthy_portfolio["exposure_pct"] = 0.10

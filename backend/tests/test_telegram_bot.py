@@ -134,7 +134,13 @@ class TestKillSwitchCommands:
         result = await skill.execute(command="stop")
 
         assert result.success
-        app_context.db.set_system_state.assert_awaited_with("kill_switch", "active")
+        # kill_switch now writes two keys: the binary active flag
+        # plus the granular mode (pause / stop / kill / ""). The
+        # assertion has to use assert_any_await because the granular
+        # mode is the LAST call and assert_awaited_with only matches
+        # that one.
+        app_context.db.set_system_state.assert_any_await("kill_switch", "active")
+        app_context.db.set_system_state.assert_any_await("kill_switch_mode", "stop")
 
     async def test_resume_clears_system_state(self, app_context):
 
@@ -157,7 +163,10 @@ class TestKillSwitchCommands:
             result = await skill.execute(command="resume")
 
         assert result.success
-        app_context.db.set_system_state.assert_awaited_with("kill_switch", "inactive")
+        # See test_stop_sets_system_state for why assert_any_await is
+        # used here — kill_switch_mode is cleared as a second call.
+        app_context.db.set_system_state.assert_any_await("kill_switch", "inactive")
+        app_context.db.set_system_state.assert_any_await("kill_switch_mode", "")
 
 
 class TestBrokerLoginUrl:

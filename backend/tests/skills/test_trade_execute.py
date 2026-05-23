@@ -9,7 +9,15 @@ from yolovest.skills.trade_execute import TradeExecuteSkill
 
 @pytest.fixture
 def trade_skill(app_context):
-    return TradeExecuteSkill(app_context)
+    skill = TradeExecuteSkill(app_context)
+    # _find_matching_recent_order calls asyncio.to_thread on
+    # broker._kite.orders. The default AsyncMock for _kite doesn't
+    # behave like a sync object, so the to_thread call returns a
+    # coroutine that crashes iteration. Pin _kite to None — the
+    # try/except in the reconciler handles missing kite cleanly
+    # by returning None (= no matching order, treat as new attempt).
+    skill.ctx.broker._kite = None
+    return skill
 
 
 @pytest.fixture
@@ -69,8 +77,11 @@ class TestLiveTrading:
 
         assert result.success
         assert result.data["mode"] == "live"
-        # Should place 2 orders: primary + SL
-        assert trade_skill.ctx.broker.place_order.await_count == 2
+        # MIS OCO: entry + SL + resting target LIMIT.
+        # The target leg was added when broker-side MIS OCO replaced
+        # the client-side-only target detection — see CLAUDE.md
+        # "Broker-side MIS OCO" for the rationale.
+        assert trade_skill.ctx.broker.place_order.await_count == 3
 
     async def test_live_slippage_tracked(self, trade_skill, base_signal):
         trade_skill.ctx.config.mode = "live"

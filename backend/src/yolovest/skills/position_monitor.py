@@ -364,8 +364,17 @@ class PositionMonitorSkill(SkillBase):
                 )
                 continue
 
-            # Trailing SL
-            if cfg.trailing_sl_enabled and risk_per_share > 0:
+            # Trailing SL — requires a broker-side SL order to modify.
+            # Positions without sl_order_id (adopted, old rows where
+            # the SL placement failed, paper-mode shortcuts) skip
+            # trailing entirely; their SL is conceptual and updated
+            # via update_position_sl only when the client-side
+            # detection path closes the trade.
+            if (
+                cfg.trailing_sl_enabled
+                and risk_per_share > 0
+                and pos.get("sl_order_id")
+            ):
                 if pos["signal_type"] == "BUY":
                     profit = current_price - entry
                 else:
