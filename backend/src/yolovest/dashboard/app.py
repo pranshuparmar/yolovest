@@ -4317,6 +4317,10 @@ def create_app(ctx: AppContext) -> FastAPI:
                     mode_days_range=mode_days_range,
                     existing_positions=open_positions,
                     market_regime=regime_state,
+                    # Dry-run is a preview — don't let time-of-day
+                    # execution gates (intraday cutoff etc.) suppress
+                    # signals the model would produce earlier in the day.
+                    bypass_time_gates=True,
                 )
 
                 if evaluation.outcome != "passed":

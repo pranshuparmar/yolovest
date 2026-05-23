@@ -288,6 +288,7 @@ async def evaluate_symbol_signal(
     intraday_features: dict[str, Any] | None = None,
     existing_positions: list[dict[str, Any]] | None = None,
     market_regime: str | None = None,
+    bypass_time_gates: bool = False,
 ) -> SignalEvaluation:
     """Per-symbol signal evaluation — see module docstring.
 
@@ -316,6 +317,22 @@ async def evaluate_symbol_signal(
     cfg = ctx.config
     if now_time is None:
         now_time = datetime.now(IST).time()
+    if bypass_time_gates:
+        # Dry-run / preview: evaluate as if at session open so the
+        # time-of-day EXECUTION gates don't suppress signals the model
+        # would genuinely produce earlier in the day. Those gates exist
+        # to stop the live engine OPENING positions too late to manage
+        # (intraday cutoff, _is_intraday_viable's 14:30 cap, balanced-
+        # mode swing-only-after-cutoff) — they're not model-quality
+        # gates, so a preview run at 16:00 should still surface the
+        # intraday signals that a 09:30 heartbeat would have. Pinning
+        # now_time to market_hours.open makes all three downstream
+        # checks read "early session".
+        try:
+            oh, om = cfg.market_hours.open.split(":")
+            now_time = time(int(oh), int(om))
+        except Exception:
+            now_time = time(9, 15)
     if effective_mode is None:
         effective_mode = cfg.strategy.mode
     if allowed_periods is None:
