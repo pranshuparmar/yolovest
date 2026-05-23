@@ -15,6 +15,11 @@ def ingest_skill(app_context):
     # Disable expensive fetches (news, scrapers) to isolate OHLCV tests
     app_context.config.market_data.news_enabled = False
     app_context.config.market_data.scrapers_enabled = False
+    # Disable market-regime so the index symbol (NIFTY 50) isn't
+    # appended to the ingest list — these tests assert on the exact
+    # symbol passed to record_fetch_failure and the appended index
+    # would otherwise be the last call.
+    app_context.config.strategy.market_regime.enabled = False
     return skill
 
 

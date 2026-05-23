@@ -138,6 +138,13 @@ def mock_broker() -> AsyncMock:
     broker.modify_sl_order = AsyncMock(return_value=True)
     broker.get_executed_trades = AsyncMock(return_value=[])
     broker.compute_charges = AsyncMock(return_value=None)
+    # tick_for / round_to_tick are SYNC on BrokerBase. AsyncMock would
+    # return coroutines that signal_evaluator stores as the target/SL
+    # price. Use MagicMock with identity rounding (0.05 tick is the
+    # NSE default; tests don't assert exact tick snapping).
+    from unittest.mock import MagicMock
+    broker.tick_for = MagicMock(return_value=0.05)
+    broker.round_to_tick = MagicMock(side_effect=lambda _sym, price: round(price, 2))
     return broker
 
 
@@ -182,8 +189,18 @@ def mock_db() -> AsyncMock:
         "daily_pnl_pct": 0.0,
         "weekly_pnl_pct": 0.0,
         "trades_today": 0,
+        "mis_trades_today": 0,
+        "cnc_trades_today": 0,
         "minutes_since_last_loss": 60,
     })
+    # Per-symbol loss cooldown + the gates risk-check added later. Sane
+    # numeric / empty defaults so tests that construct RiskCheckSkill
+    # against the shared mock_db don't trip on AsyncMock-vs-int
+    # comparisons or empty-gate iteration.
+    db.minutes_since_last_loss_for_symbol = AsyncMock(return_value=1e9)
+    db.get_pending_trades = AsyncMock(return_value=[])
+    db.get_earnings_events = AsyncMock(return_value=[])
+    db.compute_symbol_beta = AsyncMock(return_value=None)
     db.upsert_ohlcv = AsyncMock()
     db.upsert_sentiment = AsyncMock()
     db.upsert_watchlist = AsyncMock()
@@ -246,6 +263,12 @@ def mock_db() -> AsyncMock:
     db.get_quarantined_symbols = AsyncMock(return_value=[])
     db.record_fetch_failure = AsyncMock(return_value=False)
     db.record_fetch_success = AsyncMock()
+    # Quarantine resolver — default to identity so ingest paths that
+    # route their symbol list through it (ingest-data, ingest-universe,
+    # backfill) get the list back unchanged unless a test overrides.
+    db.resolve_symbols_with_replacements = AsyncMock(
+        side_effect=lambda syms: list(syms),
+    )
     db.unquarantine_symbol = AsyncMock(return_value=True)
     db.is_quarantined = AsyncMock(return_value=False)
     # generate-signals pre-loop reads: empty stubs so the per-symbol
@@ -256,6 +279,16 @@ def mock_db() -> AsyncMock:
     db.get_news_articles = AsyncMock(return_value=[])
     db.get_vix_timeline = AsyncMock(return_value=[])
     db.get_fno_timeline = AsyncMock(return_value={})
+    # model-retrain per-feature timelines — empty defaults so the
+    # training-data builder gets real (empty) dicts/lists instead of
+    # AsyncMock coroutines that crash on .items() / iteration.
+    db.get_news_timeline = AsyncMock(return_value={})
+    db.get_bulk_deals_timeline = AsyncMock(return_value={})
+    db.get_symbol_sectors_map = AsyncMock(return_value={})
+    db.get_live_metrics_for_model = AsyncMock(return_value={
+        "total": 0, "scored": 0, "direction_accuracy": 0.0,
+        "target_hit_rate": 0.0, "avg_pnl_pct": 0.0,
+    })
     db.get_ohlcv = AsyncMock(return_value=[])
     db.get_system_state = AsyncMock(return_value=None)
     db.record_signal_outcome = AsyncMock()

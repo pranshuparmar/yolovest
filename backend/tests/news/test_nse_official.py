@@ -17,6 +17,19 @@ import pytest
 
 from yolovest.news.nse_official import NSEOfficialSource
 
+
+@pytest.fixture(autouse=True)
+def _clear_endpoint_failure_cache():
+    """The per-endpoint circuit breaker is module-level state. A test
+    that exercises a non-200 path would otherwise poison the cache and
+    make later tests' _api_get short-circuit (returning None without
+    ever calling session.get). Clear it before every test."""
+    from yolovest.news import nse_official
+    nse_official._endpoint_failures.clear()
+    yield
+    nse_official._endpoint_failures.clear()
+
+
 # ---------------------------------------------------------------------------
 # Helpers — mock aiohttp responses
 # ---------------------------------------------------------------------------

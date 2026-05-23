@@ -238,13 +238,17 @@ class KiteDataProvider(MarketDataBase):
         when the requested window exceeds Kite's per-interval limit
         (see _KITE_MAX_DAYS_PER_CALL).
         """
-        self._assert_kite_authed()
+        # Validate the interval BEFORE the auth check — it's pure
+        # input validation that shouldn't depend on token state, and
+        # surfacing "unsupported interval" is more useful than masking
+        # it behind "token unset" when a caller passes a bad value.
         kite_interval = _INTERVAL_MAP.get(interval)
         if kite_interval is None:
             raise ValueError(
                 f"Unsupported interval '{interval}'. "
                 f"Supported: {list(_INTERVAL_MAP.keys())}"
             )
+        self._assert_kite_authed()
 
         instrument_token = await self._get_instrument_token(symbol)
         end_date = now_ist().date()

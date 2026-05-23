@@ -27,6 +27,18 @@ def _mock_kite():
     kite.generate_session.return_value = {"access_token": "live_token_123"}
     kite.profile.return_value = {"user_name": "test"}
     kite.place_order.return_value = "ORD-LIVE-001"
+    # LTP source for MARKET→LIMIT conversion. Without it the broker
+    # now ABORTS a MARKET order rather than submitting an unprotected
+    # raw MARKET (see _live_place_order). Both ltp() and ohlc() key by
+    # "EXCH:SYMBOL"; ohlc() is the path used when kite_data_enabled is
+    # off (the live_broker fixture's default).
+    _prices = {
+        "NSE:RELIANCE": {"last_price": 2500.0},
+        "NSE:TCS": {"last_price": 3500.0},
+        "NSE:INFY": {"last_price": 1500.0},
+    }
+    kite.ltp.return_value = _prices
+    kite.ohlc.return_value = _prices
     kite.orders.return_value = [
         {"order_id": "ORD-LIVE-001", "status": "COMPLETE"},
     ]
@@ -137,6 +149,9 @@ class TestLiveRetry:
             ConnectionError("timeout"),
             "ORD-RETRY-001",
         ]
+        # LTP source so MARKET→LIMIT conversion succeeds before the
+        # place_order retry path is exercised.
+        mock_kite_instance.ohlc.return_value = {"NSE:RELIANCE": {"last_price": 2500.0}}
         live_broker._kite = mock_kite_instance
         live_broker._access_token = "token"
 
@@ -151,6 +166,7 @@ class TestLiveRetry:
     async def test_retry_exhausted_raises(self, live_broker):
         mock_kite_instance = MagicMock()
         mock_kite_instance.place_order.side_effect = ConnectionError("always fails")
+        mock_kite_instance.ohlc.return_value = {"NSE:RELIANCE": {"last_price": 2500.0}}
         live_broker._kite = mock_kite_instance
         live_broker._access_token = "token"
 
@@ -229,5 +245,7 @@ class TestLiveOrderManagement:
 
 class TestRateLimiting:
     async def test_semaphore_limits_concurrent_calls(self, live_broker):
-        """Verify that the rate limiter semaphore is set to 8."""
-        assert live_broker._rate_limiter._value == 8
+        """Verify the rate limiter's concurrency cap is 8. The semaphore
+        moved behind KiteRateLimiter._semaphore when concurrency + time
+        gating were combined into one limiter."""
+        assert live_broker._rate_limiter._semaphore._value == 8

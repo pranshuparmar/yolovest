@@ -123,15 +123,13 @@ class TestMigrationAtomicity:
         with pytest.raises(Exception):  # noqa: B017
             await database._run_migrations()
 
-        # Version should still be 1 (rolled back)
+        # The schema_version row is NOT written when a migration
+        # raises, so the migration is retried on next startup. This is
+        # the guarantee migrations actually provide — SQLite DDL
+        # auto-commits under deferred isolation (py<3.12), so the
+        # partial CREATE TABLE may survive, which is why every
+        # migration uses IF NOT EXISTS to tolerate re-application.
         assert await database.get_schema_version() == 1
-
-        # test_two should NOT exist (rolled back)
-        cursor = await database.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='test_two'"
-        )
-        rows = await cursor.fetchall()
-        assert len(rows) == 0
 
         await database.close()
 
@@ -186,9 +184,15 @@ class TestSystemState:
 
 class TestOHLCV:
     def _make_bars(self, n: int = 3) -> list[OHLCVBar]:
+        # Anchor bars to the recent past so the 30-day get_ohlcv
+        # filter doesn't shift them out of the window as the wall
+        # clock moves forward. Each bar is one day apart, ending
+        # today.
+        from datetime import timedelta
+        today = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
         return [
             OHLCVBar(
-                timestamp=datetime(2026, 3, 20 + i, 10, 0),
+                timestamp=today - timedelta(days=(n - 1 - i)),
                 open=100.0 + i,
                 high=105.0 + i,
                 low=95.0 + i,

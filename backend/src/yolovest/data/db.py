@@ -226,7 +226,16 @@ class Database:
                             continue
                         raise
 
-                # Run remaining statements in a transaction
+                # Run remaining statements in a transaction. NOTE:
+                # under the default deferred isolation_level, sqlite3
+                # implicitly COMMITs before each DDL statement on
+                # Python < 3.12, so a CREATE TABLE that ran before a
+                # later statement failed is NOT undone by rollback().
+                # The schema_version row is still not written (the
+                # raise below skips it), so the migration is retried
+                # on next startup — which is why every migration's
+                # CREATE/ALTER must be IF NOT EXISTS / tolerant of
+                # partial prior application.
                 if other_stmts:
                     try:
                         for stmt in other_stmts:

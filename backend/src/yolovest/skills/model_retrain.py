@@ -214,6 +214,11 @@ class ModelRetrainSkill(SkillBase):
             "swing": (hp.short_swing.target, hp.short_swing.stop_loss),
         }
 
+        # Imported once here (not inside the loop) — an early `continue`
+        # on insufficient features used to skip the in-loop import,
+        # leaving _gc unbound for the post-loop collect() below.
+        import gc as _gc
+
         for model_type in ("intraday", "swing"):
             # Build feature matrix with model-specific labeling + feedback features
             lookahead = lookahead_map[model_type]
@@ -451,7 +456,6 @@ class ModelRetrainSkill(SkillBase):
             # own copy. Without this the intraday and swing matrices
             # would briefly coexist and OOM the process on a 2 GB host.
             X = y = feat_names = sample_weights = bars_meta = None  # type: ignore[assignment]
-            import gc as _gc
             _gc.collect()
 
         # Free training_data eagerly — _check_shadow_promotions doesn't
