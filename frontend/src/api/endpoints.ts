@@ -26,6 +26,7 @@ import type {
   PredictionDetail,
   PaginatedPredictions,
   RiskExposure,
+  RiskGates,
   PremarketData,
   SystemState,
   NSESymbol,
@@ -418,6 +419,13 @@ export const api = {
     apiFetch<WeeklyLLMReview[]>("/api/weekly/llm-reviews"),
 
   riskExposure: () => apiFetch<RiskExposure>("/api/risk-exposure"),
+
+  riskGates: () => apiFetch<RiskGates>("/api/risk-gates"),
+
+  clearDriftSuspension: () =>
+    apiFetch<{ success: boolean; suspended: boolean }>("/api/drift-suspension", {
+      method: "DELETE",
+    }),
 
   nseUniverse: () => apiFetch<NSESymbol[]>("/api/nse-universe"),
 

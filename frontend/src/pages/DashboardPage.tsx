@@ -3,6 +3,7 @@ import { PortfolioCards } from "../components/PortfolioCards";
 import { EquityChart } from "../components/EquityChart";
 import { TradesTable } from "../components/TradesTable";
 import { RiskExposureChart } from "../components/RiskExposureChart";
+import { RiskGatesPanel } from "../components/RiskGatesPanel";
 import { EconomicCalendarWidget } from "../components/EconomicCalendarWidget";
 import { PremarketCard } from "../components/PremarketCard";
 import { PendingTradesBanner, ClearSignalsButton } from "../components/PendingTradesBanner";
@@ -104,6 +105,9 @@ export function DashboardPage() {
       <RecommendationsPanel />
 
       <EquityChart days={30} />
+
+      {/* Opt-in risk-gate status (drift suspension / beta cap / earnings) */}
+      <RiskGatesPanel />
 
       {/* Risk exposure */}
       <RiskExposureChart />

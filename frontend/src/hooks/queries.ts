@@ -593,6 +593,23 @@ export function useRiskExposure() {
   });
 }
 
+export function useRiskGates() {
+  return useQuery({
+    queryKey: ["risk-gates"],
+    queryFn: api.riskGates,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function useClearDriftSuspension() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.clearDriftSuspension,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["risk-gates"] }),
+  });
+}
+
 export function useNSEUniverse() {
   return useQuery({
     queryKey: ["nse-universe"],

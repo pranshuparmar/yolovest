@@ -4774,6 +4774,122 @@ def create_app(ctx: AppContext) -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
+    @app.get("/api/risk-gates")
+    async def get_risk_gates(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Consolidated status of the opt-in risk gates so the
+        dashboard can show in one round-trip what's currently
+        blocking / constraining trades:
+
+        - drift suspension (active + reason)
+        - portfolio beta vs cap (current beta-weighted exposure)
+        - earnings blackout (open-position / watchlist symbols with a
+          scheduled earnings event inside the blackout window)
+        """
+        cfg = ctx.config.risk
+        mode = ctx.config.mode
+
+        # --- Drift suspension ---
+        try:
+            drift_reason = await ctx.db.get_system_state(
+                "signal_gen_suspended_by_drift",
+            )
+        except Exception:
+            drift_reason = None
+        drift = {
+            "enabled": cfg.drift_auto_suspend_enabled,
+            "suspended": bool(drift_reason),
+            "reason": drift_reason or None,
+        }
+
+        positions = await ctx.db.get_open_positions(mode=mode)
+        capital = 0.0
+        try:
+            portfolio = await ctx.db.get_portfolio_state(mode=mode)
+            capital = float(portfolio.get("total_capital") or 0)
+        except Exception:
+            logger.debug("risk-gates: portfolio state fetch failed", exc_info=True)
+
+        # --- Portfolio beta ---
+        beta_cap_value = capital * cfg.max_portfolio_beta if cfg.max_portfolio_beta > 0 else 0.0
+        beta_weighted = 0.0
+        per_symbol_beta: list[dict[str, Any]] = []
+        if cfg.max_portfolio_beta > 0:
+            for p in positions:
+                sym = p.get("symbol")
+                qty = float(p.get("quantity") or 0)
+                entry = float(p.get("fill_price") or p.get("entry_price") or 0)
+                if not sym or qty <= 0 or entry <= 0:
+                    continue
+                try:
+                    beta = await ctx.db.compute_symbol_beta(sym)
+                except Exception:
+                    beta = None
+                eff_beta = beta if beta is not None else 1.0
+                notional = qty * entry
+                contribution = notional * abs(eff_beta)
+                beta_weighted += contribution
+                per_symbol_beta.append({
+                    "symbol": sym,
+                    "beta": round(eff_beta, 2),
+                    "notional": round(notional, 0),
+                    "beta_weighted": round(contribution, 0),
+                    "estimated": beta is None,
+                })
+        beta = {
+            "enabled": cfg.max_portfolio_beta > 0,
+            "cap_multiple": cfg.max_portfolio_beta,
+            "cap_value": round(beta_cap_value, 0),
+            "current_beta_weighted": round(beta_weighted, 0),
+            "utilization_pct": (
+                round(beta_weighted / beta_cap_value * 100, 1)
+                if beta_cap_value > 0 else 0.0
+            ),
+            "positions": sorted(
+                per_symbol_beta, key=lambda x: x["beta_weighted"], reverse=True,
+            ),
+        }
+
+        # --- Earnings blackout ---
+        blackout_symbols: list[dict[str, Any]] = []
+        if cfg.earnings_blackout_days > 0:
+            # Check open positions + algo/user watchlist symbols.
+            candidate_syms: set[str] = {
+                (p.get("symbol") or "").upper() for p in positions if p.get("symbol")
+            }
+            try:
+                wl = await ctx.db.get_combined_watchlist()
+                candidate_syms |= {
+                    (w.get("symbol") or "").upper() for w in wl if w.get("symbol")
+                }
+            except Exception:
+                logger.debug("risk-gates: watchlist fetch failed", exc_info=True)
+            for sym in sorted(candidate_syms):
+                try:
+                    events = await ctx.db.get_earnings_events(
+                        symbol=sym, days=cfg.earnings_blackout_days,
+                    )
+                except Exception:
+                    events = []
+                if events:
+                    ev = events[0]
+                    blackout_symbols.append({
+                        "symbol": sym,
+                        "event_date": ev.get("event_date"),
+                        "title": ev.get("title"),
+                        "held": sym in {
+                            (p.get("symbol") or "").upper() for p in positions
+                        },
+                    })
+        earnings = {
+            "enabled": cfg.earnings_blackout_days > 0,
+            "window_days": cfg.earnings_blackout_days,
+            "blocked_symbols": blackout_symbols,
+        }
+
+        return {"drift": drift, "beta": beta, "earnings": earnings}
+
     @app.post("/api/pending-trades/{trade_id}/approve")
     async def approve_pending_trade(
         trade_id: int,

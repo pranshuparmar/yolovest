@@ -434,6 +434,38 @@ export interface RiskExposure {
   positions_count: number;
 }
 
+export interface RiskGates {
+  drift: {
+    enabled: boolean;
+    suspended: boolean;
+    reason: string | null;
+  };
+  beta: {
+    enabled: boolean;
+    cap_multiple: number;
+    cap_value: number;
+    current_beta_weighted: number;
+    utilization_pct: number;
+    positions: {
+      symbol: string;
+      beta: number;
+      notional: number;
+      beta_weighted: number;
+      estimated: boolean;
+    }[];
+  };
+  earnings: {
+    enabled: boolean;
+    window_days: number;
+    blocked_symbols: {
+      symbol: string;
+      event_date: string | null;
+      title: string | null;
+      held: boolean;
+    }[];
+  };
+}
+
 export interface PremarketData {
   date: string | null;
   gift_nifty_change_pct: number | null;
