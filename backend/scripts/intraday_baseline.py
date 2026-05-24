@@ -203,9 +203,84 @@ def simulate_exit(
     return last_close
 
 
+def compute_session_features(
+    bars: list[OHLCVBar], or_bars: int = 6,
+) -> dict[int, dict[str, float]]:
+    """Intraday-specific, SESSION-AWARE features keyed by global bar index.
+
+    These are the features the daily-style technicals can't express and
+    that the design doc identifies as the real intraday signal source.
+    Everything resets at the session (calendar-date) boundary:
+
+    - or_position: where price sits relative to the opening range (high/low
+      of the first `or_bars` bars). 0 inside, >1 broke above, <-1 below.
+    - session_vwap_dist_pct: close vs the running *session* VWAP (reset
+      daily — NOT the year-long P/V average the daily model excludes).
+    - minutes_since_open_norm: time-of-day in [0,1] over the ~375-min session.
+    - rel_volume_tod: cumulative session volume at this bar vs the symbol's
+      typical cumulative volume at the same bar-position (U-shaped intraday
+      profile). >1 = unusually active session.
+    """
+    sessions: list[list[int]] = []
+    cur_date = None
+    cur: list[int] = []
+    for gi, b in enumerate(bars):
+        d = b.timestamp.date()
+        if d != cur_date:
+            if cur:
+                sessions.append(cur)
+            cur, cur_date = [], d
+        cur.append(gi)
+    if cur:
+        sessions.append(cur)
+
+    # Typical cumulative volume by within-session position (across sessions).
+    cumvol_sum: dict[int, float] = defaultdict(float)
+    cumvol_cnt: dict[int, int] = defaultdict(int)
+    for sess in sessions:
+        cv = 0.0
+        for p, gi in enumerate(sess):
+            cv += bars[gi].volume
+            cumvol_sum[p] += cv
+            cumvol_cnt[p] += 1
+    avg_cumvol = {p: cumvol_sum[p] / cumvol_cnt[p]
+                  for p in cumvol_sum if cumvol_cnt[p] > 0}
+
+    out: dict[int, dict[str, float]] = {}
+    for sess in sessions:
+        or_high, or_low = float("-inf"), float("inf")
+        pv_sum = v_sum = cv = 0.0
+        open_ts = bars[sess[0]].timestamp
+        for p, gi in enumerate(sess):
+            b = bars[gi]
+            tp = (b.high + b.low + b.close) / 3.0
+            pv_sum += tp * b.volume
+            v_sum += b.volume
+            cv += b.volume
+            if p < or_bars:
+                or_high, or_low = max(or_high, b.high), min(or_low, b.low)
+            vwap = pv_sum / v_sum if v_sum > 0 else b.close
+            mins = (b.timestamp - open_ts).total_seconds() / 60.0
+            if p >= or_bars and or_high > or_low:
+                or_mid = (or_high + or_low) / 2.0
+                or_half = (or_high - or_low) / 2.0
+                or_pos = (b.close - or_mid) / or_half if or_half > 0 else 0.0
+            else:
+                or_pos = 0.0
+            avg_cv = avg_cumvol.get(p, 0.0)
+            out[gi] = {
+                "or_position": float(max(min(or_pos, 5.0), -5.0)),
+                "session_vwap_dist_pct": float((b.close - vwap) / vwap) if vwap > 0 else 0.0,
+                "minutes_since_open_norm": float(min(max(mins / 375.0, 0.0), 1.0)),
+                "rel_volume_tod": float(cv / avg_cv) if avg_cv > 0 else 1.0,
+            }
+    return out
+
+
 def build_samples(
     by_symbol: dict[str, list[OHLCVBar]], *, window: int, stride: int,
     lookahead: int, target_mult: float, sl_mult: float,
+    intraday_features: bool = True,
 ) -> tuple[list[dict], list[str]]:
     """Return per-sample dicts (features + label + trade meta) and the
     stable, exclusion-filtered feature-name list."""
@@ -217,6 +292,7 @@ def build_samples(
     for si, (sym, bars) in enumerate(by_symbol.items(), 1):
         if len(bars) < window + lookahead + 2:
             continue
+        sess_feats = compute_session_features(bars) if intraday_features else {}
         for i in range(window, len(bars) - lookahead - 1, stride):
             feats = compute_features(bars[i - window: i + 1], cfg)
             if not feats:
@@ -231,6 +307,8 @@ def build_samples(
             )
             row = {k: float(v) for k, v in feats.items()
                    if k not in MODEL_FEATURE_EXCLUSIONS}
+            if intraday_features:
+                row.update(sess_feats.get(i, {}))
             for k in row:
                 if k not in feat_set:
                     feat_set.add(k)
@@ -262,6 +340,12 @@ def main() -> None:
     ap.add_argument("--capital", type=float, default=100000.0)
     ap.add_argument("--risk-pct", type=float, default=0.01)
     ap.add_argument("--slippage", type=float, default=0.0005)
+    ap.add_argument(
+        "--intraday-features", action=argparse.BooleanOptionalAction, default=True,
+        help="add session-aware intraday features (opening range, session "
+             "VWAP, time-of-day, rel-volume). Use --no-intraday-features to "
+             "reproduce the basic-feature baseline for comparison.",
+    )
     args = ap.parse_args()
 
     by_symbol = load_bars(args.db, args.days, args.min_bars, args.max_symbols)
@@ -285,10 +369,12 @@ def main() -> None:
         args.target_mult, args.sl_mult, args.lookahead,
     )
 
+    log.info("Intraday-specific features: %s",
+             "ON" if args.intraday_features else "OFF (basic technicals only)")
     samples, feat_names = build_samples(
         by_symbol, window=args.window, stride=args.stride,
         lookahead=args.lookahead, target_mult=eff_target_mult,
-        sl_mult=eff_sl_mult,
+        sl_mult=eff_sl_mult, intraday_features=args.intraday_features,
     )
     if len(samples) < 1000:
         log.error("Only %d samples — too few to trust. Lower --stride/--min-bars.",
