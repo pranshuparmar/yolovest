@@ -204,6 +204,7 @@ const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
     { value: "short_term", label: "Short Term" },
     { value: "balanced", label: "Balanced" },
     { value: "long_term", label: "Long Term" },
+    { value: "swing", label: "Swing (Short + Long, no MIS)" },
   ],
   "scanning.universe": [
     { value: "nifty50", label: "Nifty 50" },
