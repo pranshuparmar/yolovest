@@ -916,6 +916,15 @@ class RetrainingConfig(BaseModel):
     # fits comfortably under 2 GB. Raise on hosts with more memory if
     # you want the model to see deeper history.
     max_training_days: int = Field(default=730, ge=90, le=3650)
+    # Honest-edge promotion gate. A model may only be promoted to
+    # production when its *argmax* walk-forward Sharpe (the edge of its
+    # natural, untuned decisions) is at least this value. The
+    # threshold-tuned Sharpe is selection-biased — a model can score
+    # well only on a cherry-picked high-probability tail that the live
+    # model may never reach — so promotion decisions must clear the
+    # untuned edge first. Default 0.0 blocks net-losing models. Set
+    # negative to disable (not recommended on a live account).
+    min_argmax_sharpe_for_promotion: float = Field(default=0.0, ge=-100.0, le=100.0)
 
 
 class ReportsConfig(BaseModel):

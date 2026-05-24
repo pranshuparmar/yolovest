@@ -5,7 +5,45 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from yolovest.skills.model_retrain import ModelRetrainSkill, _decision_sharpe
+from yolovest.skills.model_retrain import (
+    ModelRetrainSkill,
+    _decision_sharpe,
+    passes_edge_gate,
+)
+
+
+class TestEdgeGate:
+    """The honest-edge gate blocks promoting a model whose untuned
+    (argmax) Sharpe is below the floor, regardless of how good its
+    threshold-tuned headline number looks."""
+
+    def test_blocks_negative_argmax_edge(self):
+        ok, reason = passes_edge_gate({"argmax_sharpe": -7.0, "sharpe": 5.3}, 0.0)
+        assert ok is False
+        assert "argmax Sharpe -7.00" in reason
+
+    def test_passes_positive_argmax_edge(self):
+        ok, _ = passes_edge_gate({"argmax_sharpe": 0.97}, 0.0)
+        assert ok is True
+
+    def test_skips_when_argmax_absent(self):
+        # Legacy / synthetic-payoff artifacts don't carry argmax_sharpe —
+        # don't spuriously block them.
+        ok, reason = passes_edge_gate({"sharpe": 2.0}, 0.0)
+        assert ok is True
+        assert "skipped" in reason
+
+    def test_disabled_when_floor_negative(self):
+        ok, _ = passes_edge_gate({"argmax_sharpe": -50.0}, -1.0)
+        assert ok is True
+
+    def test_honors_custom_floor(self):
+        assert passes_edge_gate({"argmax_sharpe": 0.4}, 0.5)[0] is False
+        assert passes_edge_gate({"argmax_sharpe": 0.6}, 0.5)[0] is True
+
+    def test_unparseable_argmax_skips(self):
+        ok, _ = passes_edge_gate({"argmax_sharpe": "n/a"}, 0.0)
+        assert ok is True
 
 
 class TestDecisionSharpe:
@@ -147,6 +185,51 @@ class TestShadowPromotion:
     async def test_no_shadow_models_ready(self, retrain_skill):
         promotions = await retrain_skill._check_shadow_promotions()
         assert promotions == []
+
+    async def test_negative_edge_shadow_retired_despite_winning_sharpe(
+        self, retrain_skill,
+    ):
+        # Shadow beats production on tuned Sharpe and has no live data to
+        # gate on — but its argmax edge is negative, so the honest-edge
+        # gate must retire it rather than promote a net-losing model.
+        # This is the exact case that put a -7 argmax model live.
+        retrain_skill.ctx.db.get_shadow_models_ready = AsyncMock(return_value=[
+            {
+                "model_type": "intraday", "version": "v2.0",
+                "sharpe_ratio": 5.3, "sharpe_lower": 4.7,
+                "argmax_sharpe": -7.0, "status": "shadow",
+            }
+        ])
+        retrain_skill.ctx.db.get_production_model = AsyncMock(return_value=None)
+        retrain_skill.ctx.db.get_live_metrics_for_model = AsyncMock(
+            return_value={"scored": 0}
+        )
+
+        promotions = await retrain_skill._check_shadow_promotions()
+
+        assert promotions[0]["action"] == "retired"
+        assert any("edge:" in p for p in promotions[0]["failed_gates"])
+        retrain_skill.ctx.db.promote_model.assert_not_awaited()
+        retrain_skill.ctx.db.retire_model.assert_awaited_with("intraday", "v2.0")
+
+    async def test_positive_edge_shadow_promotes(self, retrain_skill):
+        # Same setup but a positive argmax edge → promotion proceeds.
+        retrain_skill.ctx.db.get_shadow_models_ready = AsyncMock(return_value=[
+            {
+                "model_type": "swing", "version": "v2.0",
+                "sharpe_ratio": 3.5, "sharpe_lower": 3.1,
+                "argmax_sharpe": 0.97, "status": "shadow",
+            }
+        ])
+        retrain_skill.ctx.db.get_production_model = AsyncMock(return_value=None)
+        retrain_skill.ctx.db.get_live_metrics_for_model = AsyncMock(
+            return_value={"scored": 0}
+        )
+
+        promotions = await retrain_skill._check_shadow_promotions()
+
+        assert promotions[0]["action"] == "promoted"
+        retrain_skill.ctx.db.promote_model.assert_awaited_with("swing", "v2.0")
 
 
 class TestFullRetrain:

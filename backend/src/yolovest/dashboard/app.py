@@ -3214,9 +3214,47 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def promote_model(
         model_type: str,
         version: str,
+        force: bool = False,
         user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
-        """Manually promote a shadow model to production."""
+        """Manually promote a shadow model to production.
+
+        Honest-edge gate: a model whose untuned (argmax) Sharpe is below
+        the configured floor is blocked unless `force=true`. argmax_sharpe
+        isn't persisted on the registry row, so it's read from the
+        artifact; if the artifact can't be read the gate is skipped
+        rather than blocking on an infra error.
+        """
+        if "/" in version or "\\" in version or ".." in version:
+            raise HTTPException(status_code=400, detail="Invalid version")
+        if not force:
+            pkl_path = Path(_model_dir()) / f"{version}.pkl"
+            if pkl_path.exists():
+                try:
+                    import joblib
+
+                    from yolovest.skills.model_retrain import passes_edge_gate
+                    artifact = await asyncio.to_thread(joblib.load, str(pkl_path))
+                    metrics = (artifact or {}).get("metrics") or {}
+                    edge_ok, edge_reason = passes_edge_gate(
+                        metrics,
+                        ctx.config.retraining.min_argmax_sharpe_for_promotion,
+                    )
+                    if not edge_ok:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"Refusing to promote {model_type} {version}: "
+                                f"{edge_reason}. Pass force=true to override."
+                            ),
+                        )
+                except HTTPException:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Edge gate could not read %s; promoting without it",
+                        pkl_path, exc_info=True,
+                    )
         await ctx.db.promote_model(model_type, version)
         if ctx.ml:
             try:
@@ -3405,6 +3443,33 @@ def create_app(ctx: AppContext) -> FastAPI:
                     + (f"; removed {removed}" if removed else "")
                     + "."
                 )
+
+        # Honest-edge gate on promotion. An imported model trained
+        # elsewhere bypasses the retrain skill's gates entirely, so a
+        # net-losing model (negative argmax Sharpe whose backtest profit
+        # is a threshold-selected artifact) could otherwise be promoted
+        # straight to live — exactly how a −7 argmax model reached
+        # production before. Registering as shadow is always allowed
+        # (shadow only observes); promotion requires clearing the floor
+        # unless the caller explicitly forces.
+        if promote:
+            from yolovest.skills.model_retrain import passes_edge_gate
+
+            edge_ok, edge_reason = passes_edge_gate(
+                metrics,
+                ctx.config.retraining.min_argmax_sharpe_for_promotion,
+            )
+            if not edge_ok and not force:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Refusing to promote {model_type} {version}: "
+                        f"{edge_reason}. Import as shadow (promote=false) to "
+                        f"observe it, or pass force=true to promote anyway."
+                    ),
+                )
+            if not edge_ok:
+                warnings.append(f"Forced promotion despite edge gate: {edge_reason}.")
 
         # Register as shadow first (mirrors the retrain path), then
         # optionally promote. Hot-reload the running provider so the

@@ -74,6 +74,43 @@ def _decision_sharpe(
     return (c_pt or 0.0), (i_pt or 0.0)
 
 
+def passes_edge_gate(
+    metrics: dict[str, Any], min_argmax_sharpe: float,
+) -> tuple[bool, str]:
+    """Honest-edge promotion gate.
+
+    A model may trade live only if its *argmax* walk-forward Sharpe — the
+    edge of its natural, untuned decisions — clears `min_argmax_sharpe`.
+    The threshold-tuned Sharpe stored as the headline metric is
+    selection-biased: a threshold sweep can find a tiny high-probability
+    tail that backtests beautifully while the model's argmax actually
+    loses money (the real failure that put a -7 argmax Sharpe intraday
+    model on a live account). Gating on `argmax_sharpe` blocks that.
+
+    Returns ``(passes, reason)``. When `argmax_sharpe` is absent — legacy
+    artifacts and the synthetic-payoff training path don't produce it —
+    the gate is skipped (``passes=True``) so honest older models aren't
+    spuriously blocked. The gate is disabled entirely when
+    `min_argmax_sharpe` is negative.
+    """
+    if min_argmax_sharpe < 0:
+        return True, "edge gate disabled (min_argmax_sharpe < 0)"
+    raw = metrics.get("argmax_sharpe")
+    if raw is None:
+        return True, "no argmax_sharpe in metrics — edge gate skipped"
+    try:
+        argmax = float(raw)
+    except (TypeError, ValueError):
+        return True, "argmax_sharpe unparseable — edge gate skipped"
+    if argmax < min_argmax_sharpe:
+        return False, (
+            f"argmax Sharpe {argmax:.2f} < required {min_argmax_sharpe:.2f}: "
+            f"the model has no honest edge — its backtest profit relies on a "
+            f"threshold-selected tail and it must not trade live"
+        )
+    return True, f"argmax Sharpe {argmax:.2f} >= {min_argmax_sharpe:.2f}"
+
+
 class ModelRetrainSkill(SkillBase):
     name = "model-retrain"
     description = "Retrain ML models, version artifacts, A/B test"
@@ -1266,7 +1303,14 @@ class ModelRetrainSkill(SkillBase):
                         f"(diff {diff:+.2%}, tolerance ±{tolerance:.0%})"
                     )
 
-            if backtest_pass and live_pass:
+            # Honest-edge gate — the model's untuned (argmax) Sharpe must
+            # clear the floor. Blocks promoting a model whose backtest
+            # profit lives entirely in a threshold-selected tail.
+            edge_pass, edge_reason = passes_edge_gate(
+                shadow, self.ctx.config.retraining.min_argmax_sharpe_for_promotion,
+            )
+
+            if backtest_pass and live_pass and edge_pass:
                 # Promote shadow to production
                 await self.ctx.db.promote_model(model_type, shadow["version"])
                 if self.ctx.ml:
@@ -1308,6 +1352,8 @@ class ModelRetrainSkill(SkillBase):
                     )
                 if not live_pass:
                     fail_reason_parts.append(f"live: {live_reason}")
+                if not edge_pass:
+                    fail_reason_parts.append(f"edge: {edge_reason}")
                 promotions.append({
                     "model_type": model_type,
                     "version": shadow["version"],
