@@ -86,6 +86,40 @@ class TestFallbackChain:
             MarketDataIngester([])
 
 
+class TestSourceProvenance:
+    """The ingester records WHICH provider produced a symbol's bars so
+    callers can stamp the real source (kite/jugaad/...) into ohlcv.source."""
+
+    async def test_winning_provider_recorded(self):
+        primary = _make_provider(bars=_make_bars())
+        primary.source_name = "kite"
+        fallback = _make_provider()
+        fallback.source_name = "jugaad"
+
+        ingester = MarketDataIngester([primary, fallback])
+        await ingester.get_ohlcv("RELIANCE", "daily", 30)
+
+        assert ingester.get_fetch_meta("RELIANCE")["source"] == "kite"
+
+    async def test_fallback_provider_recorded(self):
+        primary = _make_provider(fail=True)
+        primary.source_name = "kite"
+        fallback = _make_provider(bars=_make_bars())
+        fallback.source_name = "jugaad"
+
+        ingester = MarketDataIngester([primary, fallback])
+        await ingester.get_ohlcv("RELIANCE", "daily", 30)
+
+        assert ingester.get_fetch_meta("RELIANCE")["source"] == "jugaad"
+
+    async def test_source_name_derived_from_class(self):
+        from yolovest.data.kite_data import KiteDataProvider
+        from yolovest.data.yfinance_provider import YFinanceProvider
+        # property is class-level; read on an unconfigured instance is fine
+        assert KiteDataProvider.__new__(KiteDataProvider).source_name == "kite"
+        assert YFinanceProvider.__new__(YFinanceProvider).source_name == "yfinance"
+
+
 class TestStalenessValidation:
     async def test_fresh_data_accepted(self):
         bars = _make_bars(age_days=0)

@@ -57,3 +57,20 @@ class MarketDataBase(ABC):
         clears.
         """
         return True
+
+    @property
+    def source_name(self) -> str:
+        """Short, stable provider identifier stamped into `ohlcv.source`
+        so data provenance is auditable (e.g. tell Kite-sourced bars from
+        free-provider ones). Derived from the class name by default:
+        `KiteDataProvider` -> "kite", `JugaadDataProvider` -> "jugaad",
+        `YFinanceProvider` -> "yfinance", `TVDatafeedProvider` ->
+        "tvdatafeed". Override if the derivation is wrong.
+        """
+        name = type(self).__name__
+        for suffix in ("DataProvider", "Provider"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        return name.lower()
+

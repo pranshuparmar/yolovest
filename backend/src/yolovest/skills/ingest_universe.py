@@ -78,7 +78,8 @@ class IngestUniverseSkill(SkillBase):
                 )
                 if bars:
                     count = await self.ctx.db.upsert_ohlcv(
-                        symbol, "daily", bars, "universe"
+                        symbol, "daily", bars,
+                        self._ingest_source(symbol, "universe"),
                     )
                     results["total_bars_stored"] += count
                     results["symbols_ingested"] += 1
