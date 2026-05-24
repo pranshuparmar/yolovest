@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sqlite3
 import sys
 from collections import Counter, defaultdict
@@ -254,7 +255,7 @@ def main() -> None:
     ap.add_argument("--stride", type=int, default=3,
                     help="sample every Nth bar (cheapness knob)")
     ap.add_argument("--window", type=int, default=200)
-    ap.add_argument("--lookahead", type=int, default=6, help="bars (~30min)")
+    ap.add_argument("--lookahead", type=int, default=12, help="bars (~60min)")
     ap.add_argument("--target-mult", type=float, default=0.6)
     ap.add_argument("--sl-mult", type=float, default=0.3)
     ap.add_argument("--train-frac", type=float, default=0.8)
@@ -268,10 +269,26 @@ def main() -> None:
         log.error("No symbols with enough 5-min history. Lower --min-bars.")
         return
 
+    # Scale the ATR multipliers to the HOLDING HORIZON, not a single bar.
+    # The expected move over H bars is ~ATR(5min)*sqrt(H); a stop sized as
+    # a fraction of one bar's ATR sits inside the first bar's noise and is
+    # tripped instantly. target_mult/sl_mult are therefore fractions of the
+    # horizon's expected move (mirrors how the daily model's 0.6/0.3 are
+    # fractions of a daily-ATR move over a ~1-day hold).
+    horizon_scale = math.sqrt(args.lookahead)
+    eff_target_mult = args.target_mult * horizon_scale
+    eff_sl_mult = args.sl_mult * horizon_scale
+    log.info(
+        "Effective ATR(5min) mults over %d bars: target=%.2f sl=%.2f "
+        "(raw %.2f/%.2f x sqrt(%d))",
+        args.lookahead, eff_target_mult, eff_sl_mult,
+        args.target_mult, args.sl_mult, args.lookahead,
+    )
+
     samples, feat_names = build_samples(
         by_symbol, window=args.window, stride=args.stride,
-        lookahead=args.lookahead, target_mult=args.target_mult,
-        sl_mult=args.sl_mult,
+        lookahead=args.lookahead, target_mult=eff_target_mult,
+        sl_mult=eff_sl_mult,
     )
     if len(samples) < 1000:
         log.error("Only %d samples — too few to trust. Lower --stride/--min-bars.",
@@ -329,13 +346,17 @@ def main() -> None:
         bars = by_symbol[s["sym"]]
         slip = 1 + args.slippage if direction == _BUY else 1 - args.slippage
         entry = s["entry"] * slip
-        sl_dist = max(entry * s["atr_pct"] * args.sl_mult, 0.01)
+        sl_dist = max(entry * s["atr_pct"] * eff_sl_mult, 0.01)
         qty = int((args.risk_pct * args.capital) / sl_dist)
+        # Cap at 1x capital — no leverage. With a tight intraday stop the
+        # risk-based size can blow past the account; without this cap a
+        # bad gross edge gets amplified into a meaningless Sharpe.
+        qty = min(qty, int(args.capital / entry))
         if qty <= 0:
             continue
         exit_px = simulate_exit(
             bars, s["idx"], direction, entry,
-            s["atr_pct"] * args.target_mult, s["atr_pct"] * args.sl_mult,
+            s["atr_pct"] * eff_target_mult, s["atr_pct"] * eff_sl_mult,
             args.lookahead,
         )
         gross = (exit_px - entry) * qty * (1 if direction == _BUY else -1)
