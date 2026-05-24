@@ -332,6 +332,78 @@ def run_formulation(
     }
 
 
+def run_walk_forward(
+    samples: list[dict], feat_names: list[str], *, folds: int, gate: float,
+    lookahead: int, target_mult: float, sl_mult: float, by_symbol: dict,
+    capital: float, slippage: float, rng: np.random.Generator,
+) -> None:
+    """Walk-forward validate baseline_3class across `folds` sequential
+    expanding-window train->test folds, with a `lookahead`-day purge gap so
+    the train tail's label window can't peek into the test fold. Tells us
+    whether the single-split edge holds across regimes or was a one-window
+    mirage."""
+    all_dates = sorted({s["date"] for s in samples})
+    nseg = folds + 1
+    bounds = [(j * len(all_dates)) // nseg for j in range(nseg + 1)]
+    by_date: dict = defaultdict(list)
+    for s in samples:
+        by_date[s["date"]].append(s)
+
+    rows = []
+    for i in range(1, nseg):
+        test_dates = all_dates[bounds[i]:bounds[i + 1]]
+        if not test_dates:
+            continue
+        purge_idx = max(0, bounds[i] - lookahead)  # drop last `lookahead` train days
+        train_dates = set(all_dates[:purge_idx])
+        test_dset = set(test_dates)
+        train = [s for s in samples if s["date"] in train_dates]
+        test = [s for s in samples if s["date"] in test_dset]
+        if len(train) < 2000 or len(test) < 500:
+            log.info("Fold %d skipped (train=%d test=%d too small)",
+                     i, len(train), len(test))
+            continue
+        log.info("Fold %d: train=%d test=%d (%s -> %s)",
+                 i, len(train), len(test), test_dates[0], test_dates[-1])
+        r = run_formulation(
+            "baseline_3class", train, test, feat_names, gate=gate,
+            lookahead=lookahead, target_mult=target_mult, sl_mult=sl_mult,
+            by_symbol=by_symbol, capital=capital, slippage=slippage, rng=rng,
+        )
+        r["fold"] = i
+        r["test_lo"] = str(test_dates[0])
+        r["test_hi"] = str(test_dates[-1])
+        rows.append(r)
+
+    print("\n" + "=" * 96)
+    print(f"SWING WALK-FORWARD (baseline_3class) — {len(rows)} folds, gate={gate:.2f}, "
+          f"lookahead={lookahead}d, target/SL={target_mult:.2f}/{sl_mult:.2f}")
+    print("=" * 96)
+    print(f"{'fold':<5}{'test window':<26}{'%conv>=.55':>11}{'trades':>8}"
+          f"{'win%':>7}{'gross_bps':>11}{'net_bps':>9}{'sharpe*':>9}")
+    print("-" * 96)
+    for r in rows:
+        print(f"{r['fold']:<5}{r['test_lo'] + '..' + r['test_hi']:<26}"
+              f"{r['pct_conv_55']:>10.1%}{r['n_trades']:>8d}{r['win_rate']:>6.1%}"
+              f"{r['gross_per_trade_bps']:>11.1f}{r['net_per_trade_bps']:>9.1f}"
+              f"{r['sharpe_cmp']:>9.2f}")
+    print("-" * 96)
+    if rows:
+        nets = [r["net_per_trade_bps"] for r in rows]
+        wins = [r["win_rate"] for r in rows]
+        pos = sum(1 for x in nets if x > 0)
+        print(f"AGG: {pos}/{len(rows)} folds net-positive | "
+              f"mean net_bps={float(np.mean(nets)):.1f} | "
+              f"mean win%={float(np.mean(wins)):.1%} | "
+              f"min net_bps={min(nets):.1f}")
+    print("=" * 96)
+    print("Reading: edge is real & deployable only if MOST folds are net-positive "
+          "with consistent win% — not one fold carrying the average. A single\n"
+          "strong fold + several flat/negative folds means the single-split "
+          "number was a regime mirage.")
+    print("=" * 96)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="/app/data/yolovest.db")
@@ -345,6 +417,10 @@ def main() -> None:
     ap.add_argument("--train-frac", type=float, default=0.8)
     ap.add_argument("--gate", type=float, default=0.55,
                     help="conviction threshold for a tradeable signal")
+    ap.add_argument("--folds", type=int, default=1,
+                    help="if >1, walk-forward validate baseline_3class across N "
+                         "sequential expanding-window folds instead of the "
+                         "single-split 3-formulation comparison")
     ap.add_argument("--capital", type=float, default=100000.0)
     ap.add_argument("--slippage", type=float, default=0.0005)
     args = ap.parse_args()
@@ -368,6 +444,17 @@ def main() -> None:
              n, 100 * dist[_BUY] / n, 100 * dist[_HOLD] / n,
              100 * dist[_SELL] / n, len(feat_names))
 
+    rng = np.random.default_rng(42)
+
+    if args.folds > 1:
+        run_walk_forward(
+            samples, feat_names, folds=args.folds, gate=args.gate,
+            lookahead=args.lookahead, target_mult=args.target_mult,
+            sl_mult=args.sl_mult, by_symbol=by_symbol, capital=args.capital,
+            slippage=args.slippage, rng=rng,
+        )
+        return
+
     dates = sorted({s["date"] for s in samples})
     cut = dates[int(len(dates) * args.train_frac)]
     train = [s for s in samples if s["date"] < cut]
@@ -375,7 +462,6 @@ def main() -> None:
     log.info("Split: %d train / %d test (cut %s, gate=%.2f)",
              len(train), len(test), cut, args.gate)
 
-    rng = np.random.default_rng(42)
     results = []
     for name in ("baseline_3class", "downsample_hold", "binary_abstain"):
         log.info("Training formulation: %s ...", name)
