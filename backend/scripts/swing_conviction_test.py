@@ -253,12 +253,15 @@ def run_formulation(
     *, gate: float, lookahead: int, target_mult: float, sl_mult: float,
     by_symbol: dict, capital: float, slippage: float, rng: np.random.Generator,
     regime: dict | None = None, apply_regime_gate: bool = False,
+    long_only: bool = False,
 ) -> dict:
     """Train one formulation, return conviction + net-of-cost edge stats.
 
-    When apply_regime_gate is set, a BUY is only taken if the regime as-of
-    the signal day is 'bull' and a SELL only if 'bear' — standing aside in
-    unfavorable regimes (the existing production regime_gate concept)."""
+    When long_only is set, SELL signals are dropped — matching the live
+    CNC swing reality (Indian retail can't hold overnight shorts, so the
+    system drops non-held SELLs). When apply_regime_gate is set, a BUY is
+    only taken if the regime as-of the signal day is 'bull' and a SELL only
+    if 'bear' — standing aside in unfavorable regimes."""
     if name == "binary_abstain":
         tr = [s for s in train if s["label"] != _HOLD]
         y_tr = np.array([1 if s["label"] == _BUY else 0 for s in tr])
@@ -314,6 +317,8 @@ def run_formulation(
         convictions.append(conv)
         if direction == _HOLD or conv < gate:
             continue
+        if long_only and direction == _SELL:
+            continue  # live CNC swing can't short overnight
         if apply_regime_gate and regime is not None:
             rg = regime.get(s["signal_date"], "bull")
             if (direction == _BUY and rg != "bull") or (direction == _SELL and rg != "bear"):
@@ -386,6 +391,7 @@ def run_walk_forward(
     samples: list[dict], feat_names: list[str], *, folds: int, gate: float,
     lookahead: int, target_mult: float, sl_mult: float, by_symbol: dict,
     capital: float, slippage: float, rng: np.random.Generator,
+    long_only: bool = False,
 ) -> None:
     """Walk-forward validate baseline_3class across `folds` sequential
     expanding-window train->test folds, with a `lookahead`-day purge gap so
@@ -420,7 +426,7 @@ def run_walk_forward(
         common = dict(
             gate=gate, lookahead=lookahead, target_mult=target_mult,
             sl_mult=sl_mult, by_symbol=by_symbol, capital=capital,
-            slippage=slippage, rng=rng,
+            slippage=slippage, rng=rng, long_only=long_only,
         )
         ungated = run_formulation(
             "baseline_3class", train, test, feat_names, **common)
@@ -431,7 +437,8 @@ def run_walk_forward(
 
     print("\n" + "=" * 104)
     print(f"SWING WALK-FORWARD (baseline_3class) — {len(rows)} folds, gate={gate:.2f}, "
-          f"lookahead={lookahead}d, target/SL={target_mult:.2f}/{sl_mult:.2f}")
+          f"lookahead={lookahead}d, target/SL={target_mult:.2f}/{sl_mult:.2f}"
+          f"{'  [LONG-ONLY: live CNC reality]' if long_only else ''}")
     print("UNGATED vs REGIME-GATED (BUY only in bull breadth, SELL only in bear)")
     print("=" * 104)
     print(f"{'fold':<5}{'test window':<24}{'BUY%':>6}"
@@ -478,6 +485,9 @@ def main() -> None:
                     help="if >1, walk-forward validate baseline_3class across N "
                          "sequential expanding-window folds instead of the "
                          "single-split 3-formulation comparison")
+    ap.add_argument("--long-only", action="store_true",
+                    help="drop SELL signals — matches live CNC swing (no "
+                         "overnight shorting); this is how the app actually trades")
     ap.add_argument("--capital", type=float, default=100000.0)
     ap.add_argument("--slippage", type=float, default=0.0005)
     args = ap.parse_args()
@@ -508,7 +518,7 @@ def main() -> None:
             samples, feat_names, folds=args.folds, gate=args.gate,
             lookahead=args.lookahead, target_mult=args.target_mult,
             sl_mult=args.sl_mult, by_symbol=by_symbol, capital=args.capital,
-            slippage=args.slippage, rng=rng,
+            slippage=args.slippage, rng=rng, long_only=args.long_only,
         )
         return
 
@@ -526,7 +536,7 @@ def main() -> None:
             name, train, test, feat_names, gate=args.gate,
             lookahead=args.lookahead, target_mult=args.target_mult,
             sl_mult=args.sl_mult, by_symbol=by_symbol, capital=args.capital,
-            slippage=args.slippage, rng=rng,
+            slippage=args.slippage, rng=rng, long_only=args.long_only,
         ))
 
     print("\n" + "=" * 92)
