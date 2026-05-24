@@ -877,10 +877,11 @@ class TransactionCostConfig(BaseModel):
 
 
 class RetentionConfig(BaseModel):
-    # DAILY OHLCV retention. Must be >= retraining.max_training_days /
-    # market_data.backfill_days or the nightly maintenance silently
-    # truncates the model's training history (startup logs a warning
-    # if it's too short).
+    # DAILY OHLCV retention. The nightly maintenance floors the actual
+    # prune window at max(retraining.max_training_days,
+    # market_data.backfill_days), so a value below that is harmless —
+    # training history (and exited/delisted symbols) is preserved
+    # regardless. Set it >= that window to make the intent explicit.
     ohlcv_days: int = 730
     # INTRADAY OHLCV (5-minute etc.) retention — decoupled from daily.
     # Intraday bars are ~75× heavier per day than daily and are NOT

@@ -525,25 +525,23 @@ async def async_main(args: argparse.Namespace) -> None:
         config.execution.transaction_mode,
     )
 
-    # Config sanity: OHLCV retention shorter than the training window
-    # silently truncates the data the model can train on. The nightly
-    # database-maintenance DELETE FROMs ohlcv older than
-    # retention.ohlcv_days, so a max_training_days / backfill_days
-    # beyond that can never be fully populated — you pay to ingest
-    # history that gets deleted before the next retrain uses it.
+    # Config sanity: OHLCV retention shorter than the training window.
+    # The nightly database-maintenance now FLOORS the daily-OHLCV prune at
+    # max(max_training_days, backfill_days), so training history (and
+    # exited/delisted symbols) is never silently truncated. We still
+    # surface the mismatch as INFO so the user knows their configured
+    # `ohlcv_days` is being overridden upward in practice.
     _ohlcv_retention = config.database.retention.ohlcv_days
     _train_window = config.retraining.max_training_days
     _backfill = config.market_data.backfill_days
     _needed = max(_train_window, _backfill)
     if _ohlcv_retention < _needed:
-        logger.warning(
+        logger.info(
             "OHLCV retention (%dd) is shorter than the training/backfill "
-            "window (%dd). The nightly maintenance deletes OHLCV older than "
-            "%dd, so the model can only ever train on ~%dd of history — not "
-            "the %dd you configured. Raise database.retention.ohlcv_days to "
-            ">= %d (with some buffer) to stop silently truncating training data.",
-            _ohlcv_retention, _needed, _ohlcv_retention,
-            _ohlcv_retention, _needed, _needed,
+            "window (%dd); the nightly maintenance will keep daily OHLCV for "
+            "%dd anyway so the model trains on full history. Set "
+            "database.retention.ohlcv_days >= %d to make this explicit.",
+            _ohlcv_retention, _needed, _needed, _needed,
         )
 
     # Restore Zerodha session from persisted access token

@@ -57,8 +57,29 @@ class DatabaseMaintenanceSkill(SkillBase):
         # --- Step 2: Retention Cleanup ---
         try:
             retention = self.ctx.config.database.retention
+            # Floor the DAILY OHLCV window at the model's training history
+            # so the nightly prune can never delete bars the next retrain
+            # needs. This is also the survivorship-bias guard: a symbol that
+            # leaves the index (or gets delisted) stops being ingested, so
+            # its newest bar is frozen — without this floor a too-short
+            # `ohlcv_days` ages out that symbol's ENTIRE history wholesale,
+            # erasing the exited/loser names from the training set. The
+            # retrain has no current-membership filter, so as long as the
+            # bars survive inside the window they keep teaching the model.
+            train_floor = max(
+                int(getattr(self.ctx.config.retraining, "max_training_days", 0)),
+                int(getattr(self.ctx.config.market_data, "backfill_days", 0)),
+            )
+            effective_ohlcv_days = max(retention.ohlcv_days, train_floor)
+            if effective_ohlcv_days > retention.ohlcv_days:
+                logger.info(
+                    "Retention: daily OHLCV window raised %dd -> %dd to cover "
+                    "the training history (max_training_days/backfill_days); "
+                    "preserves exited/delisted symbols for the next retrain.",
+                    retention.ohlcv_days, effective_ohlcv_days,
+                )
             deleted = await self.ctx.db.run_retention_cleanup(
-                ohlcv_days=retention.ohlcv_days,
+                ohlcv_days=effective_ohlcv_days,
                 intraday_ohlcv_days=retention.intraday_ohlcv_days,
                 audit_days=retention.audit_log_days,
                 predictions_days=retention.predictions_days,

@@ -19,6 +19,11 @@ def _make_ctx(backup_enabled=True, backup_cron="0 18 * * *", backup_dir="./backu
     ctx.config.database.retention.ohlcv_days = 730
     ctx.config.database.retention.audit_log_days = 365
     ctx.config.database.retention.predictions_days = 365
+    # Training-window floor inputs (db_maintenance raises the daily OHLCV
+    # retention to cover these). Default both <= ohlcv_days so the baseline
+    # test sees the configured 730 unchanged.
+    ctx.config.retraining.max_training_days = 730
+    ctx.config.market_data.backfill_days = 730
     ctx.db.backup = AsyncMock(return_value="/backups/yolovest_20260322_180000.db")
     ctx.db.run_retention_cleanup = AsyncMock(
         return_value={"ohlcv": 5, "audit_log": 2, "predictions": 1}
@@ -65,6 +70,22 @@ class TestDatabaseMaintenanceSkill:
         )
         ctx.db.log_audit.assert_called_once()
         ctx.notify.send.assert_called()
+
+    async def test_retention_floors_daily_window_to_training_history(self):
+        # A 5-year training window with a 2-year retention would silently
+        # erase 3 years of history (and exited/delisted symbols wholesale).
+        # The skill must raise the daily OHLCV window to cover training.
+        ctx = _make_ctx()
+        ctx.config.database.retention.ohlcv_days = 730
+        ctx.config.retraining.max_training_days = 1825
+        ctx.config.market_data.backfill_days = 1095
+        skill = DatabaseMaintenanceSkill(ctx)
+        await skill.execute()
+
+        _, kwargs = ctx.db.run_retention_cleanup.call_args
+        assert kwargs["ohlcv_days"] == 1825
+        # Intraday is NOT floored — it isn't used for training.
+        assert kwargs["intraday_ohlcv_days"] == ctx.config.database.retention.intraday_ohlcv_days
 
     async def test_backup_failure_still_runs_retention(self):
         ctx = _make_ctx()
