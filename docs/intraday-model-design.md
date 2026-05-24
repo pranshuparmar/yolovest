@@ -1,8 +1,38 @@
 # Designing a Proper Intraday Model
 
-> Status: **design / not built**. Captures why the current "intraday" model
-> is really a next-day daily predictor, and what a genuine intraday model
-> would require. Start a fresh session from this doc.
+> Status: **shelved (2026-05-24)** after a cheap baseline showed no
+> net-of-cost edge — see "Baseline result" below. Originally captured why
+> the current "intraday" model is really a next-day daily predictor and
+> what a genuine intraday model would require. Kept for the record; revisit
+> only if the universe / cost structure / data (e.g. order-flow) changes.
+
+## Baseline result (2026-05-24) — decision: do NOT build
+
+`backend/scripts/intraday_baseline.py` answered the "is there ANY
+net-of-cost edge?" gate before investing in the full build. Setup: top 50
+liquid names with ~1y of 5-min bars, XGBoost argmax, 60-min horizon,
+sqrt(horizon)-scaled ATR barriers (2.08/1.04 x 5-min ATR), 1x-capital cap,
+MIS cost stack + slippage, daily-aggregated equity.
+
+| Features | Gross PnL/trade | Win rate | Net/trade |
+|----------|-----------------|----------|-----------|
+| Basic technicals (on 5-min) | -Rs 32.4 (~0%) | 28% | -Rs 117 |
+| + intraday-specific (OR, session-VWAP, time-of-day, rel-volume) | -Rs 32.7 (~0%) | 28% | -Rs 112 |
+
+The intraday-specific features moved gross edge by ~Rs 1.4/trade —
+statistically nothing. Gross edge is flat coin-flip with *or without* the
+features the design (section 3) bet on; the **0.085%/trade MIS cost wall**
+turns flat-zero gross into a guaranteed net loss. This is a real "no edge
+on this universe", not a tuning miss. The cheap baseline (a day of work)
+saved the multi-week full build below.
+
+Conditions that would justify revisiting: a different universe, materially
+lower costs, or new data the daily features can't proxy (order-book
+depth/imbalance, which is forward-only — see section 3). Until then,
+**run swing-only modes (short_term / long_term); never `intraday` or
+`balanced`** — the daily-trained "intraday" model has negative real edge
+(argmax Sharpe ~ -7) and the Phase-0 honest-edge gate will retire it on
+the next retrain.
 
 ## TL;DR
 
