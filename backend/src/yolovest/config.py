@@ -244,6 +244,7 @@ _MODE_HOLDING_DAYS: dict[str, tuple[int, int]] = {
     "short_term": (2, 5),      # 2–5 trading days
     "balanced": (0, 15),       # model decides: intraday up to 3 weeks
     "long_term": (5, 66),      # 1 week to ~3 months (configurable via max_holding_days)
+    "swing": (2, 66),          # short + long combined, NEVER intraday/MIS (CNC only)
 }
 
 # Kept for backwards compatibility — maps mode to discrete period labels
@@ -252,6 +253,7 @@ _MODE_HOLDING_PERIODS: dict[str, list[str]] = {
     "short_term": ["short_term"],
     "balanced": ["intraday", "short_term", "long_term"],
     "long_term": ["long_term"],
+    "swing": ["short_term", "long_term"],   # swing model across the full 2–66d range, no MIS
 }
 
 
@@ -483,6 +485,26 @@ class RegimeGateConfig(BaseModel):
     bearish_size_multiplier: float = Field(default=1.20, ge=1.0, le=2.0)
 
 
+class MarketTrendFilterConfig(BaseModel):
+    """Market-trend circuit breaker for a long-only book.
+
+    Builds an equal-weight market index from the universe's daily closes
+    and refuses NEW long (BUY) entries when the index is below its
+    `ma_window`-day moving average (a downtrend). Exits (SELLs / closing
+    holdings) are never blocked. This is the standard, robust protection
+    for a long-biased systematic strategy: ride uptrends, stand aside in
+    downtrends. Unlike the breadth `regime_gate` (noisy day-to-day), the
+    index-vs-MA trend is the signal that actually bounds drawdowns in a
+    sustained bear — the regime a bull-heavy backtest can't validate.
+
+    Default off (opt-in). Enable before running a long-only swing book
+    unattended in `auto` mode.
+    """
+
+    enabled: bool = False
+    ma_window: int = Field(default=50, ge=5, le=400)
+
+
 class ReentryConfig(BaseModel):
     """Smart re-entry — allow re-entering after SL hit if conditions improve."""
 
@@ -506,7 +528,7 @@ class ReentryConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
-    mode: Literal["intraday", "short_term", "balanced", "long_term"] = "balanced"
+    mode: Literal["intraday", "short_term", "balanced", "long_term", "swing"] = "balanced"
     allowed_holding_periods: list[str] | None = None
     holding_periods: HoldingPeriodConfig = Field(default_factory=HoldingPeriodConfig)
     volatility: VolatilityConfig = Field(default_factory=VolatilityConfig)
@@ -760,6 +782,9 @@ class RiskConfig(BaseModel):
     depth_gate: DepthGateConfig = Field(default_factory=DepthGateConfig)
     liquidity_gate: LiquidityGateConfig = Field(default_factory=LiquidityGateConfig)
     regime_gate: RegimeGateConfig = Field(default_factory=RegimeGateConfig)
+    market_trend_filter: MarketTrendFilterConfig = Field(
+        default_factory=MarketTrendFilterConfig
+    )
     institutional_flow: InstitutionalFlowConfig = Field(default_factory=InstitutionalFlowConfig)
     exit_tweaks: ExitTweaksConfig = Field(default_factory=ExitTweaksConfig)
     reentry: ReentryConfig = Field(default_factory=ReentryConfig)

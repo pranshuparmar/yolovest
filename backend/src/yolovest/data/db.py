@@ -2291,6 +2291,67 @@ class Database:
             "sample_size": len(returns),
         }
 
+    async def compute_market_trend(self, ma_window: int = 50) -> dict[str, Any]:
+        """Equal-weight market-index trend vs its moving average — the
+        long-only circuit-breaker signal. Builds an index from the mean
+        daily return across all tracked symbols, then reports whether the
+        latest index level is at/above its trailing `ma_window`-day MA.
+
+        Returns: {"in_uptrend": bool, "index_level": float, "ma": float,
+                  "sample_size": int, "ma_window": int}. Neutral
+        (in_uptrend=True, sample_size=0) when there isn't enough history —
+        fail-open so a cold cache never blocks trading.
+        """
+        lookback = ma_window + 10
+        cursor = await self.read_conn.execute(
+            "SELECT symbol, timestamp, close FROM ohlcv "
+            "WHERE interval = 'daily' AND timestamp >= date('now', ?) "
+            "ORDER BY symbol, timestamp",
+            (f"-{int(lookback)} day",),
+        )
+        rows = await cursor.fetchall()
+        neutral = {
+            "in_uptrend": True, "index_level": 1.0, "ma": 1.0,
+            "sample_size": 0, "ma_window": ma_window,
+        }
+        if not rows:
+            return neutral
+        by_symbol: dict[str, list[tuple[str, float]]] = {}
+        for sym, ts, close in rows:
+            try:
+                c = float(close)
+            except (TypeError, ValueError):
+                continue
+            by_symbol.setdefault(sym, []).append((str(ts)[:10], c))
+        ret_sum: dict[str, float] = {}
+        ret_cnt: dict[str, int] = {}
+        for series in by_symbol.values():
+            series.sort()
+            for i in range(1, len(series)):
+                pc = series[i - 1][1]
+                if pc > 0:
+                    d = series[i][0]
+                    ret_sum[d] = ret_sum.get(d, 0.0) + (series[i][1] / pc - 1)
+                    ret_cnt[d] = ret_cnt.get(d, 0) + 1
+        dates = sorted(ret_cnt)
+        if len(dates) < 2:
+            return neutral
+        level = 1.0
+        levels: list[float] = []
+        for d in dates:
+            level *= (1 + ret_sum[d] / ret_cnt[d])
+            levels.append(level)
+        window = levels[-ma_window:] if len(levels) >= ma_window else levels
+        ma = sum(window) / len(window)
+        latest = levels[-1]
+        return {
+            "in_uptrend": latest >= ma,
+            "index_level": latest,
+            "ma": ma,
+            "sample_size": ret_cnt[dates[-1]],
+            "ma_window": ma_window,
+        }
+
     async def minutes_since_last_loss_for_symbol(
         self, symbol: str, mode: str | None = None,
     ) -> float:
