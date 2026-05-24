@@ -37,6 +37,43 @@ from yolovest.timezone import IST
 logger = logging.getLogger(__name__)
 
 
+def _decision_sharpe(
+    candidate: dict[str, Any], incumbent: dict[str, Any] | None,
+) -> tuple[float, float]:
+    """Return (candidate, incumbent) Sharpe on a like-for-like basis for
+    deploy/promote comparisons.
+
+    Prefers the bootstrapped lower-bound (`sharpe_lower`) — robust to a
+    lucky single-holdout slice — but only when BOTH sides carry it.
+    Otherwise falls back to point Sharpe on BOTH sides, so a candidate's
+    conservative lower bound is never pitted against a pre-`sharpe_lower`
+    incumbent's optimistic point estimate (which would unfairly block
+    honest retrains during the transition). Once an incumbent trained on
+    the new code reaches production, every later comparison is
+    lower-vs-lower automatically.
+    """
+    inc = incumbent or {}
+
+    def _num(v: Any) -> float | None:
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    c_low = _num(candidate.get("sharpe_lower"))
+    i_low = _num(inc.get("sharpe_lower"))
+    if c_low is not None and i_low is not None:
+        return c_low, i_low
+
+    c_pt = _num(candidate.get("sharpe"))
+    if c_pt is None:
+        c_pt = _num(candidate.get("sharpe_ratio"))
+    i_pt = _num(inc.get("sharpe_ratio"))
+    if i_pt is None:
+        i_pt = _num(inc.get("sharpe"))
+    return (c_pt or 0.0), (i_pt or 0.0)
+
+
 class ModelRetrainSkill(SkillBase):
     name = "model-retrain"
     description = "Retrain ML models, version artifacts, A/B test"
@@ -440,11 +477,13 @@ class ModelRetrainSkill(SkillBase):
                     model_type, version, f"models/{model_type}_{version}.pkl", metrics
                 )
 
-                # Step 5: Compare with production
+                # Step 5: Compare with production on the robust
+                # (bootstrapped lower-bound) Sharpe, not the noisy
+                # single-holdout point estimate.
                 current = await self.ctx.db.get_production_model(model_type)
-                current_sharpe = (current.get("sharpe_ratio") or 0) if current else 0
+                cand_sharpe, current_sharpe = _decision_sharpe(metrics, current)
 
-                improved = metrics.get("sharpe", 0) > current_sharpe
+                improved = cand_sharpe > current_sharpe
                 if improved:
                     shadow_deployed.append(model_type)
 
@@ -1168,9 +1207,10 @@ class ModelRetrainSkill(SkillBase):
             model_type = shadow["model_type"]
             current = await self.ctx.db.get_production_model(model_type)
 
-            # Backtest Sharpe — necessary gate.
-            shadow_sharpe = shadow.get("sharpe_ratio", 0) or 0
-            current_sharpe = (current.get("sharpe_ratio", 0) or 0) if current else 0
+            # Backtest Sharpe — necessary gate. Compare on the robust
+            # bootstrapped lower bound (falls back to point Sharpe when a
+            # legacy model on either side lacks it — see _decision_sharpe).
+            shadow_sharpe, current_sharpe = _decision_sharpe(shadow, current)
             backtest_pass = shadow_sharpe >= current_sharpe
 
             # Live accuracy — sufficiency check on top. Skip when

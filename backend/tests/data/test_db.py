@@ -599,3 +599,26 @@ class TestAuditLog:
         cursor = await db.conn.execute("SELECT * FROM audit_log")
         rows = await cursor.fetchall()
         assert len(rows) == 3
+
+
+class TestModelVersionSharpeLower:
+    async def test_sharpe_lower_roundtrips(self, db):
+        await db.save_model_version(
+            "intraday", "intraday_v1", "models/intraday_v1.pkl",
+            {"sharpe": 7.75, "sharpe_lower": 5.05, "win_rate": 0.62,
+             "max_drawdown_pct": 0.24, "profit_factor": 1.8},
+        )
+        await db.promote_model("intraday", "intraday_v1")
+        row = await db.get_production_model("intraday")
+        assert row["sharpe_ratio"] == 7.75
+        assert row["sharpe_lower"] == 5.05
+
+    async def test_sharpe_lower_null_for_legacy_metrics(self, db):
+        # Metrics without sharpe_lower (legacy artifact) store NULL, not error.
+        await db.save_model_version(
+            "swing", "swing_v0", "models/swing_v0.pkl", {"sharpe": 3.0},
+        )
+        await db.promote_model("swing", "swing_v0")
+        row = await db.get_production_model("swing")
+        assert row["sharpe_ratio"] == 3.0
+        assert row["sharpe_lower"] is None

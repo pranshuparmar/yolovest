@@ -1469,13 +1469,15 @@ class Database:
         """Save a new model version record."""
         await self.conn.execute(
             "INSERT INTO model_versions (model_type, version, file_path, "
-            "sharpe_ratio, max_drawdown_pct, win_rate, profit_factor, "
-            "status, shadow_start_date) VALUES (?, ?, ?, ?, ?, ?, ?, 'shadow', datetime('now'))",
+            "sharpe_ratio, sharpe_lower, max_drawdown_pct, win_rate, profit_factor, "
+            "status, shadow_start_date) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'shadow', datetime('now'))",
             (
                 model_type,
                 version,
                 file_path,
                 metrics.get("sharpe") or metrics.get("sharpe_ratio"),
+                metrics.get("sharpe_lower"),
                 metrics.get("max_drawdown_pct"),
                 metrics.get("win_rate"),
                 metrics.get("profit_factor"),

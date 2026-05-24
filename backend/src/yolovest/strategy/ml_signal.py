@@ -10,13 +10,12 @@ XGBoost and sklearn are lazily imported so tests can run without them.
 import asyncio
 import logging
 from datetime import UTC, datetime
-
-from yolovest.timezone import now_ist
 from pathlib import Path
 from typing import Any
 
 from yolovest.models.schemas import MLPrediction
 from yolovest.strategy.ml_base import MLBase
+from yolovest.timezone import now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -761,8 +760,14 @@ class XGBoostSignalModel(MLBase):
             # the end so the metrics reflect actual costs / sizing /
             # slippage rather than the legacy +1%/-0.5% fiction.
             from yolovest.strategy.walk_forward_backtest import (
-                BacktestConfig, BarMeta, apply_thresholds as _apply_thresholds,
-                run_walk_forward_backtest, sweep_thresholds,
+                BacktestConfig,
+                BarMeta,
+                _bootstrap_sharpe_lower_bound,
+                run_walk_forward_backtest,
+                sweep_thresholds,
+            )
+            from yolovest.strategy.walk_forward_backtest import (
+                apply_thresholds as _apply_thresholds,
             )
 
             collected_preds: list[int] = []
@@ -796,7 +801,8 @@ class XGBoostSignalModel(MLBase):
                     and bars_meta_raw is not None
                     and len(test_idx) > 0
                 ):
-                    from datetime import date as _date, timedelta as _td
+                    from datetime import date as _date
+                    from datetime import timedelta as _td
 
                     def _meta_date(i: int) -> "_date | None":
                         raw = bars_meta_raw[int(i)].get("entry_date", "")
@@ -967,8 +973,23 @@ class XGBoostSignalModel(MLBase):
                 # accessible for comparison.
                 use_tuned = tuned_bt.sharpe > bt.sharpe
                 headline = tuned_bt if use_tuned else bt
+                # Robust decision Sharpe: bootstrap the SAME daily-return
+                # series the headline point Sharpe is computed from, and
+                # take its p25 lower bound. The headline is a point
+                # estimate on a single contiguous holdout slice — high
+                # variance and regime-dependent — so deploy/promote
+                # decisions compare on this lower bound instead (a Sharpe
+                # propped up by a couple of lucky days collapses here,
+                # while a consistent edge survives).
+                _boot_series = headline.daily_returns or headline.returns
+                _boot_annual = 252 if headline.daily_returns else bt_cfg.annualization_factor
+                sharpe_lower = _bootstrap_sharpe_lower_bound(
+                    _boot_series, annualization=_boot_annual,
+                    n_iter=200, percentile=25.0,
+                ) if _boot_series else headline.sharpe
                 metrics = {
                     "sharpe": headline.sharpe,
+                    "sharpe_lower": sharpe_lower,
                     "max_drawdown_pct": headline.max_drawdown_pct,
                     "win_rate": headline.win_rate,
                     "profit_factor": (
@@ -1017,6 +1038,10 @@ class XGBoostSignalModel(MLBase):
                 )
                 metrics = {
                     "sharpe": round(sharpe, 4),
+                    # No bootstrap on the synthetic legacy path — mirror
+                    # the point Sharpe so the decision metric is always
+                    # present for downstream comparisons.
+                    "sharpe_lower": round(sharpe, 4),
                     "max_drawdown_pct": round(max_dd, 4),
                     "win_rate": round(win_rate, 4),
                     "profit_factor": round(profit_factor, 4),
