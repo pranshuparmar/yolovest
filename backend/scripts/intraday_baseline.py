@@ -260,7 +260,11 @@ def compute_session_features(
             if p < or_bars:
                 or_high, or_low = max(or_high, b.high), min(or_low, b.low)
             vwap = pv_sum / v_sum if v_sum > 0 else b.close
-            mins = (b.timestamp - open_ts).total_seconds() / 60.0
+            # Wall-clock minutes since session open. Computed from hour/minute
+            # components (not datetime subtraction) because the ohlcv table
+            # mixes tz-aware and tz-naive timestamps — both are IST clock time.
+            mins = ((b.timestamp.hour * 60 + b.timestamp.minute)
+                    - (open_ts.hour * 60 + open_ts.minute))
             if p >= or_bars and or_high > or_low:
                 or_mid = (or_high + or_low) / 2.0
                 or_half = (or_high - or_low) / 2.0
