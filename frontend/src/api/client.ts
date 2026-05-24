@@ -72,29 +72,24 @@ function _authHeaders(includeCsrf: boolean): Record<string, string> {
 }
 
 /** Download a file from `path` and trigger a browser "Save as" with
- *  `suggestedName`. Used for backup / model / config exports. */
+ *  `suggestedName`. Used for backup / model / config exports.
+ *
+ *  Streams straight to disk via a native <a download> rather than
+ *  fetch()+blob(): a blob buffers the ENTIRE payload in browser memory
+ *  before the save dialog, which stalls (and can OOM) on multi-hundred-MB
+ *  DB backups. A native download can't carry the Authorization header, so
+ *  we first mint a short-lived token and pass it as a query param. The
+ *  server's Content-Disposition still drives the actual filename. */
 export async function apiDownload(path: string, suggestedName: string): Promise<void> {
-  const res = await fetch(path, { headers: _authHeaders(false) });
-  if (res.status === 401) {
-    _onUnauthorized?.();
-    throw new Error("Unauthorized");
-  }
-  if (!res.ok) {
-    throw new Error(`Download failed: ${res.status} ${res.statusText}`);
-  }
-  // Prefer the server's Content-Disposition filename when present.
-  const cd = res.headers.get("Content-Disposition") || "";
-  const m = cd.match(/filename="?([^"]+)"?/);
-  const name = m?.[1] || suggestedName;
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
+  const { token } = await apiFetch<{ token: string }>("/api/download-token");
+  const sep = path.includes("?") ? "&" : "?";
+  const url = `${path}${sep}token=${encodeURIComponent(token)}`;
   const a = document.createElement("a");
   a.href = url;
-  a.download = name;
+  a.download = suggestedName;
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
 }
 
 /** Upload a file via multipart/form-data. The browser sets the

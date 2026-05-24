@@ -405,6 +405,27 @@ class TestExportImport:
         resp = client.get("/api/backups/yolovest_nope.db/download", headers=auth_headers)
         assert resp.status_code == 404
 
+    def test_download_token_issued(self, client, auth_headers):
+        resp = client.get("/api/download-token", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json().get("token")
+
+    def test_download_with_query_token_authorizes(self, client, auth_headers):
+        # Native downloads can't send the Authorization header, so a valid
+        # ?token= must authorize on its own. A missing file then 404s
+        # (not 401) — proving the token auth passed without a header.
+        token = client.get("/api/download-token", headers=auth_headers).json()["token"]
+        resp = client.get(f"/api/backups/yolovest_nope.db/download?token={token}")
+        assert resp.status_code == 404
+
+    def test_download_with_bad_token_rejected(self, client):
+        resp = client.get("/api/backups/x.db/download?token=garbage.sig")
+        assert resp.status_code == 401
+
+    def test_download_without_auth_rejected(self, client):
+        resp = client.get("/api/backups/x.db/download")
+        assert resp.status_code == 401
+
     def test_model_upload_rejects_non_pkl(self, client, auth_headers):
         import io
         resp = client.post(

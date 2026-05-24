@@ -42,14 +42,19 @@ _TOKEN_SECRET = secrets.token_bytes(32)
 _TOKEN_TTL_SEC = 24 * 60 * 60  # 24 hours
 
 
-def _sign_token(username: str) -> str:
-    """Create a signed session token: base64(payload).signature."""
+def _sign_token(username: str, ttl: int = _TOKEN_TTL_SEC) -> str:
+    """Create a signed session token: base64(payload).signature.
+
+    `ttl` defaults to the normal session lifetime; pass a short value to
+    mint a single-use-ish download token that can ride in a URL query
+    param (native browser downloads can't send the Authorization header).
+    """
     import base64
 
     payload = json.dumps({
         "user": username,
         "iat": int(time.time()),
-        "exp": int(time.time()) + _TOKEN_TTL_SEC,
+        "exp": int(time.time()) + ttl,
         "jti": secrets.token_hex(8),
     }).encode()
     payload_b64 = base64.urlsafe_b64encode(payload).decode()
@@ -815,6 +820,32 @@ def create_app(ctx: AppContext) -> FastAPI:
             detail="Invalid credentials",
             headers={"WWW-Authenticate": 'Bearer, Basic realm="YoloVest"'},
         )
+
+    def verify_download_credentials(
+        request: Request,
+        token: str | None = Query(None),
+        credentials: HTTPBasicCredentials | None = Depends(security),
+    ) -> str:
+        """Auth for large file downloads. Accepts a short-lived `?token=`
+        query param (so the browser can stream the file to disk natively
+        — an <a> download can't carry the Authorization header) and falls
+        back to the normal Bearer/Basic header auth.
+        """
+        if token:
+            return _verify_token(token)
+        return verify_credentials(request, credentials)
+
+    # Download token — short-lived, for native streaming downloads of
+    # large files (DB backups, model artifacts) where fetch()+blob() would
+    # otherwise buffer the whole payload in browser memory.
+    _DOWNLOAD_TOKEN_TTL = 120
+
+    @app.get("/api/download-token")
+    async def issue_download_token(
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        return {"token": _sign_token(user, ttl=_DOWNLOAD_TOKEN_TTL),
+                "expires_in": _DOWNLOAD_TOKEN_TTL}
 
     # CSRF token — one per process, sent to client on login
     _csrf_token = secrets.token_hex(32)
@@ -3196,7 +3227,7 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.get("/api/ml-models/{version}/download")
     async def download_model(
-        version: str, _user: str = Depends(verify_credentials),
+        version: str, _user: str = Depends(verify_download_credentials),
     ) -> FileResponse:
         """Stream a trained model artifact (.pkl) to the browser so it
         can be moved to another machine (e.g. import a model trained on
@@ -4851,7 +4882,7 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.get("/api/backups/{filename}/download")
     async def download_backup(
-        filename: str, _user: str = Depends(verify_credentials),
+        filename: str, _user: str = Depends(verify_download_credentials),
     ) -> FileResponse:
         """Stream a backup .db file to the browser. Used to move a full
         DB (data + settings) to another machine for offline retraining."""
@@ -5339,7 +5370,7 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.get("/api/config/export")
     async def export_config(
-        _user: str = Depends(verify_credentials),
+        _user: str = Depends(verify_download_credentials),
     ) -> JSONResponse:
         """Download all DB-editable config as a flat {key: value} JSON
         file. Import on another instance by uploading it (the Settings
