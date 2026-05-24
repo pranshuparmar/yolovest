@@ -171,6 +171,39 @@ def compute_market_regime(
     return regime
 
 
+def compute_trend_regime(
+    by_symbol: dict[str, list[OHLCVBar]], ma_window: int = 50,
+) -> dict:
+    """Market-TREND regime: build an equal-weight index from the mean daily
+    return across the universe, then mark each date 'bull' when the index
+    level is at/above its trailing `ma_window`-day average, else 'bear'.
+    This is the classic long-only safety filter (index above its MA) — far
+    less noisy than day-to-day breadth. Uses only closes through each date,
+    so a regime keyed on the signal day has no lookahead."""
+    ret_sum: dict = defaultdict(float)
+    ret_cnt: dict = defaultdict(int)
+    for bars in by_symbol.values():
+        for k in range(1, len(bars)):
+            pc = bars[k - 1].close
+            if pc > 0:
+                d = bars[k].timestamp.date()
+                ret_sum[d] += bars[k].close / pc - 1
+                ret_cnt[d] += 1
+    dates = sorted(ret_cnt)
+    level = 1.0
+    levels = []
+    for d in dates:
+        r = ret_sum[d] / ret_cnt[d] if ret_cnt[d] else 0.0
+        level *= (1 + r)
+        levels.append(level)
+    regime = {}
+    for idx, d in enumerate(dates):
+        lo = max(0, idx - ma_window + 1)
+        ma = sum(levels[lo:idx + 1]) / (idx - lo + 1)
+        regime[d] = "bull" if levels[idx] >= ma else "bear"
+    return regime
+
+
 def load_daily_bars(
     db_path: str, days: int, min_bars: int, max_symbols: int,
 ) -> dict[str, list[OHLCVBar]]:
@@ -391,17 +424,21 @@ def run_walk_forward(
     samples: list[dict], feat_names: list[str], *, folds: int, gate: float,
     lookahead: int, target_mult: float, sl_mult: float, by_symbol: dict,
     capital: float, slippage: float, rng: np.random.Generator,
-    long_only: bool = False,
+    long_only: bool = False, regime_method: str = "trend", regime_ma: int = 50,
 ) -> None:
     """Walk-forward validate baseline_3class across `folds` sequential
     expanding-window train->test folds, with a `lookahead`-day purge gap so
     the train tail's label window can't peek into the test fold. Tells us
     whether the single-split edge holds across regimes or was a one-window
     mirage."""
-    regime = compute_market_regime(by_symbol)
+    if regime_method == "trend":
+        regime = compute_trend_regime(by_symbol, ma_window=regime_ma)
+    else:
+        regime = compute_market_regime(by_symbol)
     nbull = sum(1 for v in regime.values() if v == "bull")
-    log.info("Regime: %d/%d days bull (%.0f%%)",
-             nbull, len(regime), 100 * nbull / max(1, len(regime)))
+    log.info("Regime (%s, ma=%d): %d/%d days bull (%.0f%%)",
+             regime_method, regime_ma, nbull, len(regime),
+             100 * nbull / max(1, len(regime)))
 
     all_dates = sorted({s["date"] for s in samples})
     nseg = folds + 1
@@ -488,6 +525,12 @@ def main() -> None:
     ap.add_argument("--long-only", action="store_true",
                     help="drop SELL signals — matches live CNC swing (no "
                          "overnight shorting); this is how the app actually trades")
+    ap.add_argument("--regime", choices=("trend", "breadth"), default="trend",
+                    help="regime filter for the gated column: 'trend' = index "
+                         "above its MA (classic long-only safety), 'breadth' = "
+                         "cross-sectional up-fraction (noisier)")
+    ap.add_argument("--regime-ma", type=int, default=50,
+                    help="MA window (days) for the trend regime")
     ap.add_argument("--capital", type=float, default=100000.0)
     ap.add_argument("--slippage", type=float, default=0.0005)
     args = ap.parse_args()
@@ -519,6 +562,7 @@ def main() -> None:
             lookahead=args.lookahead, target_mult=args.target_mult,
             sl_mult=args.sl_mult, by_symbol=by_symbol, capital=args.capital,
             slippage=args.slippage, rng=rng, long_only=args.long_only,
+            regime_method=args.regime, regime_ma=args.regime_ma,
         )
         return
 
