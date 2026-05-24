@@ -62,7 +62,6 @@ try:
         compute_features,
     )
     from yolovest.models.schemas import OHLCVBar
-    from yolovest.skills.model_retrain import intraday_path_aware_label
 except Exception as e:  # pragma: no cover - environment guard
     log.error("Import failed (run inside the backend container): %s", e)
     sys.exit(1)
@@ -70,6 +69,61 @@ except Exception as e:  # pragma: no cover - environment guard
 
 # Class label ints, matching the training pipeline: 0=SELL, 1=HOLD, 2=BUY.
 _SELL, _HOLD, _BUY = 0, 1, 2
+
+
+def intraday_path_aware_label(
+    *, bars: list[OHLCVBar], start_idx: int, lookahead: int,
+    entry: float, target_pct: float, sl_pct: float,
+) -> int:
+    """Inlined copy of skills.model_retrain.intraday_path_aware_label so
+    this script runs against the deployed image (which predates that
+    function). Same-session close-out: the forward walk stops at the
+    first bar whose date differs from the entry bar's. Returns
+    2 BUY / 0 SELL / 1 HOLD."""
+    if start_idx + 1 >= len(bars):
+        return _HOLD
+    session_date = bars[start_idx + 1].timestamp.date()
+    buy_target, buy_sl = entry * (1 + target_pct), entry * (1 - sl_pct)
+    sell_target, sell_sl = entry * (1 - target_pct), entry * (1 + sl_pct)
+    bo = so = None
+    bwb = swb = None
+    end_idx = min(start_idx + lookahead, len(bars) - 1)
+    for k in range(start_idx + 1, end_idx + 1):
+        bar = bars[k]
+        if bar.timestamp.date() != session_date:
+            break
+        hi, lo = bar.high, bar.low
+        if bo is None:
+            tn, sn = hi >= buy_target, lo <= buy_sl
+            if tn and sn:
+                bo = "ambiguous"
+            elif tn:
+                bo, bwb = "win", k
+            elif sn:
+                bo = "loss"
+        if so is None:
+            tn, sn = lo <= sell_target, hi >= sell_sl
+            if tn and sn:
+                so = "ambiguous"
+            elif tn:
+                so, swb = "win", k
+            elif sn:
+                so = "loss"
+        if bo is not None and so is not None:
+            break
+    bw, sw = bo == "win", so == "win"
+    if bw and sw:
+        if bwb is not None and swb is not None:
+            if bwb < swb:
+                return _BUY
+            if swb < bwb:
+                return _SELL
+        return _HOLD
+    if bw:
+        return _BUY
+    if sw:
+        return _SELL
+    return _HOLD
 
 
 def load_bars(
