@@ -218,6 +218,34 @@ class TestSweepThresholds:
         assert buy_t > 0.55
         assert result.win_rate >= 0.99
 
+    def test_bounds_restrict_sweep_to_reachable_thresholds(self):
+        # 40 high-conviction winners (P(BUY)=0.80, +5%) and 40 losers
+        # whose conviction sits ABOVE the 0.60 ceiling (P(BUY)=0.68, -5%).
+        # Shedding the losers requires a BUY threshold > 0.68, so the
+        # unbounded sweep climbs past 0.60; bounded to <=0.60 it can't
+        # separate them and is forced to a reachable cell — exactly what
+        # production's tuned_threshold_max_value clamp does at inference.
+        winners = [BarMeta("W", 100.0, 105.0) for _ in range(40)]
+        losers = [BarMeta("L", 100.0, 95.0) for _ in range(40)]
+        bars = winners + losers
+        probas = (
+            [[0.05, 0.15, 0.80]] * 40
+            + [[0.05, 0.27, 0.68]] * 40
+        )
+        cfg = BacktestConfig(initial_capital=100_000.0, entry_slippage_pct=0.0)
+
+        ub_buy, _, _ = sweep_thresholds(
+            probas, bars, cfg, min_trades=10, min_class_share=0.0,
+        )
+        b_buy, b_sell, _ = sweep_thresholds(
+            probas, bars, cfg, min_trades=10, min_class_share=0.0,
+            max_threshold=0.60, max_diff=0.05,
+        )
+        assert ub_buy > 0.60  # unbounded climbs past the ceiling
+        assert b_buy <= 0.60 + 1e-9  # bounded stays within it
+        assert b_sell <= 0.60 + 1e-9
+        assert abs(b_buy - b_sell) <= 0.05 + 1e-9
+
     def test_returns_argmax_baseline_when_no_cell_clears_min_trades(self):
         # Tiny corpus: 2 samples, both BUYs. min_trades=10 → no cell
         # clears the floor → function falls back to argmax.

@@ -497,6 +497,8 @@ def sweep_thresholds(
     min_class_share: float = 0.10,
     bootstrap_iterations: int = 200,
     bootstrap_percentile: float = 25.0,
+    max_threshold: float | None = None,
+    max_diff: float | None = None,
 ) -> tuple[float, float, BacktestResult]:
     """Find the (buy_threshold, sell_threshold) pair with the best
     bootstrapped lower-bound Sharpe on the walk-forward test predictions.
@@ -538,6 +540,17 @@ def sweep_thresholds(
     Set `bootstrap_iterations=0` to disable bootstrapping and revert
     to point-Sharpe ranking (legacy behaviour).
 
+    `max_threshold` / `max_diff` bound the search to the range production
+    can actually trade: the live inference layer clamps tuned thresholds
+    to `risk.tuned_threshold_max_value` (ceiling) and
+    `risk.tuned_threshold_max_diff` (symmetry). Without these bounds the
+    sweep can pick e.g. (0.75, 0.80) — great on the holdout — that the
+    live model clamps to (0.60, 0.60), so the reported Sharpe/win-rate
+    describe a model production never runs. Passing the same caps here
+    makes the chosen pair == the effective pair == what's backtested ==
+    what trades live. Both default `None` (unbounded) for callers that
+    don't care (tests / legacy).
+
     Falls back to (0.5, 0.5, run_walk_forward_backtest(argmax)) when no
     grid cell clears the floors (typically a model that just doesn't
     have enough conviction on this corpus).
@@ -554,8 +567,17 @@ def sweep_thresholds(
     best_result: BacktestResult | None = None
     best_lower_sharpe: float = float("-inf")
 
+    # Tiny epsilon so clean 0.05-step grid values aren't excluded by
+    # float-representation noise (e.g. abs(0.60-0.55) == 0.0500000…1).
+    _eps = 1e-9
     for buy_thresh in grid:
+        if max_threshold is not None and buy_thresh > max_threshold + _eps:
+            continue
         for sell_thresh in grid:
+            if max_threshold is not None and sell_thresh > max_threshold + _eps:
+                continue
+            if max_diff is not None and abs(buy_thresh - sell_thresh) > max_diff + _eps:
+                continue
             preds: list[int] = []
             for p in probas:
                 buy_prob = p[_LABEL_BUY] if len(p) > _LABEL_BUY else 0.0

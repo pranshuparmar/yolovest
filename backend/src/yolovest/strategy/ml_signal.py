@@ -902,6 +902,24 @@ class XGBoostSignalModel(MLBase):
                     max_concurrent_positions=backtest_max_positions,
                 )
 
+                # Bound the sweep to the range production can actually
+                # trade. The inference layer (_get_effective_thresholds)
+                # clamps tuned thresholds to risk.tuned_threshold_max_value
+                # / _max_diff; without mirroring those caps here the sweep
+                # can pick a cell (e.g. 0.75/0.80) the live model clamps to
+                # 0.60/0.60, so the reported Sharpe/win-rate describe a
+                # model that never trades. Caps None when config is absent
+                # (tests) → unbounded, preserving prior behaviour.
+                _risk_cfg = getattr(self._config, "risk", None) if self._config else None
+                _sweep_max_value = (
+                    float(getattr(_risk_cfg, "tuned_threshold_max_value", 0.60))
+                    if _risk_cfg is not None else None
+                )
+                _sweep_max_diff = (
+                    float(getattr(_risk_cfg, "tuned_threshold_max_diff", 0.05))
+                    if _risk_cfg is not None else None
+                )
+
                 # Chronological tuning / reporting split. The CV-test
                 # predictions accumulated above are in chronological
                 # order across folds, so the last `holdout_frac` slice
@@ -934,6 +952,8 @@ class XGBoostSignalModel(MLBase):
                         probas=collected_probas[:_split],
                         bars_meta=collected_meta[:_split],
                         config=bt_cfg,
+                        max_threshold=_sweep_max_value,
+                        max_diff=_sweep_max_diff,
                     )
                     # Tuned: replay chosen cutoffs on the holdout.
                     _holdout_tuned_preds = _apply_thresholds(
@@ -965,6 +985,8 @@ class XGBoostSignalModel(MLBase):
                         probas=collected_probas,
                         bars_meta=collected_meta,
                         config=bt_cfg,
+                        max_threshold=_sweep_max_value,
+                        max_diff=_sweep_max_diff,
                     )
                     _holdout_used = False
                 # When tuned thresholds beat the argmax baseline, report
