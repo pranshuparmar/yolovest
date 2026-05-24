@@ -30,6 +30,48 @@ def _lib_version(module: str) -> str:
         return "unknown"
 
 
+def _purge_boundary(
+    bars_meta_raw: list[dict[str, Any]],
+    cut: int,
+    lookahead_bars: int,
+    min_keep: int,
+) -> int:
+    """Largest index ≤ `cut` a tuning model may train up to without its
+    label window peeking into the holdout that begins at `cut`.
+
+    A training sample at date d carries a label computed from ~lookahead
+    future bars; if that reaches the holdout's first date the label saw
+    holdout-period data → leakage into the tuning model. Walk back from
+    `cut` past any sample within the lookahead (converted to calendar
+    days) of the holdout start. Floored at `min_keep` so the tuning fit
+    is never starved. Returns `cut` unchanged when there's no lookahead
+    or dates are unusable.
+    """
+    if lookahead_bars <= 0 or not bars_meta_raw or cut <= 0:
+        return cut
+    from datetime import date as _date
+    from datetime import timedelta as _td
+
+    def _md(i: int) -> "_date | None":
+        try:
+            return _date.fromisoformat(str(bars_meta_raw[i].get("entry_date", ""))[:10])
+        except (ValueError, TypeError, IndexError, AttributeError):
+            return None
+
+    ho_start = _md(cut) if cut < len(bars_meta_raw) else None
+    if ho_start is None:
+        return cut
+    boundary = ho_start - _td(days=int(lookahead_bars * 7 / 5) + 2)
+    j = cut
+    while j > min_keep:
+        d = _md(j - 1)
+        if d is None or d < boundary:
+            break
+        j -= 1
+    return max(j, min_keep)
+
+
+
 # Label mapping for model output
 _LABEL_MAP = {0: "SELL", 1: "HOLD", 2: "BUY"}
 _LABEL_SELL = 0
@@ -785,7 +827,28 @@ class XGBoostSignalModel(MLBase):
             synthetic_gross_profit = 0.0
             synthetic_gross_loss = 0.0
 
+            # Threshold tuning + metrics use a final-scale chronological
+            # holdout (see the metrics block below) when there's enough
+            # data + bars_meta: a tuning model trained only on the early
+            # data scores a strict-future holdout, so its probabilities
+            # are at ~the deployed full-data model's scale. The per-fold
+            # OOF probabilities collected here come from models trained on
+            # less data — more overfit, more over-confident — so tuned
+            # thresholds came out unreachable at inference (every signal
+            # collapsed to HOLD). That path doesn't use collected_*, so
+            # skip the (expensive) K-fold loop when it applies.
+            _holdout_frac = 0.30
+            _min_each_side = 200
+            n_samples = len(X_arr)
+            use_final_holdout = (
+                bars_meta_raw is not None
+                and int(n_samples * (1.0 - _holdout_frac)) >= _min_each_side
+                and int(n_samples * _holdout_frac) >= 2 * _min_each_side
+            )
+
             for train_idx, test_idx in tscv.split(X_arr):
+                if use_final_holdout:
+                    break
                 # Purge: drop train samples whose label window overlaps
                 # the test fold. A train sample at date d has a label
                 # computed from bars up to ~d + lookahead trading days;
@@ -895,7 +958,7 @@ class XGBoostSignalModel(MLBase):
             )
             calibrator.fit(X_arr, y_arr)
 
-            if bars_meta_raw is not None and collected_preds:
+            if bars_meta_raw is not None and (use_final_holdout or collected_preds):
                 # Real-PnL backtest path
                 bt_cfg = BacktestConfig(
                     product=backtest_product,
@@ -920,75 +983,116 @@ class XGBoostSignalModel(MLBase):
                     if _risk_cfg is not None else None
                 )
 
-                # Chronological tuning / reporting split. The CV-test
-                # predictions accumulated above are in chronological
-                # order across folds, so the last `holdout_frac` slice
-                # is a strict future of the tuning slice. We pick
-                # thresholds on the tuning slice and report metrics on
-                # the holdout slice — without this, sweep_thresholds
-                # picks the (buy, sell) cell that maximises Sharpe on
-                # the exact same predictions we then report, which is
-                # in-sample optimisation and inflates the headline
-                # numbers dramatically (the user saw argmax→tuned go
-                # from 17.69 → 28.96 on intraday and 6.01 → 17.00 on
-                # swing, almost entirely from this).
-                _holdout_frac = 0.30
-                _split = int(len(collected_preds) * (1.0 - _holdout_frac))
-                # Tiny corpora can't support a holdout — fall back to
-                # the legacy in-sample path when we don't have at least
-                # enough samples on each side for the sweep's
-                # min_trades floor to fire honestly.
-                _min_each_side = 200
-                _can_split = (
-                    _split >= _min_each_side
-                    and (len(collected_preds) - _split) >= _min_each_side
-                )
-
-                if _can_split:
-                    # Tune on the chronological first slice; report on
-                    # the strict-future holdout slice for both baseline
-                    # and tuned, so the two numbers are apples-to-apples.
+                if use_final_holdout:
+                    # Final-scale holdout. Train a tuning model on the
+                    # chronological early data only, score the strict-
+                    # future holdout with it (out-of-sample, at ~the
+                    # deployed full-data model's probability scale), then
+                    # tune thresholds on the FIRST half of that holdout
+                    # and report metrics on the SECOND half (keeps the
+                    # threshold choice out of the reported slice). A purge
+                    # gap before the holdout stops the tuning model's
+                    # labels peeking into it. This is what makes the tuned
+                    # thresholds reachable at inference — the per-fold OOF
+                    # probabilities are from over-confident sub-models and
+                    # don't transfer to the deployed model.
+                    _cut = int(n_samples * (1.0 - _holdout_frac))
+                    _purge_cut = _purge_boundary(
+                        bars_meta_raw, _cut, lookahead_bars, _min_each_side,
+                    )
+                    _tw = weights_arr[:_purge_cut] if weights_arr is not None else None
+                    _tuning_model = xgb.XGBClassifier(**xgb_params)
+                    _tuning_model.fit(
+                        X_arr[:_purge_cut], y_arr[:_purge_cut],
+                        sample_weight=_tw, verbose=False,
+                    )
+                    _ho_proba = _tuning_model.predict_proba(X_arr[_cut:])
+                    del _tuning_model
+                    _gc.collect()
+                    _ho_probas = [[float(p) for p in row] for row in _ho_proba]
+                    _ho_preds = [int(row.argmax()) for row in _ho_proba]
+                    _ho_meta = [
+                        BarMeta(
+                            symbol=str(m.get("symbol", "")),
+                            entry_close=float(m.get("entry_close") or 0.0),
+                            exit_close=float(m.get("exit_close") or 0.0),
+                            path_highs=list(m.get("path_highs") or []),
+                            path_lows=list(m.get("path_lows") or []),
+                            target_pct=float(m.get("target_pct") or 0.0),
+                            sl_pct=float(m.get("sl_pct") or 0.0),
+                            entry_date=str(m.get("entry_date") or ""),
+                        )
+                        for m in bars_meta_raw[_cut:]
+                    ]
+                    _sub = len(_ho_probas) // 2
                     tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
-                        probas=collected_probas[:_split],
-                        bars_meta=collected_meta[:_split],
+                        probas=_ho_probas[:_sub],
+                        bars_meta=_ho_meta[:_sub],
                         config=bt_cfg,
                         max_threshold=_sweep_max_value,
                         max_diff=_sweep_max_diff,
                     )
-                    # Tuned: replay chosen cutoffs on the holdout.
-                    _holdout_tuned_preds = _apply_thresholds(
-                        collected_probas[_split:], tuned_buy, tuned_sell,
+                    _ht_preds = _apply_thresholds(
+                        _ho_probas[_sub:], tuned_buy, tuned_sell,
                     )
                     tuned_bt = run_walk_forward_backtest(
-                        preds=_holdout_tuned_preds,
-                        bars_meta=collected_meta[_split:],
+                        preds=_ht_preds,
+                        bars_meta=_ho_meta[_sub:],
                         config=bt_cfg,
                     )
-                    # Argmax baseline on the same holdout slice.
                     bt = run_walk_forward_backtest(
-                        preds=collected_preds[_split:],
-                        bars_meta=collected_meta[_split:],
+                        preds=_ho_preds[_sub:],
+                        bars_meta=_ho_meta[_sub:],
                         config=bt_cfg,
                     )
                     _holdout_used = True
                 else:
-                    # Not enough samples to split — fall back to legacy
-                    # in-sample tuning so tests / small corpora still
-                    # produce a number. The metrics dict flags this so
-                    # it's visible on the dashboard.
-                    bt = run_walk_forward_backtest(
-                        preds=collected_preds,
-                        bars_meta=collected_meta,
-                        config=bt_cfg,
+                    # Small bars_meta corpus (not enough for the holdout):
+                    # fall back to the K-fold OOF collection. Tune on the
+                    # chronological first slice, report on the strict-
+                    # future slice; if too small to split, tune in-sample
+                    # (flagged via threshold_holdout_used).
+                    _split = int(len(collected_preds) * (1.0 - _holdout_frac))
+                    _can_split = (
+                        _split >= _min_each_side
+                        and (len(collected_preds) - _split) >= _min_each_side
                     )
-                    tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
-                        probas=collected_probas,
-                        bars_meta=collected_meta,
-                        config=bt_cfg,
-                        max_threshold=_sweep_max_value,
-                        max_diff=_sweep_max_diff,
-                    )
-                    _holdout_used = False
+                    if _can_split:
+                        tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
+                            probas=collected_probas[:_split],
+                            bars_meta=collected_meta[:_split],
+                            config=bt_cfg,
+                            max_threshold=_sweep_max_value,
+                            max_diff=_sweep_max_diff,
+                        )
+                        _holdout_tuned_preds = _apply_thresholds(
+                            collected_probas[_split:], tuned_buy, tuned_sell,
+                        )
+                        tuned_bt = run_walk_forward_backtest(
+                            preds=_holdout_tuned_preds,
+                            bars_meta=collected_meta[_split:],
+                            config=bt_cfg,
+                        )
+                        bt = run_walk_forward_backtest(
+                            preds=collected_preds[_split:],
+                            bars_meta=collected_meta[_split:],
+                            config=bt_cfg,
+                        )
+                        _holdout_used = True
+                    else:
+                        bt = run_walk_forward_backtest(
+                            preds=collected_preds,
+                            bars_meta=collected_meta,
+                            config=bt_cfg,
+                        )
+                        tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
+                            probas=collected_probas,
+                            bars_meta=collected_meta,
+                            config=bt_cfg,
+                            max_threshold=_sweep_max_value,
+                            max_diff=_sweep_max_diff,
+                        )
+                        _holdout_used = False
                 # When tuned thresholds beat the argmax baseline, report
                 # the tuned metrics as the headline numbers — that's what
                 # live trading will actually see. Keep the argmax sharpe

@@ -234,6 +234,62 @@ class TestTrainingGuard:
             await sm.train("intraday", X, y, {})
 
 
+class TestFinalScaleHoldout:
+    """Large bars_meta corpora tune thresholds on a final-scale holdout
+    (a tuning model scored on a strict-future slice), not the per-fold
+    OOF probabilities — so tuned thresholds are reachable at inference."""
+
+    @staticmethod
+    def _dataset(n=1600, n_feat=8):
+        import random
+        from datetime import date, timedelta
+        random.seed(7)
+        base = date(2022, 1, 1)
+        X, y, meta = [], [], []  # noqa: N806
+        for i in range(n):
+            feats = [random.gauss(0, 1) for _ in range(n_feat)]
+            s = feats[0]
+            label = 2 if s > 0.4 else 0 if s < -0.4 else 1
+            X.append(feats)
+            y.append(label)
+            entry = 100.0
+            exit_close = entry * (1.02 if label == 2 else 0.98 if label == 0 else 1.0)
+            meta.append({
+                "symbol": f"S{i % 30}",
+                "entry_close": entry,
+                "exit_close": exit_close,
+                "path_highs": [entry * 1.03],
+                "path_lows": [entry * 0.97],
+                "target_pct": 0.02,
+                "sl_pct": 0.01,
+                "entry_date": (base + timedelta(days=i)).isoformat(),
+            })
+        return X, y, meta
+
+    async def test_holdout_path_thresholds_respect_cap(self, tmp_path):
+        from types import SimpleNamespace
+        cfg = SimpleNamespace(risk=SimpleNamespace(
+            tuned_threshold_max_value=0.60,
+            tuned_threshold_max_diff=0.05,
+            buy_threshold_override=None,
+            sell_threshold_override=None,
+        ))
+        sm = XGBoostSignalModel(model_dir=str(tmp_path), config=cfg)
+        X, y, meta = self._dataset()  # noqa: N806
+        metrics = await sm.train("intraday", X, y, {
+            "n_estimators": 25, "max_depth": 3,
+            "bars_meta": meta, "lookahead_bars": 1,
+        })
+        # The final-scale holdout path ran (not the small-corpus OOF path).
+        assert metrics["threshold_holdout_used"] is True
+        assert metrics["backtest_source"].startswith("walk_forward")
+        # Tuned thresholds stay within the production-reachable ceiling.
+        assert 0.0 <= metrics["tuned_buy_threshold"] <= 0.60 + 1e-9
+        assert 0.0 <= metrics["tuned_sell_threshold"] <= 0.60 + 1e-9
+        # Robust decision metric present.
+        assert "sharpe_lower" in metrics
+
+
 # ---------------------------------------------------------------------------
 # Backtester — Sharpe ratio
 # ---------------------------------------------------------------------------
