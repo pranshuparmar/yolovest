@@ -495,6 +495,7 @@ def sweep_thresholds(
     grid: tuple[float, ...] = _DEFAULT_THRESHOLD_GRID,
     min_trades: int = 100,
     min_class_share: float = 0.10,
+    min_signal_rate: float = 0.0,
     bootstrap_iterations: int = 200,
     bootstrap_percentile: float = 25.0,
     max_threshold: float | None = None,
@@ -591,19 +592,27 @@ def sweep_thresholds(
             result = run_walk_forward_backtest(preds, bars_meta, cfg)
             if result.total_trades < min_trades:
                 continue
+            buy_count = sum(1 for p in preds if p == _LABEL_BUY)
+            sell_count = sum(1 for p in preds if p == _LABEL_SELL)
+            total_nh = buy_count + sell_count
+            # Signal-RATE floor (fraction of samples that produce a
+            # signal), not just an absolute trade count. On a large
+            # holdout `min_trades=100` is a trivial 0.2% rate, so the sweep
+            # can still park at an ultra-selective ceiling cell that fires
+            # ~never live. Computed from non-HOLD predictions (not executed
+            # trades, which the concurrent-position cap throttles).
+            if (min_signal_rate > 0.0 and probas
+                    and (total_nh / len(probas)) < min_signal_rate):
+                continue
             # Class-collapse floor. Reject cells where one side
             # produces less than `min_class_share` of total trades
             # — those translate to "0 BUY signals in 7 days" in
             # production even when Sharpe looks great on the holdout.
-            if min_class_share > 0.0:
-                buy_count = sum(1 for p in preds if p == _LABEL_BUY)
-                sell_count = sum(1 for p in preds if p == _LABEL_SELL)
-                total_nh = buy_count + sell_count
-                if total_nh > 0:
-                    buy_share = buy_count / total_nh
-                    sell_share = sell_count / total_nh
-                    if buy_share < min_class_share or sell_share < min_class_share:
-                        continue
+            if min_class_share > 0.0 and total_nh > 0:
+                buy_share = buy_count / total_nh
+                sell_share = sell_count / total_nh
+                if buy_share < min_class_share or sell_share < min_class_share:
+                    continue
 
             # Robust ranking: bootstrap the SAME series result.sharpe is
             # computed from (daily-aggregated when available, else

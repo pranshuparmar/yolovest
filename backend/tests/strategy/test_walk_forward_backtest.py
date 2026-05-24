@@ -218,6 +218,36 @@ class TestSweepThresholds:
         assert buy_t > 0.55
         assert result.win_rate >= 0.99
 
+    def test_min_signal_rate_rejects_ultra_selective_cell(self):
+        # 8 ultra-high-conviction winners (P(BUY)=0.90) + 92 moderate
+        # mixed-outcome signals (P(BUY)=0.58). A cell at buy_t in
+        # (0.58, 0.90] fires on only the 8 winners — 8% signal rate, best
+        # Sharpe (pure winners). Without a signal-rate floor the sweep
+        # picks it: a cutoff that fires ~never live. With the floor it must
+        # pick a reachable cell that fires on the moderate mass (P=0.58),
+        # i.e. a threshold <= 0.58. This is the silent-model fix.
+        hi = [BarMeta("HI", 100.0, 100.0 + (i % 3 + 2)) for i in range(8)]  # +2..+4%
+        mod_win = [BarMeta("MW", 100.0, 102.0) for _ in range(46)]
+        mod_lose = [BarMeta("ML", 100.0, 98.0) for _ in range(46)]
+        bars = hi + mod_win + mod_lose
+        probas = [[0.05, 0.05, 0.90]] * 8 + [[0.05, 0.37, 0.58]] * 92
+        cfg = BacktestConfig(initial_capital=100_000.0, entry_slippage_pct=0.0)
+
+        buy_no, _, _ = sweep_thresholds(
+            probas, bars, cfg, min_trades=3, min_class_share=0.0,
+            min_signal_rate=0.0,
+        )
+        buy_floor, _, _ = sweep_thresholds(
+            probas, bars, cfg, min_trades=3, min_class_share=0.0,
+            min_signal_rate=0.10,  # require >=10% of samples to signal
+        )
+        # No floor → can lock onto the ultra-selective 8% cell (buy_t > 0.58).
+        assert buy_no > 0.58
+        # With the floor → forced down to a reachable cell firing on the
+        # moderate mass (P=0.58), so buy_t <= 0.58.
+        assert buy_floor <= 0.58 + 1e-9
+        assert buy_floor < buy_no
+
     def test_bounds_restrict_sweep_to_reachable_thresholds(self):
         # 40 high-conviction winners (P(BUY)=0.80, +5%) and 40 losers
         # whose conviction sits ABOVE the 0.60 ceiling (P(BUY)=0.68, -5%).

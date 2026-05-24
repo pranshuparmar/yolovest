@@ -723,6 +723,16 @@ class RiskConfig(BaseModel):
     # below `min_confidence_buy` / `min_confidence_sell` doesn't add
     # value since those floors still apply downstream.
     tuned_threshold_max_value: float = Field(default=0.60, ge=0.5, le=1.0)
+    # Minimum fraction of holdout samples a tuned-threshold cell must
+    # signal on (BUY or SELL) to be eligible. The threshold sweep ranks by
+    # Sharpe, and max selectivity tends to maximise Sharpe — so without a
+    # signal-RATE floor the tuner parks at the most selective (highest)
+    # cell, which fires ~never on the live feed and collapses every signal
+    # to HOLD (the silent-model failure). The pre-existing `min_trades`
+    # floor is absolute (100), a trivial 0.2% rate on a large holdout, so
+    # it doesn't catch this. 0.02 = "the chosen cutoff must produce a
+    # signal on at least 2% of samples". Set 0.0 to disable.
+    tuned_min_signal_rate: float = Field(default=0.02, ge=0.0, le=1.0)
     # Hard overrides on the model's tuned probability thresholds.
     # When set, these REPLACE the saved tuned values entirely (the
     # diff cap above no longer applies). Use when the model's saved

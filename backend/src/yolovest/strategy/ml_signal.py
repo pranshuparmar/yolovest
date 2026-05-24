@@ -982,6 +982,12 @@ class XGBoostSignalModel(MLBase):
                     float(getattr(_risk_cfg, "tuned_threshold_max_diff", 0.05))
                     if _risk_cfg is not None else None
                 )
+                # Signal-rate floor so the sweep can't pick an unreachable
+                # ceiling cell that fires ~never live (the silent-model bug).
+                _sweep_min_signal_rate = (
+                    float(getattr(_risk_cfg, "tuned_min_signal_rate", 0.0))
+                    if _risk_cfg is not None else 0.0
+                )
 
                 if use_final_holdout:
                     # Final-scale holdout. Train a tuning model on the
@@ -1031,6 +1037,7 @@ class XGBoostSignalModel(MLBase):
                         config=bt_cfg,
                         max_threshold=_sweep_max_value,
                         max_diff=_sweep_max_diff,
+                        min_signal_rate=_sweep_min_signal_rate,
                     )
                     _ht_preds = _apply_thresholds(
                         _ho_probas[_sub:], tuned_buy, tuned_sell,
@@ -1064,6 +1071,7 @@ class XGBoostSignalModel(MLBase):
                             config=bt_cfg,
                             max_threshold=_sweep_max_value,
                             max_diff=_sweep_max_diff,
+                            min_signal_rate=_sweep_min_signal_rate,
                         )
                         _holdout_tuned_preds = _apply_thresholds(
                             collected_probas[_split:], tuned_buy, tuned_sell,
@@ -1091,6 +1099,7 @@ class XGBoostSignalModel(MLBase):
                             config=bt_cfg,
                             max_threshold=_sweep_max_value,
                             max_diff=_sweep_max_diff,
+                            min_signal_rate=_sweep_min_signal_rate,
                         )
                         _holdout_used = False
                 # When tuned thresholds beat the argmax baseline, report
