@@ -335,7 +335,10 @@ class DepthGateConfig(BaseModel):
 
     Imbalance = (total_buy_qty - total_sell_qty) / (total_buy_qty +
     total_sell_qty). Ranges -1 (all sell pressure) to +1 (all buy
-    pressure). Rejects when the book strongly opposes the signal.
+    pressure). Instead of hard-blocking, unfavourable books reduce
+    position size down to min_size_multiplier (default 40% of normal).
+    Size scales linearly: neutral book → 1.0×, worst possible book →
+    min_size_multiplier×.
 
     Requires market_data.kite_data_enabled — only the paid feed exposes
     total_buy_quantity / total_sell_quantity. Off by default; enable
@@ -346,6 +349,7 @@ class DepthGateConfig(BaseModel):
     enabled: bool = False
     min_imbalance_for_buy: float = Field(default=-0.30, ge=-1.0, le=0.0)
     max_imbalance_for_sell: float = Field(default=0.30, ge=0.0, le=1.0)
+    min_size_multiplier: float = Field(default=0.4, ge=0.1, le=1.0)
 
 
 class LiquidityGateConfig(BaseModel):
@@ -487,6 +491,18 @@ class ReentryConfig(BaseModel):
     min_price_move_pct: float = Field(default=0.02, ge=0, le=0.10)  # price must move 2% from exit
     max_reentries_per_symbol: int = Field(default=1, ge=1, le=3)  # max re-entries per symbol per day
     require_higher_confidence: bool = True  # new signal must have higher confidence than original
+    # Tolerance applied when require_higher_confidence is True. The
+    # original strict "new >= old" rule rejected legitimate re-entries
+    # because ML confidence typically decays as a trend matures — a
+    # breakout that scored 0.85 will score lower (e.g. 0.70) on the
+    # pullback re-entry even when the setup is just as valid. With
+    # tolerance 0.85, we accept new_conf >= orig_conf × 0.85.
+    confidence_tolerance: float = Field(default=0.85, ge=0.5, le=1.0)
+    # Absolute floor — re-entries below this confidence are rejected
+    # regardless of how the original compared. Belt-and-braces with
+    # confidence_tolerance: tolerance keeps quality high relative to
+    # the originating signal; floor keeps it high in absolute terms.
+    min_reentry_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
 
 
 class StrategyConfig(BaseModel):
@@ -498,6 +514,15 @@ class StrategyConfig(BaseModel):
     ema_periods: list[int] = Field(default_factory=lambda: [9, 21, 50, 200])
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     min_training_samples: int = 200
+    # Number of symbols generate-signals evaluates concurrently per
+    # chunk. Each evaluation does DB reads (OHLCV + news), an LTP fetch,
+    # feature computation, and the ML predict — the dominant cost is
+    # I/O, so a chunk size of ~10 lets ~10 reads overlap while the ML
+    # predicts are running for the previous batch. Higher numbers
+    # increase memory pressure and risk hitting Kite's REST rate limit
+    # for LTP fetches; lower numbers reverts to near-sequential. Set to
+    # 1 to disable concurrency entirely (for debugging).
+    signal_generation_concurrency: int = Field(default=10, ge=1, le=50)
     market_regime: MarketRegimeConfig = Field(default_factory=MarketRegimeConfig)
     # Apply inverse-frequency class weights at training time so a
     # rare class (e.g. BUY under path-aware 2:1 R/R labelling) isn't
@@ -532,6 +557,14 @@ class StrategyConfig(BaseModel):
 
 class RiskConfig(BaseModel):
     max_risk_per_trade_pct: float = Field(default=0.02, gt=0, lt=1)
+    # Ceiling on how far the chain of conviction / regime / institutional
+    # multipliers is allowed to push the per-trade RISK above
+    # max_risk_per_trade_pct. Default 1.5 means a 2% base risk can grow
+    # to 3% on a strongly-favourable stack but no higher — protects
+    # against multiplicative compounding (1.5 × 1.5 × 1.2 = 2.7× base)
+    # silently running 5%+ effective risk. Set to 1.0 to disable
+    # conviction up-sizing entirely; bumps above ~2.0 are not advised.
+    risk_uplift_cap: float = Field(default=1.5, ge=1.0, le=3.0)
     max_portfolio_exposure_pct: float = Field(default=0.60, gt=0, le=1)
     max_open_positions: int = Field(default=10, ge=1)
     max_single_stock_pct: float = Field(default=0.25, gt=0, le=1)
@@ -545,14 +578,20 @@ class RiskConfig(BaseModel):
     # binding, instead of just 2-3 at the looser single-stock cap.
     # Set equal to max_single_stock_pct to disable.
     max_pct_per_signal: float = Field(default=0.10, gt=0, le=1)
-    # Scale the per-signal allocation by ML confidence. At 1.0 (default
-    # off, equal to max_pct_per_signal), every passing signal gets the
-    # full slot. With confidence_scaling on, a signal at confidence =
-    # base_threshold gets `min_factor` of the cap and a signal at 0.95+
-    # gets 100% — so a 0.95-conviction setup occupies twice the room
-    # of a 0.75-just-cleared-threshold one. Keeps high-conviction
-    # trades from being throttled by the same cap as marginal ones.
-    confidence_scaled_sizing_enabled: bool = True
+    # DEPRECATED in favour of `conviction_sizing` (below). Both knobs
+    # scale position size by ML confidence — keeping them both on
+    # double-modulates the same input with overlapping ranges, making
+    # "why is my size this number?" hard to audit. conviction_sizing is
+    # the canonical path because it scales position_size bidirectionally
+    # (can shrink OR expand), while confidence_scaled_sizing only acts
+    # as a one-sided pacing cap that clips conviction's upscaling.
+    #
+    # Default flipped to False (was True). Existing deployments that
+    # explicitly persisted True keep working — change is opt-out via
+    # Settings if you want the legacy stacked behaviour. The cumulative
+    # size_multiplier audit log in risk-check shows the combined effect
+    # of every multiplier in either case.
+    confidence_scaled_sizing_enabled: bool = False
     confidence_scaled_min_factor: float = Field(default=0.5, gt=0, le=1)
     daily_loss_limit_pct: float = Field(default=0.03, gt=0, lt=1)
     weekly_loss_limit_pct: float = Field(default=0.05, gt=0, lt=1)
@@ -591,6 +630,30 @@ class RiskConfig(BaseModel):
     llm_fallback_to_rules: bool = True
     max_same_sector_positions: int = Field(default=1, ge=1)
     kill_switch_enabled: bool = True
+    # Auto-suspend signal generation when drift-watch detects a >15pp
+    # win-rate decay or signal-class collapse. Drift-watch runs at 16:30
+    # IST daily; when this is on, the suspension flag blocks the next
+    # session's generate-signals from running until either (a) a manual
+    # retrain via /run model-retrain clears the flag, or (b) the user
+    # clears it via the dashboard / API. Off by default — opt-in safety
+    # net for users running unattended (drift-watch alerts are still
+    # delivered via Telegram regardless).
+    drift_auto_suspend_enabled: bool = False
+    # Block new entries in symbols with an earnings / board-meeting
+    # announcement scheduled within `earnings_blackout_days` calendar
+    # days. Earnings reactions routinely move stocks ±5-20% overnight,
+    # blowing through any ATR-based SL. The data comes from the
+    # `economic_events` table populated by ingest-data's NSE corp-
+    # actions scraper. 0 disables the gate.
+    earnings_blackout_days: int = Field(default=0, ge=0, le=10)
+    # Portfolio-level beta cap (vs NIFTY proxy = INDIA VIX / cross-
+    # sectional regime index). 0 disables. When > 0, risk-check
+    # computes the position-weighted beta of currently-open + this
+    # candidate signal and rejects if it'd push the portfolio over
+    # the cap. Use to prevent "every position is a high-beta tech name"
+    # correlated-drawdown scenarios. 1.5 is the standard "diversified"
+    # ceiling; 2.0 lets you concentrate further.
+    max_portfolio_beta: float = Field(default=0.0, ge=0.0, le=5.0)
     min_confidence_buy: float = Field(default=0.60, ge=0, le=1)
     min_confidence_sell: float = Field(default=0.75, ge=0, le=1)
     # Per-strategy-mode floors. Intraday and swing have very different
@@ -608,6 +671,15 @@ class RiskConfig(BaseModel):
     min_confidence_sell_swing: float | None = Field(default=None, ge=0, le=1)
     skip_sell_on_holdings: bool = True  # position-monitor handles exits; no SELL on held symbols
     max_trades_per_day: int = Field(default=5, ge=1)
+    # Per-product caps on top of max_trades_per_day. Both default to
+    # None (disabled — only the combined cap applies). Set independently
+    # to allow asymmetric policies: e.g. 10 MIS entries per day for an
+    # active intraday workflow but only 1 CNC entry per day for slow,
+    # deliberate delivery positions. The combined max_trades_per_day
+    # still acts as an overall backstop; raise it if the sum of the
+    # per-product caps exceeds the current combined value.
+    max_mis_trades_per_day: int | None = Field(default=None, ge=1)
+    max_cnc_trades_per_day: int | None = Field(default=None, ge=1)
     loss_cooldown_minutes: int = Field(default=15, ge=0)
     # Risk-rejected signals get re-evaluated each heartbeat (most
     # reasons — exposure, drift, depth, correlation, cooldown — are
@@ -637,6 +709,20 @@ class RiskConfig(BaseModel):
     # large number (e.g. 1.0) to disable; set to 0.0 to force exactly
     # symmetric thresholds.
     tuned_threshold_max_diff: float = Field(default=0.05, ge=0, le=1.0)
+    # Absolute ceiling on the tuned BUY / SELL probability thresholds.
+    # The diff cap above only addresses asymmetry — it can't help when
+    # the sweep saved (0.70, 0.70) and the calibrated probabilities
+    # rarely cross 0.60. That's the second class-collapse mode: both
+    # tuned thresholds are reachable in the holdout slice but
+    # unreachable on the live feed (because the holdout had a few
+    # high-conviction setups dominating Sharpe, while live trading
+    # mostly sees moderate-conviction signals). Capping at this value
+    # keeps the sweep's directional preference intact while guaranteeing
+    # the gate stays reachable. 0.60 = "any tuned threshold above 0.60
+    # gets pulled down to 0.60". Set to 1.0 to disable. Setting this
+    # below `min_confidence_buy` / `min_confidence_sell` doesn't add
+    # value since those floors still apply downstream.
+    tuned_threshold_max_value: float = Field(default=0.60, ge=0.5, le=1.0)
     # Hard overrides on the model's tuned probability thresholds.
     # When set, these REPLACE the saved tuned values entirely (the
     # diff cap above no longer applies). Use when the model's saved
@@ -791,7 +877,20 @@ class TransactionCostConfig(BaseModel):
 
 
 class RetentionConfig(BaseModel):
+    # DAILY OHLCV retention. The nightly maintenance floors the actual
+    # prune window at max(retraining.max_training_days,
+    # market_data.backfill_days), so a value below that is harmless —
+    # training history (and exited/delisted symbols) is preserved
+    # regardless. Set it >= that window to make the intent explicit.
     ohlcv_days: int = 730
+    # INTRADAY OHLCV (5-minute etc.) retention — decoupled from daily.
+    # Intraday bars are ~75× heavier per day than daily and are NOT
+    # used for model training (the model trains on daily bars); they're
+    # only consumed operationally (volume-exhaustion exits, live
+    # monitoring). Keeping years of 5-min bars just bloats the DB, so
+    # this defaults to the intraday backfill window (365d) rather than
+    # inheriting the much longer daily retention.
+    intraday_ohlcv_days: int = 365
     audit_log_days: int = 365
     predictions_days: int = 365
     news_days: int = 90

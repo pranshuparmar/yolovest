@@ -162,15 +162,26 @@ class TestEconomicEventsDB:
     """Test DB methods for economic events via the real Database class."""
 
     async def test_upsert_and_query_economic_events(self, tmp_path):
+        from datetime import date, timedelta
+
         from yolovest.data.db import Database
 
         db = Database(str(tmp_path / "test.db"))
         await db.initialize()
 
+        # Anchor event dates to the future relative to today so the
+        # get_upcoming_economic_events(days=60) window actually
+        # contains them — hardcoded 2026-03/04 dates fall out of the
+        # window as the wall clock advances.
+        today = date.today()
+        d1 = (today + timedelta(days=10)).isoformat()
+        d2 = (today + timedelta(days=20)).isoformat()
+        d3 = (today + timedelta(days=30)).isoformat()
+
         try:
             events = [
                 {
-                    "event_date": "2026-03-25",
+                    "event_date": d1,
                     "event_type": "monetary_policy",
                     "title": "US Fed FOMC Meeting",
                     "country": "US",
@@ -179,7 +190,7 @@ class TestEconomicEventsDB:
                     "content_hash": "abc123",
                 },
                 {
-                    "event_date": "2026-04-07",
+                    "event_date": d2,
                     "event_type": "monetary_policy",
                     "title": "RBI MPC Meeting",
                     "country": "IN",
@@ -188,7 +199,7 @@ class TestEconomicEventsDB:
                     "content_hash": "def456",
                 },
                 {
-                    "event_date": "2026-04-15",
+                    "event_date": d3,
                     "event_type": "earnings",
                     "title": "TCS Board Meeting",
                     "country": "IN",

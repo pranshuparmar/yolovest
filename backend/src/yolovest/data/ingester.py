@@ -78,6 +78,7 @@ class MarketDataIngester(MarketDataBase):
         providers = available
         last_error: Exception | None = None
         best_stale_bars: list[OHLCVBar] | None = None
+        best_stale_source: str | None = None
         provider_errors = 0
         providers_empty = 0
 
@@ -93,11 +94,13 @@ class MarketDataIngester(MarketDataBase):
                     )
                     continue
                 if skip_stale_check or not self._is_stale(bars, interval):
-                    # Track provider health for quarantine decisions
+                    # Track provider health for quarantine decisions + the
+                    # winning provider so callers can stamp ohlcv.source.
                     self._last_fetch_meta[symbol] = {
                         "provider_errors": provider_errors,
                         "providers_empty": providers_empty,
                         "all_providers_tried": False,
+                        "source": provider.source_name,
                     }
                     return bars
                 # Stale but valid — keep as fallback
@@ -108,6 +111,7 @@ class MarketDataIngester(MarketDataBase):
                 )
                 if best_stale_bars is None or len(bars) > len(best_stale_bars):
                     best_stale_bars = bars
+                    best_stale_source = provider.source_name
                 last_error = ValueError(f"Stale data from {type(provider).__name__}")
                 continue
             except Exception as e:
@@ -119,11 +123,13 @@ class MarketDataIngester(MarketDataBase):
                 last_error = e
                 continue
 
-        # All providers tried — record metadata
+        # All providers tried — record metadata. `source` is the provider
+        # behind best_stale_bars (None if nothing was returned at all).
         self._last_fetch_meta[symbol] = {
             "provider_errors": provider_errors,
             "providers_empty": providers_empty,
             "all_providers_tried": True,
+            "source": best_stale_source,
         }
 
         # If all providers returned stale data, return the best one anyway

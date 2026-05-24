@@ -27,6 +27,41 @@ def fake_bars():
     ]
 
 
+class TestSourceProvenance:
+    """ohlcv.source must record the actual provider that produced the
+    bars (kite/jugaad/...) so data provenance is auditable, not a static
+    skill label."""
+
+    async def test_records_winning_provider(self, backfill_skill, fake_bars):
+        ctx = backfill_skill.ctx
+        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "RELIANCE"}])
+        ctx.db.get_user_watchlist = AsyncMock(return_value=[])
+        ctx.config.strategy.market_regime.enabled = False
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+        ctx.market_data.get_fetch_meta = lambda sym: {"source": "kite"}
+
+        await backfill_skill.execute()
+
+        srcs = [c.args[3] for c in ctx.db.upsert_ohlcv.call_args_list]
+        assert srcs and all(s == "kite" for s in srcs)
+
+    async def test_falls_back_to_skill_label_without_meta(self, backfill_skill, fake_bars):
+        ctx = backfill_skill.ctx
+        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "RELIANCE"}])
+        ctx.db.get_user_watchlist = AsyncMock(return_value=[])
+        ctx.config.strategy.market_regime.enabled = False
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+        # Meta carries no usable source -> default skill label.
+        ctx.market_data.get_fetch_meta = lambda sym: {}
+
+        await backfill_skill.execute()
+
+        srcs = [c.args[3] for c in ctx.db.upsert_ohlcv.call_args_list]
+        assert srcs and all(s == "backfill" for s in srcs)
+
+
 class TestBackfillDefaults:
     """The skill must default to *tracked* symbols, not seed_symbols."""
 

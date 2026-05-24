@@ -525,12 +525,44 @@ async def async_main(args: argparse.Namespace) -> None:
         config.execution.transaction_mode,
     )
 
+    # Config sanity: OHLCV retention shorter than the training window.
+    # The nightly database-maintenance now FLOORS the daily-OHLCV prune at
+    # max(max_training_days, backfill_days), so training history (and
+    # exited/delisted symbols) is never silently truncated. We still
+    # surface the mismatch as INFO so the user knows their configured
+    # `ohlcv_days` is being overridden upward in practice.
+    _ohlcv_retention = config.database.retention.ohlcv_days
+    _train_window = config.retraining.max_training_days
+    _backfill = config.market_data.backfill_days
+    _needed = max(_train_window, _backfill)
+    if _ohlcv_retention < _needed:
+        logger.info(
+            "OHLCV retention (%dd) is shorter than the training/backfill "
+            "window (%dd); the nightly maintenance will keep daily OHLCV for "
+            "%dd anyway so the model trains on full history. Set "
+            "database.retention.ohlcv_days >= %d to make this explicit.",
+            _ohlcv_retention, _needed, _needed, _needed,
+        )
+
     # Restore Zerodha session from persisted access token
     if isinstance(ctx.broker, ZerodhaBroker):
         restored = await ctx.broker.restore_session()
 
         # Sync Kite data provider with broker's access token
         _sync_kite_data_token(ctx)
+
+        # Warm the tick-size cache eagerly so signal_evaluator can
+        # snap target / SL to the per-symbol grid on the very first
+        # heartbeat. Without this the cache only warms on the first
+        # order placement, and signals generated before then would
+        # use the 0.05 fallback even for stocks with 0.01 tick.
+        # Safe to call before any trades exist (idempotent + skips
+        # when kite is unauthenticated).
+        if restored:
+            try:
+                await ctx.broker._ensure_tick_size_cache()
+            except Exception:
+                logger.debug("tick-size cache warmup failed (non-fatal)", exc_info=True)
 
         # KiteTicker WebSocket — gated behind a flag because it requires
         # the paid Kite data plan. When enabled, position-monitor reads

@@ -349,3 +349,168 @@ class TestDryRunDiagnostics:
         assert data["run_id"] == "abc123"
         assert data["deleted"] == 3
         dashboard_ctx.db.delete_dry_run.assert_called_once_with("abc123")
+
+
+class TestExportImport:
+    """Backup / model / config download + upload for cross-machine moves."""
+
+    def test_config_export_download(self, client, auth_headers):
+        resp = client.get("/api/config/export", headers=auth_headers)
+        assert resp.status_code == 200
+        assert "attachment" in resp.headers.get("content-disposition", "")
+        body = resp.json()
+        assert "config" in body and len(body["config"]) > 0
+        # File-only keys (secrets/paths) must be excluded
+        assert "database.path" not in body["config"]
+
+    def test_config_import_roundtrip(self, client, auth_headers, dashboard_ctx):
+        import io
+        import json as _json
+        dashboard_ctx.db.get_all_config = AsyncMock(return_value={})
+        dashboard_ctx.db.set_config_bulk = AsyncMock()
+        payload = _json.dumps({"config": {"risk.max_open_positions": 7}}).encode()
+        resp = client.post(
+            "/api/config/import", headers=auth_headers,
+            files={"file": ("cfg.json", io.BytesIO(payload), "application/json")},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["imported"] == 1
+        dashboard_ctx.db.set_config_bulk.assert_awaited_once()
+
+    def test_backup_upload_rejects_non_sqlite(self, client, auth_headers):
+        import io
+        resp = client.post(
+            "/api/backups/upload", headers=auth_headers,
+            files={"file": ("x.db", io.BytesIO(b"not a sqlite file"), "application/octet-stream")},
+        )
+        assert resp.status_code == 400
+
+    def test_backup_upload_accepts_sqlite(self, client, auth_headers, dashboard_ctx, tmp_path):
+        import io
+        dashboard_ctx.config.database.backup_dir = str(tmp_path)
+        dashboard_ctx.db.invalidate_storage_stats_cache = lambda: None
+        # Minimal valid SQLite header
+        data = b"SQLite format 3\x00" + b"\x00" * 100
+        resp = client.post(
+            "/api/backups/upload", headers=auth_headers,
+            files={"file": ("yolovest_x.db", io.BytesIO(data), "application/octet-stream")},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["filename"] == "yolovest_x.db"
+
+    def test_backup_download_missing_returns_404(self, client, auth_headers):
+        # A normal-but-nonexistent filename reaches the handler and 404s
+        # (proves the endpoint is wired and only serves real files, never
+        # an arbitrary path).
+        resp = client.get("/api/backups/yolovest_nope.db/download", headers=auth_headers)
+        assert resp.status_code == 404
+
+    def test_download_token_issued(self, client, auth_headers):
+        resp = client.get("/api/download-token", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json().get("token")
+
+    def test_download_with_query_token_authorizes(self, client, auth_headers):
+        # Native downloads can't send the Authorization header, so a valid
+        # ?token= must authorize on its own. A missing file then 404s
+        # (not 401) — proving the token auth passed without a header.
+        token = client.get("/api/download-token", headers=auth_headers).json()["token"]
+        resp = client.get(f"/api/backups/yolovest_nope.db/download?token={token}")
+        assert resp.status_code == 404
+
+    def test_download_with_bad_token_rejected(self, client):
+        resp = client.get("/api/backups/x.db/download?token=garbage.sig")
+        assert resp.status_code == 401
+
+    def test_download_without_auth_rejected(self, client):
+        resp = client.get("/api/backups/x.db/download")
+        assert resp.status_code == 401
+
+    def test_model_upload_rejects_non_pkl(self, client, auth_headers):
+        import io
+        resp = client.post(
+            "/api/ml-models/upload", headers=auth_headers,
+            files={"file": ("x.txt", io.BytesIO(b"nope"), "text/plain")},
+        )
+        assert resp.status_code == 400
+
+    def _write_artifact(self, version: str, schema_version, *, model_dir="models"):
+        """Dump a minimal model bundle to <model_dir>/<version>.pkl (relative
+        to cwd — pair with monkeypatch.chdir). schema_version=None omits the
+        key (simulates a pre-versioning legacy artifact)."""
+        import os
+        import joblib
+        os.makedirs(model_dir, exist_ok=True)
+        artifact = {"model": {}, "metrics": {"sharpe_ratio": 1.0},
+                    "feature_names": ["rsi_14", "macd_histogram_pct"]}
+        if schema_version is not None:
+            artifact["schema_version"] = schema_version
+        joblib.dump(artifact, os.path.join(model_dir, f"{version}.pkl"))
+
+    def test_model_import_matching_schema_succeeds(self, client, auth_headers, dashboard_ctx, tmp_path, monkeypatch):
+        from yolovest.data.features import MODEL_SCHEMA_VERSION
+        monkeypatch.chdir(tmp_path)
+        dashboard_ctx.db.save_model_version = AsyncMock()
+        self._write_artifact("swing_v1", MODEL_SCHEMA_VERSION)
+        resp = client.post(
+            "/api/ml-models/import", headers=auth_headers,
+            json={"model_type": "swing", "version": "swing_v1"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["imported"] is True
+        dashboard_ctx.db.save_model_version.assert_awaited_once()
+
+    def test_model_import_schema_mismatch_rejected(self, client, auth_headers, dashboard_ctx, tmp_path, monkeypatch):
+        from yolovest.data.features import MODEL_SCHEMA_VERSION
+        monkeypatch.chdir(tmp_path)
+        dashboard_ctx.db.save_model_version = AsyncMock()
+        self._write_artifact("swing_v2", MODEL_SCHEMA_VERSION + 1)
+        resp = client.post(
+            "/api/ml-models/import", headers=auth_headers,
+            json={"model_type": "swing", "version": "swing_v2"},
+        )
+        assert resp.status_code == 422, resp.text
+        assert "schema" in resp.json()["detail"].lower()
+        dashboard_ctx.db.save_model_version.assert_not_awaited()
+
+    def test_model_import_legacy_no_schema_rejected(self, client, auth_headers, dashboard_ctx, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        dashboard_ctx.db.save_model_version = AsyncMock()
+        self._write_artifact("swing_v3", None)
+        resp = client.post(
+            "/api/ml-models/import", headers=auth_headers,
+            json={"model_type": "swing", "version": "swing_v3"},
+        )
+        assert resp.status_code == 422, resp.text
+
+    def test_model_import_force_overrides_schema(self, client, auth_headers, dashboard_ctx, tmp_path, monkeypatch):
+        from yolovest.data.features import MODEL_SCHEMA_VERSION
+        monkeypatch.chdir(tmp_path)
+        dashboard_ctx.db.save_model_version = AsyncMock()
+        self._write_artifact("swing_v4", MODEL_SCHEMA_VERSION + 1)
+        resp = client.post(
+            "/api/ml-models/import", headers=auth_headers,
+            json={"model_type": "swing", "version": "swing_v4", "force": True},
+        )
+        assert resp.status_code == 200, resp.text
+        assert any("schema mismatch" in w.lower() for w in resp.json()["warnings"])
+
+    def test_model_upload_accepts_valid_bundle(self, client, auth_headers, tmp_path, monkeypatch):
+        # Exercises the joblib.load happy path (asyncio.to_thread) so a
+        # missing `import asyncio` can't silently NameError on the path
+        # the reject-tests never reach. _model_dir() falls back to
+        # "./models", so chdir into tmp keeps the write out of the repo.
+        import io
+        import joblib
+        monkeypatch.chdir(tmp_path)
+        buf = io.BytesIO()
+        joblib.dump({"model": {}, "metrics": {"sharpe_ratio": 1.5}}, buf)
+        buf.seek(0)
+        resp = client.post(
+            "/api/ml-models/upload", headers=auth_headers,
+            files={"file": ("swing_v2.pkl", buf, "application/octet-stream")},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["version"] == "swing_v2"
+        assert body["metrics"]["sharpe_ratio"] == 1.5

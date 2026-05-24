@@ -10,15 +10,67 @@ XGBoost and sklearn are lazily imported so tests can run without them.
 import asyncio
 import logging
 from datetime import UTC, datetime
-
-from yolovest.timezone import now_ist
 from pathlib import Path
 from typing import Any
 
 from yolovest.models.schemas import MLPrediction
 from yolovest.strategy.ml_base import MLBase
+from yolovest.timezone import now_ist
 
 logger = logging.getLogger(__name__)
+
+
+def _lib_version(module: str) -> str:
+    """Best-effort library version string for artifact compatibility
+    stamps. Returns 'unknown' if the package can't be queried."""
+    try:
+        from importlib.metadata import version
+        return version(module)
+    except Exception:
+        return "unknown"
+
+
+def _purge_boundary(
+    bars_meta_raw: list[dict[str, Any]],
+    cut: int,
+    lookahead_bars: int,
+    min_keep: int,
+) -> int:
+    """Largest index ≤ `cut` a tuning model may train up to without its
+    label window peeking into the holdout that begins at `cut`.
+
+    A training sample at date d carries a label computed from ~lookahead
+    future bars; if that reaches the holdout's first date the label saw
+    holdout-period data → leakage into the tuning model. Walk back from
+    `cut` past any sample within the lookahead (converted to calendar
+    days) of the holdout start. Floored at `min_keep` so the tuning fit
+    is never starved. Returns `cut` unchanged when there's no lookahead
+    or dates are unusable.
+    """
+    if lookahead_bars <= 0 or not bars_meta_raw or cut <= 0:
+        return cut
+    from datetime import date as _date
+    from datetime import timedelta as _td
+
+    def _md(i: int) -> "_date | None":
+        try:
+            return _date.fromisoformat(str(bars_meta_raw[i].get("entry_date", ""))[:10])
+        except (ValueError, TypeError, IndexError, AttributeError):
+            return None
+
+    ho_start = _md(cut) if cut < len(bars_meta_raw) else None
+    if ho_start is None:
+        return cut
+    boundary = ho_start - _td(days=int(lookahead_bars * 7 / 5) + 2)
+    j = cut
+    while j > min_keep:
+        d = _md(j - 1)
+        if d is None or d < boundary:
+            break
+        j -= 1
+    return max(j, min_keep)
+
+
 
 # Label mapping for model output
 _LABEL_MAP = {0: "SELL", 1: "HOLD", 2: "BUY"}
@@ -198,31 +250,50 @@ class XGBoostSignalModel(MLBase):
             )
             return {"buy": round(out_buy, 4), "sell": round(out_sell, 4)}
 
-        # No override — apply the symmetry cap.
+        # No override — apply the symmetry cap first.
         max_diff = float(
             getattr(risk_cfg, "tuned_threshold_max_diff", 0.05)
             if risk_cfg is not None else 0.05
         )
         diff = abs(buy - sell)
-        if diff <= max_diff:
-            return {"buy": buy, "sell": sell}
-        # Shrink both toward midpoint so the gap is exactly max_diff
-        # while preserving the direction the model learned (i.e. if
-        # tuned buy was higher, it stays higher).
-        midpoint = (buy + sell) / 2.0
-        half_gap = max_diff / 2.0
-        if buy > sell:
-            new_buy = midpoint + half_gap
-            new_sell = midpoint - half_gap
-        else:
-            new_buy = midpoint - half_gap
-            new_sell = midpoint + half_gap
-        logger.debug(
-            "Threshold-diff cap applied to %s: buy %.3f→%.3f, sell %.3f→%.3f "
-            "(max_diff=%.2f)",
-            model_type, buy, new_buy, sell, new_sell, max_diff,
+        if diff > max_diff:
+            # Shrink both toward midpoint so the gap is exactly
+            # max_diff while preserving the direction the model
+            # learned (i.e. if tuned buy was higher, it stays higher).
+            midpoint = (buy + sell) / 2.0
+            half_gap = max_diff / 2.0
+            if buy > sell:
+                new_buy = midpoint + half_gap
+                new_sell = midpoint - half_gap
+            else:
+                new_buy = midpoint - half_gap
+                new_sell = midpoint + half_gap
+            logger.debug(
+                "Threshold-diff cap applied to %s: buy %.3f→%.3f, "
+                "sell %.3f→%.3f (max_diff=%.2f)",
+                model_type, buy, new_buy, sell, new_sell, max_diff,
+            )
+            buy, sell = new_buy, new_sell
+
+        # Then the absolute-ceiling cap. Pulls thresholds above the
+        # configured ceiling back down so a sweep that landed on
+        # (0.70, 0.70) can't class-collapse the live model when the
+        # calibrated probabilities rarely reach that high.
+        max_value = float(
+            getattr(risk_cfg, "tuned_threshold_max_value", 0.60)
+            if risk_cfg is not None else 0.60
         )
-        return {"buy": round(new_buy, 4), "sell": round(new_sell, 4)}
+        if buy > max_value or sell > max_value:
+            new_buy = min(buy, max_value)
+            new_sell = min(sell, max_value)
+            logger.debug(
+                "Threshold-ceiling cap applied to %s: buy %.3f→%.3f, "
+                "sell %.3f→%.3f (max_value=%.2f)",
+                model_type, buy, new_buy, sell, new_sell, max_value,
+            )
+            buy, sell = new_buy, new_sell
+
+        return {"buy": round(buy, 4), "sell": round(sell, 4)}
 
     def _set_thresholds(
         self, model_type: str, thresholds: dict[str, float] | None,
@@ -459,16 +530,35 @@ class XGBoostSignalModel(MLBase):
 
             cal_label, cal_confidence, cal_probas = await asyncio.to_thread(_calibrate)
 
-            if cal_confidence > raw_confidence:
-                # Calibration improved confidence — use calibrated values
-                pred_label = cal_label
-                confidence = cal_confidence
-                chosen_probas = cal_probas
+            # Only adopt calibrated probabilities when the calibrator
+            # AGREES with the raw model on the argmax class. The
+            # CalibratedClassifierCV uses sigmoid Platt scaling that,
+            # on a HOLD-dominated label distribution (e.g. the swing
+            # model's ~73% HOLD), systematically compresses directional
+            # predictions back toward the HOLD prior — even when the
+            # class-weighted XGBoost has clear conviction. When raw
+            # says BUY/SELL but calibrator pulls it to HOLD, that's
+            # the over-correction kicking in; trust the trained model.
+            # When they agree on direction, use the higher-confidence
+            # version (calibration is doing its job refining the
+            # probability magnitude). The old "always use higher
+            # confidence" rule silently flipped most swing
+            # directional argmaxes into HOLD.
+            if cal_label == pred_label:
+                if cal_confidence > raw_confidence:
+                    confidence = cal_confidence
+                    chosen_probas = cal_probas
+                else:
+                    logger.debug(
+                        "Calibration compressed %s confidence from %.4f to %.4f, using raw",
+                        symbol, raw_confidence, cal_confidence,
+                    )
             else:
-                # Calibration compressed confidence — keep raw model output
                 logger.debug(
-                    "Calibration compressed %s confidence from %.4f to %.4f, using raw",
-                    symbol, raw_confidence, cal_confidence,
+                    "Calibrator disagrees with raw on %s: raw=%s@%.3f cal=%s@%.3f, keeping raw probas",
+                    symbol,
+                    _LABEL_MAP.get(pred_label, "?"), raw_confidence,
+                    _LABEL_MAP.get(cal_label, "?"), cal_confidence,
                 )
 
         # Apply tuned class thresholds when the model was trained with the
@@ -627,6 +717,10 @@ class XGBoostSignalModel(MLBase):
         bars_meta_raw = params.pop("bars_meta", None)
         backtest_product = params.pop("backtest_product", "MIS")
         backtest_max_positions = int(params.pop("backtest_max_positions", 0))
+        # Label lookahead in trading days — used to purge train samples
+        # whose label window overlaps the test fold (cross-sectional
+        # leakage). 0 disables purging.
+        lookahead_bars = int(params.pop("lookahead_bars", 0))
 
         import numpy as np
 
@@ -689,6 +783,14 @@ class XGBoostSignalModel(MLBase):
                 # Histogram tree method: bins continuous features into a
                 # fixed number of buckets, avoiding the full sorted matrix.
                 "tree_method": params.get("tree_method", "hist"),
+                # Pin to a single thread. Inference runs inside
+                # asyncio.to_thread, and signal generation predicts
+                # across hundreds of symbols concurrently — letting
+                # XGBoost default to "all cores per call" oversubscribes
+                # the box (8 cores × 8 concurrent predicts = 64 OS
+                # threads thrashing each other). Override via params
+                # if you're training offline and want full parallelism.
+                "n_jobs": params.get("n_jobs", 1),
             }
 
             # Train on full data first
@@ -700,8 +802,14 @@ class XGBoostSignalModel(MLBase):
             # the end so the metrics reflect actual costs / sizing /
             # slippage rather than the legacy +1%/-0.5% fiction.
             from yolovest.strategy.walk_forward_backtest import (
-                BacktestConfig, BarMeta, apply_thresholds as _apply_thresholds,
-                run_walk_forward_backtest, sweep_thresholds,
+                BacktestConfig,
+                BarMeta,
+                _bootstrap_sharpe_lower_bound,
+                run_walk_forward_backtest,
+                sweep_thresholds,
+            )
+            from yolovest.strategy.walk_forward_backtest import (
+                apply_thresholds as _apply_thresholds,
             )
 
             collected_preds: list[int] = []
@@ -719,7 +827,72 @@ class XGBoostSignalModel(MLBase):
             synthetic_gross_profit = 0.0
             synthetic_gross_loss = 0.0
 
+            # Threshold tuning + metrics use a final-scale chronological
+            # holdout (see the metrics block below) when there's enough
+            # data + bars_meta: a tuning model trained only on the early
+            # data scores a strict-future holdout, so its probabilities
+            # are at ~the deployed full-data model's scale. The per-fold
+            # OOF probabilities collected here come from models trained on
+            # less data — more overfit, more over-confident — so tuned
+            # thresholds came out unreachable at inference (every signal
+            # collapsed to HOLD). That path doesn't use collected_*, so
+            # skip the (expensive) K-fold loop when it applies.
+            _holdout_frac = 0.30
+            _min_each_side = 200
+            n_samples = len(X_arr)
+            use_final_holdout = (
+                bars_meta_raw is not None
+                and int(n_samples * (1.0 - _holdout_frac)) >= _min_each_side
+                and int(n_samples * _holdout_frac) >= 2 * _min_each_side
+            )
+
             for train_idx, test_idx in tscv.split(X_arr):
+                if use_final_holdout:
+                    break
+                # Purge: drop train samples whose label window overlaps
+                # the test fold. A train sample at date d has a label
+                # computed from bars up to ~d + lookahead trading days;
+                # if that reaches the test fold's date range the label
+                # peeked at test-period data → leakage. Samples are a
+                # cross-sectional panel (many symbols per day) so a
+                # fixed sample-count gap can't express a day-gap — we
+                # purge by date explicitly. Over-purge slightly
+                # (calendar-day conversion of trading days) rather than
+                # risk leaving any overlap.
+                if (
+                    lookahead_bars > 0
+                    and bars_meta_raw is not None
+                    and len(test_idx) > 0
+                ):
+                    from datetime import date as _date
+                    from datetime import timedelta as _td
+
+                    def _meta_date(i: int) -> "_date | None":
+                        raw = bars_meta_raw[int(i)].get("entry_date", "")
+                        try:
+                            return _date.fromisoformat(str(raw)[:10])
+                        except (ValueError, TypeError):
+                            return None
+
+                    test_dates = [d for d in (_meta_date(i) for i in test_idx) if d]
+                    if test_dates:
+                        test_min = min(test_dates)
+                        # trading days → calendar days (×7/5) + slack
+                        purge_calendar_days = int(lookahead_bars * 7 / 5) + 2
+                        cutoff = test_min - _td(days=purge_calendar_days)
+                        kept = [
+                            i for i in train_idx
+                            if (_meta_date(i) is None or _meta_date(i) < cutoff)
+                        ]
+                        purged = len(train_idx) - len(kept)
+                        if kept and purged > 0:
+                            train_idx = np.asarray(kept, dtype=train_idx.dtype)
+                            logger.debug(
+                                "CV purge: dropped %d train samples within "
+                                "%dd of test fold start %s",
+                                purged, purge_calendar_days, test_min,
+                            )
+
                 X_train, X_test = X_arr[train_idx], X_arr[test_idx]  # noqa: N806
                 y_train, y_test = y_arr[train_idx], y_arr[test_idx]
                 w_train = weights_arr[train_idx] if weights_arr is not None else None
@@ -772,92 +945,177 @@ class XGBoostSignalModel(MLBase):
             # Final model trained on all data (with sample weights if available)
             model.fit(X_arr, y_arr, sample_weight=weights_arr, verbose=False)
 
-            # Calibrate probabilities (Platt scaling)
+            # Calibrate probabilities (Platt scaling). cv MUST be a
+            # TimeSeriesSplit — passing an int makes sklearn default to
+            # StratifiedKFold, which shuffles. Shuffled CV leaks future
+            # data into past calibration on time-series, silently
+            # corrupting every downstream probability the system reads.
+            calibration_n_splits = min(3, len(y_arr) // 50 or 2)
             calibrator = CalibratedClassifierCV(
-                model, method="sigmoid", cv=min(3, len(y_arr) // 50 or 2)
+                model,
+                method="sigmoid",
+                cv=TimeSeriesSplit(n_splits=max(2, calibration_n_splits)),
             )
             calibrator.fit(X_arr, y_arr)
 
-            if bars_meta_raw is not None and collected_preds:
+            if bars_meta_raw is not None and (use_final_holdout or collected_preds):
                 # Real-PnL backtest path
                 bt_cfg = BacktestConfig(
                     product=backtest_product,
                     max_concurrent_positions=backtest_max_positions,
                 )
 
-                # Chronological tuning / reporting split. The CV-test
-                # predictions accumulated above are in chronological
-                # order across folds, so the last `holdout_frac` slice
-                # is a strict future of the tuning slice. We pick
-                # thresholds on the tuning slice and report metrics on
-                # the holdout slice — without this, sweep_thresholds
-                # picks the (buy, sell) cell that maximises Sharpe on
-                # the exact same predictions we then report, which is
-                # in-sample optimisation and inflates the headline
-                # numbers dramatically (the user saw argmax→tuned go
-                # from 17.69 → 28.96 on intraday and 6.01 → 17.00 on
-                # swing, almost entirely from this).
-                _holdout_frac = 0.30
-                _split = int(len(collected_preds) * (1.0 - _holdout_frac))
-                # Tiny corpora can't support a holdout — fall back to
-                # the legacy in-sample path when we don't have at least
-                # enough samples on each side for the sweep's
-                # min_trades floor to fire honestly.
-                _min_each_side = 200
-                _can_split = (
-                    _split >= _min_each_side
-                    and (len(collected_preds) - _split) >= _min_each_side
+                # Bound the sweep to the range production can actually
+                # trade. The inference layer (_get_effective_thresholds)
+                # clamps tuned thresholds to risk.tuned_threshold_max_value
+                # / _max_diff; without mirroring those caps here the sweep
+                # can pick a cell (e.g. 0.75/0.80) the live model clamps to
+                # 0.60/0.60, so the reported Sharpe/win-rate describe a
+                # model that never trades. Caps None when config is absent
+                # (tests) → unbounded, preserving prior behaviour.
+                _risk_cfg = getattr(self._config, "risk", None) if self._config else None
+                _sweep_max_value = (
+                    float(getattr(_risk_cfg, "tuned_threshold_max_value", 0.60))
+                    if _risk_cfg is not None else None
+                )
+                _sweep_max_diff = (
+                    float(getattr(_risk_cfg, "tuned_threshold_max_diff", 0.05))
+                    if _risk_cfg is not None else None
                 )
 
-                if _can_split:
-                    # Tune on the chronological first slice; report on
-                    # the strict-future holdout slice for both baseline
-                    # and tuned, so the two numbers are apples-to-apples.
-                    tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
-                        probas=collected_probas[:_split],
-                        bars_meta=collected_meta[:_split],
-                        config=bt_cfg,
+                if use_final_holdout:
+                    # Final-scale holdout. Train a tuning model on the
+                    # chronological early data only, score the strict-
+                    # future holdout with it (out-of-sample, at ~the
+                    # deployed full-data model's probability scale), then
+                    # tune thresholds on the FIRST half of that holdout
+                    # and report metrics on the SECOND half (keeps the
+                    # threshold choice out of the reported slice). A purge
+                    # gap before the holdout stops the tuning model's
+                    # labels peeking into it. This is what makes the tuned
+                    # thresholds reachable at inference — the per-fold OOF
+                    # probabilities are from over-confident sub-models and
+                    # don't transfer to the deployed model.
+                    _cut = int(n_samples * (1.0 - _holdout_frac))
+                    _purge_cut = _purge_boundary(
+                        bars_meta_raw, _cut, lookahead_bars, _min_each_side,
                     )
-                    # Tuned: replay chosen cutoffs on the holdout.
-                    _holdout_tuned_preds = _apply_thresholds(
-                        collected_probas[_split:], tuned_buy, tuned_sell,
+                    _tw = weights_arr[:_purge_cut] if weights_arr is not None else None
+                    _tuning_model = xgb.XGBClassifier(**xgb_params)
+                    _tuning_model.fit(
+                        X_arr[:_purge_cut], y_arr[:_purge_cut],
+                        sample_weight=_tw, verbose=False,
+                    )
+                    _ho_proba = _tuning_model.predict_proba(X_arr[_cut:])
+                    del _tuning_model
+                    _gc.collect()
+                    _ho_probas = [[float(p) for p in row] for row in _ho_proba]
+                    _ho_preds = [int(row.argmax()) for row in _ho_proba]
+                    _ho_meta = [
+                        BarMeta(
+                            symbol=str(m.get("symbol", "")),
+                            entry_close=float(m.get("entry_close") or 0.0),
+                            exit_close=float(m.get("exit_close") or 0.0),
+                            path_highs=list(m.get("path_highs") or []),
+                            path_lows=list(m.get("path_lows") or []),
+                            target_pct=float(m.get("target_pct") or 0.0),
+                            sl_pct=float(m.get("sl_pct") or 0.0),
+                            entry_date=str(m.get("entry_date") or ""),
+                        )
+                        for m in bars_meta_raw[_cut:]
+                    ]
+                    _sub = len(_ho_probas) // 2
+                    tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
+                        probas=_ho_probas[:_sub],
+                        bars_meta=_ho_meta[:_sub],
+                        config=bt_cfg,
+                        max_threshold=_sweep_max_value,
+                        max_diff=_sweep_max_diff,
+                    )
+                    _ht_preds = _apply_thresholds(
+                        _ho_probas[_sub:], tuned_buy, tuned_sell,
                     )
                     tuned_bt = run_walk_forward_backtest(
-                        preds=_holdout_tuned_preds,
-                        bars_meta=collected_meta[_split:],
+                        preds=_ht_preds,
+                        bars_meta=_ho_meta[_sub:],
                         config=bt_cfg,
                     )
-                    # Argmax baseline on the same holdout slice.
                     bt = run_walk_forward_backtest(
-                        preds=collected_preds[_split:],
-                        bars_meta=collected_meta[_split:],
+                        preds=_ho_preds[_sub:],
+                        bars_meta=_ho_meta[_sub:],
                         config=bt_cfg,
                     )
                     _holdout_used = True
                 else:
-                    # Not enough samples to split — fall back to legacy
-                    # in-sample tuning so tests / small corpora still
-                    # produce a number. The metrics dict flags this so
-                    # it's visible on the dashboard.
-                    bt = run_walk_forward_backtest(
-                        preds=collected_preds,
-                        bars_meta=collected_meta,
-                        config=bt_cfg,
+                    # Small bars_meta corpus (not enough for the holdout):
+                    # fall back to the K-fold OOF collection. Tune on the
+                    # chronological first slice, report on the strict-
+                    # future slice; if too small to split, tune in-sample
+                    # (flagged via threshold_holdout_used).
+                    _split = int(len(collected_preds) * (1.0 - _holdout_frac))
+                    _can_split = (
+                        _split >= _min_each_side
+                        and (len(collected_preds) - _split) >= _min_each_side
                     )
-                    tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
-                        probas=collected_probas,
-                        bars_meta=collected_meta,
-                        config=bt_cfg,
-                    )
-                    _holdout_used = False
+                    if _can_split:
+                        tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
+                            probas=collected_probas[:_split],
+                            bars_meta=collected_meta[:_split],
+                            config=bt_cfg,
+                            max_threshold=_sweep_max_value,
+                            max_diff=_sweep_max_diff,
+                        )
+                        _holdout_tuned_preds = _apply_thresholds(
+                            collected_probas[_split:], tuned_buy, tuned_sell,
+                        )
+                        tuned_bt = run_walk_forward_backtest(
+                            preds=_holdout_tuned_preds,
+                            bars_meta=collected_meta[_split:],
+                            config=bt_cfg,
+                        )
+                        bt = run_walk_forward_backtest(
+                            preds=collected_preds[_split:],
+                            bars_meta=collected_meta[_split:],
+                            config=bt_cfg,
+                        )
+                        _holdout_used = True
+                    else:
+                        bt = run_walk_forward_backtest(
+                            preds=collected_preds,
+                            bars_meta=collected_meta,
+                            config=bt_cfg,
+                        )
+                        tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
+                            probas=collected_probas,
+                            bars_meta=collected_meta,
+                            config=bt_cfg,
+                            max_threshold=_sweep_max_value,
+                            max_diff=_sweep_max_diff,
+                        )
+                        _holdout_used = False
                 # When tuned thresholds beat the argmax baseline, report
                 # the tuned metrics as the headline numbers — that's what
                 # live trading will actually see. Keep the argmax sharpe
                 # accessible for comparison.
                 use_tuned = tuned_bt.sharpe > bt.sharpe
                 headline = tuned_bt if use_tuned else bt
+                # Robust decision Sharpe: bootstrap the SAME daily-return
+                # series the headline point Sharpe is computed from, and
+                # take its p25 lower bound. The headline is a point
+                # estimate on a single contiguous holdout slice — high
+                # variance and regime-dependent — so deploy/promote
+                # decisions compare on this lower bound instead (a Sharpe
+                # propped up by a couple of lucky days collapses here,
+                # while a consistent edge survives).
+                _boot_series = headline.daily_returns or headline.returns
+                _boot_annual = 252 if headline.daily_returns else bt_cfg.annualization_factor
+                sharpe_lower = _bootstrap_sharpe_lower_bound(
+                    _boot_series, annualization=_boot_annual,
+                    n_iter=200, percentile=25.0,
+                ) if _boot_series else headline.sharpe
                 metrics = {
                     "sharpe": headline.sharpe,
+                    "sharpe_lower": sharpe_lower,
                     "max_drawdown_pct": headline.max_drawdown_pct,
                     "win_rate": headline.win_rate,
                     "profit_factor": (
@@ -906,6 +1164,10 @@ class XGBoostSignalModel(MLBase):
                 )
                 metrics = {
                     "sharpe": round(sharpe, 4),
+                    # No bootstrap on the synthetic legacy path — mirror
+                    # the point Sharpe so the decision metric is always
+                    # present for downstream comparisons.
+                    "sharpe_lower": round(sharpe, 4),
                     "max_drawdown_pct": round(max_dd, 4),
                     "win_rate": round(win_rate, 4),
                     "profit_factor": round(profit_factor, 4),
@@ -982,6 +1244,8 @@ class XGBoostSignalModel(MLBase):
         def _save() -> None:
             import joblib
 
+            from yolovest.data.features import MODEL_SCHEMA_VERSION
+
             feature_names = (self._intraday_features if model_type == "intraday"
                              else self._swing_features)
             artifact = {
@@ -992,6 +1256,11 @@ class XGBoostSignalModel(MLBase):
                 "feature_names": feature_names,
                 "tuned_thresholds": self._get_thresholds(model_type),
                 "saved_at": datetime.now(UTC).isoformat(),
+                # Compatibility stamps — checked on cross-machine import so
+                # a model trained against different code fails loudly.
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "xgboost_version": _lib_version("xgboost"),
+                "sklearn_version": _lib_version("scikit-learn"),
             }
             joblib.dump(artifact, filepath)
 

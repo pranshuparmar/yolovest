@@ -141,7 +141,14 @@ class TestPredictIntraday:
         assert result.signal_type == "BUY"
 
     async def test_predict_calibrator_different_label(self, signal_model):
-        """When calibrator improves confidence with a different label, use calibrator's label."""
+        """When calibrator argmax disagrees with raw, keep raw probas.
+
+        The CalibratedClassifierCV sigmoid Platt-scaling on a HOLD-
+        dominated training set (e.g. swing model's 73% HOLD) systematically
+        pulls directional predictions back to the HOLD prior, even when
+        the class-weighted XGBoost has clear conviction. Keeping raw on
+        disagreement preserves the trained model's directional intuition.
+        """
         mock_calibrator = MagicMock()
         mock_calibrator.predict.return_value = np.array([0])  # SELL (different from raw BUY)
         mock_calibrator.predict_proba.return_value = np.array([[0.85, 0.05, 0.10]])
@@ -150,9 +157,27 @@ class TestPredictIntraday:
         features = {"close": 100.0, "atr_14": 5.0, "rsi": 55.0}
         result = await signal_model.predict_intraday("RELIANCE", features)
 
-        # Calibrated confidence (0.85) > raw (0.8) — calibrated label+confidence used
-        assert result.confidence == 0.85
-        assert result.signal_type == "SELL"
+        # Disagreement on label → raw wins, regardless of confidence delta.
+        assert result.confidence == 0.8
+        assert result.signal_type == "BUY"
+
+    async def test_predict_calibrator_compresses_directional_to_hold(self, signal_model):
+        """The dominant failure case fixed by the calibration logic change:
+        raw model has a clear BUY argmax, calibrator pulls it to HOLD with
+        higher confidence. Old logic adopted the HOLD; new logic keeps the
+        BUY direction.
+        """
+        mock_calibrator = MagicMock()
+        mock_calibrator.predict.return_value = np.array([1])  # HOLD
+        mock_calibrator.predict_proba.return_value = np.array([[0.20, 0.55, 0.25]])
+        signal_model._intraday_calibrator = mock_calibrator
+
+        features = {"close": 100.0, "atr_14": 5.0, "rsi": 55.0}
+        result = await signal_model.predict_intraday("RELIANCE", features)
+
+        # Raw (BUY @ 0.8) preserved despite calibrator preferring HOLD @ 0.55.
+        assert result.signal_type == "BUY"
+        assert result.confidence == 0.8
 
 
 class TestPredictSwing:
@@ -207,6 +232,62 @@ class TestTrainingGuard:
 
         with pytest.raises(ValueError, match="Insufficient training data: 199"):
             await sm.train("intraday", X, y, {})
+
+
+class TestFinalScaleHoldout:
+    """Large bars_meta corpora tune thresholds on a final-scale holdout
+    (a tuning model scored on a strict-future slice), not the per-fold
+    OOF probabilities — so tuned thresholds are reachable at inference."""
+
+    @staticmethod
+    def _dataset(n=1600, n_feat=8):
+        import random
+        from datetime import date, timedelta
+        random.seed(7)
+        base = date(2022, 1, 1)
+        X, y, meta = [], [], []  # noqa: N806
+        for i in range(n):
+            feats = [random.gauss(0, 1) for _ in range(n_feat)]
+            s = feats[0]
+            label = 2 if s > 0.4 else 0 if s < -0.4 else 1
+            X.append(feats)
+            y.append(label)
+            entry = 100.0
+            exit_close = entry * (1.02 if label == 2 else 0.98 if label == 0 else 1.0)
+            meta.append({
+                "symbol": f"S{i % 30}",
+                "entry_close": entry,
+                "exit_close": exit_close,
+                "path_highs": [entry * 1.03],
+                "path_lows": [entry * 0.97],
+                "target_pct": 0.02,
+                "sl_pct": 0.01,
+                "entry_date": (base + timedelta(days=i)).isoformat(),
+            })
+        return X, y, meta
+
+    async def test_holdout_path_thresholds_respect_cap(self, tmp_path):
+        from types import SimpleNamespace
+        cfg = SimpleNamespace(risk=SimpleNamespace(
+            tuned_threshold_max_value=0.60,
+            tuned_threshold_max_diff=0.05,
+            buy_threshold_override=None,
+            sell_threshold_override=None,
+        ))
+        sm = XGBoostSignalModel(model_dir=str(tmp_path), config=cfg)
+        X, y, meta = self._dataset()  # noqa: N806
+        metrics = await sm.train("intraday", X, y, {
+            "n_estimators": 25, "max_depth": 3,
+            "bars_meta": meta, "lookahead_bars": 1,
+        })
+        # The final-scale holdout path ran (not the small-corpus OOF path).
+        assert metrics["threshold_holdout_used"] is True
+        assert metrics["backtest_source"].startswith("walk_forward")
+        # Tuned thresholds stay within the production-reachable ceiling.
+        assert 0.0 <= metrics["tuned_buy_threshold"] <= 0.60 + 1e-9
+        assert 0.0 <= metrics["tuned_sell_threshold"] <= 0.60 + 1e-9
+        # Robust decision metric present.
+        assert "sharpe_lower" in metrics
 
 
 # ---------------------------------------------------------------------------

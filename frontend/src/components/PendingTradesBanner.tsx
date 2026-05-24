@@ -3,6 +3,7 @@ import { usePendingTrades, useApprovePendingTrade, useRejectPendingTrade, useCle
 import { useLtpStream } from "../hooks/useLtpStream";
 import clsx from "clsx";
 import { SymbolLink } from "./SymbolLink";
+import { formatPriceMovePct, priceMovePct } from "../utils/priceMove";
 
 function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -341,8 +342,18 @@ export function PendingTradesBanner() {
                       );
                     })()}
                   </td>
-                  <td className="py-2 px-3 text-right font-mono text-emerald-400">{fmt(t.target_price)}</td>
-                  <td className="py-2 px-3 text-right font-mono text-red-400">{fmt(t.stop_loss_price)}</td>
+                  <td className="py-2 px-3 text-right font-mono text-emerald-400">
+                    {fmt(t.target_price)}
+                    <span className="ml-1 text-[10px] text-emerald-400/70">
+                      {formatPriceMovePct(priceMovePct(t.entry_price, t.target_price, t.signal_type))}
+                    </span>
+                  </td>
+                  <td className="py-2 px-3 text-right font-mono text-red-400">
+                    {fmt(t.stop_loss_price)}
+                    <span className="ml-1 text-[10px] text-red-400/70">
+                      {formatPriceMovePct(priceMovePct(t.entry_price, t.stop_loss_price, t.signal_type))}
+                    </span>
+                  </td>
                   <td className="py-2 px-3 text-right text-gray-400">{t.position_size}</td>
                   <td className="py-2 px-3 text-right font-mono text-gray-300">
                     {"₹"}{fmt(t.entry_price * t.position_size, 0)}

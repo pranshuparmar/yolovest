@@ -10,6 +10,7 @@ Security:
 - CSRF protection: state-changing endpoints require X-CSRF-Token header
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -21,11 +22,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import (
-    Depends, FastAPI, Header, HTTPException, Query, Request,
-    WebSocket, WebSocketDisconnect, status,
+    Depends, FastAPI, File, Header, HTTPException, Query, Request,
+    UploadFile, WebSocket, WebSocketDisconnect, status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
@@ -41,14 +42,19 @@ _TOKEN_SECRET = secrets.token_bytes(32)
 _TOKEN_TTL_SEC = 24 * 60 * 60  # 24 hours
 
 
-def _sign_token(username: str) -> str:
-    """Create a signed session token: base64(payload).signature."""
+def _sign_token(username: str, ttl: int = _TOKEN_TTL_SEC) -> str:
+    """Create a signed session token: base64(payload).signature.
+
+    `ttl` defaults to the normal session lifetime; pass a short value to
+    mint a single-use-ish download token that can ride in a URL query
+    param (native browser downloads can't send the Authorization header).
+    """
     import base64
 
     payload = json.dumps({
         "user": username,
         "iat": int(time.time()),
-        "exp": int(time.time()) + _TOKEN_TTL_SEC,
+        "exp": int(time.time()) + ttl,
         "jti": secrets.token_hex(8),
     }).encode()
     payload_b64 = base64.urlsafe_b64encode(payload).decode()
@@ -519,9 +525,9 @@ async def _apply_order_postback(
     elif leg == "sl":
         if status == "COMPLETE":
             # Broker-side SL fired — position is closed at broker. Cancel
-            # any resting target leg so it doesn't try to sell on a now-
-            # empty position. Ghost recovery (next heartbeat) closes the
-            # DB row with the actual fill price.
+            # the resting target leg and close the DB row inline using
+            # the fill price from the postback. Ghost recovery is the
+            # safety net if anything below raises.
             target_oid = trade.get("target_order_id")
             if target_oid:
                 try:
@@ -529,7 +535,7 @@ async def _apply_order_postback(
                     await ctx.db.set_trade_target_order_id(trade_id, None)
                 except Exception:
                     logger.debug("%s: target cancel after SL fill failed", log_prefix, exc_info=True)
-            logger.info("%s: SL fired — broker exit registered, ghost recovery will close DB row", log_prefix)
+            await _close_on_exit_fill(ctx, trade, body, leg="sl", log_prefix=log_prefix)
         elif status == "REJECTED":
             logger.warning("%s: SL order REJECTED — position is unprotected!", log_prefix)
             await ctx.notify.send(
@@ -541,7 +547,7 @@ async def _apply_order_postback(
     elif leg == "target":
         if status == "COMPLETE":
             # Target LIMIT filled — same shape as SL fill: cancel the
-            # other leg, let ghost recovery close the row.
+            # other leg and close the DB row inline.
             sl_oid = trade.get("sl_order_id")
             if sl_oid:
                 try:
@@ -549,7 +555,82 @@ async def _apply_order_postback(
                     await ctx.db.set_trade_sl_order_id(trade_id, None)
                 except Exception:
                     logger.debug("%s: SL cancel after target fill failed", log_prefix, exc_info=True)
-            logger.info("%s: target LIMIT filled — broker exit registered", log_prefix)
+            await _close_on_exit_fill(ctx, trade, body, leg="target", log_prefix=log_prefix)
+
+
+async def _close_on_exit_fill(
+    ctx: AppContext,
+    trade: dict[str, Any],
+    body: dict[str, Any],
+    leg: str,
+    log_prefix: str,
+) -> None:
+    """Close the DB row immediately when a broker-side exit leg (SL or
+    target) reports COMPLETE, using the fill price from the postback
+    body. Heartbeat ghost-recovery remains the backstop for postbacks
+    that get dropped (Kite doesn't retry).
+
+    Idempotent: if the trade is already marked closed (e.g. duplicate
+    postback via both HTTP + WebSocket channels), this returns early.
+    """
+    trade_id = trade.get("trade_id")
+    if (trade.get("status") or "").lower() == "closed":
+        return
+
+    try:
+        exit_price = float(body.get("average_price") or 0)
+    except (TypeError, ValueError):
+        exit_price = 0.0
+    if exit_price <= 0:
+        # No fill price in the postback — let ghost recovery handle it
+        # using kite.trades() lookup. Don't synthesize a number.
+        logger.info(
+            "%s: %s COMPLETE without average_price; deferring to ghost recovery",
+            log_prefix, leg.upper(),
+        )
+        return
+
+    entry = float(trade.get("fill_price") or trade.get("entry_price") or 0)
+    qty = int(trade.get("quantity") or 0)
+    if entry <= 0 or qty <= 0:
+        logger.warning(
+            "%s: cannot close on %s fill — entry=%.2f qty=%d invalid",
+            log_prefix, leg.upper(), entry, qty,
+        )
+        return
+
+    signal_type = trade.get("signal_type", "BUY")
+    if signal_type == "BUY":
+        gross_pnl = (exit_price - entry) * qty
+    else:
+        gross_pnl = (entry - exit_price) * qty
+
+    product = trade.get("product", "MIS")
+    try:
+        from yolovest.costs import resolve_round_trip_costs
+
+        costs, _src, breakdown = await resolve_round_trip_costs(
+            ctx.broker, symbol=trade["symbol"], signal_type=signal_type,
+            entry_price=entry, exit_price=exit_price, quantity=qty,
+            product=product, cost_config=ctx.config.transaction_costs,
+        )
+    except Exception:
+        logger.exception("%s: cost resolution failed, using gross PnL", log_prefix)
+        costs, breakdown = 0.0, None
+
+    pnl = round(gross_pnl - costs, 2)
+    try:
+        await ctx.db.close_position(
+            trade_id, exit_price, pnl, realized_costs=breakdown,
+        )
+    except Exception:
+        logger.exception("%s: close_position failed after %s fill", log_prefix, leg.upper())
+        return
+
+    logger.info(
+        "%s: %s filled @ %.2f, closed inline — pnl ₹%.0f (gross ₹%.0f, costs ₹%.0f)",
+        log_prefix, leg.upper(), exit_price, pnl, gross_pnl, costs,
+    )
 
 
 async def _compute_total_capital(broker: Any) -> float:
@@ -739,6 +820,32 @@ def create_app(ctx: AppContext) -> FastAPI:
             detail="Invalid credentials",
             headers={"WWW-Authenticate": 'Bearer, Basic realm="YoloVest"'},
         )
+
+    def verify_download_credentials(
+        request: Request,
+        token: str | None = Query(None),
+        credentials: HTTPBasicCredentials | None = Depends(security),
+    ) -> str:
+        """Auth for large file downloads. Accepts a short-lived `?token=`
+        query param (so the browser can stream the file to disk natively
+        — an <a> download can't carry the Authorization header) and falls
+        back to the normal Bearer/Basic header auth.
+        """
+        if token:
+            return _verify_token(token)
+        return verify_credentials(request, credentials)
+
+    # Download token — short-lived, for native streaming downloads of
+    # large files (DB backups, model artifacts) where fetch()+blob() would
+    # otherwise buffer the whole payload in browser memory.
+    _DOWNLOAD_TOKEN_TTL = 120
+
+    @app.get("/api/download-token")
+    async def issue_download_token(
+        user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        return {"token": _sign_token(user, ttl=_DOWNLOAD_TOKEN_TTL),
+                "expires_in": _DOWNLOAD_TOKEN_TTL}
 
     # CSRF token — one per process, sent to client on login
     _csrf_token = secrets.token_hex(32)
@@ -2296,6 +2403,27 @@ def create_app(ctx: AppContext) -> FastAPI:
                 )
             return {"success": False, "error": msg}
 
+    @app.get("/api/trades/recent-symbols")
+    async def get_recent_traded_symbols(
+        limit: int = Query(10, ge=1, le=50),
+        _user: str = Depends(verify_credentials),
+    ) -> list[str]:
+        """Distinct symbols ordered by most-recent trade time. Used by
+        the Quick ML Review floater as a sensible default before the
+        user types anything. Mode-scoped (matches everything else)."""
+        try:
+            cur = await ctx.db.read_conn.execute(
+                "SELECT symbol, MAX(created_at) AS last_seen FROM trades "
+                "WHERE mode = ? GROUP BY symbol "
+                "ORDER BY last_seen DESC LIMIT ?",
+                (ctx.config.mode, limit),
+            )
+            rows = await cur.fetchall()
+            return [r[0] for r in rows if r[0]]
+        except Exception:
+            logger.debug("recent-traded-symbols lookup failed", exc_info=True)
+            return []
+
     @app.get("/api/trades/today")
     async def get_todays_trades(
         user: str = Depends(verify_credentials),
@@ -3097,6 +3225,217 @@ def create_app(ctx: AppContext) -> FastAPI:
                 logger.warning("Failed to load promoted model %s/%s: %s", model_type, version, e)
         return {"promoted": True, "model_type": model_type, "version": version}
 
+    @app.get("/api/ml-models/{version}/download")
+    async def download_model(
+        version: str, _user: str = Depends(verify_download_credentials),
+    ) -> FileResponse:
+        """Stream a trained model artifact (.pkl) to the browser so it
+        can be moved to another machine (e.g. import a model trained on
+        a higher-memory box)."""
+        model_dir = _model_dir()
+        if "/" in version or "\\" in version or ".." in version:
+            raise HTTPException(status_code=400, detail="Invalid version")
+        path = Path(model_dir) / f"{version}.pkl"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"{version}.pkl not found")
+        return FileResponse(
+            str(path), media_type="application/octet-stream",
+            filename=f"{version}.pkl",
+        )
+
+    @app.post("/api/ml-models/upload")
+    async def upload_model(
+        file: UploadFile = File(...),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Accept a trained .pkl uploaded from another machine and place
+        it in the models dir. Call POST /api/ml-models/import afterwards
+        to register + (optionally) promote + hot-reload it."""
+        import os
+
+        model_dir = _model_dir()
+        os.makedirs(model_dir, exist_ok=True)
+        name = os.path.basename(file.filename or "")
+        if not name.endswith(".pkl"):
+            raise HTTPException(status_code=400, detail="Expected a .pkl file")
+        if "/" in name or "\\" in name or ".." in name:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        dest = Path(model_dir) / name
+        size = 0
+        with open(dest, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                size += len(chunk)
+        # Sanity-check it loads as a YoloVest model bundle before
+        # reporting success — a bad file shouldn't sit around looking
+        # importable.
+        try:
+            import joblib
+            artifact = await asyncio.to_thread(joblib.load, str(dest))
+            if not isinstance(artifact, dict) or "model" not in artifact:
+                raise ValueError("not a YoloVest model bundle")
+        except Exception as e:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=400, detail=f"Invalid model artifact: {e}",
+            ) from e
+        version = name[:-4]  # strip .pkl
+        logger.info("Uploaded model artifact %s (%d bytes)", name, size)
+        return {
+            "success": True, "version": version, "filename": name,
+            "size_bytes": size,
+            "metrics": artifact.get("metrics", {}),
+        }
+
+    @app.post("/api/ml-models/import")
+    async def import_model(
+        request: Request,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Register a model artifact trained on another machine.
+
+        Workflow: run the full app in a container on a higher-memory box,
+        retrain via the model-retrain skill, download the produced
+        <version>.pkl, then upload it here (POST /api/ml-models/upload)
+        and POST here to register + (optionally) promote + hot-reload.
+
+        Body: {"model_type": "intraday"|"swing", "version": "<stem>",
+               "promote": bool}
+        `version` is the .pkl filename without extension (the artifact's
+        own version string). Metrics are read straight from the
+        artifact so the registry row matches what was trained.
+        """
+        body = await request.json()
+        model_type = body.get("model_type")
+        version = body.get("version")
+        promote = bool(body.get("promote", False))
+        force = bool(body.get("force", False))
+        if model_type not in ("intraday", "swing") or not version:
+            raise HTTPException(
+                status_code=400,
+                detail="model_type must be 'intraday' or 'swing' and version is required",
+            )
+
+        model_dir = _model_dir()
+        pkl_path = Path(model_dir) / f"{version}.pkl"
+        if not pkl_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"{version}.pkl not found in {model_dir}. Copy the "
+                    "trained artifact there first."
+                ),
+            )
+
+        # Read metrics + sanity-check the artifact loads + matches type.
+        try:
+            import joblib
+            artifact = await asyncio.to_thread(joblib.load, str(pkl_path))
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Failed to load artifact: {e}",
+            ) from e
+        if not isinstance(artifact, dict) or "model" not in artifact:
+            raise HTTPException(
+                status_code=400,
+                detail="Artifact is not a valid YoloVest model bundle.",
+            )
+        metrics = artifact.get("metrics") or {}
+
+        # Compatibility gate — a model trained against a different feature
+        # schema would be silently fed wrong inputs at inference (missing
+        # features resolve to 0.0, no crash). Hard-block on schema mismatch
+        # unless the caller explicitly forces. Library-version drift and a
+        # feature-name diff vs the current production model are surfaced as
+        # soft warnings (won't block).
+        from yolovest.data.features import MODEL_SCHEMA_VERSION
+
+        warnings: list[str] = []
+        artifact_schema = artifact.get("schema_version")
+        if artifact_schema != MODEL_SCHEMA_VERSION and not force:
+            if artifact_schema is None:
+                detail = (
+                    "Artifact has no schema_version (trained before schema "
+                    f"versioning; current is {MODEL_SCHEMA_VERSION}). It may "
+                    "feed the model stale features. Re-train on current code, "
+                    "or pass force=true to import anyway."
+                )
+            else:
+                detail = (
+                    f"Schema mismatch: artifact is schema_version "
+                    f"{artifact_schema}, this code expects "
+                    f"{MODEL_SCHEMA_VERSION}. The feature set or label "
+                    "geometry changed since this model was trained. Re-train "
+                    "on current code, or pass force=true to import anyway."
+                )
+            raise HTTPException(status_code=422, detail=detail)
+        if artifact_schema != MODEL_SCHEMA_VERSION:
+            warnings.append(
+                f"Forced import despite schema mismatch (artifact "
+                f"{artifact_schema} vs code {MODEL_SCHEMA_VERSION})."
+            )
+
+        # Soft: library-version drift (unpickled estimators can misbehave
+        # across major XGBoost / scikit-learn versions).
+        for lib, key in (("xgboost", "xgboost_version"),
+                         ("scikit-learn", "sklearn_version")):
+            stamped = artifact.get(key)
+            current = _lib_version_safe(lib)
+            if stamped and current != "unknown" and stamped != current:
+                warnings.append(
+                    f"{lib} version differs (artifact {stamped} vs runtime "
+                    f"{current}); verify predictions look sane."
+                )
+
+        # Soft: feature-name drift vs the model currently in production for
+        # this type — a cheap automatic guard against a forgotten schema
+        # bump (compares to the last validated model rather than to code).
+        prod_features = _production_feature_names(model_type)
+        new_features = artifact.get("feature_names") or []
+        if prod_features and new_features:
+            added = sorted(set(new_features) - set(prod_features))
+            removed = sorted(set(prod_features) - set(new_features))
+            if added or removed:
+                warnings.append(
+                    "Feature set differs from current production model"
+                    + (f"; added {added}" if added else "")
+                    + (f"; removed {removed}" if removed else "")
+                    + "."
+                )
+
+        # Register as shadow first (mirrors the retrain path), then
+        # optionally promote. Hot-reload the running provider so the
+        # change takes effect without a server restart.
+        await ctx.db.save_model_version(
+            model_type, version, f"models/{version}.pkl", metrics,
+        )
+        loaded = False
+        if ctx.ml:
+            try:
+                if promote:
+                    await ctx.db.promote_model(model_type, version)
+                    await ctx.ml.load_model(model_type, version)
+                else:
+                    await ctx.ml.load_shadow_model(model_type, version)
+                loaded = True
+            except Exception as e:
+                logger.warning(
+                    "Imported model %s/%s registered but hot-reload failed: %s",
+                    model_type, version, e,
+                )
+        return {
+            "imported": True,
+            "model_type": model_type,
+            "version": version,
+            "promoted": promote,
+            "hot_reloaded": loaded,
+            "metrics": metrics,
+            "warnings": warnings,
+        }
+
     @app.post("/api/ml-models/{model_type}/{version}/reshadow")
     async def reshadow_model(
         model_type: str,
@@ -3480,6 +3819,143 @@ def create_app(ctx: AppContext) -> FastAPI:
             "latest_signal": latest_signal,
         }
 
+    @app.get("/api/symbol/{symbol}/quick-context")
+    async def get_symbol_quick_context(
+        symbol: str,
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Compact context for the floating Quick ML Review widget.
+
+        One round-trip: sector, last 8 daily bars (LTP/open/prev close/
+        7d perf/avg vol), quarantine + lock status, current open
+        position (if any), and today's signal disposition (if any).
+
+        Designed to be cheap: no bulk-deals, no TreeSHAP attribution —
+        the full /context endpoint covers that for the detail page.
+        """
+        sym = symbol.upper()
+
+        sector: str | None = None
+        try:
+            cur = await ctx.db.read_conn.execute(
+                "SELECT sector, industry FROM symbol_sectors WHERE symbol = ?",
+                (sym,),
+            )
+            row = await cur.fetchone()
+            if row:
+                sector = row[0] or row[1]
+        except Exception:
+            logger.debug("quick-context sector lookup failed", exc_info=True)
+
+        bars: list[dict[str, Any]] = []
+        try:
+            ohlcv_bars = await ctx.db.get_ohlcv(sym, "daily", days=20)
+            for b in ohlcv_bars[-10:]:
+                bars.append({
+                    "timestamp": b.timestamp.isoformat(),
+                    "open": b.open,
+                    "high": b.high,
+                    "low": b.low,
+                    "close": b.close,
+                    "volume": b.volume,
+                })
+        except Exception:
+            logger.debug("quick-context ohlcv lookup failed", exc_info=True)
+
+        avg_volume_20d: float | None = None
+        try:
+            all_bars = await ctx.db.get_ohlcv(sym, "daily", days=30)
+            recent_vols = [b.volume for b in all_bars[-20:] if b.volume]
+            if recent_vols:
+                avg_volume_20d = sum(recent_vols) / len(recent_vols)
+        except Exception:
+            logger.debug("quick-context avg volume lookup failed", exc_info=True)
+
+        ltp: float | None = None
+        try:
+            quote = await ctx.market_data.get_quote(sym)
+            ltp = float(quote.get("last_price") or 0) or None
+        except Exception:
+            logger.debug("quick-context LTP fetch failed", exc_info=True)
+
+        is_quarantined = False
+        quarantine_reason: str | None = None
+        try:
+            quarantined = await ctx.db.get_quarantined_symbols()
+            q_entry = next(
+                (q for q in quarantined if (q.get("symbol") or "").upper() == sym),
+                None,
+            )
+            if q_entry:
+                is_quarantined = True
+                quarantine_reason = q_entry.get("reason")
+        except Exception:
+            logger.debug("quick-context quarantine lookup failed", exc_info=True)
+
+        is_locked = False
+        try:
+            locked = await ctx.db.get_locked_holdings()
+            is_locked = any(
+                (h.get("symbol") or "").upper() == sym for h in locked
+            )
+        except Exception:
+            logger.debug("quick-context lock lookup failed", exc_info=True)
+
+        open_position: dict[str, Any] | None = None
+        try:
+            positions = await ctx.db.get_open_positions(mode=ctx.config.mode)
+            for p in positions:
+                if (p.get("symbol") or "").upper() == sym:
+                    open_position = {
+                        "signal_type": p.get("signal_type"),
+                        "quantity": p.get("quantity"),
+                        "fill_price": p.get("fill_price"),
+                        "entry_price": p.get("entry_price"),
+                        "target_price": p.get("target_price"),
+                        "stop_loss_price": p.get("stop_loss_price"),
+                        "product": p.get("product"),
+                    }
+                    break
+        except Exception:
+            logger.debug("quick-context open positions lookup failed", exc_info=True)
+
+        todays_signal: dict[str, Any] | None = None
+        try:
+            from yolovest.timezone import now_ist
+
+            today_str = now_ist().date().isoformat()
+            cur = await ctx.db.read_conn.execute(
+                "SELECT signal_type, confidence_score, disposition, "
+                "disposition_reason, created_at "
+                "FROM signals WHERE symbol = ? AND mode = ? "
+                "AND DATE(created_at) = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (sym, ctx.config.mode, today_str),
+            )
+            row = await cur.fetchone()
+            if row:
+                todays_signal = {
+                    "signal_type": row[0],
+                    "confidence_score": row[1],
+                    "disposition": row[2],
+                    "disposition_reason": row[3],
+                    "created_at": row[4],
+                }
+        except Exception:
+            logger.debug("quick-context todays signal lookup failed", exc_info=True)
+
+        return {
+            "symbol": sym,
+            "sector": sector,
+            "ltp": ltp,
+            "bars": bars,
+            "avg_volume_20d": avg_volume_20d,
+            "quarantine": {"is_quarantined": is_quarantined, "reason": quarantine_reason},
+            "is_locked": is_locked,
+            "open_position": open_position,
+            "todays_signal": todays_signal,
+        }
+
     @app.get("/api/symbol/{symbol}/ohlcv")
     async def get_symbol_ohlcv(
         symbol: str,
@@ -3542,7 +4018,6 @@ def create_app(ctx: AppContext) -> FastAPI:
         REST fetches run concurrently so a 30-symbol page doesn't
         serialise into a 30 × round-trip wait.
         """
-        import asyncio as _asyncio
         syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
         result: dict[str, float] = {}
         ticker = getattr(ctx, "ticker", None)
@@ -3576,7 +4051,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 pass
             return sym, None
 
-        pairs = await _asyncio.gather(*[_resolve(s) for s in syms])
+        pairs = await asyncio.gather(*[_resolve(s) for s in syms])
         for sym, ltp in pairs:
             if ltp is not None and ltp > 0:
                 result[sym] = ltp
@@ -3914,7 +4389,8 @@ def create_app(ctx: AppContext) -> FastAPI:
         from yolovest.costs import compute_transaction_costs
         from yolovest.data.features import IndicatorConfig, compute_features
         from yolovest.skills.generate_signals import _format_class_probs
-        from yolovest.strategy.holding_period import adjust_sell_for_holdings, decide_holding_period, interpolate_atr_multipliers
+        # holding-period decision and target/SL geometry now live inside
+        # the shared signal_evaluator — no direct imports needed here.
         from yolovest.timezone import IST
 
         run_id = str(uuid.uuid4())[:8]
@@ -3981,22 +4457,34 @@ def create_app(ctx: AppContext) -> FastAPI:
                 },
             }
 
-        # Step 2: Generate signals from shortlisted stocks
+        # Step 2: Generate signals from shortlisted stocks via the
+        # shared evaluator. Same code path the production heartbeat
+        # uses — dry-run and live trading agree by construction.
+        from yolovest.strategy.signal_evaluator import evaluate_symbol_signal
+
         signals_out: list[dict[str, Any]] = []
         ml_unavailable = ctx.ml is None
 
-        # Build held symbols set for SELL signal adjustment
+        # Build held + locked symbol sets (the evaluator needs both
+        # for SELL adjustment and lock skip)
         open_positions = await ctx.db.get_open_positions()
         held_symbols = {p["symbol"] for p in open_positions}
-        min_confidence_buy = cfg.risk.min_confidence_buy
-        min_confidence_sell = cfg.risk.min_confidence_sell
+        locked_symbols = set(await ctx.db.get_locked_symbols())
 
         if ml_unavailable:
             logger.warning("Dry-run: ML model not loaded — cannot generate signals. "
                            "Train a model first via the model-retrain skill.")
 
-        # Diagnostics: track why stocks get filtered out
-        filter_counts = {
+        # Market regime (same source generate-signals reads from)
+        regime_state = None
+        if cfg.strategy.market_regime.enabled:
+            regime_state = await ctx.db.get_system_state("market_regime")
+
+        # Diagnostics: track why stocks get filtered out. Buckets
+        # mirror the SignalEvaluation.outcome enum + the pre-
+        # evaluator gates (insufficient_bars / feature_computation
+        # _failed / ml_unavailable / error).
+        filter_counts: dict[str, int] = {
             "insufficient_bars": 0,
             "feature_computation_failed": 0,
             "ml_unavailable": 0,
@@ -4060,166 +4548,63 @@ def create_app(ctx: AppContext) -> FastAPI:
                 except Exception:
                     logger.debug("LTP unavailable for dry-run %s, using bar close", symbol)
 
-                # Decide holding period based on features and selected strategy mode
-                now_time = dt.now(IST).time()
-                holding_period, product, expected_days = decide_holding_period(
-                    features, allowed_periods, cfg.strategy.volatility, now_time,
+                evaluation = await evaluate_symbol_signal(
+                    ctx, symbol, features,
+                    current_price=current_price,
+                    held_symbols=held_symbols,
+                    locked_symbols=locked_symbols,
+                    now_time=dt.now(IST).time(),
+                    effective_mode=effective_mode,
+                    allowed_periods=allowed_periods,
                     mode_days_range=mode_days_range,
+                    existing_positions=open_positions,
+                    market_regime=regime_state,
+                    # Dry-run is a preview — don't let time-of-day
+                    # execution gates (intraday cutoff etc.) suppress
+                    # signals the model would produce earlier in the day.
+                    bypass_time_gates=True,
                 )
-                use_intraday = holding_period == "intraday"
-                is_balanced = effective_mode == "balanced"
 
-                if is_balanced:
-                    # Balanced mode: run both models, pick higher confidence
-                    import asyncio as _aio
-
-                    intra_feat = {**features}
-                    intraday_bars = await ctx.db.get_ohlcv(symbol, "5minute", days=1)
-                    if intraday_bars:
-                        intra_feat["close"] = intraday_bars[-1].close
-
-                    intra_pred, swing_pred = await _aio.gather(
-                        ctx.ml.predict_intraday(symbol, intra_feat, current_price=current_price),
-                        ctx.ml.predict_swing(symbol, features, current_price=current_price),
-                        return_exceptions=True,
-                    )
-                    if isinstance(intra_pred, BaseException):
-                        intra_pred = None
-                    if isinstance(swing_pred, BaseException):
-                        swing_pred = None
-
-                    intra_conf = intra_pred.confidence if intra_pred and intra_pred.signal_type != "HOLD" else -1
-                    swing_conf = swing_pred.confidence if swing_pred and swing_pred.signal_type != "HOLD" else -1
-
-                    if intra_conf < 0 and swing_conf < 0:
-                        prediction = swing_pred or intra_pred
-                    elif intra_conf >= swing_conf:
-                        prediction = intra_pred
-                        holding_period, product, expected_days = "intraday", "MIS", 0
-                    else:
-                        prediction = swing_pred
-                        _, product, expected_days = decide_holding_period(
-                            features, ["short_term", "long_term"],
-                            cfg.strategy.volatility, now_time,
-                            mode_days_range=(max(1, mode_days_range[0]) if mode_days_range else 1, mode_days_range[1] if mode_days_range else 15),
-                        )
-                        holding_period = "swing" if expected_days <= 5 else "positional" if expected_days <= 15 else "long_term"
-                        product = "CNC"
-                    use_intraday = holding_period == "intraday"
-                elif use_intraday:
-                    prediction = await ctx.ml.predict_intraday(
-                        symbol, features, current_price=current_price,
-                    )
-                else:
-                    prediction = await ctx.ml.predict_swing(
-                        symbol, features, current_price=current_price,
-                    )
-
-                if prediction.signal_type == "HOLD":
-                    filter_counts["hold_signal"] += 1
+                if evaluation.outcome != "passed":
+                    bucket = evaluation.outcome
+                    filter_counts.setdefault(bucket, 0)
+                    filter_counts[bucket] += 1
                     rejection_details.append({
                         "symbol": symbol,
-                        "reason": "hold_signal",
-                        "detail": f"HOLD @ confidence {prediction.confidence:.2f}",
-                    })
-                    logger.info(
-                        "Dry-run: HOLD signal for %s (%s)",
-                        symbol, _format_class_probs(prediction),
-                    )
-                    continue
-
-                threshold = cfg.risk.resolve_min_confidence(
-                    holding_period, prediction.signal_type,
-                )
-                if prediction.confidence < threshold:
-                    filter_counts["low_confidence"] += 1
-                    rejection_details.append({
-                        "symbol": symbol,
-                        "reason": "low_confidence",
-                        "detail": f"{prediction.signal_type} @ confidence {prediction.confidence:.2f} < {threshold}",
-                    })
-                    logger.info(
-                        "Dry-run: Low confidence for %s: %s @ %.2f < %.2f (%s)",
-                        symbol, prediction.signal_type, prediction.confidence, threshold,
-                        _format_class_probs(prediction),
-                    )
-                    continue
-
-                # Adjust SELL: force to MIS/intraday if user doesn't hold
-                # the stock. Drop when the per-symbol decision is swing —
-                # mirrors generate-signals so the dry-run preview matches.
-                _adjusted = adjust_sell_for_holdings(
-                    prediction.signal_type, holding_period, product,
-                    symbol, held_symbols, expected_days,
-                )
-                if _adjusted is None:
-                    filter_counts.setdefault("short_on_swing_horizon", 0)
-                    filter_counts["short_on_swing_horizon"] += 1
-                    rejection_details.append({
-                        "symbol": symbol,
-                        "reason": "short_on_swing_horizon",
-                        "detail": (
-                            f"SELL on non-held {symbol} with "
-                            f"holding_period='{holding_period}' would require "
-                            f"intraday/MIS — dropped"
-                        ),
+                        "reason": bucket,
+                        "detail": evaluation.detail,
                     })
                     continue
-                holding_period, product, expected_days = _adjusted
 
-                # Apply ATR multipliers interpolated for holding duration.
-                # Mirror generate-signals: clamp intraday ATR at
-                # holding_periods.intraday.max_atr_pct_for_target so the
-                # dry-run preview shows the same target/SL geometry the
-                # live engine would produce.
-                entry = prediction.entry_price
-                atr = features.get("atr_14", entry * 0.02)
-                if holding_period == "intraday":
-                    max_atr_pct = float(
-                        cfg.strategy.holding_periods.intraday
-                            .max_atr_pct_for_target
-                    )
-                    if max_atr_pct > 0:
-                        atr = min(atr, entry * max_atr_pct)
-                target_mult, sl_mult = interpolate_atr_multipliers(
-                    expected_days, cfg.strategy.holding_periods,
-                )
-
-                if prediction.signal_type == "BUY":
-                    target_price = round(max(entry + target_mult * atr, 0.01), 2)
-                    stop_loss_price = round(max(entry - sl_mult * atr, 0.01), 2)
-                elif prediction.signal_type == "SELL":
-                    target_price = round(max(entry - target_mult * atr, 0.01), 2)
-                    stop_loss_price = round(max(entry + sl_mult * atr, 0.01), 2)
-                else:
-                    target_price = prediction.target_price
-                    stop_loss_price = prediction.stop_loss_price
-
-                # Estimate transaction costs
+                # Passed all evaluator gates. Compute transaction costs
+                # (dry-run-only — production builds the signal dict
+                # without these as risk-check needs the raw figures).
                 est_costs = compute_transaction_costs(
-                    entry, target_price, prediction.position_size,
-                    product=product, cost_config=cfg.transaction_costs,
+                    evaluation.entry_price, evaluation.target_price,
+                    evaluation.prediction.position_size,
+                    product=evaluation.product,
+                    cost_config=cfg.transaction_costs,
                 )
 
                 filter_counts["passed"] += 1
                 logger.info(
                     "Dry-run: PASSED %s for %s @ %.2f (%s)",
-                    prediction.signal_type, symbol,
-                    prediction.confidence,
-                    _format_class_probs(prediction),
+                    evaluation.signal_type, symbol,
+                    evaluation.confidence,
+                    _format_class_probs(evaluation.prediction),
                 )
                 signals_out.append({
                     "symbol": symbol,
-                    "signal_type": prediction.signal_type,
-                    "entry_price": entry,
-                    "target_price": target_price,
-                    "stop_loss_price": stop_loss_price,
-                    "confidence_score": prediction.confidence,
-                    "position_size": prediction.position_size,
-                    "model_version": prediction.model_version,
-                    "holding_period": holding_period,
-                    "expected_holding_days": expected_days,
-                    "product": product,
+                    "signal_type": evaluation.signal_type,
+                    "entry_price": evaluation.entry_price,
+                    "target_price": evaluation.target_price,
+                    "stop_loss_price": evaluation.stop_loss_price,
+                    "confidence_score": evaluation.confidence,
+                    "position_size": evaluation.prediction.position_size,
+                    "model_version": evaluation.model_version,
+                    "holding_period": evaluation.holding_period,
+                    "expected_holding_days": evaluation.expected_days,
+                    "product": evaluation.product,
                     "estimated_costs": est_costs,
                     "composite_score": stock.get("composite_score"),
                     "technical_score": stock.get("technical_score"),
@@ -4424,6 +4809,22 @@ def create_app(ctx: AppContext) -> FastAPI:
     def _model_dir() -> str:
         return getattr(ctx.config.strategy, "model_dir", "./models")
 
+    def _lib_version_safe(dist: str) -> str:
+        try:
+            from importlib.metadata import version
+            return version(dist)
+        except Exception:
+            return "unknown"
+
+    def _production_feature_names(model_type: str) -> list[str]:
+        """Feature names of the model currently loaded for this type, used
+        as a soft reference for the import feature-drift warning. Reads the
+        provider's restored feature list; empty when nothing is loaded."""
+        if not ctx.ml:
+            return []
+        attr = "_intraday_features" if model_type == "intraday" else "_swing_features"
+        return list(getattr(ctx.ml, attr, None) or [])
+
     @app.post("/api/backup")
     async def create_backup(_user: str = Depends(verify_credentials)) -> dict[str, Any]:
         """Create a manual database backup including ML model artifacts."""
@@ -4467,6 +4868,67 @@ def create_app(ctx: AppContext) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(e))
         logger.info("Deleted backup %s (%d bytes)", filename, result["size_bytes"])
         return {"success": True, **result}
+
+    def _safe_in_dir(base_dir: str, filename: str) -> Path:
+        """Resolve `filename` strictly inside `base_dir`. Rejects path
+        traversal (../, absolute paths, separators). Raises HTTP 400."""
+        if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        base = Path(base_dir).resolve()
+        target = (base / filename).resolve()
+        if base not in target.parents and target != base:
+            raise HTTPException(status_code=400, detail="Path traversal rejected")
+        return target
+
+    @app.get("/api/backups/{filename}/download")
+    async def download_backup(
+        filename: str, _user: str = Depends(verify_download_credentials),
+    ) -> FileResponse:
+        """Stream a backup .db file to the browser. Used to move a full
+        DB (data + settings) to another machine for offline retraining."""
+        backup_dir = ctx.config.database.backup_dir
+        path = _safe_in_dir(backup_dir, filename)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"Backup not found: {filename}")
+        return FileResponse(
+            str(path), media_type="application/octet-stream", filename=filename,
+        )
+
+    @app.post("/api/backups/upload")
+    async def upload_backup(
+        file: UploadFile = File(...),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Accept a backup .db uploaded from another machine, validate
+        it's a SQLite file, and place it in the backup dir so it can be
+        restored. Pairs with download_backup for cross-machine moves."""
+        import os
+
+        backup_dir = ctx.config.database.backup_dir
+        os.makedirs(backup_dir, exist_ok=True)
+        name = os.path.basename(file.filename or "")
+        if not name.endswith(".db"):
+            raise HTTPException(status_code=400, detail="Expected a .db file")
+        dest = _safe_in_dir(backup_dir, name)
+        # Validate SQLite magic header on the first chunk before
+        # committing the whole upload to disk.
+        first = await file.read(16)
+        if not first.startswith(b"SQLite format 3\x00"):
+            raise HTTPException(
+                status_code=400, detail="Not a valid SQLite database file",
+            )
+        size = len(first)
+        with open(dest, "wb") as out:
+            out.write(first)
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                size += len(chunk)
+        ctx.db.invalidate_storage_stats_cache()
+        logger.info("Uploaded backup %s (%d bytes)", name, size)
+        return {"success": True, "filename": name, "size_bytes": size}
 
     @app.post("/api/backups/{filename}/lock")
     async def lock_backup(
@@ -4603,6 +5065,153 @@ def create_app(ctx: AppContext) -> FastAPI:
             "data": result.data or {},
             "error": result.error,
         }
+
+    @app.get("/api/drift-suspension")
+    async def get_drift_suspension(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Return the current drift-watch suspension state. When non-
+        empty, generate-signals is paused until either a successful
+        model-retrain clears it or POST /api/drift-suspension with
+        empty body clears it manually."""
+        try:
+            reason = await ctx.db.get_system_state("signal_gen_suspended_by_drift")
+        except Exception:
+            reason = None
+        return {
+            "suspended": bool(reason),
+            "reason": reason or None,
+        }
+
+    @app.delete("/api/drift-suspension")
+    async def clear_drift_suspension(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Manually clear the drift-watch suspension flag without
+        running a retrain. Useful when the user inspected the drift,
+        decided it was a transient bad week, and wants to resume
+        signal generation immediately."""
+        try:
+            await ctx.db.set_system_state("signal_gen_suspended_by_drift", "")
+            return {"success": True, "suspended": False}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    @app.get("/api/risk-gates")
+    async def get_risk_gates(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Consolidated status of the opt-in risk gates so the
+        dashboard can show in one round-trip what's currently
+        blocking / constraining trades:
+
+        - drift suspension (active + reason)
+        - portfolio beta vs cap (current beta-weighted exposure)
+        - earnings blackout (open-position / watchlist symbols with a
+          scheduled earnings event inside the blackout window)
+        """
+        cfg = ctx.config.risk
+        mode = ctx.config.mode
+
+        # --- Drift suspension ---
+        try:
+            drift_reason = await ctx.db.get_system_state(
+                "signal_gen_suspended_by_drift",
+            )
+        except Exception:
+            drift_reason = None
+        drift = {
+            "enabled": cfg.drift_auto_suspend_enabled,
+            "suspended": bool(drift_reason),
+            "reason": drift_reason or None,
+        }
+
+        positions = await ctx.db.get_open_positions(mode=mode)
+        capital = 0.0
+        try:
+            portfolio = await ctx.db.get_portfolio_state(mode=mode)
+            capital = float(portfolio.get("total_capital") or 0)
+        except Exception:
+            logger.debug("risk-gates: portfolio state fetch failed", exc_info=True)
+
+        # --- Portfolio beta ---
+        beta_cap_value = capital * cfg.max_portfolio_beta if cfg.max_portfolio_beta > 0 else 0.0
+        beta_weighted = 0.0
+        per_symbol_beta: list[dict[str, Any]] = []
+        if cfg.max_portfolio_beta > 0:
+            for p in positions:
+                sym = p.get("symbol")
+                qty = float(p.get("quantity") or 0)
+                entry = float(p.get("fill_price") or p.get("entry_price") or 0)
+                if not sym or qty <= 0 or entry <= 0:
+                    continue
+                try:
+                    beta = await ctx.db.compute_symbol_beta(sym)
+                except Exception:
+                    beta = None
+                eff_beta = beta if beta is not None else 1.0
+                notional = qty * entry
+                contribution = notional * abs(eff_beta)
+                beta_weighted += contribution
+                per_symbol_beta.append({
+                    "symbol": sym,
+                    "beta": round(eff_beta, 2),
+                    "notional": round(notional, 0),
+                    "beta_weighted": round(contribution, 0),
+                    "estimated": beta is None,
+                })
+        beta = {
+            "enabled": cfg.max_portfolio_beta > 0,
+            "cap_multiple": cfg.max_portfolio_beta,
+            "cap_value": round(beta_cap_value, 0),
+            "current_beta_weighted": round(beta_weighted, 0),
+            "utilization_pct": (
+                round(beta_weighted / beta_cap_value * 100, 1)
+                if beta_cap_value > 0 else 0.0
+            ),
+            "positions": sorted(
+                per_symbol_beta, key=lambda x: x["beta_weighted"], reverse=True,
+            ),
+        }
+
+        # --- Earnings blackout ---
+        blackout_symbols: list[dict[str, Any]] = []
+        if cfg.earnings_blackout_days > 0:
+            # Check open positions + algo/user watchlist symbols.
+            candidate_syms: set[str] = {
+                (p.get("symbol") or "").upper() for p in positions if p.get("symbol")
+            }
+            try:
+                wl = await ctx.db.get_combined_watchlist()
+                candidate_syms |= {
+                    (w.get("symbol") or "").upper() for w in wl if w.get("symbol")
+                }
+            except Exception:
+                logger.debug("risk-gates: watchlist fetch failed", exc_info=True)
+            for sym in sorted(candidate_syms):
+                try:
+                    events = await ctx.db.get_earnings_events(
+                        symbol=sym, days=cfg.earnings_blackout_days,
+                    )
+                except Exception:
+                    events = []
+                if events:
+                    ev = events[0]
+                    blackout_symbols.append({
+                        "symbol": sym,
+                        "event_date": ev.get("event_date"),
+                        "title": ev.get("title"),
+                        "held": sym in {
+                            (p.get("symbol") or "").upper() for p in positions
+                        },
+                    })
+        earnings = {
+            "enabled": cfg.earnings_blackout_days > 0,
+            "window_days": cfg.earnings_blackout_days,
+            "blocked_symbols": blackout_symbols,
+        }
+
+        return {"drift": drift, "beta": beta, "earnings": earnings}
 
     @app.post("/api/pending-trades/{trade_id}/approve")
     async def approve_pending_trade(
@@ -4758,6 +5367,92 @@ def create_app(ctx: AppContext) -> FastAPI:
         from yolovest.config import config_to_ui_sections, FILE_ONLY_KEYS
         sections = config_to_ui_sections(ctx.config)
         return {"sections": sections}
+
+    @app.get("/api/config/export")
+    async def export_config(
+        _user: str = Depends(verify_download_credentials),
+    ) -> JSONResponse:
+        """Download all DB-editable config as a flat {key: value} JSON
+        file. Import on another instance by uploading it (the Settings
+        importer PUTs these through the same validation as manual
+        edits). Excludes file-only keys (secrets, paths)."""
+        from yolovest.config import FILE_ONLY_KEYS, _flatten_model
+        from yolovest.timezone import now_ist as _now_ist
+        flat = {
+            k: v for k, v in _flatten_model(ctx.config).items()
+            if k not in FILE_ONLY_KEYS
+        }
+        ts = _now_ist().strftime("%Y%m%d_%H%M%S")
+        return JSONResponse(
+            content={"config": flat},
+            headers={
+                "Content-Disposition": f'attachment; filename="yolovest_config_{ts}.json"',
+            },
+        )
+
+    @app.post("/api/config/import")
+    async def import_config(
+        file: UploadFile = File(...),
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Apply a config JSON exported from another instance. Runs
+        every key through the same Pydantic validation + apply path as
+        manual Settings edits. File-only keys in the upload are ignored."""
+        from yolovest.config import (
+            FILE_ONLY_KEYS, apply_db_config, config_to_ui_sections,
+        )
+
+        raw = await file.read()
+        try:
+            parsed = json.loads(raw)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
+        flat = parsed.get("config") if isinstance(parsed, dict) else None
+        if not isinstance(flat, dict):
+            raise HTTPException(
+                status_code=400,
+                detail='Expected {"config": {key: value, ...}}',
+            )
+        updates = {
+            k: v for k, v in flat.items() if k not in FILE_ONLY_KEYS
+        }
+        if not updates:
+            raise HTTPException(status_code=400, detail="No importable keys")
+        str_updates = {
+            k: (json.dumps(v) if isinstance(v, (list, dict, bool)) or v is None else str(v))
+            for k, v in updates.items()
+        }
+        # Validate the merged config BEFORE persisting (same order as
+        # PUT /api/config) so a bad value never lands in the DB.
+        db_values = await ctx.db.get_all_config()
+        db_values.update(str_updates)
+        try:
+            new_config = apply_db_config(ctx.config, db_values)
+        except Exception as e:
+            raise HTTPException(
+                status_code=422, detail=f"Config validation failed: {e}",
+            ) from e
+        await ctx.db.set_config_bulk(str_updates)
+        ctx.config = new_config
+        ctx.market_hours = MarketHoursChecker(ctx.config)
+        if hasattr(ctx.notify, "_config"):
+            ctx.notify._config = ctx.config
+        return {
+            "success": True,
+            "imported": len(updates),
+            "sections": config_to_ui_sections(ctx.config),
+        }
+
+    @app.get("/api/config/defaults")
+    async def get_config_defaults(
+        _user: str = Depends(verify_credentials),
+    ) -> dict[str, Any]:
+        """Return the default values for every DB-editable config key,
+        in the same {section: {key: value}} shape as /api/config so the
+        frontend can diff current vs default and offer a per-tab reset."""
+        from yolovest.config import AppConfig, config_to_ui_sections
+        defaults = config_to_ui_sections(AppConfig())
+        return {"sections": defaults}
 
     @app.put("/api/config")
     async def update_config(
@@ -4968,7 +5663,6 @@ def create_app(ctx: AppContext) -> FastAPI:
             finally:
                 _running_skills.pop(skill_name, None)
 
-        import asyncio
         task = asyncio.create_task(_run_in_background())
         _running_skills[skill_name] = task
 

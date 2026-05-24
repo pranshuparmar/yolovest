@@ -16,6 +16,38 @@ from yolovest.models.schemas import OHLCVBar
 
 logger = logging.getLogger(__name__)
 
+_yf_cache_configured = False
+
+
+def configure_yfinance_cache() -> None:
+    """Point yfinance's timezone cache at a writable temp dir created
+    with exist_ok=True.
+
+    yfinance (some versions) does an mkdir WITHOUT exist_ok on its
+    default ~/.cache/py-yfinance dir, so when the dir already exists it
+    logs "Error creating TzCache folder ... [Errno 17] File exists" and
+    silently disables tz caching (re-fetching timezones every call).
+    Redirecting to a pre-created dir both silences the recurring warning
+    and restores the cache. Best-effort + run-once; yfinance works
+    regardless if this fails.
+    """
+    global _yf_cache_configured
+    if _yf_cache_configured:
+        return
+    _yf_cache_configured = True
+    try:
+        import os
+        import tempfile
+
+        import yfinance as yf
+
+        cache_dir = os.path.join(tempfile.gettempdir(), "yfinance_tz_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        yf.set_tz_cache_location(cache_dir)
+    except Exception:
+        logger.debug("yfinance tz-cache configuration skipped", exc_info=True)
+
+
 # Interval mapping: our names → yfinance names
 _YF_INTERVALS = {
     "daily": "1d",
@@ -31,6 +63,7 @@ class YFinanceProvider(MarketDataBase):
     def __init__(self) -> None:
         self._lock = asyncio.Semaphore(2)  # max 2 concurrent requests
         self._last_request = 0.0
+        configure_yfinance_cache()
 
     def _nse_symbol(self, symbol: str) -> str:
         """Convert NSE symbol to yfinance format."""

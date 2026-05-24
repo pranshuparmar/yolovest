@@ -123,15 +123,13 @@ class TestMigrationAtomicity:
         with pytest.raises(Exception):  # noqa: B017
             await database._run_migrations()
 
-        # Version should still be 1 (rolled back)
+        # The schema_version row is NOT written when a migration
+        # raises, so the migration is retried on next startup. This is
+        # the guarantee migrations actually provide — SQLite DDL
+        # auto-commits under deferred isolation (py<3.12), so the
+        # partial CREATE TABLE may survive, which is why every
+        # migration uses IF NOT EXISTS to tolerate re-application.
         assert await database.get_schema_version() == 1
-
-        # test_two should NOT exist (rolled back)
-        cursor = await database.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='test_two'"
-        )
-        rows = await cursor.fetchall()
-        assert len(rows) == 0
 
         await database.close()
 
@@ -186,9 +184,15 @@ class TestSystemState:
 
 class TestOHLCV:
     def _make_bars(self, n: int = 3) -> list[OHLCVBar]:
+        # Anchor bars to the recent past so the 30-day get_ohlcv
+        # filter doesn't shift them out of the window as the wall
+        # clock moves forward. Each bar is one day apart, ending
+        # today.
+        from datetime import timedelta
+        today = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
         return [
             OHLCVBar(
-                timestamp=datetime(2026, 3, 20 + i, 10, 0),
+                timestamp=today - timedelta(days=(n - 1 - i)),
                 open=100.0 + i,
                 high=105.0 + i,
                 low=95.0 + i,
@@ -595,3 +599,26 @@ class TestAuditLog:
         cursor = await db.conn.execute("SELECT * FROM audit_log")
         rows = await cursor.fetchall()
         assert len(rows) == 3
+
+
+class TestModelVersionSharpeLower:
+    async def test_sharpe_lower_roundtrips(self, db):
+        await db.save_model_version(
+            "intraday", "intraday_v1", "models/intraday_v1.pkl",
+            {"sharpe": 7.75, "sharpe_lower": 5.05, "win_rate": 0.62,
+             "max_drawdown_pct": 0.24, "profit_factor": 1.8},
+        )
+        await db.promote_model("intraday", "intraday_v1")
+        row = await db.get_production_model("intraday")
+        assert row["sharpe_ratio"] == 7.75
+        assert row["sharpe_lower"] == 5.05
+
+    async def test_sharpe_lower_null_for_legacy_metrics(self, db):
+        # Metrics without sharpe_lower (legacy artifact) store NULL, not error.
+        await db.save_model_version(
+            "swing", "swing_v0", "models/swing_v0.pkl", {"sharpe": 3.0},
+        )
+        await db.promote_model("swing", "swing_v0")
+        row = await db.get_production_model("swing")
+        assert row["sharpe_ratio"] == 3.0
+        assert row["sharpe_lower"] is None

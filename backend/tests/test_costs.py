@@ -19,11 +19,18 @@ def cost_config() -> TransactionCostConfig:
 
 class TestComputeTransactionCosts:
     def test_intraday_cap_applied(self):
-        # Brokerage capped at ₹20 per leg regardless of value
+        # Brokerage capped at ₹20 per leg regardless of value. On a
+        # ₹250k notional trade (100 × ₹2500-ish), total round-trip
+        # comes out to ~₹40 brokerage + ~₹62 STT + ~₹20 exchange +
+        # ~₹14 GST + small other = roughly ₹150. The cap test verifies
+        # the BROKERAGE component doesn't scale with notional —
+        # without it brokerage alone would be ~₹250 on this trade.
         costs = compute_transaction_costs(2500, 2510, 100, product="MIS")
-        # Two legs × ₹20 cap + STT on sell + small other = bounded
         assert costs > 0
-        assert costs < 100
+        # Sanity ceiling: without the brokerage cap costs would be
+        # 2-3× higher. 250 is comfortable headroom over the realistic
+        # ~150 floor while still catching a missing-cap regression.
+        assert costs < 250
 
     def test_delivery_stt_higher(self):
         mis = compute_transaction_costs(2500, 2510, 10, product="MIS")

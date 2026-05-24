@@ -1,6 +1,68 @@
-import { useState, useEffect, useCallback } from "react";
-import { useConfig, useUpdateConfig } from "../hooks/queries";
+import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext } from "react";
+import { useConfig, useConfigDefaults, useUpdateConfig, useImportConfig } from "../hooks/queries";
+import { api } from "../api/endpoints";
 import clsx from "clsx";
+
+// Defaults flow into the InfoIcon tooltip via context so we don't have
+// to thread the value through 5 field-component layers. SettingsPage
+// populates this once defaults are loaded.
+const DefaultsContext = createContext<Record<string, unknown>>({});
+
+// Field type registry built from the originally-loaded /api/config
+// response. JSON loses Python's int/float distinction (both → Number
+// in JS), but `_parse_db_value` on the backend preserves int values as
+// JSON integers and floats as JSON numbers with a fractional part. We
+// capture that distinction at first load so NumberField knows whether
+// to allow decimals — preventing leaks like 10.5 being saved to a
+// max_trades_per_day field and crashing Pydantic.
+type FieldKind = "int" | "float";
+const FieldTypesContext = createContext<Record<string, FieldKind>>({});
+
+// Explicit fallback list for fields whose value is null on both the
+// live config and the defaults endpoint, so the heuristic can't
+// classify them. Currently the Optional[int] caps; extend whenever a
+// new Optional[int] field is added.
+const EXPLICIT_INT_KEYS: ReadonlySet<string> = new Set([
+  "risk.max_mis_trades_per_day",
+  "risk.max_cnc_trades_per_day",
+]);
+
+function inferFieldType(value: unknown): FieldKind | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Number.isInteger(value) ? "int" : "float";
+}
+
+// Per-key fallback semantics for Optional fields. When the field's
+// own default is None, the system uses one of these at runtime:
+//   - a reference to another config key (string starting with "ref:")
+//   - a fixed numeric default (number)
+//   - a descriptive note (string)
+// The InfoIcon tooltip surfaces this so "not set" doesn't read as a
+// dead end.
+const FALLBACK_DEFAULTS: Record<string, string | number> = {
+  "risk.min_confidence_buy_intraday": "ref:risk.min_confidence_buy",
+  "risk.min_confidence_sell_intraday": "ref:risk.min_confidence_sell",
+  "risk.min_confidence_buy_swing": "ref:risk.min_confidence_buy",
+  "risk.min_confidence_sell_swing": "ref:risk.min_confidence_sell",
+  "risk.buy_threshold_override": "uses the model's bootstrap-tuned threshold from the saved artifact",
+  "risk.sell_threshold_override": "uses the model's bootstrap-tuned threshold from the saved artifact",
+  "risk.max_mis_trades_per_day": "disabled — only the combined Max Trades / Day cap applies",
+  "risk.max_cnc_trades_per_day": "disabled — only the combined Max Trades / Day cap applies",
+};
+
+function formatDefaultValue(v: unknown): string {
+  // Optional fields default to None. What "not set" means at runtime
+  // depends on the field (some fall back to a general value, some
+  // disable the gate entirely) — the field's description explains it.
+  if (v === null || v === undefined) return "not set";
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "string") return v.length === 0 ? '""' : v;
+  if (Array.isArray(v)) return `[${v.map((x) => formatDefaultValue(x)).join(", ")}]`;
+  if (typeof v === "object") {
+    try { return JSON.stringify(v); } catch { return String(v); }
+  }
+  return String(v);
+}
 
 // ---------------------------------------------------------------------------
 // Tab definitions
@@ -21,12 +83,19 @@ const TABS: Tab[] = [
   {
     id: "strategy",
     label: "Strategy",
-    sections: ["_strategy_top", "strategy", "scanning", "retraining"],
+    sections: [
+      "_strategy_top",
+      "_strategy_mis",
+      "_strategy_cnc",
+      "strategy",
+      "scanning",
+      "retraining",
+    ],
   },
   {
     id: "risk",
     label: "Risk & Execution",
-    sections: ["risk", "execution", "transaction_costs"],
+    sections: ["risk", "_risk_mis", "_risk_cnc", "execution", "transaction_costs"],
   },
   {
     id: "schedule",
@@ -57,6 +126,47 @@ const STRATEGY_TOP_KEYS = [
   "scanning.min_avg_daily_volume",
 ];
 
+// Per-product strategy settings. ATR target/stop multipliers and the
+// intraday-only eligibility / bias knobs live here. Swing buckets
+// (short_swing / week / long) all map to CNC at the broker so they
+// share the CNC section.
+const STRATEGY_MIS_KEYS = [
+  "strategy.holding_periods.intraday.target",
+  "strategy.holding_periods.intraday.stop_loss",
+  "strategy.holding_periods.intraday.max_atr_pct_for_target",
+  "strategy.max_atr_pct_for_intraday_eligibility",
+  "strategy.bull_bias_intraday_pct",
+];
+
+const STRATEGY_CNC_KEYS = [
+  "strategy.holding_periods.short_swing.target",
+  "strategy.holding_periods.short_swing.stop_loss",
+  "strategy.holding_periods.week.target",
+  "strategy.holding_periods.week.stop_loss",
+  "strategy.holding_periods.long.target",
+  "strategy.holding_periods.long.stop_loss",
+];
+
+// Per-product risk settings — intraday/swing in the model maps 1:1 to
+// MIS/CNC at the broker, so these virtual sections group the knobs the
+// user actually thinks about as "MIS rules" vs "CNC rules".
+const RISK_MIS_KEYS = [
+  "risk.max_mis_trades_per_day",
+  "risk.min_confidence_buy_intraday",
+  "risk.min_confidence_sell_intraday",
+  "risk.trailing_sl_trigger_target_pct_intraday",
+  "risk.exit_tweaks.time_stop_enabled",
+  "risk.exit_tweaks.intraday_stop_after_min",
+  "risk.exit_tweaks.intraday_stop_progress_threshold",
+];
+
+const RISK_CNC_KEYS = [
+  "risk.max_cnc_trades_per_day",
+  "risk.min_confidence_buy_swing",
+  "risk.min_confidence_sell_swing",
+  "risk.trailing_sl_trigger_target_pct_swing",
+];
+
 // All cron/schedule-related keys, pulled from various sections into one card
 const CRON_KEYS = [
   "heartbeat.auth_broker_cron",
@@ -74,6 +184,10 @@ const RELOCATED_KEYS = new Set([
   ...GENERAL_TOP_KEYS,
   ...CRON_KEYS,
   ...STRATEGY_TOP_KEYS,
+  ...STRATEGY_MIS_KEYS,
+  ...STRATEGY_CNC_KEYS,
+  ...RISK_MIS_KEYS,
+  ...RISK_CNC_KEYS,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -147,6 +261,8 @@ const NULLABLE_NUMBER_KEYS = new Set([
   "risk.sell_threshold_override",
   "risk.trailing_sl_trigger_target_pct_intraday",
   "risk.trailing_sl_trigger_target_pct_swing",
+  "risk.max_mis_trades_per_day",
+  "risk.max_cnc_trades_per_day",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -156,7 +272,11 @@ const NULLABLE_NUMBER_KEYS = new Set([
 const SECTION_LABELS: Record<string, string> = {
   _general_top: "General",
   _strategy_top: "Strategy — Core",
+  _strategy_mis: "MIS (Intraday) — Holding Geometry",
+  _strategy_cnc: "CNC (Delivery) — Holding Geometry",
   _cron_schedules: "Cron Schedules",
+  _risk_mis: "MIS (Intraday) Specific",
+  _risk_cnc: "CNC (Delivery) Specific",
   capital: "Capital",
   llm: "LLM (Gemini)",
   market_data: "Market Data",
@@ -279,7 +399,12 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.min_confidence_sell_swing": "Min Confidence (SELL · Swing)",
   "risk.skip_sell_on_holdings": "Skip SELL on Holdings",
   "risk.max_trades_per_day": "Max Trades / Day",
+  "risk.max_mis_trades_per_day": "Max MIS Trades / Day",
+  "risk.max_cnc_trades_per_day": "Max CNC Trades / Day",
   "risk.kill_switch_enabled": "Kill Switch",
+  "risk.drift_auto_suspend_enabled": "Auto-Suspend on Model Drift",
+  "risk.earnings_blackout_days": "Earnings Blackout (days)",
+  "risk.max_portfolio_beta": "Max Portfolio Beta",
   "risk.llm_review_enabled": "LLM Trade Review",
   "risk.llm_fallback_to_rules": "Fallback to Rules if LLM Down",
   "risk.max_same_sector_positions": "Max Same Sector Positions",
@@ -385,7 +510,8 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "market_hours.holidays": "Market Holidays",
   "market_hours.early_close_days": "Early Close Days",
   "database.backup_enabled": "Backups Enabled",
-  "database.retention.ohlcv_days": "OHLCV Retention (days)",
+  "database.retention.ohlcv_days": "Daily OHLCV Retention (days)",
+  "database.retention.intraday_ohlcv_days": "Intraday OHLCV Retention (days)",
   "database.retention.audit_log_days": "Audit Log Retention (days)",
   "database.retention.predictions_days": "Predictions Retention (days)",
   "database.retention.news_days": "News Retention (days)",
@@ -509,8 +635,13 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "risk.min_confidence_buy_swing": "Swing BUY floor (0–1). Applied on top of the model's tuned threshold for short_swing / week / long holding signals. Leave blank to fall back to the global Min Confidence (BUY).",
   "risk.min_confidence_sell_swing": "Swing SELL floor (0–1). Applied on top of the model's tuned threshold for short_swing / week / long holding signals. Leave blank to fall back to the global Min Confidence (SELL).",
   "risk.skip_sell_on_holdings": "Don't generate SELL signals for symbols you already hold — position-monitor handles exits.",
-  "risk.max_trades_per_day": "Maximum trades per day including re-entries.",
+  "risk.max_trades_per_day": "Maximum combined trades per day across MIS and CNC, including re-entries. Acts as an overall cap on top of the per-product limits below.",
+  "risk.max_mis_trades_per_day": "Optional per-product cap on intraday (MIS) entries per day. When blank, only the combined Max Trades / Day applies. Useful when you want a different MIS budget than CNC — e.g. 10 MIS entries for an active intraday workflow.",
+  "risk.max_cnc_trades_per_day": "Optional per-product cap on delivery (CNC) entries per day. When blank, only the combined Max Trades / Day applies. Useful for users who hold inventory deliberately and want a tighter CNC budget — e.g. 1 CNC entry per day.",
   "risk.kill_switch_enabled": "Allow /stop and /kill commands to halt all trading.",
+  "risk.drift_auto_suspend_enabled": "When drift-watch detects a >15pp win-rate decay or a signal-class collapse at 16:30 IST, automatically suspend signal generation until the next successful model-retrain. Off by default — opt in for unattended live trading. The suspension flag can also be cleared manually via the dashboard.",
+  "risk.earnings_blackout_days": "Block new entries in symbols with a scheduled earnings or board-meeting announcement within this many days. Earnings reactions routinely move stocks ±5-20% overnight, wider than any ATR-based SL. Sources from the NSE Corporate Filings calendar (populated by ingest-data). 0 disables the gate; 1-2 is typical.",
+  "risk.max_portfolio_beta": "Cap the portfolio's beta-weighted notional exposure as a multiple of capital. Sum of (position notional × |beta|) over all open positions + the candidate signal must stay under this × capital. Beta is computed against a cross-sectional market-return proxy over the last 60 days. 0 disables the gate. 1.5 is the standard 'diversified' ceiling; 2.0 lets you concentrate more.",
   "risk.llm_review_enabled": "Gemini reviews each trade before execution (APPROVE/REJECT/RESIZE).",
   "risk.llm_fallback_to_rules": "Use rules-only risk check if LLM is unavailable.",
   "risk.max_same_sector_positions": "Maximum open positions in the same sector (correlation limit).",
@@ -615,7 +746,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "market_hours.holidays": "JSON list of NSE holiday dates (YYYY-MM-DD strings). Heartbeat skips these. Also editable via the /holiday Telegram command.",
   "market_hours.early_close_days": "JSON list of half-day sessions: [{\"date\": \"YYYY-MM-DD\", \"close\": \"HH:MM\"}]. Used for Diwali muhurat and shortened sessions; market-hours checker honours the truncated close on these days.",
   "database.backup_enabled": "Enable daily automatic database backups.",
-  "database.retention.ohlcv_days": "Keep OHLCV price data for this many days.",
+  "database.retention.ohlcv_days": "Keep DAILY OHLCV bars for this many days. Must be >= your max training history (retraining.max_training_days / market_data.backfill_days) or the nightly maintenance silently truncates the model's training data.",
+  "database.retention.intraday_ohlcv_days": "Keep INTRADAY (5-minute etc.) OHLCV bars for this many days. Decoupled from daily because 5-min bars are ~75x heavier per day and aren't used for model training — only operationally (volume-exhaustion exits, live monitoring). Keep this short (defaults to the 365d intraday backfill window) to avoid bloating the DB.",
   "database.retention.audit_log_days": "Keep audit log entries for this many days.",
   "database.retention.predictions_days": "Keep ML prediction records for this many days.",
   "database.retention.news_days": "Keep news articles for this many days.",
@@ -683,16 +815,50 @@ function formatHint(fullKey: string): string | null {
 function InfoIcon({
   description, fullKey,
 }: { description?: string; fullKey?: string }) {
-  const [open, setOpen] = useState(false);
+  // Two independent open states. Hover reveals on desktop without
+  // requiring a click; click pins so the tooltip stays open and works
+  // on mobile (where hover doesn't exist). Either state being true
+  // shows the tooltip.
+  const [hovering, setHovering] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const visible = hovering || pinned;
   const hasDescription = !!description;
+  const defaults = useContext(DefaultsContext);
   // Always render the icon — every setting should have one so the user
   // can at least see the canonical dotted key (useful for /run, docs,
   // /symbol contexts) even when we haven't written a description yet.
-  const tooltip = hasDescription
-    ? description
+  const baseTooltip = hasDescription
+    ? description!
     : `Config key: ${fullKey}\nDescription not yet written — file an issue if unclear.`;
+  let defaultLine = "";
+  if (fullKey && fullKey in defaults) {
+    const raw = defaults[fullKey];
+    if (raw !== null && raw !== undefined) {
+      defaultLine = `Default: ${formatDefaultValue(raw)}`;
+    } else if (fullKey in FALLBACK_DEFAULTS) {
+      // Optional field whose default is None — surface the
+      // documented fallback so "not set" isn't a dead end.
+      const fallback = FALLBACK_DEFAULTS[fullKey];
+      if (typeof fallback === "string" && fallback.startsWith("ref:")) {
+        const refKey = fallback.slice(4);
+        const refValue = defaults[refKey];
+        defaultLine = refValue !== undefined && refValue !== null
+          ? `Default: not set — falls back to ${refKey} (${formatDefaultValue(refValue)})`
+          : `Default: not set — falls back to ${refKey}`;
+      } else {
+        defaultLine = `Default: ${fallback}`;
+      }
+    } else {
+      defaultLine = `Default: not set`;
+    }
+  }
+  const tooltip = defaultLine ? `${baseTooltip}\n\n${defaultLine}` : baseTooltip;
   return (
-    <span className="relative inline-flex shrink-0">
+    <span
+      className="relative inline-flex shrink-0"
+      onMouseEnter={() => setHovering(true)}
+      onMouseLeave={() => setHovering(false)}
+    >
       <button
         type="button"
         className={clsx(
@@ -701,13 +867,14 @@ function InfoIcon({
             ? "bg-gray-800 border border-gray-600 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
             : "bg-gray-900 border border-dashed border-gray-700 text-gray-600 hover:text-gray-400 hover:border-gray-500",
         )}
-        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-        onBlur={() => setOpen(false)}
+        onClick={(e) => { e.stopPropagation(); setPinned((v) => !v); }}
+        onBlur={() => setPinned(false)}
+        aria-label={hasDescription ? "Show description" : "Show config key"}
       >
         i
       </button>
-      {open && (
-        <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-50 w-56 px-2.5 py-1.5 rounded bg-gray-700 border border-gray-600 text-[11px] text-gray-200 leading-snug shadow-lg whitespace-pre-line">
+      {visible && (
+        <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-50 w-56 px-2.5 py-1.5 rounded bg-gray-700 border border-gray-600 text-[11px] text-gray-200 leading-snug shadow-lg whitespace-pre-line pointer-events-none">
           {tooltip}
         </span>
       )}
@@ -834,16 +1001,58 @@ function NumberField({
   hint?: string | null;
   onChange: (val: number) => void;
 }) {
+  // Field type is captured once from the original server data so
+  // edits can't corrupt the int/float classification. Falls back to
+  // a heuristic on the current value when registry has no entry.
+  const fieldTypes = useContext(FieldTypesContext);
+  const kind: FieldKind =
+    (fullKey && fieldTypes[fullKey]) ||
+    (Number.isInteger(value) ? "int" : "float");
+  const isInt = kind === "int";
+
+  // Track the raw input string so the user can transiently clear the
+  // box while typing without leaking NaN/null. Only commit when the
+  // parsed value is finite AND matches the field's int/float kind.
+  const [draft, setDraft] = useState<string>(String(value));
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
   return (
     <div className="flex items-center justify-between py-2.5 gap-4">
       <FieldLabel label={label} description={description} fullKey={fullKey} hint={hint} />
       <input
         type="number"
-        step={value % 1 !== 0 ? 0.001 : 1}
-        value={value}
+        step={isInt ? 1 : value % 1 !== 0 ? 0.001 : 1}
+        value={draft}
         onChange={(e) => {
           const v = e.target.value;
-          onChange(v.includes(".") ? parseFloat(v) : parseInt(v, 10));
+          setDraft(v);
+          if (v === "") return;
+          if (isInt) {
+            // Decimals would parse via Math.floor / parseInt and
+            // silently truncate the user's input — better to refuse
+            // them outright so the backend doesn't get a value the
+            // user didn't actually type. The committed value stays
+            // until the user enters a valid integer.
+            if (v.includes(".") || v.includes("e") || v.includes("E")) return;
+            const parsed = parseInt(v, 10);
+            if (Number.isFinite(parsed) && String(parsed) === v.replace(/^\+/, "")) {
+              onChange(parsed);
+            }
+          } else {
+            const parsed = v.includes(".") ? parseFloat(v) : parseInt(v, 10);
+            if (Number.isFinite(parsed)) onChange(parsed);
+          }
+        }}
+        onBlur={() => {
+          // Snap visible draft back to committed value when invalid
+          // so the input doesn't sit in a "10.5" state while the
+          // committed integer is 10.
+          if (draft === "" || !Number.isFinite(Number(draft))
+              || (isInt && draft.includes("."))) {
+            setDraft(String(value));
+          }
         }}
         className="w-28 bg-gray-800 border border-gray-700 rounded px-2.5 py-1.5 text-sm text-gray-200 text-right focus:border-blue-500 focus:outline-none"
       />
@@ -894,21 +1103,35 @@ function NullableNumberField({
   hint?: string | null;
   onChange: (val: number | null) => void;
 }) {
+  // For Optional[int] fields the registry pegs them as "int" even
+  // when the current value is null; check it. Falls back to "float"
+  // for the historical Optional[float] confidence/threshold keys.
+  const fieldTypes = useContext(FieldTypesContext);
+  const kind: FieldKind = (fullKey && fieldTypes[fullKey]) || "float";
+  const isInt = kind === "int";
   return (
     <div className="flex items-center justify-between py-2.5 gap-4">
       <FieldLabel label={label} description={description} fullKey={fullKey} hint={hint} />
       <input
         type="number"
-        step={0.05}
+        step={isInt ? 1 : 0.05}
         placeholder="(global)"
         value={value === null ? "" : value}
         onChange={(e) => {
           const v = e.target.value;
           if (v === "") {
             onChange(null);
+            return;
+          }
+          if (isInt) {
+            if (v.includes(".") || v.includes("e") || v.includes("E")) return;
+            const parsed = parseInt(v, 10);
+            if (Number.isFinite(parsed) && String(parsed) === v.replace(/^\+/, "")) {
+              onChange(parsed);
+            }
           } else {
             const parsed = v.includes(".") ? parseFloat(v) : parseInt(v, 10);
-            onChange(Number.isFinite(parsed) ? parsed : null);
+            if (Number.isFinite(parsed)) onChange(parsed);
           }
         }}
         className="w-28 bg-gray-800 border border-gray-700 rounded px-2.5 py-1.5 text-sm text-gray-200 text-right focus:border-blue-500 focus:outline-none"
@@ -999,7 +1222,7 @@ function SectionCard({
   if (entries.length === 0) return null;
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg">
+    <div className="bg-gray-900 border border-gray-800 rounded-lg mb-4 break-inside-avoid">
       <div className="flex items-center justify-between px-5 pt-4 pb-2">
         <h3 className="text-sm font-semibold text-gray-200">{title}</h3>
         {changedCount > 0 && (
@@ -1021,14 +1244,39 @@ function SectionCard({
 // Main page
 // ---------------------------------------------------------------------------
 
+// Compare two config values structurally. Booleans / numbers / strings
+// are sometimes loaded from the DB as their string forms (e.g. "0.02"
+// vs 0.02 from a default AppConfig), so the comparison normalises via
+// JSON.stringify rather than ===.
+function valuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  // Tolerate numeric strings vs numbers
+  if (typeof a === "number" && typeof b === "string") return String(a) === b;
+  if (typeof a === "string" && typeof b === "number") return a === String(b);
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
 export default function SettingsPage() {
   const { data, isLoading, error } = useConfig();
+  const { data: defaultsData } = useConfigDefaults();
   const updateMutation = useUpdateConfig();
+  const importConfigMutation = useImportConfig();
+  const configUploadRef = useRef<HTMLInputElement>(null);
 
   const [activeTab, setActiveTab] = useState("general");
   const [edited, setEdited] = useState<Record<string, unknown>>({});
   const [localConfig, setLocalConfig] = useState<Record<string, Record<string, unknown>>>({});
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  // "Diff from default" mode is per-tab so toggling on the Risk tab
+  // doesn't hide unchanged keys on the General tab when the user
+  // navigates back.
+  const [diffOnlyTabs, setDiffOnlyTabs] = useState<Record<string, boolean>>({});
 
   // Flatten all config into a single lookup for virtual sections
   const flatConfig: Record<string, unknown> = {};
@@ -1037,6 +1285,53 @@ export default function SettingsPage() {
       flatConfig[k] = v;
     }
   }
+
+  // Field-type registry built once from server data so subsequent
+  // local edits can't corrupt the int/float classification. Falls back
+  // to defaults if the live config hasn't carried a value yet (some
+  // Optional fields).
+  const fieldTypes = useMemo<Record<string, FieldKind>>(() => {
+    const out: Record<string, FieldKind> = {};
+    const collect = (sections: Record<string, Record<string, unknown>> | undefined) => {
+      if (!sections) return;
+      for (const sec of Object.values(sections)) {
+        for (const [k, v] of Object.entries(sec)) {
+          if (k in out) continue;
+          const t = inferFieldType(v);
+          if (t) out[k] = t;
+        }
+      }
+    };
+    collect(data?.sections as Record<string, Record<string, unknown>> | undefined);
+    collect(defaultsData?.sections as Record<string, Record<string, unknown>> | undefined);
+    // Explicit overrides for fields the heuristic can't classify
+    // (Optional[int] with default None has no carrying value).
+    for (const k of EXPLICIT_INT_KEYS) {
+      out[k] = "int";
+    }
+    return out;
+  }, [data, defaultsData]);
+
+  // Flat lookup of defaults (same key format as flatConfig)
+  const flatDefaults: Record<string, unknown> = useMemo(() => {
+    const out: Record<string, unknown> = {};
+    if (defaultsData?.sections) {
+      for (const section of Object.values(defaultsData.sections)) {
+        for (const [k, v] of Object.entries(section as Record<string, unknown>)) {
+          out[k] = v;
+        }
+      }
+    }
+    return out;
+  }, [defaultsData]);
+
+  const isDifferentFromDefault = useCallback(
+    (key: string): boolean => {
+      if (!(key in flatDefaults)) return false; // unknown key — treat as "same"
+      return !valuesEqual(flatConfig[key], flatDefaults[key]);
+    },
+    [flatConfig, flatDefaults],
+  );
 
   useEffect(() => {
     if (data?.sections) {
@@ -1075,6 +1370,29 @@ export default function SettingsPage() {
     }
   }, [data]);
 
+  const handleExport = useCallback(() => {
+    api.exportConfig().catch((err) =>
+      setSaveMsg(`Error: ${err instanceof Error ? err.message : String(err)}`),
+    );
+  }, []);
+
+  const handleConfigImport = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setSaveMsg(null);
+    importConfigMutation.mutate(file, {
+      onSuccess: (result) => {
+        setEdited({});
+        setSaveMsg(`Imported ${result.imported} setting(s)`);
+        setTimeout(() => setSaveMsg(null), 4000);
+      },
+      onError: (err) => {
+        setSaveMsg(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      },
+    });
+  }, [importConfigMutation]);
+
   // Build entries for a section key — handles virtual sections
   const getEntries = useCallback((sectionKey: string): [string, unknown][] => {
     if (sectionKey === "_general_top") {
@@ -1085,6 +1403,18 @@ export default function SettingsPage() {
     }
     if (sectionKey === "_cron_schedules") {
       return CRON_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
+    if (sectionKey === "_risk_mis") {
+      return RISK_MIS_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
+    if (sectionKey === "_risk_cnc") {
+      return RISK_CNC_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
+    if (sectionKey === "_strategy_mis") {
+      return STRATEGY_MIS_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
+    if (sectionKey === "_strategy_cnc") {
+      return STRATEGY_CNC_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
     }
     // Normal section — filter out relocated keys
     return Object.entries(localConfig[sectionKey] ?? {}).filter(([k]) => !RELOCATED_KEYS.has(k));
@@ -1113,6 +1443,28 @@ export default function SettingsPage() {
           <p className="text-xs text-gray-500 mt-0.5">Changes take effect immediately after saving.</p>
         </div>
         <div className="flex items-center gap-2">
+          <input
+            ref={configUploadRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleConfigImport}
+            className="hidden"
+          />
+          <button
+            onClick={handleExport}
+            className="px-3 py-1.5 rounded text-sm bg-gray-800 hover:bg-gray-700 text-gray-300"
+            title="Download all settings as a JSON file (e.g. to copy to another instance)"
+          >
+            Export
+          </button>
+          <button
+            onClick={() => configUploadRef.current?.click()}
+            disabled={importConfigMutation.isPending}
+            className="px-3 py-1.5 rounded text-sm bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-50"
+            title="Import settings from an exported JSON file"
+          >
+            {importConfigMutation.isPending ? "Importing..." : "Import"}
+          </button>
           {pendingCount > 0 && (
             <>
               <span className="text-xs text-amber-400">{pendingCount} unsaved</span>
@@ -1165,10 +1517,51 @@ export default function SettingsPage() {
         })}
       </div>
 
-      {/* Tab content */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      {/* Per-tab toolbar */}
+      <PerTabToolbar
+        currentTab={currentTab}
+        getEntries={getEntries}
+        isDifferentFromDefault={isDifferentFromDefault}
+        flatDefaults={flatDefaults}
+        diffOnly={!!diffOnlyTabs[currentTab.id]}
+        onToggleDiff={() =>
+          setDiffOnlyTabs((prev) => ({
+            ...prev,
+            [currentTab.id]: !prev[currentTab.id],
+          }))
+        }
+        onReset={(changedKeys) => {
+          if (changedKeys.length === 0) return;
+          if (
+            !window.confirm(
+              `Reset ${changedKeys.length} setting(s) on the "${currentTab.label}" tab back to default? ` +
+                `Changes are staged and won't take effect until you press Save.`,
+            )
+          )
+            return;
+          changedKeys.forEach((k) => handleChange(k, flatDefaults[k]));
+        }}
+      />
+
+      {/* Tab content. CSS columns instead of CSS grid so a tall card
+          (e.g. the Risk Management list with 50+ rows) doesn't force
+          its neighbours to grow with empty space below short cards.
+          Each section uses break-inside-avoid so it never splits
+          across columns mid-card. */}
+      <DefaultsContext.Provider value={flatDefaults}>
+      <FieldTypesContext.Provider value={fieldTypes}>
+      <div className="columns-1 lg:columns-2 gap-4 [column-fill:balance]">
         {currentTab.sections.map((sectionKey) => {
-          const entries = getEntries(sectionKey);
+          let entries = getEntries(sectionKey);
+          if (diffOnlyTabs[currentTab.id]) {
+            // Keep keys currently in the unsaved-changes buffer even if
+            // the user just typed them back to default — otherwise the
+            // field vanishes mid-edit, which is jarring. After Save or
+            // Discard, the buffer clears and the filter applies cleanly.
+            entries = entries.filter(
+              ([k]) => isDifferentFromDefault(k) || k in edited,
+            );
+          }
           if (entries.length === 0) return null;
           const title = SECTION_LABELS[sectionKey] ?? sectionKey;
           return (
@@ -1182,6 +1575,73 @@ export default function SettingsPage() {
           );
         })}
       </div>
+      </FieldTypesContext.Provider>
+      </DefaultsContext.Provider>
+    </div>
+  );
+}
+
+function PerTabToolbar({
+  currentTab,
+  getEntries,
+  isDifferentFromDefault,
+  flatDefaults,
+  diffOnly,
+  onToggleDiff,
+  onReset,
+}: {
+  currentTab: Tab;
+  getEntries: (sectionKey: string) => [string, unknown][];
+  isDifferentFromDefault: (key: string) => boolean;
+  flatDefaults: Record<string, unknown>;
+  diffOnly: boolean;
+  onToggleDiff: () => void;
+  onReset: (changedKeys: string[]) => void;
+}) {
+  // All keys on this tab, across virtual + real sections, deduped.
+  const tabKeys = useMemo(() => {
+    const seen = new Set<string>();
+    for (const sectionKey of currentTab.sections) {
+      for (const [k] of getEntries(sectionKey)) seen.add(k);
+    }
+    return Array.from(seen);
+  }, [currentTab, getEntries]);
+
+  const changedKeys = useMemo(
+    () => tabKeys.filter((k) => isDifferentFromDefault(k)),
+    [tabKeys, isDifferentFromDefault],
+  );
+
+  const defaultsLoaded = Object.keys(flatDefaults).length > 0;
+
+  return (
+    <div className="flex items-center justify-end gap-2 text-xs">
+      <span className="text-gray-500">
+        {changedKeys.length} of {tabKeys.length} differ from default
+      </span>
+      <button
+        type="button"
+        onClick={onToggleDiff}
+        disabled={!defaultsLoaded}
+        className={clsx(
+          "px-2.5 py-1 rounded border transition-colors disabled:opacity-40",
+          diffOnly
+            ? "bg-blue-900/40 border-blue-700 text-blue-300"
+            : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700",
+        )}
+        title="Show only settings that differ from their default value"
+      >
+        {diffOnly ? "Showing diff" : "Diff from default"}
+      </button>
+      <button
+        type="button"
+        onClick={() => onReset(changedKeys)}
+        disabled={!defaultsLoaded || changedKeys.length === 0}
+        className="px-2.5 py-1 rounded border bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 transition-colors disabled:opacity-40 disabled:hover:bg-gray-800"
+        title="Stage all settings on this tab to their default values (still requires Save)"
+      >
+        Reset to default
+      </button>
     </div>
   );
 }

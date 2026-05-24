@@ -5,7 +5,32 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from yolovest.skills.model_retrain import ModelRetrainSkill
+from yolovest.skills.model_retrain import ModelRetrainSkill, _decision_sharpe
+
+
+class TestDecisionSharpe:
+    """Deploy/promote must compare on the robust bootstrapped lower bound,
+    with a fair point-vs-point fallback for legacy incumbents."""
+
+    def test_prefers_lower_bound_when_both_present(self):
+        # Candidate looks better on point (8 vs 5) but worse on the robust
+        # lower bound (3 vs 4) — the lower bound must be what's compared.
+        assert _decision_sharpe(
+            {"sharpe": 8.0, "sharpe_lower": 3.0},
+            {"sharpe_ratio": 5.0, "sharpe_lower": 4.0},
+        ) == (3.0, 4.0)
+
+    def test_falls_back_to_point_for_legacy_incumbent(self):
+        # Incumbent predates sharpe_lower → compare point-vs-point so the
+        # candidate's conservative lower bound isn't pitted against the
+        # incumbent's optimistic point.
+        assert _decision_sharpe(
+            {"sharpe": 5.0, "sharpe_lower": 3.0},
+            {"sharpe_ratio": 7.0},
+        ) == (5.0, 7.0)
+
+    def test_no_incumbent_returns_zero_baseline(self):
+        assert _decision_sharpe({"sharpe": 5.0, "sharpe_lower": 3.0}, None) == (5.0, 0.0)
 
 
 def _make_bars(n: int, symbol: str = "RELIANCE") -> list[dict]:
@@ -60,6 +85,28 @@ class TestShadowPromotion:
         assert promotions[0]["version"] == "v2.0"
         retrain_skill.ctx.db.promote_model.assert_awaited_with("intraday", "v2.0")
         retrain_skill.ctx.ml.load_model.assert_awaited_with("intraday", "v2.0")
+
+    async def test_promotion_judged_on_lower_bound_not_point(self, retrain_skill):
+        # Shadow wins on point Sharpe (9 > 5) but loses on the robust
+        # lower bound (2 < 4) → must be retired, proving the decision
+        # keys off sharpe_lower, not the inflatable point estimate.
+        retrain_skill.ctx.db.get_shadow_models_ready = AsyncMock(return_value=[
+            {
+                "model_type": "intraday", "version": "v2.0",
+                "sharpe_ratio": 9.0, "sharpe_lower": 2.0, "status": "shadow",
+            }
+        ])
+        retrain_skill.ctx.db.get_production_model = AsyncMock(return_value={
+            "version": "v1.0", "sharpe_ratio": 5.0, "sharpe_lower": 4.0,
+        })
+        retrain_skill.ctx.db.get_live_metrics_for_model = AsyncMock(
+            return_value={"scored": 0}
+        )
+
+        promotions = await retrain_skill._check_shadow_promotions()
+
+        assert promotions[0]["action"] == "retired"
+        retrain_skill.ctx.db.promote_model.assert_not_awaited()
 
     async def test_retire_worse_shadow(self, retrain_skill):
         retrain_skill.ctx.db.get_shadow_models_ready = AsyncMock(return_value=[

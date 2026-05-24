@@ -63,3 +63,59 @@ export async function apiFetch<T>(
 
   return res.json();
 }
+
+function _authHeaders(includeCsrf: boolean): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (_authHeader) headers["Authorization"] = _authHeader;
+  if (includeCsrf && _csrfToken) headers["X-CSRF-Token"] = _csrfToken;
+  return headers;
+}
+
+/** Download a file from `path` and trigger a browser "Save as" with
+ *  `suggestedName`. Used for backup / model / config exports.
+ *
+ *  Streams straight to disk via a native <a download> rather than
+ *  fetch()+blob(): a blob buffers the ENTIRE payload in browser memory
+ *  before the save dialog, which stalls (and can OOM) on multi-hundred-MB
+ *  DB backups. A native download can't carry the Authorization header, so
+ *  we first mint a short-lived token and pass it as a query param. The
+ *  server's Content-Disposition still drives the actual filename. */
+export async function apiDownload(path: string, suggestedName: string): Promise<void> {
+  const { token } = await apiFetch<{ token: string }>("/api/download-token");
+  const sep = path.includes("?") ? "&" : "?";
+  const url = `${path}${sep}token=${encodeURIComponent(token)}`;
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = suggestedName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/** Upload a file via multipart/form-data. The browser sets the
+ *  Content-Type (with boundary) itself, so we must NOT set it. */
+export async function apiUpload<T>(path: string, file: File, field = "file"): Promise<T> {
+  const form = new FormData();
+  form.append(field, file);
+  const res = await fetch(path, {
+    method: "POST",
+    headers: _authHeaders(true),
+    body: form,
+  });
+  if (res.status === 401) {
+    _onUnauthorized?.();
+    throw new Error("Unauthorized");
+  }
+  if (!res.ok) {
+    let detail: unknown = null;
+    try {
+      const body = await res.json();
+      detail = body?.detail ?? body;
+    } catch {
+      // not JSON
+    }
+    const msg = typeof detail === "string" ? detail : `Upload failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return res.json();
+}

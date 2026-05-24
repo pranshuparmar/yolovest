@@ -37,6 +37,43 @@ from yolovest.timezone import IST
 logger = logging.getLogger(__name__)
 
 
+def _decision_sharpe(
+    candidate: dict[str, Any], incumbent: dict[str, Any] | None,
+) -> tuple[float, float]:
+    """Return (candidate, incumbent) Sharpe on a like-for-like basis for
+    deploy/promote comparisons.
+
+    Prefers the bootstrapped lower-bound (`sharpe_lower`) — robust to a
+    lucky single-holdout slice — but only when BOTH sides carry it.
+    Otherwise falls back to point Sharpe on BOTH sides, so a candidate's
+    conservative lower bound is never pitted against a pre-`sharpe_lower`
+    incumbent's optimistic point estimate (which would unfairly block
+    honest retrains during the transition). Once an incumbent trained on
+    the new code reaches production, every later comparison is
+    lower-vs-lower automatically.
+    """
+    inc = incumbent or {}
+
+    def _num(v: Any) -> float | None:
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    c_low = _num(candidate.get("sharpe_lower"))
+    i_low = _num(inc.get("sharpe_lower"))
+    if c_low is not None and i_low is not None:
+        return c_low, i_low
+
+    c_pt = _num(candidate.get("sharpe"))
+    if c_pt is None:
+        c_pt = _num(candidate.get("sharpe_ratio"))
+    i_pt = _num(inc.get("sharpe_ratio"))
+    if i_pt is None:
+        i_pt = _num(inc.get("sharpe"))
+    return (c_pt or 0.0), (i_pt or 0.0)
+
+
 class ModelRetrainSkill(SkillBase):
     name = "model-retrain"
     description = "Retrain ML models, version artifacts, A/B test"
@@ -193,8 +230,13 @@ class ModelRetrainSkill(SkillBase):
         results: dict[str, Any] = {}
         shadow_deployed = []
 
-        # Lookahead periods: intraday uses 1-bar, swing uses 5-bar returns
-        lookahead_map = {"intraday": 1, "swing": 5}
+        # Lookahead periods: intraday uses 1-bar, swing uses 10-bar
+        # returns. 10 bars (~2 weeks) gives genuine swing setups
+        # enough room for the 1.5×ATR target to develop without the
+        # 0.75×ATR SL noise-tripping on the same window — at 5 bars
+        # the SL fires constantly and the labeler classes most
+        # outcomes as HOLD even after the first-winner disambiguation.
+        lookahead_map = {"intraday": 1, "swing": 10}
 
         # Match each model's path-aware label geometry to the holding
         # bucket it actually trades at runtime: intraday uses the tight
@@ -208,6 +250,11 @@ class ModelRetrainSkill(SkillBase):
             "intraday": (hp.intraday.target, hp.intraday.stop_loss),
             "swing": (hp.short_swing.target, hp.short_swing.stop_loss),
         }
+
+        # Imported once here (not inside the loop) — an early `continue`
+        # on insufficient features used to skip the in-loop import,
+        # leaving _gc unbound for the post-loop collect() below.
+        import gc as _gc
 
         for model_type in ("intraday", "swing"):
             # Build feature matrix with model-specific labeling + feedback features
@@ -320,6 +367,11 @@ class ModelRetrainSkill(SkillBase):
                 # Real-PnL backtest config: intraday model uses MIS for
                 # cost calc (lower STT); swing model uses CNC.
                 train_params["bars_meta"] = bars_meta
+                # Lookahead window (in trading days) so the CV can purge
+                # train samples whose label window overlaps the test
+                # fold — without it the multi-bar label leaks across the
+                # train/test boundary.
+                train_params["lookahead_bars"] = lookahead
                 train_params["backtest_product"] = (
                     "MIS" if model_type == "intraday" else "CNC"
                 )
@@ -425,11 +477,13 @@ class ModelRetrainSkill(SkillBase):
                     model_type, version, f"models/{model_type}_{version}.pkl", metrics
                 )
 
-                # Step 5: Compare with production
+                # Step 5: Compare with production on the robust
+                # (bootstrapped lower-bound) Sharpe, not the noisy
+                # single-holdout point estimate.
                 current = await self.ctx.db.get_production_model(model_type)
-                current_sharpe = (current.get("sharpe_ratio") or 0) if current else 0
+                cand_sharpe, current_sharpe = _decision_sharpe(metrics, current)
 
-                improved = metrics.get("sharpe", 0) > current_sharpe
+                improved = cand_sharpe > current_sharpe
                 if improved:
                     shadow_deployed.append(model_type)
 
@@ -446,7 +500,6 @@ class ModelRetrainSkill(SkillBase):
             # own copy. Without this the intraday and swing matrices
             # would briefly coexist and OOM the process on a 2 GB host.
             X = y = feat_names = sample_weights = bars_meta = None  # type: ignore[assignment]
-            import gc as _gc
             _gc.collect()
 
         # Free training_data eagerly — _check_shadow_promotions doesn't
@@ -458,6 +511,34 @@ class ModelRetrainSkill(SkillBase):
 
         # Step 7: Check shadow promotions
         promotions = await self._check_shadow_promotions()
+
+        # Clear drift-watch suspension if any model successfully
+        # retrained. The next signal-gen cycle will then run normally;
+        # drift-watch will re-evaluate at 16:30 IST and re-suspend
+        # only if the new model still shows the same decay.
+        any_success = any(
+            isinstance(r, dict) and "error" not in r and "version" in r
+            for r in results.values()
+        )
+        if any_success:
+            try:
+                cur = await self.ctx.db.get_system_state(
+                    "signal_gen_suspended_by_drift",
+                )
+                if cur:
+                    await self.ctx.db.set_system_state(
+                        "signal_gen_suspended_by_drift", "",
+                    )
+                    logger.info(
+                        "model-retrain: cleared drift-watch suspension "
+                        "(was: %s) — signal generation resumes next cycle",
+                        cur,
+                    )
+            except Exception:
+                logger.debug(
+                    "model-retrain: failed to clear drift suspension",
+                    exc_info=True,
+                )
 
         # Step 9: Gemini failure analysis
         failure_analysis = None
@@ -533,8 +614,19 @@ class ModelRetrainSkill(SkillBase):
             ema_periods=self.ctx.config.strategy.ema_periods,
         )
 
-        # Minimum window size for feature computation (need enough bars for indicators)
-        window_size = 50
+        # Minimum window size for feature computation. Must match the
+        # longest-lookback indicator (EMA-200) so every emitted sample
+        # carries the full feature set from its very first iteration.
+        # The previous value of 50 caused samples 50-199 to lack
+        # ema_200 → the discovery-and-backfill loop below would
+        # backfill them with 0.0, training the model to associate
+        # ema_200=0 with "early history" when at inference ema_200 is
+        # always non-zero. Inference distribution didn't match training.
+        # Bumping to 200 eliminates the train-inference mismatch.
+        # `window` is a per-iteration slice that's GC'd after
+        # compute_features returns, so the larger window doesn't
+        # accumulate memory across samples.
+        window_size = 200
         X: list[list[float]] = []
         y: list[int] = []
         sample_weights: list[float] = []
@@ -596,16 +688,22 @@ class ModelRetrainSkill(SkillBase):
                 continue
 
             # Compute sample weight for this symbol based on recent performance
-            sym_weight = 1.0
+            # Per-symbol failure flag — used INSIDE the per-bar loop
+            # below to apply the boost only to recent bars. The old
+            # behaviour upweighted every historical bar of a symbol
+            # whose recent accuracy was <50%, which overfits the
+            # model to that symbol's idiosyncratic past rather than
+            # learning from the conditions that produced the failures.
+            symbol_has_recent_failure = False
             if feedback_data and sym in feedback_data:
                 fb = feedback_data[sym]
-                # Upweight symbols where model accuracy was poor (< 50%)
                 pred_acc = fb.get("pred_accuracy", 0.5)
                 dry_acc = fb.get("dry_run_accuracy", 0.5)
-                # Use worst accuracy signal to determine weight
-                worst_acc = min(pred_acc, dry_acc)
-                if worst_acc < 0.5:
-                    sym_weight = weight_boost
+                if min(pred_acc, dry_acc) < 0.5:
+                    symbol_has_recent_failure = True
+            feedback_lookback_days = int(
+                self.ctx.config.strategy.feedback.lookback_days or 60
+            )
 
             # Convert rows to OHLCVBar objects for compute_features
             bars = [
@@ -754,20 +852,31 @@ class ModelRetrainSkill(SkillBase):
 
                 # Path-aware label: BUY iff target hits before SL when
                 # walking forward bar-by-bar, using the same ATR-based
-                # geometry the live trades use. Replaces the legacy
-                # close[i+N] vs close[i] ±0.5% rule, which was blind to
-                # intra-window SL hits and didn't match runtime exits.
-                current_close = bars[i].close
+                # geometry the live trades use.
+                #
+                # ENTRY PRICE: bars[i+1].open, NOT bars[i].close.
+                # The model sees features computed at bars[i].close
+                # (end of session i), but it can never actually enter
+                # at that price — the earliest a heartbeat fires the
+                # next morning is at the next session's open. Training
+                # on close-as-entry while live execution uses open-as-
+                # entry creates an overnight-gap mismatch — on volatile
+                # stocks the open can be 0.3-0.8% away from close, which
+                # is wider than a 0.3×ATR intraday SL. The model would
+                # see a "winning" pattern in training that in production
+                # is already stopped out before it can react.
+                current_close = bars[i].close  # kept for backtest path
+                next_open = bars[i + 1].open if i + 1 < len(bars) else current_close
                 future_close = bars[i + lookahead_bars].close
                 atr_pct = features.get("atr_pct") or 0.0
-                if current_close <= 0 or atr_pct <= 0:
+                if next_open <= 0 or atr_pct <= 0:
                     label = 1
                 else:
                     label = self._path_aware_label(
                         bars=bars,
                         start_idx=i,
                         lookahead=lookahead_bars,
-                        entry=current_close,
+                        entry=next_open,
                         target_pct=atr_pct * target_atr_mult,
                         sl_pct=atr_pct * sl_atr_mult,
                     )
@@ -788,13 +897,44 @@ class ModelRetrainSkill(SkillBase):
                     if k in MODEL_FEATURE_EXCLUSIONS:
                         continue
                     if k not in feature_names_set:
+                        # With window_size = 200 every iteration should
+                        # see the full feature set on entry — late-
+                        # appearing keys would mean a new optional feature
+                        # was added without a 0-default fallback in the
+                        # caller. Log so we notice the train-inference
+                        # distribution gap instead of silently backfilling.
+                        if X:
+                            logger.warning(
+                                "model-retrain: feature %s appeared at sample "
+                                "%d for %s — backfilling 0.0 into %d prior "
+                                "rows. Add a 0-default fallback at feature "
+                                "production to avoid this.",
+                                k, len(X), sym, len(X),
+                            )
                         feature_names.append(k)
                         feature_names_set.add(k)
                         for existing in X:
                             existing.append(0.0)
+                # Per-bar feedback weight. Apply weight_boost only to
+                # bars within the feedback-lookback window — those are
+                # the conditions that produced the recent failure. Older
+                # bars stay at 1.0 so the model isn't pushed to overfit
+                # this symbol's ancient history.
+                bar_weight = 1.0
+                if symbol_has_recent_failure and bars:
+                    try:
+                        latest_ts = bars[-1].timestamp
+                        this_ts = bars[i].timestamp
+                        age_days = (latest_ts - this_ts).days
+                        if 0 <= age_days <= feedback_lookback_days:
+                            bar_weight = weight_boost
+                    except Exception:
+                        # Bad timestamps fall through with no boost.
+                        pass
+
                 X.append([features.get(k, 0.0) for k in feature_names])
                 y.append(label)
-                sample_weights.append(sym_weight)
+                sample_weights.append(bar_weight)
                 # Capture the future-window high/low path so the
                 # walk-forward backtest can exit at SL or target with
                 # the same geometry as the path-aware label, instead of
@@ -804,7 +944,11 @@ class ModelRetrainSkill(SkillBase):
                 path_lows = [bars[k].low for k in range(i + 1, window_end + 1)]
                 bars_meta.append({
                     "symbol": sym,
-                    "entry_close": float(current_close),
+                    # Field name preserved for backwards-compat with
+                    # walk_forward_backtest; the value is now next-bar
+                    # open (the actual entry the model would see at
+                    # inference) instead of the same-bar close.
+                    "entry_close": float(next_open),
                     "exit_close": float(future_close),
                     "path_highs": path_highs,
                     "path_lows": path_lows,
@@ -816,6 +960,26 @@ class ModelRetrainSkill(SkillBase):
                     # the same day get netted before the Sharpe stdev.
                     "entry_date": _sample_date,
                 })
+
+        # Global chronological sort. Samples are built symbol-by-symbol,
+        # so the arrays come out ordered [symbolA_all_dates,
+        # symbolB_all_dates, ...]. The walk-forward CV (TimeSeriesSplit)
+        # assumes row order == time order — without this sort the
+        # "folds" split by SYMBOL position, not date, training on future
+        # dates relative to the test fold (severe temporal leakage that
+        # inflates the backtest Sharpe and the tuned thresholds). Sort
+        # all parallel arrays by entry_date so the split is a genuine
+        # cross-sectional walk-forward. Stable sort keeps same-date
+        # samples in their original (symbol) order.
+        if bars_meta:
+            order = sorted(
+                range(len(bars_meta)),
+                key=lambda i: bars_meta[i].get("entry_date", ""),
+            )
+            X = [X[i] for i in order]
+            y = [y[i] for i in order]
+            sample_weights = [sample_weights[i] for i in order]
+            bars_meta = [bars_meta[i] for i in order]
 
         return X, y, feature_names, sample_weights, bars_meta
 
@@ -939,8 +1103,16 @@ class ModelRetrainSkill(SkillBase):
         - SELL: target_hit when low  ≤ entry × (1 − target_pct)
                  SL_hit    when high ≥ entry × (1 + sl_pct)
 
-        Both touched in the same bar is treated as ambiguous (HOLD)
-        because daily OHLC can't tell us the intra-bar order.
+        Both touched in the same bar is treated as ambiguous because
+        daily OHLC can't tell us the intra-bar order. When both legs
+        cleanly win on DIFFERENT bars, the side that won first wins
+        the label — a real trader who took the BUY would have closed
+        at target on bar j and not been around for the SELL win on
+        bar k>j (and vice versa). The old "both won → HOLD" rule was
+        the dominant source of HOLD-label inflation on the swing
+        model (87% HOLD) because, on a 5-bar window with SL closer
+        than target, oscillating prices regularly trip both legs'
+        targets in different bars.
 
         Returns: 2 BUY, 0 SELL, 1 HOLD.
         """
@@ -949,8 +1121,10 @@ class ModelRetrainSkill(SkillBase):
         sell_target = entry * (1 - target_pct)
         sell_sl = entry * (1 + sl_pct)
 
-        buy_outcome: str | None = None  # "win" / "loss" / None
+        buy_outcome: str | None = None  # "win" / "loss" / "ambiguous" / None
         sell_outcome: str | None = None
+        buy_win_bar: int | None = None
+        sell_win_bar: int | None = None
 
         end_idx = min(start_idx + lookahead, len(bars) - 1)
         for k in range(start_idx + 1, end_idx + 1):
@@ -965,6 +1139,7 @@ class ModelRetrainSkill(SkillBase):
                     buy_outcome = "ambiguous"
                 elif target_now:
                     buy_outcome = "win"
+                    buy_win_bar = k
                 elif sl_now:
                     buy_outcome = "loss"
 
@@ -976,26 +1151,53 @@ class ModelRetrainSkill(SkillBase):
                     sell_outcome = "ambiguous"
                 elif target_now:
                     sell_outcome = "win"
+                    sell_win_bar = k
                 elif sl_now:
                     sell_outcome = "loss"
 
             if buy_outcome is not None and sell_outcome is not None:
                 break
 
-        # Decide label. Only label BUY/SELL when one side cleanly won
-        # and the other didn't also win — otherwise HOLD.
-        if buy_outcome == "win" and sell_outcome != "win":
+        buy_won = buy_outcome == "win"
+        sell_won = sell_outcome == "win"
+
+        if buy_won and sell_won:
+            # Disambiguate by which leg's target hit first. Same-bar
+            # cross-direction wins fall through to HOLD because daily
+            # OHLC can't tell us the intra-bar order.
+            if buy_win_bar is not None and sell_win_bar is not None:
+                if buy_win_bar < sell_win_bar:
+                    return 2
+                if sell_win_bar < buy_win_bar:
+                    return 0
+            return 1
+
+        if buy_won:
             return 2
-        if sell_outcome == "win" and buy_outcome != "win":
+        if sell_won:
             return 0
         return 1
 
     async def _check_shadow_promotions(self) -> list[dict[str, Any]]:
         """Check if shadow models have completed trial period.
 
-        Shadow models that have run for >= shadow_mode_days are evaluated:
-        - If shadow metrics (Sharpe, win_rate) >= production metrics: promote
-        - Otherwise: retire the shadow model (rollback)
+        Shadow models that have run for >= shadow_mode_days are evaluated
+        on TWO independent gates:
+
+        1. Backtest Sharpe — the walk-forward number stored at training
+           time. Necessary but not sufficient: a model can backtest
+           great and then collapse in production due to a regime shift
+           or feature distribution drift.
+
+        2. Live direction accuracy — accumulated from the shadow's
+           scored predictions during the trial window. The shadow must
+           track production within a small tolerance (5pp by default)
+           so we don't promote a model whose live behaviour has already
+           degraded. When production has no live data yet (new install)
+           the live gate is skipped.
+
+        Both must pass for promotion. Either failing → retire the
+        shadow.
         """
         cfg = self.ctx.config.retraining
         shadow_models = await self.ctx.db.get_shadow_models_ready(cfg.shadow_mode_days)
@@ -1005,11 +1207,66 @@ class ModelRetrainSkill(SkillBase):
             model_type = shadow["model_type"]
             current = await self.ctx.db.get_production_model(model_type)
 
-            # Compare: shadow must beat current production on Sharpe ratio
-            shadow_sharpe = shadow.get("sharpe_ratio", 0) or 0
-            current_sharpe = (current.get("sharpe_ratio", 0) or 0) if current else 0
+            # Backtest Sharpe — necessary gate. Compare on the robust
+            # bootstrapped lower bound (falls back to point Sharpe when a
+            # legacy model on either side lacks it — see _decision_sharpe).
+            shadow_sharpe, current_sharpe = _decision_sharpe(shadow, current)
+            backtest_pass = shadow_sharpe >= current_sharpe
 
-            if shadow_sharpe >= current_sharpe:
+            # Live accuracy — sufficiency check on top. Skip when
+            # production has no scored predictions yet (e.g., fresh
+            # install / first promotion).
+            shadow_live = await self.ctx.db.get_live_metrics_for_model(
+                shadow["version"], days=cfg.shadow_mode_days,
+            )
+            current_live = (
+                await self.ctx.db.get_live_metrics_for_model(
+                    current["version"], days=cfg.shadow_mode_days,
+                )
+                if current else None
+            )
+            min_shadow_scored = 30  # need at least 30 scored predictions to trust the comparison
+            live_pass = True
+            live_reason = "no live data — backtest only"
+
+            def _as_int(v: Any) -> int:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return 0
+
+            def _as_float(v: Any) -> float:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            current_scored = _as_int(
+                current_live.get("scored") if isinstance(current_live, dict) else 0
+            )
+            shadow_scored = _as_int(
+                shadow_live.get("scored") if isinstance(shadow_live, dict) else 0
+            )
+            if current_scored >= min_shadow_scored:
+                tolerance = 0.05  # 5pp
+                if shadow_scored < min_shadow_scored:
+                    live_pass = False
+                    live_reason = (
+                        f"only {shadow_scored} scored shadow predictions "
+                        f"(need {min_shadow_scored}+)"
+                    )
+                else:
+                    shadow_acc = _as_float(shadow_live.get("direction_accuracy"))
+                    current_acc = _as_float(current_live.get("direction_accuracy"))
+                    diff = shadow_acc - current_acc
+                    live_pass = diff >= -tolerance
+                    live_reason = (
+                        f"shadow live acc {shadow_acc:.2%} vs "
+                        f"production {current_acc:.2%} "
+                        f"(diff {diff:+.2%}, tolerance ±{tolerance:.0%})"
+                    )
+
+            if backtest_pass and live_pass:
                 # Promote shadow to production
                 await self.ctx.db.promote_model(model_type, shadow["version"])
                 if self.ctx.ml:
@@ -1026,24 +1283,51 @@ class ModelRetrainSkill(SkillBase):
                     "action": "promoted",
                     "shadow_sharpe": shadow_sharpe,
                     "previous_sharpe": current_sharpe,
+                    "shadow_live_accuracy": _as_float(
+                        shadow_live.get("direction_accuracy")
+                        if isinstance(shadow_live, dict) else 0
+                    ),
+                    "production_live_accuracy": (
+                        _as_float(current_live.get("direction_accuracy"))
+                        if isinstance(current_live, dict) else None
+                    ),
+                    "live_reason": live_reason,
                 })
                 logger.info(
-                    "Promoted shadow model %s/%s (Sharpe: %.2f > %.2f)",
+                    "Promoted shadow model %s/%s (backtest Sharpe %.2f vs %.2f, %s)",
                     model_type, shadow["version"], shadow_sharpe, current_sharpe,
+                    live_reason,
                 )
             else:
                 # Retire underperforming shadow
                 await self.ctx.db.retire_model(model_type, shadow["version"])
+                fail_reason_parts = []
+                if not backtest_pass:
+                    fail_reason_parts.append(
+                        f"backtest Sharpe {shadow_sharpe:.2f} < {current_sharpe:.2f}"
+                    )
+                if not live_pass:
+                    fail_reason_parts.append(f"live: {live_reason}")
                 promotions.append({
                     "model_type": model_type,
                     "version": shadow["version"],
                     "action": "retired",
                     "shadow_sharpe": shadow_sharpe,
                     "production_sharpe": current_sharpe,
+                    "shadow_live_accuracy": _as_float(
+                        shadow_live.get("direction_accuracy")
+                        if isinstance(shadow_live, dict) else 0
+                    ),
+                    "production_live_accuracy": (
+                        _as_float(current_live.get("direction_accuracy"))
+                        if isinstance(current_live, dict) else None
+                    ),
+                    "live_reason": live_reason,
+                    "failed_gates": fail_reason_parts,
                 })
                 logger.info(
-                    "Retired shadow model %s/%s (Sharpe: %.2f < %.2f)",
-                    model_type, shadow["version"], shadow_sharpe, current_sharpe,
+                    "Retired shadow model %s/%s (%s)",
+                    model_type, shadow["version"], " | ".join(fail_reason_parts),
                 )
 
         return promotions

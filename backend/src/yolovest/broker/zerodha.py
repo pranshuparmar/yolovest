@@ -431,6 +431,21 @@ class ZerodhaBroker(BrokerBase):
         """Return the cached tick size for `symbol`, or 0.05 on miss."""
         return self._tick_size_cache.get(symbol, 0.05)
 
+    def tick_for(self, symbol: str) -> float:
+        """Public wrapper around the warmed per-symbol tick cache.
+        Concrete override of BrokerBase.tick_for. Falls back to 0.05
+        when the cache hasn't been warmed yet (e.g. before the first
+        order placement or while the broker isn't authenticated)."""
+        return self._tick_for(symbol)
+
+    def round_to_tick(self, symbol: str, price: float) -> float:
+        """Snap price to the per-symbol tick grid using the warmed
+        cache. Override of BrokerBase.round_to_tick so signal-time
+        target / SL match the grid that _live_place_order will enforce
+        at order placement — no more 34.43 targets on 0.05-tick stocks
+        that get silently rounded to 34.45 when the order goes out."""
+        return self._tick_round_for(symbol, price)
+
     def _tick_round_for(self, symbol: str, price: float) -> float:
         """Snap `price` to the symbol's tick grid using the warmed cache."""
         return self._tick_round(price, self._tick_for(symbol))
@@ -451,11 +466,14 @@ class ZerodhaBroker(BrokerBase):
         Kite rejects MARKET and SL-M orders that don't carry a
         `market_protection` value. We always convert MARKET → LIMIT (at
         LTP ± buffer) and SL-M → SL (at trigger ± buffer) — those carry
-        explicit prices and need no protection. For the rare path where
-        conversion can't happen (LTP unavailable for MARKET, or trigger
-        missing for SL-M), the residual MARKET/SL-M is sent with
-        `market_protection=-1`, which asks Zerodha to apply the
-        exchange-defined protection band.
+        explicit prices and need no protection. If LTP fetch fails for
+        a MARKET order we ABORT rather than fall back to a raw MARKET
+        with exchange-defined protection — on illiquid names the
+        exchange band can be 3-5% wide and we'd rather miss the trade
+        than eat that slippage blind. SL-M with no trigger is a
+        different shape and still falls through to market_protection=-1
+        below, because that path is only reachable from manual/legacy
+        callers that build orders without a trigger.
         """
         if self._kite is None:
             raise RuntimeError("Not authenticated")
@@ -483,10 +501,19 @@ class ZerodhaBroker(BrokerBase):
                     side, symbol, ltp, price,
                 )
             else:
-                logger.warning(
-                    "MARKET→LIMIT conversion: no LTP for %s — falling back "
-                    "to MARKET with market_protection=-1 (exchange-defined)",
-                    symbol,
+                # No LTP — the previous behaviour was to fall back to a
+                # raw MARKET order with market_protection=-1, leaving
+                # slippage entirely to the exchange band (typically 3-5%
+                # on thinly traded names). On a name we've already
+                # failed to fetch LTP for, that band is exactly where
+                # things are most likely to be ugly. Refuse the trade;
+                # the heartbeat retry path will get another go once
+                # data is healthy.
+                raise RuntimeError(
+                    f"MARKET→LIMIT conversion failed for {symbol}: no LTP "
+                    "available from any data source. Refusing to submit a "
+                    "raw MARKET order — slippage protection would be left "
+                    "to the exchange band."
                 )
 
         # Convert SL-M → SL (Zerodha disabled SL-M for retail API; it errors

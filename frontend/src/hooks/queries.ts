@@ -593,6 +593,23 @@ export function useRiskExposure() {
   });
 }
 
+export function useRiskGates() {
+  return useQuery({
+    queryKey: ["risk-gates"],
+    queryFn: api.riskGates,
+    staleTime: STALE_30S,
+    refetchInterval: STALE_30S,
+  });
+}
+
+export function useClearDriftSuspension() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.clearDriftSuspension,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["risk-gates"] }),
+  });
+}
+
 export function useNSEUniverse() {
   return useQuery({
     queryKey: ["nse-universe"],
@@ -652,6 +669,23 @@ export function useSymbolContext(symbol: string) {
     queryFn: () => api.symbolContext(symbol),
     enabled: !!symbol,
     staleTime: 60_000,
+  });
+}
+
+export function useSymbolQuickContext(symbol: string) {
+  return useQuery({
+    queryKey: ["symbol-quick-context", symbol],
+    queryFn: () => api.symbolQuickContext(symbol),
+    enabled: !!symbol,
+    staleTime: 30_000,
+  });
+}
+
+export function useRecentTradedSymbols(limit = 10) {
+  return useQuery({
+    queryKey: ["recent-traded-symbols", limit],
+    queryFn: () => api.recentTradedSymbols(limit),
+    staleTime: 120_000,
   });
 }
 
@@ -842,6 +876,43 @@ export function useSetBackupLock() {
     mutationFn: ({ filename, locked }: { filename: string; locked: boolean }) =>
       api.setBackupLock(filename, locked),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["backups"] }),
+  });
+}
+
+export function useUploadBackup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => api.uploadBackup(file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["backups"] });
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+    },
+  });
+}
+
+export function useUploadModel() {
+  return useMutation({
+    mutationFn: (file: File) => api.uploadModel(file),
+  });
+}
+
+export function useImportModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { model_type: string; version: string; promote: boolean; force?: boolean }) =>
+      api.importModel(data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ml-models"] }),
+  });
+}
+
+export function useImportConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => api.importConfig(file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["config"] });
+      qc.invalidateQueries({ queryKey: ["config-defaults"] });
+    },
   });
 }
 
@@ -1099,6 +1170,14 @@ export function useConfig() {
     queryKey: ["config"],
     queryFn: api.getConfig,
     staleTime: 60_000,
+  });
+}
+
+export function useConfigDefaults() {
+  return useQuery({
+    queryKey: ["config-defaults"],
+    queryFn: api.getConfigDefaults,
+    staleTime: Infinity, // defaults never change at runtime
   });
 }
 

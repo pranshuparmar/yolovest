@@ -108,13 +108,14 @@ def mock_market_data():
     md.health_check = AsyncMock(return_value=True)
     md.get_ltp = AsyncMock(return_value=2500.0)
 
-    # Return realistic OHLCV bars
+    # Return realistic OHLCV bars ending today so the ingest
+    # staleness gate (5d) doesn't quarantine the symbol mid-test.
     from yolovest.models.schemas import OHLCVBar
     from datetime import datetime, timedelta
     bars = []
-    base = datetime(2026, 3, 1, 9, 15)
+    today = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
     for i in range(30):
-        dt = base + timedelta(days=i)
+        dt = today - timedelta(days=29 - i)
         bars.append(OHLCVBar(
             timestamp=dt,
             open=2400.0 + i * 5,
@@ -124,6 +125,11 @@ def mock_market_data():
             volume=1000000 + i * 10000,
         ))
     md.get_ohlcv = AsyncMock(return_value=bars)
+    # get_fetch_meta is SYNC (not awaited at call site); AsyncMock
+    # would return a coroutine that crashes the .get() the ingest
+    # skill does on the result. MagicMock returning an empty dict
+    # keeps the no-issues path live for tests that don't care.
+    md.get_fetch_meta = MagicMock(return_value={})
     return md
 
 

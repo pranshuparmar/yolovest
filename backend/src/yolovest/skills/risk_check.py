@@ -47,6 +47,14 @@ class RiskCheckSkill(SkillBase):
         super().__init__(context)
         self._regime: dict[str, float] | None = None
         self._regime_at: float = 0.0
+        # Per-heartbeat beta cache. Inputs to compute_symbol_beta are
+        # identical for every signal in the same cycle (last 60 days
+        # of daily bars across the universe), so caching here saves
+        # one full-universe scan per signal. Cleared on the next
+        # cycle by virtue of being instance state — same TTL pattern
+        # as _regime above.
+        self._beta_cache: dict[str, float | None] = {}
+        self._beta_cache_at: float = 0.0
 
     def should_run(self) -> bool:
         return True  # Always available — gating is per-signal
@@ -66,6 +74,24 @@ class RiskCheckSkill(SkillBase):
             self._regime = {"breadth": 0.5, "avg_return": 0.0, "sample_size": 0}
         self._regime_at = now
         return self._regime
+
+    async def _get_symbol_beta(self, symbol: str) -> float | None:
+        """Per-heartbeat cached beta lookup. Falls through to the DB
+        only on the first call per cycle per symbol."""
+        import time as _time
+        now = _time.monotonic()
+        if (now - self._beta_cache_at) >= self._regime_ttl_sec:
+            self._beta_cache = {}
+            self._beta_cache_at = now
+        if symbol in self._beta_cache:
+            return self._beta_cache[symbol]
+        try:
+            beta = await self.ctx.db.compute_symbol_beta(symbol)
+        except Exception:
+            logger.debug("compute_symbol_beta failed for %s", symbol, exc_info=True)
+            beta = None
+        self._beta_cache[symbol] = beta
+        return beta
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         signal = kwargs["signal"]
@@ -128,6 +154,33 @@ class RiskCheckSkill(SkillBase):
                 f"{portfolio['trades_today']} executed + {pending_count} pending, "
                 f"limit={cfg.max_trades_per_day})",
             )
+
+        # Per-product daily cap (MIS vs CNC). Optional; when set,
+        # acts on top of the combined cap so users can have e.g. 10
+        # MIS entries per day but only 1 CNC.
+        signal_product = (signal.get("product") or "MIS").upper()
+        if signal_product == "MIS":
+            product_limit = cfg.max_mis_trades_per_day
+            product_executed = portfolio.get("mis_trades_today", 0)
+        elif signal_product == "CNC":
+            product_limit = cfg.max_cnc_trades_per_day
+            product_executed = portfolio.get("cnc_trades_today", 0)
+        else:
+            product_limit = None
+            product_executed = 0
+        if product_limit is not None:
+            product_pending = sum(
+                1 for t in pending
+                if (t.get("product") or "MIS").upper() == signal_product
+            )
+            effective_product_today = product_executed + product_pending
+            if effective_product_today >= product_limit:
+                return self._reject(
+                    signal,
+                    f"Max {signal_product} trades/day reached "
+                    f"({effective_product_today} = {product_executed} executed "
+                    f"+ {product_pending} pending, limit={product_limit})",
+                )
 
         # Loss cooldown — portfolio-wide (any losing trade pauses everything)
         if portfolio["minutes_since_last_loss"] < cfg.loss_cooldown_minutes:
@@ -197,6 +250,35 @@ class RiskCheckSkill(SkillBase):
                 f"Sector limit ({stock_sector}: {cfg.max_same_sector_positions})",
             )
 
+        # Earnings blackout. Block new entries within N calendar days
+        # of a scheduled earnings / board-meeting announcement —
+        # results gaps routinely move stocks ±5-20% overnight, wider
+        # than any ATR-based SL can absorb. Off by default; opt in via
+        # risk.earnings_blackout_days.
+        if cfg.earnings_blackout_days > 0:
+            try:
+                events = await self.ctx.db.get_earnings_events(
+                    symbol=signal["symbol"],
+                    days=cfg.earnings_blackout_days,
+                )
+            except Exception:
+                logger.debug(
+                    "risk-check: earnings event lookup failed",
+                    exc_info=True,
+                )
+                events = []
+            if events:
+                next_event = events[0]
+                event_title = (
+                    next_event.get("title") or "earnings event"
+                )
+                return self._reject(
+                    signal,
+                    f"Earnings blackout: {signal['symbol']} has "
+                    f"\"{event_title}\" on {next_event.get('event_date')} "
+                    f"(within {cfg.earnings_blackout_days}-day window)",
+                )
+
         # Correlation-aware position limit (beyond simple sector counts)
         if cfg.correlation_limit.enabled:
             corr_rejection = await self._check_correlation_limit(
@@ -205,16 +287,15 @@ class RiskCheckSkill(SkillBase):
             if corr_rejection:
                 return self._reject(signal, corr_rejection)
 
-        # Depth-imbalance gate — reject when the live order book
-        # strongly opposes the signal direction. Only meaningful with
-        # the paid Kite feed (jugaad/yfinance can't return depth qty).
+        # Depth-imbalance gate — scale position size down when the live
+        # order book opposes the signal. Only meaningful with the paid
+        # Kite feed (jugaad/yfinance can't return depth qty).
+        depth_size_multiplier = 1.0
         if (
             cfg.depth_gate.enabled
             and self.ctx.config.market_data.kite_data_enabled
         ):
-            depth_rejection = await self._check_depth_gate(signal, cfg.depth_gate)
-            if depth_rejection:
-                return self._reject(signal, depth_rejection)
+            depth_size_multiplier = await self._check_depth_gate(signal, cfg.depth_gate)
 
         # Regime gate — refuse BUYs on broadly-red days, SELLs on
         # broadly-green days. Computed once per heartbeat via a
@@ -278,6 +359,14 @@ class RiskCheckSkill(SkillBase):
             return self._reject(signal, "Invalid stop-loss (risk_per_share <= 0)")
 
         position_size = int(risk_amount / risk_per_share)
+        # Capture base size for the cumulative audit log below. Every
+        # gate that modifies position_size (slippage penalty, conviction,
+        # regime, depth, institutional flow, confidence-scaled slot,
+        # effective-risk clamp, margin shrink) effectively contributes
+        # a multiplier off this base — the final log line shows the
+        # net effect so "why was my size this number?" is a one-grep
+        # diagnosis instead of a trace through six skills.
+        base_position_size = position_size
 
         # Weekly circuit breaker — reduce sizing
         if portfolio["weekly_pnl_pct"] <= -cfg.weekly_loss_limit_pct:
@@ -412,6 +501,16 @@ class RiskCheckSkill(SkillBase):
                 regime_size_multiplier, signal["symbol"], position_size,
             )
 
+        # Depth-imbalance size reduction — book opposed the signal but
+        # not so severely that we veto entirely; enter smaller instead.
+        if depth_size_multiplier != 1.0 and position_size > 0:
+            scaled = int(position_size * depth_size_multiplier)
+            position_size = max(1, min(scaled, max_by_exposure))
+            logger.info(
+                "risk-check: depth-gate size multiplier %.2f for %s -> %d",
+                depth_size_multiplier, signal["symbol"], position_size,
+            )
+
         # Institutional-flow conviction multiplier — uses NSE
         # bulk/block deals (per-symbol) and FII net flow (market-wide)
         # which we now persist on every ingest-data cycle. Read at
@@ -427,6 +526,78 @@ class RiskCheckSkill(SkillBase):
                 logger.info(
                     "risk-check: institutional-flow multiplier %.2f for %s -> %d",
                     inst_mult, signal["symbol"], position_size,
+                )
+
+        # Effective-risk re-clamp. The conviction / regime /
+        # institutional multipliers stack multiplicatively above, so a
+        # strongly-favourable signal (1.5 × 1.5 × 1.2 = 2.7×) can blow
+        # through max_risk_per_trade_pct in actual rupees-at-stake even
+        # when notional caps haven't fired. risk_uplift_cap is the
+        # ceiling on how far that stack is allowed to push effective
+        # risk above the base — default 1.5× means a 2% base risk can
+        # grow to 3% on a hot stack but no further.
+        if risk_per_share > 0 and position_size > 0:
+            effective_risk = position_size * risk_per_share
+            max_allowed_risk = (
+                capital * cfg.max_risk_per_trade_pct * cfg.risk_uplift_cap
+            )
+            if effective_risk > max_allowed_risk:
+                clamped = max(1, int(max_allowed_risk / risk_per_share))
+                logger.info(
+                    "risk-check: effective-risk clamp for %s — "
+                    "size %d -> %d (risk ₹%.0f -> ₹%.0f, cap %.2f× base)",
+                    signal["symbol"], position_size, clamped,
+                    effective_risk, max_allowed_risk, cfg.risk_uplift_cap,
+                )
+                position_size = clamped
+
+        # Cumulative size-multiplier audit. Logs the net effect of
+        # every gate that touched position_size since base_position_size
+        # was computed. Helps debug "why is my size X?" without
+        # threading through six separate skill log lines.
+        if base_position_size > 0:
+            net_mult = position_size / base_position_size
+            logger.info(
+                "risk-check: %s final size %d (base %d, net multiplier %.2fx, "
+                "confidence %.2f)",
+                signal["symbol"], position_size, base_position_size,
+                net_mult, float(signal.get("confidence_score") or 0),
+            )
+
+        # Portfolio-beta cap. Sum of (notional × beta) over currently-
+        # open positions + this candidate signal must stay under
+        # max_portfolio_beta × total_capital. Catches the "every
+        # position is a high-beta tech name" failure mode where a
+        # single bad market day wipes through every SL simultaneously.
+        # Off by default; opt in via risk.max_portfolio_beta > 0.
+        if cfg.max_portfolio_beta > 0 and position_size > 0:
+            cap_value = capital * cfg.max_portfolio_beta
+            # Open positions' beta-weighted notional. Adopted positions
+            # count because they share market-day downside even if they
+            # weren't system-generated.
+            open_positions = await self.ctx.db.get_open_positions(
+                mode=self.ctx.config.mode,
+            )
+            beta_value = 0.0
+            for p in open_positions:
+                p_sym = p.get("symbol")
+                p_qty = float(p.get("quantity") or 0)
+                p_entry = float(p.get("fill_price") or p.get("entry_price") or 0)
+                if not p_sym or p_qty <= 0 or p_entry <= 0:
+                    continue
+                p_beta = await self._get_symbol_beta(p_sym) or 1.0
+                beta_value += p_qty * p_entry * abs(p_beta)
+            # Candidate signal's contribution
+            sig_beta = await self._get_symbol_beta(signal["symbol"]) or 1.0
+            candidate_value = entry * position_size * abs(sig_beta)
+            total = beta_value + candidate_value
+            if total > cap_value:
+                return self._reject(
+                    signal,
+                    f"Portfolio beta cap exceeded: open beta-weighted "
+                    f"₹{beta_value:,.0f} + candidate ₹{candidate_value:,.0f} "
+                    f"(β={sig_beta:.2f}) = ₹{total:,.0f} > "
+                    f"₹{cap_value:,.0f} (cap = {cfg.max_portfolio_beta:.1f}× capital)",
                 )
 
         # Liquidity gate — refuse to be more than max_pct_of_top5 of
@@ -711,10 +882,18 @@ class RiskCheckSkill(SkillBase):
         self,
         signal: dict[str, Any],
         cfg: Any,
-    ) -> str | None:
-        """Reject BUY when total_sell_quantity dominates the book and
-        SELL when total_buy_quantity dominates. Quote fetch failures
-        return None so the gate never blocks on infra issues.
+    ) -> float:
+        """Return a position-size multiplier in [min_size_multiplier, 1.0].
+
+        Neutral or favourable book → 1.0 (no change).
+        Opposed book → linearly scaled down toward cfg.min_size_multiplier.
+        Quote fetch failures → 1.0 so infra issues never silently shrink size.
+
+        Imbalance = (buy_qty - sell_qty) / (buy_qty + sell_qty), [-1, +1].
+        For a BUY signal the hostile extreme is -1.0 (all sell-side depth);
+        for a SELL signal it is +1.0. The neutral point for each direction
+        is 0.0 (balanced book). The multiplier ramps linearly from 1.0 at
+        the neutral point down to min_size_multiplier at the hostile extreme.
         """
         try:
             quote = await self.ctx.market_data.get_quote(signal["symbol"])
@@ -723,27 +902,33 @@ class RiskCheckSkill(SkillBase):
                 "risk-check: depth-gate quote fetch failed for %s",
                 signal["symbol"], exc_info=True,
             )
-            return None
+            return 1.0
 
         buy_qty = float(quote.get("total_buy_quantity") or 0)
         sell_qty = float(quote.get("total_sell_quantity") or 0)
         if buy_qty + sell_qty <= 0:
-            return None  # No depth available — let the trade through.
+            return 1.0  # No depth available — full size.
 
         imbalance = (buy_qty - sell_qty) / (buy_qty + sell_qty)
         signal_type = signal.get("signal_type", "BUY")
+        min_mult = cfg.min_size_multiplier
+        scale = 1.0 - min_mult  # range available for scaling
 
-        if signal_type == "BUY" and imbalance < cfg.min_imbalance_for_buy:
-            return (
-                f"Depth gate: book opposes BUY "
-                f"(imbalance={imbalance:+.2f}, threshold>={cfg.min_imbalance_for_buy:+.2f})"
+        if signal_type == "BUY":
+            # hostile direction is negative imbalance; neutral is 0.0
+            adverse = max(0.0, -imbalance)  # 0 when balanced/buy-heavy
+        else:
+            # hostile direction is positive imbalance; neutral is 0.0
+            adverse = max(0.0, imbalance)  # 0 when balanced/sell-heavy
+
+        multiplier = max(min_mult, 1.0 - adverse * scale)
+
+        if multiplier < 1.0:
+            logger.info(
+                "risk-check: depth-gate %s imbalance=%+.2f -> size multiplier=%.2f",
+                signal["symbol"], imbalance, multiplier,
             )
-        if signal_type == "SELL" and imbalance > cfg.max_imbalance_for_sell:
-            return (
-                f"Depth gate: book opposes SELL "
-                f"(imbalance={imbalance:+.2f}, threshold<={cfg.max_imbalance_for_sell:+.2f})"
-            )
-        return None
+        return multiplier
 
     async def _check_correlation_limit(
         self,

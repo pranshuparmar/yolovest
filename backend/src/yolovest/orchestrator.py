@@ -596,6 +596,33 @@ class HeartbeatOrchestrator:
         # Let dashboard and other async services start before first heartbeat
         await asyncio.sleep(2)
 
+        # Boundary case: server started inside the [market.open,
+        # order_start) gap. is_market_hours() reads True (so the loop's
+        # market-hours branch would normally fire immediately) but
+        # is_order_window() is False (every signal would be deferred).
+        # Sleep through the gap so the first cycle of the day lines up
+        # with order_start.
+        if (
+            self._ctx.market_hours.is_market_hours()
+            and not self._ctx.market_hours.is_order_window()
+        ):
+            try:
+                open_in = self._ctx.market_hours.seconds_until_next_order_window()
+            except Exception:
+                open_in = 0.0
+            if open_in > 0:
+                logger.info(
+                    "Heartbeat: in market-open / order-start gap at startup, "
+                    "deferring first cycle by %ds so it aligns with order_start",
+                    int(open_in + 2),
+                )
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=open_in + 2,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+
         while self._running:
             start = time.monotonic()
 
@@ -626,13 +653,32 @@ class HeartbeatOrchestrator:
             # against "time until next order window" so an 8:00 AM
             # heartbeat doesn't lock the next cycle to 9:00 AM and
             # leave the start of the order window unmonitored. We anchor
-            # on order_start (not market.open) because risk-check rejects
-            # every signal with "Outside order window" before then —
-            # firing the first cycle at 09:15 when order_start=09:20
-            # generates signals that all get risk-blocked and consume
-            # one max_risk_rejected_retries_per_day slot each.
+            # on order_start (not market.open) because risk-check defers
+            # every signal with "Outside order window" before then — a
+            # cycle that fires at 09:15 when order_start=09:20 wastes
+            # 5 minutes of compute on signals that all get deferred.
             if self._ctx.market_hours.is_market_hours():
                 interval = self._ctx.config.heartbeat.market_hours_interval_min * 60
+                # Edge case: server was started (or the previous
+                # iteration finished) inside the [market.open,
+                # order_start) gap — e.g. market opens 09:15 but the
+                # user set order_start=09:20 to skip opening
+                # volatility. We're in market hours but outside the
+                # order window. Shorten the sleep so the next cycle
+                # fires AT order_start instead of order_start + 15min.
+                if not self._ctx.market_hours.is_order_window():
+                    try:
+                        open_in = self._ctx.market_hours.seconds_until_next_order_window()
+                    except Exception:
+                        open_in = float("inf")
+                    if open_in > 0 and open_in + 2 < interval:
+                        logger.info(
+                            "Heartbeat: shortening market-hours sleep from %ds to %ds "
+                            "so the next cycle fires at order_start (currently inside "
+                            "the market-open / order-start gap)",
+                            int(interval), int(open_in + 2),
+                        )
+                        interval = open_in + 2
             else:
                 interval = self._ctx.config.heartbeat.off_hours_interval_min * 60
                 try:

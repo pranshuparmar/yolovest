@@ -68,6 +68,27 @@ class SkillBase(ABC):
         """Check preconditions — is it the right time/state to run this skill?"""
         ...
 
+    def _ingest_source(self, symbol: str, default: str) -> str:
+        """Resolve the actual data provider behind this symbol's last
+        OHLCV fetch (kite / jugaad / yfinance / tvdatafeed) so it can be
+        stamped into `ohlcv.source` for provenance. Reads the ingester's
+        per-symbol fetch metadata; falls back to `default` when the
+        market-data layer doesn't expose it (tests, a bare provider) or
+        the source is unknown.
+        """
+        get_meta = getattr(self.ctx.market_data, "get_fetch_meta", None)
+        if not callable(get_meta):
+            return default
+        try:
+            meta = get_meta(symbol)
+        except Exception:
+            return default
+        if isinstance(meta, dict):
+            src = meta.get("source")
+            if isinstance(src, str) and src:
+                return src
+        return default
+
     async def broadcast(self, event_type: str, data: dict[str, Any]) -> None:
         """Publish an event to the event bus (bridged to WebSocket clients)."""
         try:

@@ -58,13 +58,18 @@ class TestFeatureMatrixRectangular:
         arr = np.array(X, dtype=float)
         assert arr.shape == (len(X), len(feature_names))
 
-    def test_ema_200_eventually_appears_in_feature_names(self, skill):
+    def test_ema_200_derived_appears_in_feature_names(self, skill):
+        # ema_200 (the raw level) is excluded by MODEL_FEATURE_EXCLUSIONS
+        # — the trained model only sees the normalized close_vs_ema_200_pct
+        # ratio. This test asserts the derived feature appears once we
+        # have enough history (window_size = 200 means we need ≥ 201 bars).
         bars = _bars(350)
         _, _, feature_names, _, _ = skill._prepare_training_data(
             {"bars": bars}, lookahead_bars=1,
         )
-        assert "ema_200" in feature_names, (
-            "ema_200 should be in the feature set once enough bars are in the window"
+        assert "close_vs_ema_200_pct" in feature_names, (
+            "close_vs_ema_200_pct should be in the feature set once enough "
+            "bars are in the window"
         )
 
     def test_early_rows_have_zero_for_late_features(self, skill):

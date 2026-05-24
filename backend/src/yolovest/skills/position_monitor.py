@@ -364,8 +364,17 @@ class PositionMonitorSkill(SkillBase):
                 )
                 continue
 
-            # Trailing SL
-            if cfg.trailing_sl_enabled and risk_per_share > 0:
+            # Trailing SL — requires a broker-side SL order to modify.
+            # Positions without sl_order_id (adopted, old rows where
+            # the SL placement failed, paper-mode shortcuts) skip
+            # trailing entirely; their SL is conceptual and updated
+            # via update_position_sl only when the client-side
+            # detection path closes the trade.
+            if (
+                cfg.trailing_sl_enabled
+                and risk_per_share > 0
+                and pos.get("sl_order_id")
+            ):
                 if pos["signal_type"] == "BUY":
                     profit = current_price - entry
                 else:
@@ -794,9 +803,22 @@ class PositionMonitorSkill(SkillBase):
         except (ValueError, TypeError):
             return None
 
-        # Approximate trading days: calendar days * 5/7 (excludes weekends)
-        calendar_days = (now.replace(tzinfo=None) - created_at.replace(tzinfo=None)).days
-        trading_days_held = max(0, int(calendar_days * 5 / 7))
+        # Calculate trading days held using the holiday-aware counter
+        # so a position that spans Diwali / Holi / Independence Day
+        # weeks isn't counted as expired prematurely. Falls back to
+        # the legacy 5/7 approximation only when the start date can't
+        # be normalised — should never trigger in practice.
+        created_at_date = created_at.date()
+        now_date = now.date()
+        try:
+            trading_days_held = self.ctx.market_hours.trading_days_missing_after(
+                created_at_date, now_date,
+            )
+        except Exception:
+            calendar_days = (
+                now.replace(tzinfo=None) - created_at.replace(tzinfo=None)
+            ).days
+            trading_days_held = max(0, int(calendar_days * 5 / 7))
 
         # Cap at max_holding_days
         effective_expiry = min(expected_days, cfg.max_holding_days)
@@ -1367,6 +1389,7 @@ class PositionMonitorSkill(SkillBase):
         try:
             await self.ctx.broker.modify_sl_order(sl_oid, new_sl)
             await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+            profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0.0
             logger.info(
                 "trailing SL via MIS modify: %s SL %.2f → %.2f (profit %.2fR)",
                 pos.get("symbol"), current_sl, new_sl, profit_multiple,

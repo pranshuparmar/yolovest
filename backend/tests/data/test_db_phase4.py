@@ -245,3 +245,89 @@ class TestRetireModel:
         )
         row = await cursor.fetchone()
         assert row[0] == "retired"
+
+
+class TestCleanupOrphanedModels:
+    """Verify that orphan cleanup spares retired models so they live
+    on disk until `cleanup_retired_models` runs them past the
+    `retired_model_cleanup_days` grace period — and only deletes
+    files that have no `model_versions` row at all.
+    """
+
+    async def test_retired_models_kept(self, db, tmp_path):
+        """A model with status='retired' must keep its .pkl file."""
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        retired_pkl = model_dir / "swing_v20260101_120000.pkl"
+        retired_pkl.write_bytes(b"fake-joblib-content")
+
+        await db.conn.execute(
+            "INSERT INTO model_versions (model_type, version, file_path, status) "
+            "VALUES ('swing', 'swing_v20260101_120000', "
+            "'models/swing_v20260101_120000.pkl', 'retired')"
+        )
+        await db.conn.commit()
+
+        result = await db.cleanup_orphaned_models(str(model_dir))
+        assert result["orphaned_files_deleted"] == 0
+        assert retired_pkl.exists(), "Retired model artifact should not be deleted by orphan cleanup"
+
+    async def test_production_and_shadow_kept(self, db, tmp_path):
+        """Active production / shadow models stay on disk."""
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        prod_pkl = model_dir / "intraday_v20260101_120000.pkl"
+        shadow_pkl = model_dir / "intraday_v20260102_120000.pkl"
+        prod_pkl.write_bytes(b"prod")
+        shadow_pkl.write_bytes(b"shadow")
+
+        await db.conn.execute(
+            "INSERT INTO model_versions (model_type, version, file_path, status) "
+            "VALUES ('intraday', 'intraday_v20260101_120000', "
+            "'models/intraday_v20260101_120000.pkl', 'production'), "
+            "('intraday', 'intraday_v20260102_120000', "
+            "'models/intraday_v20260102_120000.pkl', 'shadow')"
+        )
+        await db.conn.commit()
+
+        result = await db.cleanup_orphaned_models(str(model_dir))
+        assert result["orphaned_files_deleted"] == 0
+        assert prod_pkl.exists()
+        assert shadow_pkl.exists()
+
+    async def test_truly_orphaned_file_deleted(self, db, tmp_path):
+        """A .pkl with no DB row at all IS an orphan and gets deleted."""
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        orphan_pkl = model_dir / "intraday_v20250101_000000.pkl"
+        orphan_pkl.write_bytes(b"truly-orphaned")
+
+        # Nothing in model_versions for this filename.
+        result = await db.cleanup_orphaned_models(str(model_dir))
+        assert result["orphaned_files_deleted"] == 1
+        assert not orphan_pkl.exists()
+
+    async def test_mixed_states(self, db, tmp_path):
+        """Orphan cleanup keeps prod / shadow / retired; deletes only no-row files."""
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        prod_pkl = model_dir / "intraday_v20260301_120000.pkl"
+        retired_pkl = model_dir / "intraday_v20260201_120000.pkl"
+        orphan_pkl = model_dir / "intraday_v20250101_120000.pkl"
+        for p in (prod_pkl, retired_pkl, orphan_pkl):
+            p.write_bytes(b"x")
+
+        await db.conn.execute(
+            "INSERT INTO model_versions (model_type, version, file_path, status) "
+            "VALUES ('intraday', 'intraday_v20260301_120000', "
+            "'models/intraday_v20260301_120000.pkl', 'production'), "
+            "('intraday', 'intraday_v20260201_120000', "
+            "'models/intraday_v20260201_120000.pkl', 'retired')"
+        )
+        await db.conn.commit()
+
+        result = await db.cleanup_orphaned_models(str(model_dir))
+        assert result["orphaned_files_deleted"] == 1
+        assert prod_pkl.exists()
+        assert retired_pkl.exists(), "Retired model must survive orphan sweep"
+        assert not orphan_pkl.exists()

@@ -190,7 +190,10 @@ class IngestDataSkill(SkillBase):
                         result["cache_hit"] = True
                     else:
                         daily = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=30)
-                        await self.ctx.db.upsert_ohlcv(symbol, "daily", daily, "ingester")
+                        await self.ctx.db.upsert_ohlcv(
+                            symbol, "daily", daily,
+                            self._ingest_source(symbol, "ingester"),
+                        )
                         result["ok"] = True
 
                         # Check provider-level health (errors, empties) for quarantine.
@@ -251,7 +254,10 @@ class IngestDataSkill(SkillBase):
                     if is_market and not await self._is_cached_fresh(symbol, "5minute"):
                         try:
                             intraday = await self.ctx.market_data.get_ohlcv(symbol, "5minute", days=1)
-                            await self.ctx.db.upsert_ohlcv(symbol, "5minute", intraday, "ingester")
+                            await self.ctx.db.upsert_ohlcv(
+                                symbol, "5minute", intraday,
+                                self._ingest_source(symbol, "ingester"),
+                            )
                         except Exception as e:
                             logger.debug("Intraday fetch skipped for %s: %s", symbol, e)
 

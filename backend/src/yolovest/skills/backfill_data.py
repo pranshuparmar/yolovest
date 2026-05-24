@@ -79,7 +79,8 @@ class BackfillDataSkill(SkillBase):
                 )
                 if bars:
                     count = await self.ctx.db.upsert_ohlcv(
-                        symbol, interval, bars, source_label,
+                        symbol, interval, bars,
+                        self._ingest_source(symbol, source_label),
                     )
                     results["total_bars_stored"] += count
                     try:

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useStorageStats,
   useCleanupTable,
@@ -7,6 +7,7 @@ import {
   useRestoreBackup,
   useDeleteBackup,
   useSetBackupLock,
+  useUploadBackup,
   useResetAllData,
   useQuarantinedSymbols,
   useUnquarantineSymbol,
@@ -17,6 +18,7 @@ import {
   useClearRotationCooldown,
 } from "../hooks/queries";
 import type { TableStats } from "../types/api";
+import { api } from "../api/endpoints";
 import { parseUTC, getTimezone } from "../utils/datetime";
 import { SymbolLink } from "../components/SymbolLink";
 
@@ -486,11 +488,29 @@ export function DataManagementPage() {
   const restoreBackup = useRestoreBackup();
   const deleteBackup = useDeleteBackup();
   const setBackupLock = useSetBackupLock();
+  const uploadBackup = useUploadBackup();
   const resetAll = useResetAllData();
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [resetStep, setResetStep] = useState<"idle" | "warn" | "confirm">("idle");
   const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const backupUploadRef = useRef<HTMLInputElement>(null);
+
+  const handleBackupUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    uploadBackup.mutate(file, {
+      onSuccess: (r) => setLastResult(`Uploaded backup ${r.filename} (${formatBytes(r.size_bytes)}). Use Restore to apply it.`),
+      onError: (err) => setLastResult(`Upload failed: ${(err as Error).message}`),
+    });
+  };
+
+  const handleBackupDownload = (filename: string) => {
+    api.downloadBackup(filename).catch((err) =>
+      setLastResult(`Download failed: ${(err as Error).message}`),
+    );
+  };
 
   const handleCleanup = (table: string, days: number) => {
     cleanup.mutate(
@@ -603,13 +623,30 @@ export function DataManagementPage() {
               Automatic daily backups at 6 PM IST. Create a manual backup anytime.
             </p>
           </div>
-          <button
-            onClick={handleBackup}
-            disabled={createBackup.isPending}
-            className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors shrink-0"
-          >
-            {createBackup.isPending ? "Creating..." : "Create Backup Now"}
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <input
+              ref={backupUploadRef}
+              type="file"
+              accept=".db"
+              onChange={handleBackupUpload}
+              className="hidden"
+            />
+            <button
+              onClick={() => backupUploadRef.current?.click()}
+              disabled={uploadBackup.isPending}
+              className="px-3 py-1.5 rounded text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 disabled:opacity-50 transition-colors"
+              title="Upload a .db backup from another machine (e.g. one trained offline)"
+            >
+              {uploadBackup.isPending ? "Uploading..." : "Upload Backup"}
+            </button>
+            <button
+              onClick={handleBackup}
+              disabled={createBackup.isPending}
+              className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors"
+            >
+              {createBackup.isPending ? "Creating..." : "Create Backup Now"}
+            </button>
+          </div>
         </div>
         {backups && backups.length > 0 ? (
           <div className="overflow-x-auto">
@@ -715,6 +752,13 @@ export function DataManagementPage() {
                             : "Click to lock — prevents auto-prune and manual delete"}
                         >
                           {b.locked ? "Unlock" : "Lock"}
+                        </button>
+                        <button
+                          onClick={() => handleBackupDownload(b.filename)}
+                          className="px-2 py-0.5 rounded text-xs font-medium bg-gray-800 hover:bg-blue-900/40 text-gray-400 hover:text-blue-400 transition-colors"
+                          title="Download this backup to move it to another machine"
+                        >
+                          Download
                         </button>
                         <button
                           onClick={() => { setRestoreConfirm(b.filename); setDeleteConfirm(null); }}

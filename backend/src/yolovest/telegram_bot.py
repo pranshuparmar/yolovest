@@ -570,6 +570,27 @@ class TelegramBot:
             vwap=ind.vwap, atr=ind.atr, volume_profile=ind.volume_profile,
             obv=ind.obv, supertrend=ind.supertrend,
         )
+        # Sector + quarantine lookups: pull once, index in-memory so
+        # each symbol's per-row formatting is a dict hit, not a DB call.
+        sector_map: dict[str, str] = {}
+        quarantined_set: set[str] = set()
+        try:
+            cur = await self._ctx.db.read_conn.execute(
+                "SELECT symbol, COALESCE(sector, industry) FROM symbol_sectors"
+            )
+            for row in await cur.fetchall():
+                if row[0] and row[1]:
+                    sector_map[row[0].upper()] = row[1]
+        except Exception:
+            pass
+        try:
+            qrows = await self._ctx.db.get_quarantined_symbols()
+            quarantined_set = {
+                (q.get("symbol") or "").upper() for q in qrows
+            }
+        except Exception:
+            pass
+
         lines = []
         for symbol in symbols[:15]:
             # Get price context — from holdings if held, else from market data
@@ -586,16 +607,37 @@ class TelegramBot:
 
             pnl_pct = ((ltp - entry) / entry * 100) if entry > 0 and ltp > 0 else 0
             held_label = f"x{qty}" if qty > 0 else "not held"
+            sector = sector_map.get(symbol.upper(), "")
+            sector_str = f" · {sector}" if sector else ""
+            quarantine_flag = " ⚠️ QUARANTINED" if symbol.upper() in quarantined_set else ""
 
             action = "HOLD"
             conf = 0.0
             reason = ""
+            chosen_pred = None
+            day_change_pct: float | None = None
+            week_change_pct: float | None = None
+            vol_ratio: float | None = None
             try:
                 bars = await self._ctx.db.get_ohlcv(symbol, "daily", days=365)
                 if not bars or len(bars) < 50:
                     reason = f"insufficient data ({len(bars) if bars else 0} bars)"
-                    lines.append(f"⚪ <b>{symbol}</b> ({held_label}) — {reason}")
+                    lines.append(f"⚪ <b>{symbol}</b>{sector_str} ({held_label}){quarantine_flag} — {reason}")
                     continue
+
+                # Day / week % moves from the daily bars so the user has
+                # the same context they'd see on the symbol detail page.
+                if ltp > 0 and len(bars) >= 2 and bars[-2].close > 0:
+                    day_change_pct = (ltp - bars[-2].close) / bars[-2].close * 100
+                if ltp > 0 and len(bars) >= 8 and bars[-8].close > 0:
+                    week_change_pct = (ltp - bars[-8].close) / bars[-8].close * 100
+                # Volume vs 20-day average — > 1.5× signals "something is
+                # happening today", < 0.5× signals fading interest.
+                vols = [b.volume for b in bars[-20:] if b.volume]
+                if vols and bars[-1].volume:
+                    avg_vol = sum(vols) / len(vols)
+                    if avg_vol > 0:
+                        vol_ratio = bars[-1].volume / avg_vol
 
                 features = compute_features(bars, indicator_cfg)
                 if features and self._ctx.ml:
@@ -621,7 +663,8 @@ class TelegramBot:
                     if pred:
                         action = "SELL" if pred.signal_type == "SELL" else "BUY" if not held else "BUY MORE"
                         conf = pred.confidence
-                        reason = f"{pred.confidence:.0%} confidence"
+                        reason = pred.holding_period
+                        chosen_pred = pred
                     else:
                         conf = max(
                             (swing_pred.confidence if swing_pred else 0),
@@ -639,10 +682,41 @@ class TelegramBot:
             price_line = f"₹{ltp:.2f}" if ltp > 0 else "LTP unavailable"
             if held and entry > 0:
                 price_line = f"₹{entry:.2f}→₹{ltp:.2f} ({pnl_pct:+.1f}%)"
-            lines.append(
-                f"{icon} <b>{symbol}</b> ({held_label}) — {action} ({conf:.0%})\n"
-                f"    {price_line} | {reason}"
+
+            ctx_bits: list[str] = []
+            if day_change_pct is not None:
+                ctx_bits.append(f"day {day_change_pct:+.1f}%")
+            if week_change_pct is not None:
+                ctx_bits.append(f"7d {week_change_pct:+.1f}%")
+            if vol_ratio is not None:
+                ctx_bits.append(f"vol {vol_ratio:.1f}×")
+            ctx_line = " | ".join(ctx_bits)
+
+            target_line = ""
+            if chosen_pred and chosen_pred.signal_type != "HOLD":
+                tgt_pct = ((chosen_pred.target_price - chosen_pred.entry_price)
+                           / chosen_pred.entry_price * 100)
+                sl_pct = ((chosen_pred.stop_loss_price - chosen_pred.entry_price)
+                          / chosen_pred.entry_price * 100)
+                if chosen_pred.signal_type == "SELL":
+                    tgt_pct = -tgt_pct
+                    sl_pct = -sl_pct
+                target_line = (
+                    f"\n    target ₹{chosen_pred.target_price:.2f} ({tgt_pct:+.1f}%)"
+                    f" / SL ₹{chosen_pred.stop_loss_price:.2f} ({sl_pct:+.1f}%)"
+                )
+
+            header = (
+                f"{icon} <b>{symbol}</b>{sector_str} ({held_label})"
+                f"{quarantine_flag} — {action} ({conf:.0%})"
             )
+            body_lines = [f"    {price_line}"]
+            if ctx_line:
+                body_lines.append(f"    {ctx_line}")
+            if reason:
+                body_lines.append(f"    {reason}")
+            row = header + "\n" + "\n".join(body_lines) + target_line
+            lines.append(row)
 
         msg = "<b>Symbol Review</b>\n\n" + "\n\n".join(lines)
         await update.message.reply_html(msg)

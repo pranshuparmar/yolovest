@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiFetch, apiDownload, apiUpload } from "./client";
 import type {
   HealthResponse,
   PortfolioState,
@@ -26,6 +26,7 @@ import type {
   PredictionDetail,
   PaginatedPredictions,
   RiskExposure,
+  RiskGates,
   PremarketData,
   SystemState,
   NSESymbol,
@@ -37,6 +38,7 @@ import type {
   SignalClassDistribution,
   InstitutionalFlows,
   SymbolContext,
+  SymbolQuickContext,
   RotationCooldown,
   CorrelationData,
   PriceAlert,
@@ -369,6 +371,22 @@ export const api = {
       method: "POST",
     }),
 
+  // Cross-machine model transfer (train on a big box, import here)
+  downloadModel: (version: string) =>
+    apiDownload(`/api/ml-models/${encodeURIComponent(version)}/download`, `${version}.pkl`),
+
+  uploadModel: (file: File) =>
+    apiUpload<{ success: boolean; version: string; filename: string; size_bytes: number; metrics: Record<string, unknown> }>(
+      "/api/ml-models/upload",
+      file,
+    ),
+
+  importModel: (data: { model_type: string; version: string; promote: boolean; force?: boolean }) =>
+    apiFetch<{ imported: boolean; model_type: string; version: string; promoted: boolean; hot_reloaded: boolean; metrics: Record<string, unknown>; warnings: string[] }>(
+      "/api/ml-models/import",
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
   shadowComparison: (modelType: string) =>
     apiFetch<{ shadow: Record<string, number>; production: Record<string, number> }>(`/api/ml-models/${modelType}/shadow-comparison`),
 
@@ -418,6 +436,13 @@ export const api = {
 
   riskExposure: () => apiFetch<RiskExposure>("/api/risk-exposure"),
 
+  riskGates: () => apiFetch<RiskGates>("/api/risk-gates"),
+
+  clearDriftSuspension: () =>
+    apiFetch<{ success: boolean; suspended: boolean }>("/api/drift-suspension", {
+      method: "DELETE",
+    }),
+
   nseUniverse: () => apiFetch<NSESymbol[]>("/api/nse-universe"),
 
   premarket: () => apiFetch<PremarketData>("/api/premarket"),
@@ -446,6 +471,12 @@ export const api = {
 
   symbolContext: (symbol: string) =>
     apiFetch<SymbolContext>(`/api/symbol/${symbol}/context`),
+
+  symbolQuickContext: (symbol: string) =>
+    apiFetch<SymbolQuickContext>(`/api/symbol/${symbol}/quick-context`),
+
+  recentTradedSymbols: (limit = 10) =>
+    apiFetch<string[]>(`/api/trades/recent-symbols?limit=${limit}`),
 
   rotationCooldown: () =>
     apiFetch<RotationCooldown>("/api/rotation-cooldown"),
@@ -541,6 +572,15 @@ export const api = {
     apiFetch<{ success: boolean; filename: string; locked: boolean }>(
       `/api/backups/${filename}/${locked ? "lock" : "unlock"}`,
       { method: "POST" },
+    ),
+
+  downloadBackup: (filename: string) =>
+    apiDownload(`/api/backups/${encodeURIComponent(filename)}/download`, filename),
+
+  uploadBackup: (file: File) =>
+    apiUpload<{ success: boolean; filename: string; size_bytes: number }>(
+      "/api/backups/upload",
+      file,
     ),
 
   changePassword: (newPassword: string) =>
@@ -679,9 +719,20 @@ export const api = {
   // Config (UI-editable settings)
   getConfig: () => apiFetch<ConfigSections>("/api/config"),
 
+  getConfigDefaults: () => apiFetch<ConfigSections>("/api/config/defaults"),
+
   updateConfig: (updates: Record<string, unknown>) =>
     apiFetch<ConfigUpdateResult>("/api/config", {
       method: "PUT",
       body: JSON.stringify({ updates }),
     }),
+
+  exportConfig: () =>
+    apiDownload("/api/config/export", "yolovest_config.json"),
+
+  importConfig: (file: File) =>
+    apiUpload<{ success: boolean; imported: number; sections: ConfigSections }>(
+      "/api/config/import",
+      file,
+    ),
 };

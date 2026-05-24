@@ -226,7 +226,16 @@ class Database:
                             continue
                         raise
 
-                # Run remaining statements in a transaction
+                # Run remaining statements in a transaction. NOTE:
+                # under the default deferred isolation_level, sqlite3
+                # implicitly COMMITs before each DDL statement on
+                # Python < 3.12, so a CREATE TABLE that ran before a
+                # later statement failed is NOT undone by rollback().
+                # The schema_version row is still not written (the
+                # raise below skips it), so the migration is retried
+                # on next startup — which is why every migration's
+                # CREATE/ALTER must be IF NOT EXISTS / tolerant of
+                # partial prior application.
                 if other_stmts:
                     try:
                         for stmt in other_stmts:
@@ -1115,17 +1124,24 @@ class Database:
     ) -> None:
         """Update disposition for the most recent signal for a symbol today.
 
-        Matches on the date-prefix substring (first 10 chars) of
-        created_at so the comparison works whether the row was stored
-        with SQLite's space-separator format (`2026-05-13 04:18:30`)
-        from `datetime('now')` or the ISO 'T' format from explicit
-        Python timestamps.
+        `insert_signal` stamps `created_at` via SQLite `datetime('now')`,
+        i.e. UTC in space-separated form (`2026-05-13 04:18:30`). We scope
+        to "today's IST trading session" by converting IST-midnight to its
+        UTC instant and matching `created_at >= that`. Comparing the
+        IST *calendar date* against the UTC date prefix used to silently
+        no-op during the 00:00–05:30 IST window (when the IST date is a day
+        ahead of UTC), leaving disposition stuck at the seeded value.
 
         When mode is provided, the update is scoped to rows of that
         mode so a live execution can't accidentally flip a stale paper
         signal's disposition (or vice versa).
         """
-        today_ist = now_ist().strftime("%Y-%m-%d")
+        ist_day_start = now_ist().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        # Match the space-separated UTC format that datetime('now') writes
+        # so the lexical string comparison is also chronological.
+        day_start_utc = ist_day_start.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
         mode_clause = " AND mode = ?" if mode else ""
         # ml_signal seeds position_size=1 as a placeholder; risk-check
         # determines the real number. Update both columns here so the
@@ -1135,7 +1151,7 @@ class Database:
         # position_size, leave it untouched via COALESCE.
         if position_size is not None and position_size > 0:
             params: tuple[Any, ...] = (
-                disposition, reason, int(position_size), symbol, today_ist,
+                disposition, reason, int(position_size), symbol, day_start_utc,
             )
             if mode:
                 params = params + (mode,)
@@ -1144,18 +1160,18 @@ class Database:
                 "SET disposition = ?, disposition_reason = ?, "
                 "    position_size = ? "
                 "WHERE id = (SELECT id FROM signals WHERE symbol = ? "
-                f"AND substr(created_at, 1, 10) = ?{mode_clause} "
+                f"AND created_at >= ?{mode_clause} "
                 "ORDER BY created_at DESC LIMIT 1)",
                 params,
             )
         else:
-            params = (disposition, reason, symbol, today_ist)
+            params = (disposition, reason, symbol, day_start_utc)
             if mode:
                 params = params + (mode,)
             await self.conn.execute(
                 "UPDATE signals SET disposition = ?, disposition_reason = ? "
                 "WHERE id = (SELECT id FROM signals WHERE symbol = ? "
-                f"AND substr(created_at, 1, 10) = ?{mode_clause} "
+                f"AND created_at >= ?{mode_clause} "
                 "ORDER BY created_at DESC LIMIT 1)",
                 params,
             )
@@ -1453,13 +1469,15 @@ class Database:
         """Save a new model version record."""
         await self.conn.execute(
             "INSERT INTO model_versions (model_type, version, file_path, "
-            "sharpe_ratio, max_drawdown_pct, win_rate, profit_factor, "
-            "status, shadow_start_date) VALUES (?, ?, ?, ?, ?, ?, ?, 'shadow', datetime('now'))",
+            "sharpe_ratio, sharpe_lower, max_drawdown_pct, win_rate, profit_factor, "
+            "status, shadow_start_date) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'shadow', datetime('now'))",
             (
                 model_type,
                 version,
                 file_path,
                 metrics.get("sharpe") or metrics.get("sharpe_ratio"),
+                metrics.get("sharpe_lower"),
                 metrics.get("max_drawdown_pct"),
                 metrics.get("win_rate"),
                 metrics.get("profit_factor"),
@@ -2548,13 +2566,20 @@ class Database:
         exposure_pct = system_position_value / system_capital if system_capital > 0 else 0
         available_cash = system_capital - system_position_value
 
-        # Today's trades count
+        # Today's trades count — overall + per product so risk-check
+        # can enforce per-product caps (max_mis_trades_per_day /
+        # max_cnc_trades_per_day) independently of the combined cap.
         cursor = await self.conn.execute(
-            f"SELECT COUNT(*) FROM trades WHERE created_at >= ?{mode_clause}",
+            f"SELECT COUNT(*), "
+            f"SUM(CASE WHEN UPPER(product) = 'MIS' THEN 1 ELSE 0 END), "
+            f"SUM(CASE WHEN UPPER(product) = 'CNC' THEN 1 ELSE 0 END) "
+            f"FROM trades WHERE created_at >= ?{mode_clause}",
             [today_start, *mode_params],
         )
         row = await cursor.fetchone()
-        trades_today = row[0] if row else 0
+        trades_today = (row[0] or 0) if row else 0
+        mis_trades_today = (row[1] or 0) if row else 0
+        cnc_trades_today = (row[2] or 0) if row else 0
 
         # Daily realized PnL
         cursor = await self.conn.execute(
@@ -2668,6 +2693,8 @@ class Database:
             "weekly_pnl": round(float(weekly_pnl), 2),
             "weekly_charges": round(float(weekly_charges), 2),
             "trades_today": trades_today,
+            "mis_trades_today": mis_trades_today,
+            "cnc_trades_today": cnc_trades_today,
             "minutes_since_last_loss": minutes_since_last_loss,
             # Broker-synced breakdown
             "available_funds": round(breakdown["available_cash"], 2),
@@ -3306,6 +3333,127 @@ class Database:
 
         return result
 
+    async def compute_symbol_beta(
+        self, symbol: str, lookback_days: int = 60,
+    ) -> float | None:
+        """Compute a symbol's beta against a cross-sectional market
+        proxy. The proxy is the equal-weight mean daily return of every
+        symbol with daily bars in the lookback window — the same proxy
+        compute_live_regime uses. Returns None when fewer than 20
+        overlapping (symbol, market) return pairs are available.
+
+        Formula: beta = cov(symbol_ret, market_ret) / var(market_ret).
+        Standard CAPM-style regression slope.
+
+        Used by the risk_check portfolio-beta gate. Cheap enough to
+        run on demand inside a heartbeat for the small candidate set,
+        but callers should cache per-heartbeat since the inputs are
+        the same for every signal in a cycle.
+        """
+        from datetime import timedelta
+        cutoff = (now_utc() - timedelta(days=lookback_days * 2)).isoformat()
+        # Pull all daily bars from the lookback window across the
+        # whole universe — same scope as compute_live_regime so the
+        # proxy is consistent.
+        cursor = await self.read_conn.execute(
+            "SELECT symbol, timestamp, close FROM ohlcv "
+            "WHERE interval = 'daily' AND timestamp >= ? "
+            "ORDER BY symbol, timestamp",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return None
+
+        # Build per-symbol close series + the market average per day.
+        by_sym: dict[str, list[tuple[str, float]]] = {}
+        for r in rows:
+            by_sym.setdefault(r[0], []).append((r[1][:10], float(r[2])))
+
+        # Per-day market mean return.
+        day_returns: dict[str, list[float]] = {}
+        for sym_closes in by_sym.values():
+            for i in range(1, len(sym_closes)):
+                prev = sym_closes[i - 1][1]
+                cur = sym_closes[i][1]
+                if prev > 0:
+                    ret = (cur - prev) / prev
+                    day_returns.setdefault(sym_closes[i][0], []).append(ret)
+        market_by_day = {
+            d: sum(rs) / len(rs) for d, rs in day_returns.items() if rs
+        }
+
+        # Symbol-specific paired series.
+        sym_series = by_sym.get(symbol, [])
+        if len(sym_series) < 2:
+            return None
+        sym_returns: list[tuple[float, float]] = []
+        for i in range(1, len(sym_series)):
+            d = sym_series[i][0]
+            prev = sym_series[i - 1][1]
+            cur = sym_series[i][1]
+            if prev > 0 and d in market_by_day:
+                sym_returns.append(((cur - prev) / prev, market_by_day[d]))
+
+        if len(sym_returns) < 20:
+            return None
+
+        n = len(sym_returns)
+        mean_s = sum(s for s, _ in sym_returns) / n
+        mean_m = sum(m for _, m in sym_returns) / n
+        cov = sum((s - mean_s) * (m - mean_m) for s, m in sym_returns) / n
+        var_m = sum((m - mean_m) ** 2 for _, m in sym_returns) / n
+        if var_m <= 0:
+            return None
+        return cov / var_m
+
+    async def get_live_metrics_for_model(
+        self, model_version: str, days: int = 14,
+    ) -> dict[str, Any]:
+        """Live (i.e. scored-against-actual) metrics for a specific
+        model version over the last `days` calendar days. Used by the
+        shadow-promotion gate so we can require the shadow to actually
+        outperform on real predictions, not just on backtest.
+
+        Returns: {total, scored, direction_accuracy, target_hit_rate,
+        avg_pnl_pct} — all zeros when there are no scored predictions
+        for the version (caller should treat that as "no live data
+        yet, fall back to backtest").
+        """
+        from datetime import timedelta
+        since = (now_utc() - timedelta(days=days)).isoformat()
+        cursor = await self.read_conn.execute(
+            "SELECT "
+            "  COUNT(*) AS total, "
+            "  SUM(CASE WHEN direction_correct IS NOT NULL THEN 1 ELSE 0 END) AS scored, "
+            "  SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) AS correct, "
+            "  SUM(CASE WHEN target_hit = 1 THEN 1 ELSE 0 END) AS targets_hit, "
+            "  AVG(actual_pnl_pct) AS avg_pnl "
+            "FROM predictions "
+            "WHERE model_version = ? AND created_at >= ?",
+            (model_version, since),
+        )
+        row = await cursor.fetchone()
+        if not row or not row[0]:
+            return {
+                "total": 0, "scored": 0,
+                "direction_accuracy": 0.0,
+                "target_hit_rate": 0.0,
+                "avg_pnl_pct": 0.0,
+            }
+        total = int(row[0] or 0)
+        scored = int(row[1] or 0)
+        correct = int(row[2] or 0)
+        targets_hit = int(row[3] or 0)
+        avg_pnl = float(row[4] or 0)
+        return {
+            "total": total,
+            "scored": scored,
+            "direction_accuracy": round(correct / scored, 4) if scored > 0 else 0.0,
+            "target_hit_rate": round(targets_hit / scored, 4) if scored > 0 else 0.0,
+            "avg_pnl_pct": round(avg_pnl, 4),
+        }
+
     async def get_unscored_predictions(self, mode: str | None = None) -> list[dict[str, Any]]:
         """Get predictions whose holding period has elapsed but haven't been scored.
 
@@ -3635,12 +3783,12 @@ class Database:
             correct = sum(1 for p in preds if p.get("direction_correct"))
             accuracy = correct / total if total > 0 else 0
             avg_conf = (
-                sum(p.get("confidence", 0) for p in preds) / total if total > 0 else 0
+                sum((p.get("confidence") or 0) for p in preds) / total if total > 0 else 0
             )
             target_hits = sum(1 for p in preds if p.get("target_hit"))
             target_rate = target_hits / total if total > 0 else 0
             avg_pnl = (
-                sum(p.get("actual_pnl_pct", 0) for p in preds) / total
+                sum((p.get("actual_pnl_pct") or 0) for p in preds) / total
                 if total > 0
                 else 0
             )
@@ -4063,18 +4211,30 @@ class Database:
         timestamp = now_ist().strftime("%Y%m%d_%H%M%S")
         backup_path = str(Path(backup_dir) / f"yolovest_{timestamp}.db")
 
-        # VACUUM INTO creates a clean, defragmented copy atomically.
-        # It holds a read lock during the copy, so no writes can sneak in.
-        # The result is a standalone DB file (no WAL/SHM needed).
+        # VACUUM INTO creates a clean, defragmented, self-contained
+        # copy (no WAL/SHM needed). It fails with "cannot VACUUM - SQL
+        # statements in progress" when the connection has an open
+        # transaction — and our write connection usually does, because
+        # Python's deferred isolation auto-begins one on the first DML
+        # and leaves it open. The fix is simply to COMMIT first to
+        # close that transaction, then VACUUM on the SAME connection.
+        #
+        # NB: do NOT run VACUUM on a second connection to the same
+        # WAL-mode DB — the two connections contend and VACUUM hangs.
+        # Same-connection-after-commit is the reliable path.
         try:
+            await self.conn.commit()
             await self.conn.execute("VACUUM INTO ?", (backup_path,))
             logger.info("Database backup created (VACUUM INTO): %s", backup_path)
         except Exception as e:
-            # Fallback: checkpoint + copy (older SQLite without VACUUM INTO)
+            # Fallback: checkpoint + copy. Still produces a usable
+            # backup, just uncompacted and with a small torn-copy risk
+            # if a write lands during the copy.
             logger.warning(
                 "VACUUM INTO failed (%s), falling back to checkpoint + copy", e,
             )
             await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await self.conn.commit()
             shutil.copy2(self._db_path, backup_path)
             logger.info("Database backup created (file copy): %s", backup_path)
 
@@ -4106,19 +4266,42 @@ class Database:
         predictions_days: int = 365,
         news_days: int = 180,
         economic_events_days: int = 365,
+        intraday_ohlcv_days: int | None = None,
     ) -> dict[str, Any]:
-        """Delete data older than retention periods."""
+        """Delete data older than retention periods.
+
+        Daily and intraday OHLCV are trimmed on SEPARATE windows.
+        Daily must cover the training history (`ohlcv_days`); intraday
+        (5-minute etc.) is heavy and only used operationally, so it
+        gets the shorter `intraday_ohlcv_days` (defaults to ohlcv_days
+        for backwards-compat when the caller doesn't pass it).
+        """
         from datetime import timedelta
 
         now = now_utc()
         deleted = {}
 
-        # OHLCV retention
+        # Daily OHLCV retention (the training-history window).
         cutoff = (now - timedelta(days=ohlcv_days)).isoformat()
         cursor = await self.conn.execute(
-            "DELETE FROM ohlcv WHERE timestamp < ?", (cutoff,)
+            "DELETE FROM ohlcv WHERE interval = 'daily' AND timestamp < ?",
+            (cutoff,),
         )
         deleted["ohlcv"] = cursor.rowcount
+
+        # Intraday OHLCV retention (decoupled — 5-min bars are ~75×
+        # heavier per day and not used for training). When the caller
+        # doesn't supply intraday_ohlcv_days, fall back to ohlcv_days
+        # so existing behaviour (single retention) is preserved.
+        intraday_window = (
+            intraday_ohlcv_days if intraday_ohlcv_days is not None else ohlcv_days
+        )
+        intraday_cutoff = (now - timedelta(days=intraday_window)).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM ohlcv WHERE interval != 'daily' AND timestamp < ?",
+            (intraday_cutoff,),
+        )
+        deleted["ohlcv_intraday"] = cursor.rowcount
 
         # Audit log retention
         cutoff = (now - timedelta(days=audit_days)).isoformat()
@@ -5174,23 +5357,37 @@ class Database:
         }
 
     async def cleanup_orphaned_models(self, model_dir: str) -> dict[str, Any]:
-        """Remove .pkl files on disk that have no matching DB record (retired or deleted)."""
+        """Remove .pkl files on disk that have NO matching DB row.
+
+        "Orphan" means a file with no `model_versions` record at all —
+        not "retired and therefore unused". Retired models keep their
+        `.pkl` on disk until `cleanup_retired_models` deletes them
+        based on `retraining.retired_model_cleanup_days`, which is the
+        age-gated path that respects the configured grace period for
+        rollback / re-shadow. The previous behaviour (deleting any
+        file not in production/shadow status) nuked retired model
+        artifacts on the very next maintenance run, making the
+        `retired_model_cleanup_days` setting silently meaningless.
+        """
         model_path = Path(model_dir)
         if not model_path.is_dir():
             return {"orphaned_files_deleted": 0}
 
-        # Get all known versions from DB
+        # Get every version on record, regardless of status. A file
+        # whose version appears here is owned by the DB lifecycle —
+        # promotion / retirement / age-based cleanup are responsible
+        # for its eventual deletion, not this skill.
         cursor = await self.conn.execute(
-            "SELECT version FROM model_versions WHERE status IN ('production', 'shadow')"
+            "SELECT version FROM model_versions"
         )
         rows = await cursor.fetchall()
-        active_versions = {row[0] for row in rows}
+        known_versions = {row[0] for row in rows}
 
         deleted = 0
         for pkl_file in model_path.glob("*.pkl"):
             # Extract version from filename (e.g., intraday_v20260325_180000.pkl → intraday_v20260325_180000)
             version = pkl_file.stem
-            if version not in active_versions:
+            if version not in known_versions:
                 try:
                     pkl_file.unlink()
                     deleted += 1

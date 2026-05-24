@@ -434,6 +434,38 @@ export interface RiskExposure {
   positions_count: number;
 }
 
+export interface RiskGates {
+  drift: {
+    enabled: boolean;
+    suspended: boolean;
+    reason: string | null;
+  };
+  beta: {
+    enabled: boolean;
+    cap_multiple: number;
+    cap_value: number;
+    current_beta_weighted: number;
+    utilization_pct: number;
+    positions: {
+      symbol: string;
+      beta: number;
+      notional: number;
+      beta_weighted: number;
+      estimated: boolean;
+    }[];
+  };
+  earnings: {
+    enabled: boolean;
+    window_days: number;
+    blocked_symbols: {
+      symbol: string;
+      event_date: string | null;
+      title: string | null;
+      held: boolean;
+    }[];
+  };
+}
+
 export interface PremarketData {
   date: string | null;
   gift_nifty_change_pct: number | null;
@@ -608,6 +640,39 @@ export interface SymbolLatestSignal {
   disposition: string | null;
   created_at: string;
   attribution: { feature: string; contribution: number }[];
+}
+
+export interface SymbolQuickContext {
+  symbol: string;
+  sector: string | null;
+  ltp: number | null;
+  bars: {
+    timestamp: string;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+  }[];
+  avg_volume_20d: number | null;
+  quarantine: { is_quarantined: boolean; reason: string | null };
+  is_locked: boolean;
+  open_position: {
+    signal_type: string;
+    quantity: number;
+    fill_price: number | null;
+    entry_price: number;
+    target_price: number;
+    stop_loss_price: number;
+    product: string;
+  } | null;
+  todays_signal: {
+    signal_type: string;
+    confidence_score: number | null;
+    disposition: string | null;
+    disposition_reason: string | null;
+    created_at: string;
+  } | null;
 }
 
 export interface RotationCooldown {

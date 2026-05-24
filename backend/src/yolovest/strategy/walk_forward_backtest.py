@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -121,6 +122,12 @@ class BacktestResult:
     net_pnl: float
     final_capital: float
     returns: list[float] = field(default_factory=list)
+    # Daily-aggregated return series — the SAME series result.sharpe is
+    # computed from (per-day netted PnL / initial_capital). Exposed so
+    # the threshold sweep's bootstrap resamples the same quantity the
+    # point Sharpe measures; resampling the per-trade `returns` instead
+    # produced a "lower bound" that could exceed the point estimate.
+    daily_returns: list[float] = field(default_factory=list)
     # Count of non-HOLD predictions skipped because the portfolio
     # cap was already full. Reported so the user can see how much
     # opportunity the cap closes off (and decide whether
@@ -207,7 +214,19 @@ def run_walk_forward_backtest(
         capital += net
 
     Returns sharpe / DD / win-rate / profit-factor computed off the
-    realised per-trade return series.
+    realised PnL.
+
+    KNOWN LIMITATION — label/exit circularity. The path-aware *label*
+    (model_retrain: "did target hit before SL over the window") and the
+    path-aware *exit* here use identical ATR target/SL geometry on the
+    same daily bars. So a correct out-of-sample prediction tautologically
+    "wins" in the sim — backtest win-rate ≈ model directional accuracy,
+    and with a 2:1 reward:risk that compounds into an optimistic Sharpe.
+    Daily OHLC also can't see intra-bar order (the same-bar tie → SL
+    rule is the conservative guard) and the sim can't model gap-through-
+    SL fills. Treat the absolute Sharpe as a RELATIVE ranking signal for
+    threshold selection, NOT a live-performance forecast — the
+    shadow-period live-accuracy gate is the real out-of-sample check.
     """
     cfg = config or BacktestConfig()
     if len(preds) != len(bars_meta):
@@ -236,13 +255,11 @@ def run_walk_forward_backtest(
     # k is the number of newly-completed positions.
     in_flight_exits: list[_date] = []
     signals_skipped_at_cap = 0
-    # Daily aggregation for honest Sharpe. Per-trade Sharpe with
-    # annualization_factor=252 inflates massively on high-frequency
-    # strategies (5 intraday trades/day × 252 days → annualization
-    # factor should be sqrt(5×252) not sqrt(252), but the standard
-    # quant convention is to compute returns on a DAILY equity curve
-    # and annualise by sqrt(252)). When entry_date is available on
-    # the bars_meta we use that.
+    # Daily PnL aggregation, keyed by entry_date. Net PnL of all trades
+    # entered on a given day is summed here; the Sharpe block below
+    # spreads this over the FULL trading-day calendar (idle days = 0%)
+    # so the √252 annualisation is honest. Computing Sharpe on only the
+    # active days and annualising by √252 inflates it ~√(252/active).
     daily_pnl: dict[str, float] = {}
     wins = 0
     losses = 0
@@ -276,6 +293,15 @@ def run_walk_forward_backtest(
         else:
             entry = meta.entry_close * (1 - cfg.entry_slippage_pct)
         exit_price = _path_aware_exit(entry, direction, meta)
+        # Exit slippage — fills are never at the exact target/SL price.
+        # A BUY exits by SELLING (slips down); a SELL exits by BUYING
+        # (slips up). Symmetric with entry slippage, applied to both
+        # winning (target) and losing (SL) exits so the metric isn't
+        # optimistic about fill quality.
+        if direction > 0:
+            exit_price *= (1 - cfg.entry_slippage_pct)
+        else:
+            exit_price *= (1 + cfg.entry_slippage_pct)
 
         # Size on fixed initial_capital, not on compounded capital.
         # Otherwise a high-win-rate simulated equity curve doubles
@@ -355,21 +381,37 @@ def run_walk_forward_backtest(
         else (math.inf if gross_profit > 0 else 0.0)
     )
 
-    # Sharpe: prefer the daily-aggregated equity-curve series (standard
-    # quant convention; annualises cleanly via sqrt(252)). Fall back to
-    # per-trade returns × sqrt(annualization_factor) when entry_date
-    # isn't available on the metadata (older callers / unit tests).
-    if len(daily_pnl) > 1:
-        daily_rets = [n / cfg.initial_capital for n in daily_pnl.values()]
-        mean = sum(daily_rets) / len(daily_rets)
-        var = sum((r - mean) ** 2 for r in daily_rets) / (len(daily_rets) - 1)
+    # Sharpe over the FULL trading-day calendar of the backtest span,
+    # not just days that had trades. Every bars_meta sample carries an
+    # entry_date, so the distinct set of those dates IS the universe of
+    # trading days the strategy lived through. Days with no trade
+    # contribute a 0% return. Without this, a selective strategy that
+    # only fires on (say) 200 of 1000 days had its Sharpe computed over
+    # those 200 positively-biased days and then annualised by √252 as
+    # if it traded every session — a ~√(252/active_days) overstatement.
+    # Including idle days makes the √252 annualisation honest.
+    all_trading_days: set[str] = {
+        meta.entry_date[:10] for meta in bars_meta if meta.entry_date
+    }
+    if len(all_trading_days) > 1:
+        sharpe_series = [
+            daily_pnl.get(d, 0.0) / cfg.initial_capital
+            for d in sorted(all_trading_days)
+        ]
+        sharpe_annualization = 252
+    elif len(daily_pnl) > 1:
+        # No full calendar available (older callers without entry_date
+        # on every sample) — fall back to active-day aggregation.
+        sharpe_series = [n / cfg.initial_capital for n in daily_pnl.values()]
+        sharpe_annualization = 252
+    else:
+        sharpe_series = list(returns)
+        sharpe_annualization = cfg.annualization_factor
+    if len(sharpe_series) > 1:
+        mean = sum(sharpe_series) / len(sharpe_series)
+        var = sum((r - mean) ** 2 for r in sharpe_series) / (len(sharpe_series) - 1)
         stdev = math.sqrt(var) if var > 0 else 0.0
-        sharpe = (mean / stdev) * math.sqrt(252) if stdev > 0 else 0.0
-    elif len(returns) > 1:
-        mean = sum(returns) / len(returns)
-        var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
-        stdev = math.sqrt(var) if var > 0 else 0.0
-        sharpe = (mean / stdev) * math.sqrt(cfg.annualization_factor) if stdev > 0 else 0.0
+        sharpe = (mean / stdev) * math.sqrt(sharpe_annualization) if stdev > 0 else 0.0
     else:
         sharpe = 0.0
 
@@ -388,6 +430,7 @@ def run_walk_forward_backtest(
         net_pnl=round(net_pnl_total, 2),
         final_capital=round(capital, 2),
         returns=returns,
+        daily_returns=sharpe_series,
         signals_skipped_at_cap=signals_skipped_at_cap,
     )
 
@@ -397,6 +440,54 @@ _DEFAULT_THRESHOLD_GRID: tuple[float, ...] = (
 )
 
 
+def _sharpe_from_returns(returns: list[float], annualization: int) -> float:
+    """Stdlib Sharpe — sample stdev (n-1 denom), zero when degenerate."""
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    mean = sum(returns) / n
+    var = sum((r - mean) ** 2 for r in returns) / (n - 1)
+    stdev = math.sqrt(var)
+    if stdev <= 0:
+        return 0.0
+    return (mean / stdev) * math.sqrt(annualization)
+
+
+def _bootstrap_sharpe_lower_bound(
+    returns: list[float],
+    annualization: int,
+    n_iter: int,
+    percentile: float,
+    seed: int = 42,
+) -> float:
+    """Resample returns with replacement n_iter times; return the
+    requested lower-percentile Sharpe (default 25th).
+
+    This is the "robust Sharpe" used by sweep_thresholds: a threshold
+    pair whose point-Sharpe is high purely because the validation
+    slice was lucky (one or two outsized winners propping up the mean)
+    will see its bootstrapped lower bound collapse, while one with a
+    consistent edge across resamples keeps a high lower bound. Picks
+    the same family of threshold pairs on average but is far more
+    resistant to the small-N curve-fitting failure mode.
+
+    Seeded so the same training data deterministically picks the same
+    threshold pair across runs (matches the rest of the ML pipeline's
+    random_state=42 convention).
+    """
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    rng = random.Random(seed)
+    sharpes: list[float] = []
+    for _ in range(n_iter):
+        sample = [returns[rng.randint(0, n - 1)] for _ in range(n)]
+        sharpes.append(_sharpe_from_returns(sample, annualization))
+    sharpes.sort()
+    idx = max(0, min(n_iter - 1, int(n_iter * percentile / 100.0)))
+    return sharpes[idx]
+
+
 def sweep_thresholds(
     probas: list[list[float]],
     bars_meta: list[BarMeta],
@@ -404,9 +495,13 @@ def sweep_thresholds(
     grid: tuple[float, ...] = _DEFAULT_THRESHOLD_GRID,
     min_trades: int = 100,
     min_class_share: float = 0.10,
+    bootstrap_iterations: int = 200,
+    bootstrap_percentile: float = 25.0,
+    max_threshold: float | None = None,
+    max_diff: float | None = None,
 ) -> tuple[float, float, BacktestResult]:
-    """Find the (buy_threshold, sell_threshold) pair that maximises Sharpe
-    on the walk-forward test predictions.
+    """Find the (buy_threshold, sell_threshold) pair with the best
+    bootstrapped lower-bound Sharpe on the walk-forward test predictions.
 
     probas: per-sample class probability vector [P(SELL), P(HOLD), P(BUY)],
       same length as bars_meta. Comes directly from the calibrator's
@@ -417,12 +512,22 @@ def sweep_thresholds(
         BUY  if P(BUY)  >= buy_thresh  and P(BUY)  >= P(SELL)
         SELL if P(SELL) >= sell_thresh and P(SELL) >  P(BUY)
         else HOLD
-    runs the existing real-PnL backtest, and records Sharpe.
+    runs the existing real-PnL backtest, and ranks cells by the
+    `bootstrap_percentile`-th percentile of bootstrapped Sharpe.
 
-    Returns (buy_thresh, sell_thresh, backtest_result) for the cell with
-    the best Sharpe — tiebreaker is win_rate, then total_trades. Cells
-    producing fewer than `min_trades` are ignored so an over-restrictive
-    threshold pair doesn't win by trivially having zero variance.
+    Why bootstrap and not point Sharpe? Sharpe on a 100-500 trade
+    validation slice is noisy enough that the cell with the highest
+    point-Sharpe often won that race because one or two outsized
+    winners happened to land in its trade set. Bootstrapping (200
+    resamples by default, 25th percentile lower bound) discounts cells
+    whose edge collapses under resampling. Same family of cells wins
+    on a robust dataset; lucky cells get filtered out on a noisy one.
+
+    Returns (buy_thresh, sell_thresh, backtest_result) for the best
+    cell — tiebreaker is point Sharpe, then win_rate, then total_trades.
+    Cells producing fewer than `min_trades` are ignored so an
+    over-restrictive threshold pair doesn't win by trivially having
+    zero variance.
 
     `min_class_share` enforces that both BUY and SELL produce at least
     that fraction of total trades in the candidate cell. Without it the
@@ -431,6 +536,20 @@ def sweep_thresholds(
     great on the holdout's Sharpe collapses to a single-class model
     in live trading. The drift-watch class-collapse alert is the
     downstream symptom this floor prevents. Set to 0.0 to disable.
+
+    Set `bootstrap_iterations=0` to disable bootstrapping and revert
+    to point-Sharpe ranking (legacy behaviour).
+
+    `max_threshold` / `max_diff` bound the search to the range production
+    can actually trade: the live inference layer clamps tuned thresholds
+    to `risk.tuned_threshold_max_value` (ceiling) and
+    `risk.tuned_threshold_max_diff` (symmetry). Without these bounds the
+    sweep can pick e.g. (0.75, 0.80) — great on the holdout — that the
+    live model clamps to (0.60, 0.60), so the reported Sharpe/win-rate
+    describe a model production never runs. Passing the same caps here
+    makes the chosen pair == the effective pair == what's backtested ==
+    what trades live. Both default `None` (unbounded) for callers that
+    don't care (tests / legacy).
 
     Falls back to (0.5, 0.5, run_walk_forward_backtest(argmax)) when no
     grid cell clears the floors (typically a model that just doesn't
@@ -446,9 +565,19 @@ def sweep_thresholds(
     best_buy: float | None = None
     best_sell: float | None = None
     best_result: BacktestResult | None = None
+    best_lower_sharpe: float = float("-inf")
 
+    # Tiny epsilon so clean 0.05-step grid values aren't excluded by
+    # float-representation noise (e.g. abs(0.60-0.55) == 0.0500000…1).
+    _eps = 1e-9
     for buy_thresh in grid:
+        if max_threshold is not None and buy_thresh > max_threshold + _eps:
+            continue
         for sell_thresh in grid:
+            if max_threshold is not None and sell_thresh > max_threshold + _eps:
+                continue
+            if max_diff is not None and abs(buy_thresh - sell_thresh) > max_diff + _eps:
+                continue
             preds: list[int] = []
             for p in probas:
                 buy_prob = p[_LABEL_BUY] if len(p) > _LABEL_BUY else 0.0
@@ -475,15 +604,37 @@ def sweep_thresholds(
                     sell_share = sell_count / total_nh
                     if buy_share < min_class_share or sell_share < min_class_share:
                         continue
+
+            # Robust ranking: bootstrap the SAME series result.sharpe is
+            # computed from (daily-aggregated when available, else
+            # per-trade) so the lower bound is a true lower bound of the
+            # reported point Sharpe — not a different quantity that can
+            # exceed it. Falls through to point Sharpe when bootstrap
+            # is disabled or there's no series.
+            boot_series = result.daily_returns or result.returns
+            boot_annualization = 252 if result.daily_returns else cfg.annualization_factor
+            if bootstrap_iterations > 0 and boot_series:
+                lower_sharpe = _bootstrap_sharpe_lower_bound(
+                    boot_series,
+                    annualization=boot_annualization,
+                    n_iter=bootstrap_iterations,
+                    percentile=bootstrap_percentile,
+                )
+            else:
+                lower_sharpe = result.sharpe
+
             if best_result is None:
                 best_buy, best_sell, best_result = buy_thresh, sell_thresh, result
+                best_lower_sharpe = lower_sharpe
                 continue
-            # Maximise Sharpe; tiebreak on win_rate, then trade count.
+            # Maximise lower-bound Sharpe; tiebreaker on point Sharpe,
+            # then win_rate, then trade count.
             if (
-                (result.sharpe, result.win_rate, result.total_trades)
-                > (best_result.sharpe, best_result.win_rate, best_result.total_trades)
+                (lower_sharpe, result.sharpe, result.win_rate, result.total_trades)
+                > (best_lower_sharpe, best_result.sharpe, best_result.win_rate, best_result.total_trades)
             ):
                 best_buy, best_sell, best_result = buy_thresh, sell_thresh, result
+                best_lower_sharpe = lower_sharpe
 
     if best_result is None:
         # No cell met the floors — fall back to argmax baseline.
@@ -497,6 +648,14 @@ def sweep_thresholds(
         return 0.5, 0.5, baseline
 
     assert best_buy is not None and best_sell is not None
+    logger.info(
+        "sweep_thresholds: chose buy=%.2f / sell=%.2f — "
+        "point Sharpe=%.3f, bootstrap-lower=%.3f (p%.0f, %d iters), "
+        "trades=%d, win_rate=%.2f",
+        best_buy, best_sell, best_result.sharpe, best_lower_sharpe,
+        bootstrap_percentile, bootstrap_iterations,
+        best_result.total_trades, best_result.win_rate,
+    )
     return best_buy, best_sell, best_result
 
 
