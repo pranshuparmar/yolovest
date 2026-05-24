@@ -20,6 +20,17 @@ from yolovest.strategy.ml_base import MLBase
 
 logger = logging.getLogger(__name__)
 
+
+def _lib_version(module: str) -> str:
+    """Best-effort library version string for artifact compatibility
+    stamps. Returns 'unknown' if the package can't be queried."""
+    try:
+        from importlib.metadata import version
+        return version(module)
+    except Exception:
+        return "unknown"
+
+
 # Label mapping for model output
 _LABEL_MAP = {0: "SELL", 1: "HOLD", 2: "BUY"}
 _LABEL_SELL = 0
@@ -1082,6 +1093,8 @@ class XGBoostSignalModel(MLBase):
         def _save() -> None:
             import joblib
 
+            from yolovest.data.features import MODEL_SCHEMA_VERSION
+
             feature_names = (self._intraday_features if model_type == "intraday"
                              else self._swing_features)
             artifact = {
@@ -1092,6 +1105,11 @@ class XGBoostSignalModel(MLBase):
                 "feature_names": feature_names,
                 "tuned_thresholds": self._get_thresholds(model_type),
                 "saved_at": datetime.now(UTC).isoformat(),
+                # Compatibility stamps — checked on cross-machine import so
+                # a model trained against different code fails loudly.
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "xgboost_version": _lib_version("xgboost"),
+                "sklearn_version": _lib_version("scikit-learn"),
             }
             joblib.dump(artifact, filepath)
 

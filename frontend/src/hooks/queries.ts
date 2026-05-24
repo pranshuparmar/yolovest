@@ -899,7 +899,7 @@ export function useUploadModel() {
 export function useImportModel() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: { model_type: string; version: string; promote: boolean }) =>
+    mutationFn: (data: { model_type: string; version: string; promote: boolean; force?: boolean }) =>
       api.importModel(data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["ml-models"] }),
   });

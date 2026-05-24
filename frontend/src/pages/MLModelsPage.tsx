@@ -303,6 +303,7 @@ export function MLModelsPage() {
   const [importType, setImportType] = useState<"intraday" | "swing">("swing");
   const [importPromote, setImportPromote] = useState(false);
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [schemaBlock, setSchemaBlock] = useState<string | null>(null);
 
   const handleModelDownload = (version: string) => {
     api.downloadModel(version).catch((err) =>
@@ -325,19 +326,30 @@ export function MLModelsPage() {
     });
   };
 
-  const handleImport = () => {
+  const handleImport = (force = false) => {
     if (!uploadedVersion) return;
     setActionError(null);
+    setSchemaBlock(null);
     importModel.mutate(
-      { model_type: importType, version: uploadedVersion, promote: importPromote },
+      { model_type: importType, version: uploadedVersion, promote: importPromote, force },
       {
         onSuccess: (r) => {
+          const warn = r.warnings?.length ? ` Warnings: ${r.warnings.join(" ")}` : "";
           setImportMsg(
-            `Imported ${r.version} as ${r.model_type}${r.promoted ? " (promoted to production)" : " (shadow)"}${r.hot_reloaded ? ", hot-reloaded" : ""}.`,
+            `Imported ${r.version} as ${r.model_type}${r.promoted ? " (promoted to production)" : " (shadow)"}${r.hot_reloaded ? ", hot-reloaded" : ""}.${warn}`,
           );
           setUploadedVersion(null);
         },
-        onError: (err) => setActionError(`Import failed: ${(err as Error).message}`),
+        onError: (err) => {
+          const e = err as Error & { status?: number };
+          // 422 = compatibility gate. Offer an explicit override instead
+          // of silently failing or silently importing an incompatible model.
+          if (e.status === 422) {
+            setSchemaBlock(e.message);
+          } else {
+            setActionError(`Import failed: ${e.message}`);
+          }
+        },
       },
     );
   };
@@ -441,7 +453,7 @@ export function MLModelsPage() {
                 Promote to production
               </label>
               <button
-                onClick={handleImport}
+                onClick={() => handleImport(false)}
                 disabled={importModel.isPending}
                 className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 transition-colors"
               >
@@ -451,6 +463,27 @@ export function MLModelsPage() {
           )}
         </div>
         {importMsg && <p className="text-xs text-emerald-400 mt-2">{importMsg}</p>}
+        {schemaBlock && (
+          <div className="mt-3 bg-amber-900/20 border border-amber-800/50 rounded p-3 text-xs">
+            <p className="text-amber-300 font-medium mb-1">Compatibility check failed</p>
+            <p className="text-amber-200/80 mb-2">{schemaBlock}</p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleImport(true)}
+                disabled={importModel.isPending}
+                className="px-2.5 py-1 rounded font-medium bg-amber-700 hover:bg-amber-600 text-white disabled:opacity-50"
+              >
+                Import anyway
+              </button>
+              <button
+                onClick={() => setSchemaBlock(null)}
+                className="px-2.5 py-1 rounded text-amber-300 hover:text-amber-100"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Production models */}

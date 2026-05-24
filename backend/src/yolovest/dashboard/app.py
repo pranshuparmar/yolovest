@@ -3281,6 +3281,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         model_type = body.get("model_type")
         version = body.get("version")
         promote = bool(body.get("promote", False))
+        force = bool(body.get("force", False))
         if model_type not in ("intraday", "swing") or not version:
             raise HTTPException(
                 status_code=400,
@@ -3313,6 +3314,67 @@ def create_app(ctx: AppContext) -> FastAPI:
             )
         metrics = artifact.get("metrics") or {}
 
+        # Compatibility gate — a model trained against a different feature
+        # schema would be silently fed wrong inputs at inference (missing
+        # features resolve to 0.0, no crash). Hard-block on schema mismatch
+        # unless the caller explicitly forces. Library-version drift and a
+        # feature-name diff vs the current production model are surfaced as
+        # soft warnings (won't block).
+        from yolovest.data.features import MODEL_SCHEMA_VERSION
+
+        warnings: list[str] = []
+        artifact_schema = artifact.get("schema_version")
+        if artifact_schema != MODEL_SCHEMA_VERSION and not force:
+            if artifact_schema is None:
+                detail = (
+                    "Artifact has no schema_version (trained before schema "
+                    f"versioning; current is {MODEL_SCHEMA_VERSION}). It may "
+                    "feed the model stale features. Re-train on current code, "
+                    "or pass force=true to import anyway."
+                )
+            else:
+                detail = (
+                    f"Schema mismatch: artifact is schema_version "
+                    f"{artifact_schema}, this code expects "
+                    f"{MODEL_SCHEMA_VERSION}. The feature set or label "
+                    "geometry changed since this model was trained. Re-train "
+                    "on current code, or pass force=true to import anyway."
+                )
+            raise HTTPException(status_code=422, detail=detail)
+        if artifact_schema != MODEL_SCHEMA_VERSION:
+            warnings.append(
+                f"Forced import despite schema mismatch (artifact "
+                f"{artifact_schema} vs code {MODEL_SCHEMA_VERSION})."
+            )
+
+        # Soft: library-version drift (unpickled estimators can misbehave
+        # across major XGBoost / scikit-learn versions).
+        for lib, key in (("xgboost", "xgboost_version"),
+                         ("scikit-learn", "sklearn_version")):
+            stamped = artifact.get(key)
+            current = _lib_version_safe(lib)
+            if stamped and current != "unknown" and stamped != current:
+                warnings.append(
+                    f"{lib} version differs (artifact {stamped} vs runtime "
+                    f"{current}); verify predictions look sane."
+                )
+
+        # Soft: feature-name drift vs the model currently in production for
+        # this type — a cheap automatic guard against a forgotten schema
+        # bump (compares to the last validated model rather than to code).
+        prod_features = _production_feature_names(model_type)
+        new_features = artifact.get("feature_names") or []
+        if prod_features and new_features:
+            added = sorted(set(new_features) - set(prod_features))
+            removed = sorted(set(prod_features) - set(new_features))
+            if added or removed:
+                warnings.append(
+                    "Feature set differs from current production model"
+                    + (f"; added {added}" if added else "")
+                    + (f"; removed {removed}" if removed else "")
+                    + "."
+                )
+
         # Register as shadow first (mirrors the retrain path), then
         # optionally promote. Hot-reload the running provider so the
         # change takes effect without a server restart.
@@ -3340,6 +3402,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             "promoted": promote,
             "hot_reloaded": loaded,
             "metrics": metrics,
+            "warnings": warnings,
         }
 
     @app.post("/api/ml-models/{model_type}/{version}/reshadow")
@@ -4714,6 +4777,22 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     def _model_dir() -> str:
         return getattr(ctx.config.strategy, "model_dir", "./models")
+
+    def _lib_version_safe(dist: str) -> str:
+        try:
+            from importlib.metadata import version
+            return version(dist)
+        except Exception:
+            return "unknown"
+
+    def _production_feature_names(model_type: str) -> list[str]:
+        """Feature names of the model currently loaded for this type, used
+        as a soft reference for the import feature-drift warning. Reads the
+        provider's restored feature list; empty when nothing is loaded."""
+        if not ctx.ml:
+            return []
+        attr = "_intraday_features" if model_type == "intraday" else "_swing_features"
+        return list(getattr(ctx.ml, attr, None) or [])
 
     @app.post("/api/backup")
     async def create_backup(_user: str = Depends(verify_credentials)) -> dict[str, Any]:

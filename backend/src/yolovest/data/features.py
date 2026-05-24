@@ -10,6 +10,21 @@ from dataclasses import dataclass
 
 from yolovest.models.schemas import OHLCVBar
 
+# Bump this whenever a change makes a previously-trained model artifact
+# unsafe to load against the current code: the feature vocabulary changes
+# (add/rename/remove a feature the model trains on), feature *ordering*
+# semantics change, or the label geometry in model_retrain changes. The
+# value is stamped into every saved artifact (`ml_signal.save_model`) and
+# checked when importing a model trained on another machine
+# (`POST /api/ml-models/import`) so a stale .pkl fails loudly instead of
+# silently feeding the model the wrong inputs (missing features resolve to
+# 0.0 at inference — no crash, just garbage predictions).
+#
+# History:
+#   1 — initial schema versioning (base TA + sector/regime/institutional/
+#       time/news/vix/fno/feedback features, path-aware labels).
+MODEL_SCHEMA_VERSION = 1
+
 # Feature keys that compute_features emits but the ML model should NOT
 # see. These are raw absolute prices, raw cumulative levels, or raw
 # indicator bands that don't transfer across stocks at different price

@@ -381,8 +381,8 @@ export const api = {
       file,
     ),
 
-  importModel: (data: { model_type: string; version: string; promote: boolean }) =>
-    apiFetch<{ imported: boolean; model_type: string; version: string; promoted: boolean; hot_reloaded: boolean; metrics: Record<string, unknown> }>(
+  importModel: (data: { model_type: string; version: string; promote: boolean; force?: boolean }) =>
+    apiFetch<{ imported: boolean; model_type: string; version: string; promoted: boolean; hot_reloaded: boolean; metrics: Record<string, unknown>; warnings: string[] }>(
       "/api/ml-models/import",
       { method: "POST", body: JSON.stringify(data) },
     ),
