@@ -6,12 +6,12 @@ long-only bear-protection signal consumed by risk-check's
 market_trend_filter gate.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from yolovest.config import _MODE_HOLDING_DAYS, _MODE_HOLDING_PERIODS
-from yolovest.data.db import Database
+from yolovest.data.db import Database, _canonical_ohlcv_ts
 from yolovest.models.schemas import OHLCVBar
 
 
@@ -118,3 +118,28 @@ class TestGetOhlcvAsOf:
         bars = await db.get_ohlcv("BBB", "daily", days=365)
         assert len(bars) == 20
 
+
+
+class TestCanonicalTimestamp:
+    _IST = timezone(timedelta(hours=5, minutes=30))
+
+    def test_daily_strips_tz_and_time(self):
+        assert _canonical_ohlcv_ts(datetime(2024, 3, 15, 0, 0, tzinfo=self._IST), "daily") == "2024-03-15T00:00:00"
+        assert _canonical_ohlcv_ts(datetime(2024, 3, 15, 0, 0), "daily") == "2024-03-15T00:00:00"
+
+    def test_intraday_keeps_minute_drops_tz(self):
+        assert _canonical_ohlcv_ts(datetime(2024, 3, 15, 9, 20, tzinfo=self._IST), "5minute") == "2024-03-15T09:20:00"
+        assert _canonical_ohlcv_ts(datetime(2024, 3, 15, 9, 20), "5minute") == "2024-03-15T09:20:00"
+
+    async def test_upsert_dedupes_kite_tzaware_vs_yfinance_tznaive(self, db):
+        # The exact 581k-duplicate bug: same day, kite tz-aware vs yfinance
+        # tz-naive. After the canonicalization fix they must collapse to ONE
+        # row (last writer wins via upsert), not two.
+        aware = datetime(2024, 3, 15, 0, 0, tzinfo=self._IST)
+        naive = datetime(2024, 3, 15, 0, 0)
+        await db.upsert_ohlcv("ZZ", "daily", [OHLCVBar(
+            timestamp=aware, open=255, high=256, low=249, close=249, volume=100)], "kite")
+        await db.upsert_ohlcv("ZZ", "daily", [OHLCVBar(
+            timestamp=naive, open=218, high=219, low=213, close=213, volume=100)], "yfinance")
+        bars = await db.get_ohlcv("ZZ", "daily", days=3650)
+        assert len(bars) == 1

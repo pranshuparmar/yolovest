@@ -65,6 +65,19 @@ class DuplicateSignalError(Exception):
         self.existing_trade_id = existing_trade_id
 
 
+def _canonical_ohlcv_ts(ts: datetime, interval: str) -> str:
+    """Canonical tz-NAIVE timestamp string for an OHLCV bar so the same bar
+    from different providers collapses onto ONE unique key instead of
+    duplicating. The root cause of 581K duplicate day-rows was kite writing
+    tz-aware ('...+05:30') and yfinance/jugaad writing tz-naive ('...T00:00:00')
+    for the same day — different strings, so the (symbol, interval, timestamp)
+    constraint didn't dedupe. Daily → date at midnight; intraday → wall-clock
+    to the second (all bars are IST clock time, so dropping tz is correct)."""
+    if interval == "daily":
+        return ts.strftime("%Y-%m-%dT00:00:00")
+    return ts.strftime("%Y-%m-%dT%H:%M:%S")
+
+
 class Database:
     """Async SQLite database with WAL mode, read/write separation, and migration support.
 
@@ -392,7 +405,7 @@ class Database:
             (
                 symbol,
                 interval,
-                bar.timestamp.isoformat(),
+                _canonical_ohlcv_ts(bar.timestamp, interval),
                 bar.open,
                 bar.high,
                 bar.low,
