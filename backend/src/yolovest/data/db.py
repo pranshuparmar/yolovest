@@ -454,19 +454,30 @@ class Database:
         return float(row[0])
 
     async def get_ohlcv(
-        self, symbol: str, interval: str, days: int = 30
+        self, symbol: str, interval: str, days: int = 30,
+        end: datetime | None = None,
     ) -> list[OHLCVBar]:
-        """Fetch OHLCV bars for a symbol, most recent `days` days."""
+        """Fetch OHLCV bars for a symbol.
+
+        By default returns the most recent `days` days. When `end` is set
+        (an "as of" timestamp), returns the `days`-day window ENDING at
+        `end` instead — used by the historical dry-run to evaluate signals
+        as they would have looked on a past date (no look-ahead).
+        """
         from datetime import timedelta
 
-        cutoff = (now_utc() - timedelta(days=days)).isoformat()
-        cursor = await self.read_conn.execute(
+        end_dt = end or now_utc()
+        cutoff = (end_dt - timedelta(days=days)).isoformat()
+        query = (
             "SELECT timestamp, open, high, low, close, volume FROM ohlcv "
-            "WHERE symbol = ? AND interval = ? "
-            "AND timestamp >= ? "
-            "ORDER BY timestamp ASC",
-            (symbol, interval, cutoff),
+            "WHERE symbol = ? AND interval = ? AND timestamp >= ? "
         )
+        params: list[Any] = [symbol, interval, cutoff]
+        if end is not None:
+            query += "AND timestamp <= ? "
+            params.append(end_dt.isoformat())
+        query += "ORDER BY timestamp ASC"
+        cursor = await self.read_conn.execute(query, tuple(params))
         rows = await cursor.fetchall()
         return [
             OHLCVBar(

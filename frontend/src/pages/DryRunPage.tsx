@@ -33,6 +33,7 @@ export function DryRunPage() {
   const deleteDryRun = useDeleteDryRun();
   const [scoreMsg, setScoreMsg] = useState<{ text: string; type: "info" | "warn" } | null>(null);
   const [selectedMode, setSelectedMode] = useState<string>("balanced");
+  const [asOf, setAsOf] = useState<string>("");
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const { data: signals, isLoading: detailLoading } =
     useDryRunDetail(selectedRun);
@@ -45,11 +46,14 @@ export function DryRunPage() {
   }, [history, selectedRun]);
 
   const handleRun = () => {
-    runDryRun.mutate(selectedMode, {
-      onSuccess: (result) => {
-        if (result.run_id) setSelectedRun(result.run_id);
+    runDryRun.mutate(
+      { mode: selectedMode, asOf: asOf || undefined },
+      {
+        onSuccess: (result) => {
+          if (result.run_id) setSelectedRun(result.run_id);
+        },
       },
-    });
+    );
   };
 
   const scored = signals?.filter((s) => s.scored_at) ?? [];
@@ -79,7 +83,25 @@ export function DryRunPage() {
             <option value="short_term">Short Term</option>
             <option value="balanced">Balanced</option>
             <option value="long_term">Long Term</option>
+            <option value="swing">Swing (Short + Long)</option>
           </select>
+          <input
+            type="date"
+            value={asOf}
+            max={new Date().toISOString().slice(0, 10)}
+            onChange={(e) => setAsOf(e.target.value)}
+            title="Evaluate as of a past date (leave blank for latest)"
+            className="px-3 py-2 rounded text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-emerald-500"
+          />
+          {asOf && (
+            <button
+              onClick={() => setAsOf("")}
+              title="Clear date — use latest data"
+              className="px-2 py-2 rounded text-sm text-gray-400 hover:text-gray-200"
+            >
+              ×
+            </button>
+          )}
           <button
             onClick={handleRun}
             disabled={runDryRun.isPending}
@@ -94,7 +116,8 @@ export function DryRunPage() {
       {runDryRun.isSuccess && runDryRun.data && (
         <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3 text-sm text-emerald-400">
           Dry run <span className="font-mono">{runDryRun.data.run_id}</span>{" "}
-          ({runDryRun.data.mode ?? "balanced"} mode) complete: scanned{" "}
+          ({runDryRun.data.mode ?? "balanced"} mode
+          {runDryRun.data.as_of ? `, as of ${runDryRun.data.as_of}` : ""}) complete: scanned{" "}
           {runDryRun.data.universe_size} stocks, shortlisted{" "}
           {runDryRun.data.shortlist_size}, generated{" "}
           <span className="font-semibold">

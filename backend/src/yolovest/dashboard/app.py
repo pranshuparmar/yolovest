@@ -4438,8 +4438,15 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def run_dry_run_signals(
         mode: str | None = Query(
             default=None,
-            pattern=r"^(intraday|short_term|balanced|long_term)$",
-            description="Strategy mode override (intraday, short_term, balanced, long_term)",
+            pattern=r"^(intraday|short_term|balanced|long_term|swing)$",
+            description="Strategy mode override",
+        ),
+        as_of: str | None = Query(
+            default=None,
+            pattern=r"^\d{4}-\d{2}-\d{2}$",
+            description="Historical date (YYYY-MM-DD). Evaluate signals as of this "
+                        "past day using only bars up to it (no look-ahead). "
+                        "Omit for the latest market data.",
         ),
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
@@ -4447,6 +4454,7 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         Works regardless of market hours. Results are stored for next-day comparison.
         Optional `mode` query param overrides the configured strategy.mode for this run.
+        Optional `as_of` evaluates signals as they'd have looked on a past date.
         """
         from datetime import datetime as dt
 
@@ -4460,6 +4468,20 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         run_id = str(uuid.uuid4())[:8]
         cfg = ctx.config
+
+        # Historical "as of" date → end-of-day IST timestamp used to bound
+        # the bar fetch. When set, we evaluate purely on bars up to that
+        # day and use each symbol's as-of close as the price (no live LTP),
+        # so the preview reflects what the model would have signalled then.
+        as_of_dt: dt | None = None
+        if as_of:
+            try:
+                _d = dt.strptime(as_of, "%Y-%m-%d")
+                as_of_dt = _d.replace(hour=23, minute=59, second=59, tzinfo=IST)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid as_of date: {as_of}",
+                ) from None
 
         # Resolve effective strategy mode and allowed holding periods
         effective_mode = mode or cfg.strategy.mode
@@ -4575,7 +4597,9 @@ def create_app(ctx: AppContext) -> FastAPI:
         for stock in shortlist:
             symbol = stock["symbol"]
             try:
-                bars = await ctx.db.get_ohlcv(symbol, "daily", days=365)
+                bars = await ctx.db.get_ohlcv(
+                    symbol, "daily", days=365, end=as_of_dt,
+                )
                 if len(bars) < 50:
                     filter_counts["insufficient_bars"] += 1
                     rejection_details.append({
@@ -4606,12 +4630,16 @@ def create_app(ctx: AppContext) -> FastAPI:
                     })
                     continue
 
-                # Fetch fresh LTP for realistic entry/target/SL
+                # Fetch fresh LTP for realistic entry/target/SL. For a
+                # historical (as_of) run, live LTP would be look-ahead —
+                # leave current_price None so the evaluator uses the as-of
+                # bar close instead.
                 current_price: float | None = None
-                try:
-                    current_price = await ctx.market_data.get_ltp(symbol)
-                except Exception:
-                    logger.debug("LTP unavailable for dry-run %s, using bar close", symbol)
+                if as_of_dt is None:
+                    try:
+                        current_price = await ctx.market_data.get_ltp(symbol)
+                    except Exception:
+                        logger.debug("LTP unavailable for dry-run %s, using bar close", symbol)
 
                 evaluation = await evaluate_symbol_signal(
                     ctx, symbol, features,
@@ -4704,6 +4732,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             "success": True,
             "run_id": run_id,
             "mode": effective_mode,
+            "as_of": as_of,
             "universe_size": len(universe),
             "shortlist_size": len(shortlist),
             "signals": signals_out,

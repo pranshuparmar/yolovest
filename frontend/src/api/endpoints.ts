@@ -639,11 +639,16 @@ export const api = {
     apiFetch<{ status: string; reloaded: string[] }>("/api/config/reload", { method: "POST" }),
 
   // Dry-Run Signal Preview
-  runDryRun: (mode?: string) =>
-    apiFetch<DryRunResult>(
-      `/api/dry-run${mode ? `?mode=${mode}` : ""}`,
+  runDryRun: (mode?: string, asOf?: string) => {
+    const params = new URLSearchParams();
+    if (mode) params.set("mode", mode);
+    if (asOf) params.set("as_of", asOf);
+    const qs = params.toString();
+    return apiFetch<DryRunResult>(
+      `/api/dry-run${qs ? `?${qs}` : ""}`,
       { method: "POST" },
-    ),
+    );
+  },
 
   dryRunHistory: (limit = 10) =>
     apiFetch<DryRunSummary[]>(`/api/dry-run/history?limit=${limit}`),

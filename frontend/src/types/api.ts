@@ -876,6 +876,7 @@ export interface DryRunResult {
   success: boolean;
   run_id: string;
   mode?: string;
+  as_of?: string | null;
   universe_size: number;
   shortlist_size: number;
   signals: DryRunSignal[];

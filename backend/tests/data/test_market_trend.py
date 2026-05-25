@@ -74,3 +74,21 @@ class TestSwingMode:
         periods = _MODE_HOLDING_PERIODS["swing"]
         assert "intraday" not in periods
         assert set(periods) == {"short_term", "long_term"}
+
+
+class TestGetOhlcvAsOf:
+    async def test_end_bound_excludes_future_bars(self, db):
+        # 30 daily bars ending today; an as-of cutoff 10 days ago must
+        # return only bars up to that date (no look-ahead).
+        await db.upsert_ohlcv("AAA", "daily", _bars([100.0 + i for i in range(30)]), "test")
+        as_of = datetime.now().replace(hour=23, minute=59) - timedelta(days=10)
+        sliced = await db.get_ohlcv("AAA", "daily", days=365, end=as_of)
+        latest = await db.get_ohlcv("AAA", "daily", days=365)
+        assert len(sliced) < len(latest)
+        assert all(b.timestamp <= as_of for b in sliced)
+
+    async def test_no_end_returns_latest(self, db):
+        await db.upsert_ohlcv("BBB", "daily", _bars([50.0 + i for i in range(20)]), "test")
+        bars = await db.get_ohlcv("BBB", "daily", days=365)
+        assert len(bars) == 20
+
