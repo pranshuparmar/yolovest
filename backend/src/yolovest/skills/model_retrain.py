@@ -266,6 +266,35 @@ class ModelRetrainSkill(SkillBase):
             row.get("symbol", "") for row in training_data.get("bars", [])
             if row.get("symbol")
         })
+
+        # Training-data coverage summary — what history the models will
+        # actually learn from. Timestamps are ISO strings so min/max are
+        # lexical. Also report the thinnest symbol so survivorship / short
+        # listings are visible.
+        _all_bars = training_data.get("bars", [])
+        if _all_bars:
+            _ts = [r["timestamp"] for r in _all_bars if r.get("timestamp")]
+            _lo, _hi = (min(_ts), max(_ts)) if _ts else ("?", "?")
+            _per_sym: dict[str, int] = {}
+            for r in _all_bars:
+                s = r.get("symbol")
+                if s:
+                    _per_sym[s] = _per_sym.get(s, 0) + 1
+            _counts = sorted(_per_sym.values())
+            _median = _counts[len(_counts) // 2] if _counts else 0
+            _yrs = (max(_counts) / 252.0) if _counts else 0.0
+            logger.info(
+                "Training data: %d daily bars | %d symbols | %s -> %s "
+                "(deepest ~%.1f yrs) | bars/symbol min=%d median=%d max=%d | "
+                "max_training_days=%d, min_training_samples=%d",
+                len(_all_bars), len(unique_symbols), str(_lo)[:10], str(_hi)[:10],
+                _yrs, _counts[0] if _counts else 0, _median,
+                _counts[-1] if _counts else 0,
+                cfg.max_training_days, min_samples,
+            )
+        else:
+            logger.warning("Training data: 0 bars loaded — nothing to train on")
+
         try:
             sector_map = await self.ctx.db.get_symbol_sectors_map(unique_symbols)
         except Exception:
@@ -427,6 +456,11 @@ class ModelRetrainSkill(SkillBase):
             # Build feature matrix with model-specific labeling + feedback features
             lookahead = lookahead_map[model_type]
             target_mult, sl_mult = atr_mult_map[model_type]
+            logger.info(
+                "=== Retraining %s model: label geometry lookahead=%d bars, "
+                "target=%.2f×ATR, SL=%.2f×ATR ===",
+                model_type, lookahead, target_mult, sl_mult,
+            )
             X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
                 training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
                 target_atr_mult=target_mult, sl_atr_mult=sl_mult,
