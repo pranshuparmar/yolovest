@@ -120,6 +120,49 @@ class TestGetOhlcvAsOf:
 
 
 
+class TestDryRunModelOverride:
+    """The dry-run model-override + as-of-date plumbing in the DB layer."""
+
+    async def test_get_model_version_by_version(self, db):
+        await db.save_model_version(
+            "swing", "swing_v20260525_191626", "/m/swing.pkl",
+            {"sharpe": 4.76, "argmax_sharpe": 2.07},
+        )
+        row = await db.get_model_version("swing_v20260525_191626")
+        assert row is not None
+        assert row["model_type"] == "swing"
+        assert row["status"] == "shadow"
+        assert await db.get_model_version("does_not_exist") is None
+
+    async def test_dry_run_persists_as_of_and_surfaces_in_history(self, db):
+        sig = {
+            "symbol": "AAA", "signal_type": "BUY", "entry_price": 100.0,
+            "target_price": 110.0, "stop_loss_price": 95.0,
+            "confidence_score": 0.7, "model_version": "swing_v_shadow",
+            "strategy_mode": "swing",
+        }
+        await db.insert_dry_run_results("run0001", [sig], as_of="2022-06-15")
+        hist = await db.get_dry_run_history(limit=5)
+        run = next(r for r in hist if r["run_id"] == "run0001")
+        assert run["as_of"] == "2022-06-15"
+        assert run["model_version"] == "swing_v_shadow"
+        # And the per-signal rows carry the as_of stamp.
+        rows = await db.get_dry_run_signals("run0001")
+        assert rows[0]["as_of"] == "2022-06-15"
+
+    async def test_dry_run_as_of_null_for_latest(self, db):
+        sig = {
+            "symbol": "BBB", "signal_type": "BUY", "entry_price": 50.0,
+            "target_price": 55.0, "stop_loss_price": 48.0,
+            "confidence_score": 0.6, "model_version": "swing_v_prod",
+            "strategy_mode": "swing",
+        }
+        await db.insert_dry_run_results("run0002", [sig])  # no as_of → latest
+        run = next(r for r in await db.get_dry_run_history(limit=5) if r["run_id"] == "run0002")
+        assert run["as_of"] is None
+        assert run["model_version"] == "swing_v_prod"
+
+
 class TestCanonicalTimestamp:
     _IST = timezone(timedelta(hours=5, minutes=30))
 

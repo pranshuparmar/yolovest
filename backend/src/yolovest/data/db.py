@@ -1554,6 +1554,15 @@ class Database:
         row = await cursor.fetchone()
         return dict[str, Any](row) if row else None
 
+    async def get_model_version(self, version: str) -> dict[str, Any] | None:
+        """Look up a single model_versions row by version string (any status)."""
+        cursor = await self.read_conn.execute(
+            "SELECT * FROM model_versions WHERE version = ? LIMIT 1",
+            (version,),
+        )
+        row = await cursor.fetchone()
+        return dict[str, Any](row) if row else None
+
     async def promote_model(self, model_type: str, version: str) -> None:
         """Promote a shadow model to production, retire the current production.
 
@@ -5114,9 +5123,14 @@ class Database:
         return {row[1] for row in await cursor.fetchall()}
 
     async def insert_dry_run_results(
-        self, run_id: str, signals: list[dict[str, Any]]
+        self, run_id: str, signals: list[dict[str, Any]], as_of: str | None = None
     ) -> int:
-        """Save dry-run signal results for next-day comparison."""
+        """Save dry-run signal results for next-day comparison.
+
+        ``as_of`` is the historical date the run was evaluated against
+        (None = latest data); stamped on every row so the history view can
+        show which date a past run's signals were generated for.
+        """
         columns = await self._get_table_columns("dry_run_results")
 
         # Ensure strategy_mode column exists (may be missing if migration 013 was skipped)
@@ -5139,10 +5153,10 @@ class Database:
             "composite_score", "technical_score", "volume_momentum_score",
             "news_sentiment_score", "fundamental_score", "created_at",
         ]
-        # Optional columns (from migration 013+, 016+)
+        # Optional columns (from migration 013+, 016+, 047+)
         optional_cols = [
             "holding_period", "product", "volatility_score",
-            "estimated_costs", "strategy_mode", "expected_holding_days",
+            "estimated_costs", "strategy_mode", "expected_holding_days", "as_of",
         ]
         insert_cols = base_cols + [c for c in optional_cols if c in columns]
         placeholders = ", ".join("?" if c != "created_at" else "datetime('now')" for c in insert_cols)
@@ -5152,6 +5166,7 @@ class Database:
         for s in signals:
             values = tuple(
                 run_id if c == "run_id"
+                else as_of if c == "as_of"
                 else s.get(c)
                 for c in value_cols
             )
@@ -5170,18 +5185,20 @@ class Database:
                 "MIN(created_at) as created_at, "
                 "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
                 "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored, "
-                "MAX(strategy_mode) as strategy_mode "
+                "MAX(strategy_mode) as strategy_mode, "
+                "MAX(as_of) as as_of, MAX(model_version) as model_version "
                 "FROM dry_run_results "
                 "GROUP BY run_id ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
         except Exception:
-            # Fallback if strategy_mode column doesn't exist (pre-migration 013)
+            # Fallback if strategy_mode / as_of columns don't exist (pre-migration 013/047)
             cursor = await self.conn.execute(
                 "SELECT run_id, COUNT(*) as signal_count, "
                 "MIN(created_at) as created_at, "
                 "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
-                "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored "
+                "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored, "
+                "MAX(model_version) as model_version "
                 "FROM dry_run_results "
                 "GROUP BY run_id ORDER BY created_at DESC LIMIT ?",
                 (limit,),

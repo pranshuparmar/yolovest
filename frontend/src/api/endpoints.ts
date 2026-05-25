@@ -639,10 +639,11 @@ export const api = {
     apiFetch<{ status: string; reloaded: string[] }>("/api/config/reload", { method: "POST" }),
 
   // Dry-Run Signal Preview
-  runDryRun: (mode?: string, asOf?: string) => {
+  runDryRun: (mode?: string, asOf?: string, modelVersion?: string) => {
     const params = new URLSearchParams();
     if (mode) params.set("mode", mode);
     if (asOf) params.set("as_of", asOf);
+    if (modelVersion) params.set("model_version", modelVersion);
     const qs = params.toString();
     return apiFetch<DryRunResult>(
       `/api/dry-run${qs ? `?${qs}` : ""}`,

@@ -4448,6 +4448,13 @@ def create_app(ctx: AppContext) -> FastAPI:
                         "past day using only bars up to it (no look-ahead). "
                         "Omit for the latest market data.",
         ),
+        model_version: str | None = Query(
+            default=None,
+            pattern=r"^[A-Za-z0-9_.\-]+$",
+            description="Evaluate against a specific model version (shadow / "
+                        "retired / production) instead of the loaded production "
+                        "model. Omit to use whatever is currently in production.",
+        ),
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Run market-scan + signal generation on current data (read-only, no trades).
@@ -4491,6 +4498,58 @@ def create_app(ctx: AppContext) -> FastAPI:
             effective_mode, cfg.strategy.allowed_holding_periods or ["intraday", "short_term", "long_term"],
         )
 
+        # Optional model override: evaluate against a specific (shadow /
+        # retired / production) version instead of the loaded production
+        # model. We load it into a SEPARATE ML instance and run the eval
+        # through a ctx copy whose `.ml` points at it — the live engine's
+        # ctx.ml is never mutated, so a concurrent heartbeat keeps using
+        # production. The other model slot is pre-loaded from production so
+        # every strategy mode (e.g. balanced) still works.
+        import dataclasses as _dataclasses
+
+        override_ml = None
+        selected_model: dict[str, Any] | None = None
+        if model_version:
+            if ctx.ml is None:
+                raise HTTPException(status_code=400, detail="ML subsystem unavailable")
+            row = await ctx.db.get_model_version(model_version)
+            if not row:
+                raise HTTPException(
+                    status_code=404, detail=f"Unknown model version: {model_version}",
+                )
+            override_type = row["model_type"]
+            from yolovest.strategy.ml_signal import XGBoostSignalModel
+
+            _model_dir = getattr(cfg.strategy, "model_dir", "./models")
+            override_ml = XGBoostSignalModel(model_dir=_model_dir, db=ctx.db, config=cfg)
+            for _t in ("intraday", "swing"):
+                try:
+                    _prod = await ctx.db.get_production_model(_t)
+                    if _prod and _prod.get("version"):
+                        await override_ml.load_model(_t, _prod["version"])
+                except Exception:
+                    logger.debug("dry-run: preload production %s failed", _t, exc_info=True)
+            try:
+                await override_ml.load_model(override_type, model_version)
+            except FileNotFoundError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Model file for '{model_version}' not found on disk",
+                ) from None
+            selected_model = {
+                "version": model_version,
+                "model_type": override_type,
+                "status": row.get("status"),
+            }
+            logger.info(
+                "Dry-run: evaluating against non-production %s model %s (status=%s)",
+                override_type, model_version, row.get("status"),
+            )
+
+        run_ctx = (
+            _dataclasses.replace(ctx, ml=override_ml) if override_ml is not None else ctx
+        )
+
         # Step 1: Run market-scan logic (without writing to watchlist)
         universe = await ctx.db.get_nse_universe()
         if not universe:
@@ -4528,6 +4587,8 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "success": True,
                 "run_id": run_id,
                 "mode": effective_mode,
+                "as_of": as_of,
+                "selected_model": selected_model,
                 "universe_size": len(universe),
                 "shortlist_size": 0,
                 "signals": [],
@@ -4535,7 +4596,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                     "min_confidence_threshold": min(cfg.risk.min_confidence_buy, cfg.risk.min_confidence_sell),
                     "min_confidence_buy": cfg.risk.min_confidence_buy,
                     "min_confidence_sell": cfg.risk.min_confidence_sell,
-                    "ml_available": ctx.ml is not None,
+                    "ml_available": run_ctx.ml is not None,
                     "filter_counts": {
                         "insufficient_bars": 0, "feature_computation_failed": 0,
                         "ml_unavailable": 0, "hold_signal": 0,
@@ -4551,7 +4612,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         from yolovest.strategy.signal_evaluator import evaluate_symbol_signal
 
         signals_out: list[dict[str, Any]] = []
-        ml_unavailable = ctx.ml is None
+        ml_unavailable = run_ctx.ml is None
 
         # Build held + locked symbol sets (the evaluator needs both
         # for SELL adjustment and lock skip)
@@ -4631,7 +4692,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             )
         except Exception:
             fno_lookup = {}
-        inference_ctx = await load_inference_feature_context(ctx)
+        inference_ctx = await load_inference_feature_context(run_ctx)
 
         for stock in shortlist:
             symbol = stock["symbol"]
@@ -4694,9 +4755,9 @@ def create_app(ctx: AppContext) -> FastAPI:
                     ))
                 else:
                     features.update({k: 0.0 for k in FNO_FEATURE_KEYS})
-                await enrich_features(ctx, symbol, features, inference_ctx)
+                await enrich_features(run_ctx, symbol, features, inference_ctx)
 
-                if ctx.ml is None:
+                if run_ctx.ml is None:
                     filter_counts["ml_unavailable"] += 1
                     rejection_details.append({
                         "symbol": symbol,
@@ -4717,7 +4778,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                         logger.debug("LTP unavailable for dry-run %s, using bar close", symbol)
 
                 evaluation = await evaluate_symbol_signal(
-                    ctx, symbol, features,
+                    run_ctx, symbol, features,
                     current_price=current_price,
                     held_symbols=held_symbols,
                     locked_symbols=locked_symbols,
@@ -4806,7 +4867,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         eff_thr = None
         try:
             _mt = "intraday" if effective_mode == "intraday" else "swing"
-            eff_thr = ctx.ml.get_effective_thresholds(_mt) if ctx.ml else None
+            eff_thr = run_ctx.ml.get_effective_thresholds(_mt) if run_ctx.ml else None
         except Exception:
             eff_thr = None
         conviction = {
@@ -4834,13 +4895,14 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         # Step 3: Persist for next-day comparison
         if signals_out:
-            await ctx.db.insert_dry_run_results(run_id, signals_out)
+            await ctx.db.insert_dry_run_results(run_id, signals_out, as_of=as_of)
 
         result: dict[str, Any] = {
             "success": True,
             "run_id": run_id,
             "mode": effective_mode,
             "as_of": as_of,
+            "selected_model": selected_model,
             "universe_size": len(universe),
             "shortlist_size": len(shortlist),
             "signals": signals_out,
@@ -4848,7 +4910,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "min_confidence_threshold": min(cfg.risk.min_confidence_buy, cfg.risk.min_confidence_sell),
                 "min_confidence_buy": cfg.risk.min_confidence_buy,
                 "min_confidence_sell": cfg.risk.min_confidence_sell,
-                "ml_available": ctx.ml is not None,
+                "ml_available": run_ctx.ml is not None,
                 "filter_counts": filter_counts,
                 "rejection_details": rejection_details,
                 "conviction": conviction,

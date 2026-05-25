@@ -1056,8 +1056,8 @@ export function useDryRunDetail(runId: string | null) {
 export function useRunDryRun() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (args?: { mode?: string; asOf?: string }) =>
-      api.runDryRun(args?.mode, args?.asOf),
+    mutationFn: (args?: { mode?: string; asOf?: string; modelVersion?: string }) =>
+      api.runDryRun(args?.mode, args?.asOf, args?.modelVersion),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["dry-run-history"] }),
   });
 }
