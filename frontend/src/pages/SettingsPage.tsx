@@ -87,6 +87,7 @@ const TABS: Tab[] = [
       "_strategy_top",
       "_strategy_mis",
       "_strategy_cnc",
+      "_strategy_features",
       "strategy",
       "scanning",
       "retraining",
@@ -147,6 +148,19 @@ const STRATEGY_CNC_KEYS = [
   "strategy.holding_periods.long.stop_loss",
 ];
 
+// Optional support feature groups the model trains on (price/technical
+// features are always the primary core). Grouped into their own card so
+// it's clear these are toggleable add-ons.
+const STRATEGY_FEATURE_KEYS = [
+  "strategy.feature_groups.regime",
+  "strategy.feature_groups.sector",
+  "strategy.feature_groups.institutional",
+  "strategy.feature_groups.news",
+  "strategy.feature_groups.vix",
+  "strategy.feature_groups.fno",
+  "strategy.feature_groups.feedback",
+];
+
 // Per-product risk settings — intraday/swing in the model maps 1:1 to
 // MIS/CNC at the broker, so these virtual sections group the knobs the
 // user actually thinks about as "MIS rules" vs "CNC rules".
@@ -186,6 +200,7 @@ const RELOCATED_KEYS = new Set([
   ...STRATEGY_TOP_KEYS,
   ...STRATEGY_MIS_KEYS,
   ...STRATEGY_CNC_KEYS,
+  ...STRATEGY_FEATURE_KEYS,
   ...RISK_MIS_KEYS,
   ...RISK_CNC_KEYS,
 ]);
@@ -275,6 +290,7 @@ const SECTION_LABELS: Record<string, string> = {
   _strategy_top: "Strategy — Core",
   _strategy_mis: "MIS (Intraday) — Holding Geometry",
   _strategy_cnc: "CNC (Delivery) — Holding Geometry",
+  _strategy_features: "Feature Groups (price/technical always on)",
   _cron_schedules: "Cron Schedules",
   _risk_mis: "MIS (Intraday) Specific",
   _risk_cnc: "CNC (Delivery) Specific",
@@ -366,6 +382,13 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "strategy.market_regime.bear_max_holding_days": "Bear Max Holding Days",
   "strategy.market_regime.range_prefer_mean_reversion": "Range: Prefer Mean Reversion",
   // Feedback
+  "strategy.feature_groups.regime": "Support: Market Regime",
+  "strategy.feature_groups.sector": "Support: Sector-Relative",
+  "strategy.feature_groups.institutional": "Support: Bulk Deals / Delivery",
+  "strategy.feature_groups.news": "Support: News Sentiment",
+  "strategy.feature_groups.vix": "Support: India VIX",
+  "strategy.feature_groups.fno": "Support: F&O Option Chain",
+  "strategy.feature_groups.feedback": "Support: Feedback Loop",
   "strategy.feedback.enabled": "ML Feedback Loop",
   "strategy.feedback.lookback_days": "Feedback Lookback (days)",
   "strategy.feedback.sample_weight_boost": "Sample Weight Boost",
@@ -603,6 +626,13 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "strategy.market_regime.bear_max_holding_days": "In bear regime, cap holding days at this value.",
   "strategy.market_regime.range_prefer_mean_reversion": "In range regime, prefer oversold/overbought mean-reversion entries.",
   // Feedback
+  "strategy.feature_groups.regime": "Train on universe breadth / average return. Off = leaner price-primary model. Takes effect on next retrain; doesn't affect the current model.",
+  "strategy.feature_groups.sector": "Train on sector breadth / relative momentum. Off = price-primary. Next-retrain only.",
+  "strategy.feature_groups.institutional": "Train on bulk-deal counts + delivery %. Sparse data — candidate to disable if it adds noise. Next-retrain only.",
+  "strategy.feature_groups.news": "Train on news-sentiment features. Sparse for many symbols. Next-retrain only.",
+  "strategy.feature_groups.vix": "Train on India VIX features. Next-retrain only.",
+  "strategy.feature_groups.fno": "Train on F&O option-chain features. Forward-only data (very little history yet) — off by default until months accumulate. Next-retrain only.",
+  "strategy.feature_groups.feedback": "Train on the fb_* prediction/trade feedback loop. Next-retrain only.",
   "strategy.feedback.enabled": "Enable ML feedback loop — model learns from its own performance.",
   "strategy.feedback.lookback_days": "How far back to aggregate feedback data for retraining.",
   "strategy.feedback.sample_weight_boost": "Weight multiplier for symbols where model performed poorly.",
@@ -1416,6 +1446,9 @@ export default function SettingsPage() {
     }
     if (sectionKey === "_strategy_cnc") {
       return STRATEGY_CNC_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
+    if (sectionKey === "_strategy_features") {
+      return STRATEGY_FEATURE_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
     }
     // Normal section — filter out relocated keys
     return Object.entries(localConfig[sectionKey] ?? {}).filter(([k]) => !RELOCATED_KEYS.has(k));

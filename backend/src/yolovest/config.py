@@ -546,7 +546,10 @@ class FeatureGroupsConfig(BaseModel):
     institutional: bool = True   # bulk-deal counts + delivery %
     news: bool = True            # news-sentiment features
     vix: bool = True             # India VIX features
-    fno: bool = True             # F&O option-chain features
+    # F&O is forward-only (Kite exposes no option-chain history), so until
+    # months of daily ingest accumulate it's ~all-neutral in training and
+    # can only add noise — default OFF, flip on once data exists.
+    fno: bool = False
     feedback: bool = True        # fb_* prediction/trade feedback loop
 
 
