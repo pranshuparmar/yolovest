@@ -566,6 +566,14 @@ class StrategyConfig(BaseModel):
     # collapse, feature dominance). Default-on. Cheap (one matmul on
     # ~hundreds of samples). Disable if you trust the train-time guard.
     post_train_class_check_enabled: bool = True
+    # Minimum fraction of recent samples that must produce a NON-HOLD
+    # signal through the FULL production path (calibration + tuned
+    # thresholds), checked after training. The raw-argmax class check
+    # above can pass while the deployed model — after calibration and the
+    # threshold gate — fires ~zero signals live (the silent-model failure
+    # that shipped a never-trading model). This catches that end-to-end.
+    # 0.005 = "at least 0.5% of recent rows must signal". Set 0 to disable.
+    post_train_min_signal_rate: float = Field(default=0.005, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "StrategyConfig":

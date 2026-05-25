@@ -633,6 +633,52 @@ class XGBoostSignalModel(MLBase):
             attribution=attribution,
         )
 
+    def predict_labels_batch(self, X: Any, model_type: str) -> list[int]:  # noqa: N803
+        """Production-path class labels for a batch of feature vectors.
+
+        Mirrors `_predict`'s decision exactly — raw probabilities, then
+        calibrated probabilities adopted ONLY when the calibrator agrees on
+        argmax AND is more confident, then the tuned-threshold gate — but
+        vectorised over a batch with none of the per-symbol entry-price /
+        attribution work. Used by the post-train guard to verify the
+        *deployed* model (calibration + thresholds), not the raw booster
+        argmax, actually produces non-HOLD signals at its thresholds.
+
+        Returns a list of int labels (0=SELL, 1=HOLD, 2=BUY).
+        """
+        import numpy as np
+
+        model = self._get_model(model_type)
+        if model is None:
+            return []
+        Xa = np.asarray(X)
+        raw = model.predict_proba(Xa)
+        calibrator = self._get_calibrator(model_type)
+        cal = calibrator.predict_proba(Xa) if calibrator is not None else None
+        thresholds = self._get_effective_thresholds(model_type)
+        labels: list[int] = []
+        for i in range(len(raw)):
+            rp = raw[i]
+            raw_label = int(np.argmax(rp))
+            chosen = rp
+            if cal is not None:
+                cp = cal[i]
+                cal_label = int(np.argmax(cp))
+                if cal_label == raw_label and float(cp[cal_label]) > float(rp[raw_label]):
+                    chosen = cp
+            if thresholds and len(chosen) >= 3:
+                buy_p = float(chosen[_LABEL_BUY])
+                sell_p = float(chosen[_LABEL_SELL])
+                if buy_p >= thresholds["buy"] and buy_p >= sell_p:
+                    labels.append(_LABEL_BUY)
+                elif sell_p >= thresholds["sell"] and sell_p > buy_p:
+                    labels.append(_LABEL_SELL)
+                else:
+                    labels.append(_LABEL_HOLD)
+            else:
+                labels.append(int(np.argmax(chosen)))
+        return labels
+
     @staticmethod
     def _compute_attribution(
         model: Any,

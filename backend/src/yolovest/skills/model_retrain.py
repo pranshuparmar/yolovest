@@ -528,23 +528,25 @@ class ModelRetrainSkill(SkillBase):
                         "HOLD": round(class_weights.get(1, 0.0), 4),
                         "SELL": round(class_weights.get(0, 0.0), 4),
                     }
-                # Post-train class check: run the fresh model on the
-                # most recent N training rows and verify all three
-                # classes are reachable. Catches calibration-collapse
-                # or feature-dominance cases where the label balance
-                # was fine but the model still never picks a class.
+                # Post-train guard: run the fresh model on the most recent
+                # N training rows through the FULL PRODUCTION PATH
+                # (calibration + tuned thresholds) — not the raw booster
+                # argmax — and verify it still produces a non-trivial
+                # non-HOLD signal rate. The raw-argmax check passes even
+                # when the deployed model fires ~zero signals live (the
+                # silent-model failure: thresholds unreachable after
+                # calibration). This catches that end-to-end.
                 if self.ctx.config.strategy.post_train_class_check_enabled:
                     try:
-                        import numpy as np  # noqa: PLC0415
-
-                        booster = self.ctx.ml._get_model(model_type)  # noqa: SLF001
-                        # Sample the freshest N rows — that's what the
-                        # production model will see first in live use.
+                        # Sample the freshest N rows — what the production
+                        # model sees first in live use.
                         n_check = min(1000, len(X))
-                        X_check = np.asarray(X[-n_check:])
-                        preds = booster.predict(X_check)
+                        X_check = X[-n_check:]
+                        prod_labels = self.ctx.ml.predict_labels_batch(
+                            X_check, model_type,
+                        )
                         pred_counts = {0: 0, 1: 0, 2: 0}
-                        for p in preds:
+                        for p in prod_labels:
                             pred_counts[int(p)] = pred_counts.get(int(p), 0) + 1
                         # Map: 0=SELL, 1=HOLD, 2=BUY.
                         pred_dist = {
@@ -552,22 +554,30 @@ class ModelRetrainSkill(SkillBase):
                             "HOLD": pred_counts.get(1, 0),
                             "BUY": pred_counts.get(2, 0),
                         }
+                        n_eval = len(prod_labels) or 1
+                        non_hold = pred_dist["BUY"] + pred_dist["SELL"]
+                        signal_rate = non_hold / n_eval
                         logger.info(
-                            "Post-train prediction distribution for %s "
-                            "(n=%d): BUY=%d, HOLD=%d, SELL=%d",
+                            "Post-train production-path distribution for %s "
+                            "(n=%d): BUY=%d, HOLD=%d, SELL=%d (signal_rate=%.2f%%)",
                             model_type, n_check,
                             pred_dist["BUY"], pred_dist["HOLD"], pred_dist["SELL"],
+                            signal_rate * 100,
                         )
                         metrics["post_train_pred_dist"] = pred_dist
+                        metrics["post_train_signal_rate"] = round(signal_rate, 4)
 
-                        missing = [k for k, v in pred_dist.items() if v == 0]
-                        if missing:
+                        min_rate = self.ctx.config.strategy.post_train_min_signal_rate
+                        if min_rate > 0 and signal_rate < min_rate:
                             msg = (
-                                f"Refusing to save {model_type}: trained "
-                                f"booster never predicts class(es) "
-                                f"{', '.join(missing)} on the most recent "
-                                f"{n_check} samples. Production would see "
-                                f"zero of those signals."
+                                f"Refusing to save {model_type}: through the "
+                                f"production path (calibration + tuned "
+                                f"thresholds) it signals on only "
+                                f"{signal_rate * 100:.2f}% of the most recent "
+                                f"{n_check} samples (< {min_rate * 100:.2f}% "
+                                f"floor) — it would be near-silent live. "
+                                f"Thresholds are likely unreachable; check "
+                                f"the tuned cutoffs / tuned_min_signal_rate."
                             )
                             logger.warning(msg)
                             try:
@@ -583,6 +593,7 @@ class ModelRetrainSkill(SkillBase):
                             results[model_type] = {
                                 "error": msg,
                                 "post_train_pred_dist": pred_dist,
+                                "post_train_signal_rate": round(signal_rate, 4),
                                 "label_pct": label_pct,
                             }
                             continue
@@ -590,7 +601,7 @@ class ModelRetrainSkill(SkillBase):
                         # Inference inside the guard shouldn't crash
                         # the retrain — fall through and save the model.
                         logger.debug(
-                            "Post-train class check failed; saving anyway",
+                            "Post-train signal-rate check failed; saving anyway",
                             exc_info=True,
                         )
 
