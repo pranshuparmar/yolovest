@@ -527,12 +527,36 @@ class ReentryConfig(BaseModel):
     min_reentry_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
 
 
+class FeatureGroupsConfig(BaseModel):
+    """Which OPTIONAL (non-technical) feature groups the model trains on.
+
+    Price/technical features (RSI, MACD, EMA, ATR, …) computed from the
+    historical OHLCV are ALWAYS used — they're the primary source of truth.
+    The groups below are supporting signals layered on top. Each defaults
+    on, but can be disabled so the model trains on a leaner, price-primary
+    feature set — useful when a support source is sparse/noisy and you want
+    to confirm (via a retrain + dry-run conviction comparison) that it
+    isn't diluting the core signal. Disabling a group excludes its features
+    from the trained model entirely; inference then never feeds them, so
+    there's no train/inference mismatch.
+    """
+
+    regime: bool = True          # universe breadth / avg-return
+    sector: bool = True          # sector breadth / avg-return / relative momentum
+    institutional: bool = True   # bulk-deal counts + delivery %
+    news: bool = True            # news-sentiment features
+    vix: bool = True             # India VIX features
+    fno: bool = True             # F&O option-chain features
+    feedback: bool = True        # fb_* prediction/trade feedback loop
+
+
 class StrategyConfig(BaseModel):
     mode: Literal["intraday", "short_term", "balanced", "long_term", "swing"] = "balanced"
     allowed_holding_periods: list[str] | None = None
     holding_periods: HoldingPeriodConfig = Field(default_factory=HoldingPeriodConfig)
     volatility: VolatilityConfig = Field(default_factory=VolatilityConfig)
     feedback: FeedbackConfig = Field(default_factory=FeedbackConfig)
+    feature_groups: FeatureGroupsConfig = Field(default_factory=FeatureGroupsConfig)
     ema_periods: list[int] = Field(default_factory=lambda: [9, 21, 50, 200])
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     min_training_samples: int = 200

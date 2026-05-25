@@ -37,6 +37,30 @@ from yolovest.timezone import IST
 logger = logging.getLogger(__name__)
 
 
+# Optional feature-group → feature-key sets, for the train-time
+# feature_groups gate (config.strategy.feature_groups). Price/technical
+# features are always kept (primary source of truth); these supporting
+# groups can be excluded to train a leaner, price-primary model and verify
+# they aren't diluting the core signal.
+_FEATURE_GROUP_KEYS: dict[str, frozenset[str]] = {
+    "regime": frozenset({"universe_breadth", "universe_avg_return"}),
+    "sector": frozenset({"sector_breadth", "sector_avg_return", "relative_momentum"}),
+    "institutional": frozenset({
+        "bulk_deal_buy_5d", "bulk_deal_sell_5d", "bulk_deal_net_5d",
+        "delivery_pct_avg_5d",
+    }),
+    "news": frozenset(NEWS_FEATURE_KEYS),
+    "vix": frozenset(VIX_FEATURE_KEYS),
+    "fno": frozenset(FNO_FEATURE_KEYS),
+    "feedback": frozenset({
+        "fb_pred_accuracy", "fb_pred_target_hit", "fb_pred_avg_pnl",
+        "fb_dry_run_accuracy", "fb_dry_run_avg_move", "fb_trade_win_rate",
+        "fb_trade_avg_pnl", "fb_trade_avg_slippage", "fb_recent_loss_count",
+        "fb_has_data",
+    }),
+}
+
+
 def _decision_sharpe(
     candidate: dict[str, Any], incumbent: dict[str, Any] | None,
 ) -> tuple[float, float]:
@@ -772,6 +796,26 @@ class ModelRetrainSkill(SkillBase):
         sample_weights: list[float] = []
         feature_names: list[str] = []
         feature_names_set: set[str] = set()
+
+        # Train-time feature-group gate. Price/technical features always
+        # stay; disabled support groups (config.strategy.feature_groups)
+        # are excluded from the feature matrix so the model trains
+        # price-primary. Folded into MODEL_FEATURE_EXCLUSIONS so the filter
+        # below is a single check.
+        _fg = getattr(self.ctx.config.strategy, "feature_groups", None)
+        _disabled_keys: set[str] = set()
+        if _fg is not None:
+            for _group, _keys in _FEATURE_GROUP_KEYS.items():
+                if not getattr(_fg, _group, True):
+                    _disabled_keys |= set(_keys)
+        excluded_keys = set(MODEL_FEATURE_EXCLUSIONS) | _disabled_keys
+        if _disabled_keys:
+            logger.info(
+                "Feature groups DISABLED for training: %s — excluding %d "
+                "support features (price/technical core retained)",
+                [g for g in _FEATURE_GROUP_KEYS if not getattr(_fg, g, True)],
+                len(_disabled_keys),
+            )
         # Parallel to X/y — used by the walk-forward backtest to
         # simulate real PnL instead of the legacy +1%/-0.5% fiction.
         bars_meta: list[dict[str, Any]] = []
@@ -1034,7 +1078,7 @@ class ModelRetrainSkill(SkillBase):
                 # the features dict for the inference layer's entry-price
                 # lookups but the trained model never sees them.
                 for k in features:
-                    if k in MODEL_FEATURE_EXCLUSIONS:
+                    if k in excluded_keys:
                         continue
                     if k not in feature_names_set:
                         # With window_size = 200 every iteration should
