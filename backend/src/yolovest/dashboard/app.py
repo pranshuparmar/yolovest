@@ -4582,6 +4582,12 @@ def create_app(ctx: AppContext) -> FastAPI:
             "passed": 0,
         }
         rejection_details: list[dict[str, str]] = []
+        # Conviction diagnostic: the model's per-stock directional
+        # probability. Makes the real blocker visible — if these rarely
+        # reach the tuned thresholds, it's a model-conviction ceiling, not
+        # a data/threshold-tuning problem.
+        conviction_buy: list[float] = []
+        conviction_sell: list[float] = []
 
         indicator_cfg = IndicatorConfig(
             ema_periods=cfg.strategy.ema_periods,
@@ -4727,6 +4733,11 @@ def create_app(ctx: AppContext) -> FastAPI:
                     bypass_time_gates=True,
                 )
 
+                _cp = evaluation.class_probabilities or {}
+                if _cp:
+                    conviction_buy.append(float(_cp.get("BUY", 0.0)))
+                    conviction_sell.append(float(_cp.get("SELL", 0.0)))
+
                 if evaluation.outcome != "passed":
                     bucket = evaluation.outcome
                     filter_counts.setdefault(bucket, 0)
@@ -4785,12 +4796,40 @@ def create_app(ctx: AppContext) -> FastAPI:
                 })
                 logger.warning("Dry-run signal failed for %s: %s", symbol, e)
 
+        # Conviction summary — the model's reachable directional
+        # probability vs the gate it must clear. When max conviction sits
+        # below the effective threshold, that IS the blocker (model is too
+        # uncertain), independent of date/regime.
+        def _pct_ge(vals: list[float], t: float) -> float:
+            return (sum(1 for v in vals if v >= t) / len(vals)) if vals else 0.0
+
+        eff_thr = None
+        try:
+            _mt = "intraday" if effective_mode == "intraday" else "swing"
+            eff_thr = ctx.ml.get_effective_thresholds(_mt) if ctx.ml else None
+        except Exception:
+            eff_thr = None
+        conviction = {
+            "max_buy": round(max(conviction_buy), 4) if conviction_buy else 0.0,
+            "max_sell": round(max(conviction_sell), 4) if conviction_sell else 0.0,
+            "buy_ge_0.45": round(_pct_ge(conviction_buy, 0.45), 4),
+            "buy_ge_0.50": round(_pct_ge(conviction_buy, 0.50), 4),
+            "buy_ge_0.55": round(_pct_ge(conviction_buy, 0.55), 4),
+            "sell_ge_0.55": round(_pct_ge(conviction_sell, 0.55), 4),
+            "sell_ge_0.60": round(_pct_ge(conviction_sell, 0.60), 4),
+            "effective_thresholds": eff_thr,
+            "n_scored": len(conviction_buy),
+        }
+
         # Log diagnostics summary (always, not just on 0 signals)
         logger.info(
-            "Dry-run %s (%s mode) complete: scanned %d stocks, shortlisted %d, "
-            "generated %d signals — %s",
-            run_id, effective_mode, len(universe), len(shortlist),
+            "Dry-run %s (%s mode, as_of=%s) complete: scanned %d, shortlisted %d, "
+            "generated %d signals — %s | conviction: max_buy=%.2f max_sell=%.2f "
+            "buy>=.55=%.0f%% sell>=.60=%.0f%% eff_thr=%s",
+            run_id, effective_mode, as_of or "latest", len(universe), len(shortlist),
             len(signals_out), filter_counts,
+            conviction["max_buy"], conviction["max_sell"],
+            conviction["buy_ge_0.55"] * 100, conviction["sell_ge_0.60"] * 100, eff_thr,
         )
 
         # Step 3: Persist for next-day comparison
@@ -4812,6 +4851,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 "ml_available": ctx.ml is not None,
                 "filter_counts": filter_counts,
                 "rejection_details": rejection_details,
+                "conviction": conviction,
             },
         }
         if ml_unavailable:
