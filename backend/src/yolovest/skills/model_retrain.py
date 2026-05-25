@@ -409,6 +409,20 @@ class ModelRetrainSkill(SkillBase):
         # leaving _gc unbound for the post-loop collect() below.
         import gc as _gc
 
+        # Log the exact feature-group configuration this retrain will use,
+        # so the artifact's feature set is never a mystery. Price/technical
+        # features are always trained on; these support groups are toggled
+        # via config.strategy.feature_groups.
+        _fg = getattr(self.ctx.config.strategy, "feature_groups", None)
+        if _fg is not None:
+            _fg_state = " ".join(
+                f"{g}={'ON' if getattr(_fg, g, True) else 'OFF'}"
+                for g in _FEATURE_GROUP_KEYS
+            )
+            logger.info(
+                "Retrain feature groups (price/technical always ON): %s", _fg_state,
+            )
+
         for model_type in ("intraday", "swing"):
             # Build feature matrix with model-specific labeling + feedback features
             lookahead = lookahead_map[model_type]
@@ -421,6 +435,20 @@ class ModelRetrainSkill(SkillBase):
                 news_lookup=news_lookup,
                 vix_timeline=vix_timeline,
                 fno_lookup=fno_lookup,
+            )
+            # Spell out exactly what this model trained on: total feature
+            # count + which support groups actually landed in the matrix
+            # (so a disabled/empty group is visibly absent).
+            _present = {
+                g for g, keys in _FEATURE_GROUP_KEYS.items()
+                if any(k in feat_names for k in keys)
+            }
+            _absent = [g for g in _FEATURE_GROUP_KEYS if g not in _present]
+            logger.info(
+                "%s training matrix: %d features | support groups present: %s | "
+                "absent: %s",
+                model_type, len(feat_names),
+                sorted(_present) or "none", _absent or "none",
             )
             if len(y) < min_samples:
                 logger.warning(
