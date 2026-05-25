@@ -76,6 +76,32 @@ class TestSwingMode:
         assert set(periods) == {"short_term", "long_term"}
 
 
+class TestLiveSectorRegime:
+    async def test_sector_breadth_and_returns(self, db):
+        # 4 symbols in sector "BANK": 3 up, 1 down → breadth 0.75.
+        await db.upsert_symbol_sectors([
+            {"symbol": s, "industry": "BANK"} for s in ("A", "B", "C", "D")
+        ])
+        # 2 daily bars each: prev=100, latest = up or down.
+        for s, latest in [("A", 102), ("B", 103), ("C", 101), ("D", 97)]:
+            await db.upsert_ohlcv(s, "daily", _bars([100.0, float(latest)]), "test")
+        stats, rets = await db.compute_live_sector_regime()
+        assert "BANK" in stats
+        assert abs(stats["BANK"]["breadth"] - 0.75) < 1e-9
+        assert stats["BANK"]["n"] == 4
+        assert rets["A"] > 0 and rets["D"] < 0
+
+    async def test_thin_sector_excluded(self, db):
+        # Only 2 peers (< 3) → sector gets no stats.
+        await db.upsert_symbol_sectors([
+            {"symbol": "X", "industry": "TINY"}, {"symbol": "Y", "industry": "TINY"},
+        ])
+        await db.upsert_ohlcv("X", "daily", _bars([100.0, 101.0]), "test")
+        await db.upsert_ohlcv("Y", "daily", _bars([100.0, 102.0]), "test")
+        stats, _ = await db.compute_live_sector_regime()
+        assert "TINY" not in stats
+
+
 class TestGetOhlcvAsOf:
     async def test_end_bound_excludes_future_bars(self, db):
         # 30 daily bars ending today; an as-of cutoff 10 days ago must

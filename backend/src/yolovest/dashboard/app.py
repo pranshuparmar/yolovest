@@ -4457,6 +4457,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         Optional `as_of` evaluates signals as they'd have looked on a past date.
         """
         from datetime import datetime as dt
+        from datetime import timedelta
 
         from yolovest.config import _MODE_HOLDING_DAYS, _MODE_HOLDING_PERIODS
         from yolovest.costs import compute_transaction_costs
@@ -4594,6 +4595,38 @@ def create_app(ctx: AppContext) -> FastAPI:
             supertrend=cfg.strategy.indicators.supertrend,
         )
 
+        # Feature parity with the live heartbeat: the model trains on news,
+        # VIX, F&O, regime, sector, institutional and feedback features.
+        # Merge them here too so the dry-run mirrors live (without this the
+        # model is fed ~30 zeroed features and never signals).
+        from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
+        from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
+        from yolovest.data.vix_features import (
+            VIX_FEATURE_KEYS,
+            compute_vix_features,
+        )
+        from yolovest.strategy.inference_features import (
+            enrich_features,
+            load_inference_feature_context,
+        )
+
+        _ref_dt = as_of_dt or dt.now(IST)
+        _today_str = _ref_dt.strftime("%Y-%m-%d")
+        try:
+            _vix_timeline = await ctx.db.get_vix_timeline(
+                date_from=(_ref_dt - timedelta(days=40)).strftime("%Y-%m-%d"),
+            )
+            vix_feats_today = compute_vix_features(_vix_timeline, _today_str)
+        except Exception:
+            vix_feats_today = {k: 0.0 for k in VIX_FEATURE_KEYS}
+        try:
+            fno_lookup = await ctx.db.get_fno_timeline(
+                date_from=(_ref_dt - timedelta(days=5)).strftime("%Y-%m-%d"),
+            )
+        except Exception:
+            fno_lookup = {}
+        inference_ctx = await load_inference_feature_context(ctx)
+
         for stock in shortlist:
             symbol = stock["symbol"]
             try:
@@ -4620,6 +4653,42 @@ def create_app(ctx: AppContext) -> FastAPI:
                     })
                     logger.info("Dry-run: Feature computation failed for %s", symbol)
                     continue
+
+                # Merge the full training feature set (mirror generate_signals)
+                # so the dry-run feeds the model the same 54 features it
+                # trained on, not ~22 with the rest zeroed.
+                try:
+                    news_rows = await ctx.db.get_news_articles(
+                        symbol=symbol,
+                        date_from=(_ref_dt - timedelta(days=7)).isoformat(),
+                        limit=500,
+                    )
+                    _heads = []
+                    for r in news_rows:
+                        _p = r.get("published_at")
+                        if not _p:
+                            continue
+                        try:
+                            _pd = dt.fromisoformat(_p)
+                            if _pd.tzinfo is None:
+                                _pd = _pd.replace(tzinfo=IST)
+                            _heads.append((r.get("headline", ""), _pd))
+                        except (ValueError, TypeError):
+                            continue
+                    features.update(compute_news_features(_heads, _ref_dt))
+                except Exception:
+                    features.update({k: 0.0 for k in NEWS_FEATURE_KEYS})
+                features.update(vix_feats_today)
+                _sym_fno = fno_lookup.get(symbol)
+                if _sym_fno:
+                    _pc = bars[-2].close if len(bars) >= 2 else None
+                    features.update(compute_fno_features(
+                        _sym_fno, _today_str,
+                        prior_stock_close=_pc, current_stock_close=bars[-1].close,
+                    ))
+                else:
+                    features.update({k: 0.0 for k in FNO_FEATURE_KEYS})
+                await enrich_features(ctx, symbol, features, inference_ctx)
 
                 if ctx.ml is None:
                     filter_counts["ml_unavailable"] += 1

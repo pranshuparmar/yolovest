@@ -22,6 +22,10 @@ from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+from yolovest.strategy.inference_features import (
+    enrich_features,
+    load_inference_feature_context,
+)
 from yolovest.strategy.signal_evaluator import evaluate_symbol_signal
 from yolovest.timezone import IST, now_ist
 
@@ -240,6 +244,13 @@ class GenerateSignalsSkill(SkillBase):
             except Exception:
                 logger.debug("market_regime fetch failed", exc_info=True)
 
+        # Inference feature-enrichment context (universe/sector regime,
+        # feedback) loaded once per heartbeat. The per-symbol enrich call
+        # adds the ~19 features the model trains on but compute_features
+        # doesn't produce — without this they default to 0.0 (off the
+        # training distribution) and the model never reaches its thresholds.
+        inference_ctx = await load_inference_feature_context(self.ctx)
+
         # Capture the symbol evaluation in chunks so DB / LTP / news /
         # ML I/O for ~N symbols overlaps instead of running strictly
         # sequentially. Each task returns a typed result; serial state
@@ -272,6 +283,7 @@ class GenerateSignalsSkill(SkillBase):
                 locked_symbols=locked_symbols,
                 open_positions=open_positions,
                 regime_state=regime_state,
+                inference_ctx=inference_ctx,
             )
 
         chunk_size = max(
@@ -388,6 +400,7 @@ class GenerateSignalsSkill(SkillBase):
         locked_symbols: set[str],
         open_positions: list[dict[str, Any]],
         regime_state: Any,
+        inference_ctx: dict[str, Any],
     ) -> dict[str, Any]:
         """All per-symbol async work (DB reads, LTP, feature merge, ML
         predict, shadow predict) with NO shared-state mutation. Returns
@@ -516,6 +529,10 @@ class GenerateSignalsSkill(SkillBase):
                 ))
             else:
                 features.update({k: 0.0 for k in FNO_FEATURE_KEYS})
+
+            # Regime / sector / institutional / feedback features — the
+            # set the model trains on but compute_features doesn't produce.
+            await enrich_features(self.ctx, symbol, features, inference_ctx)
 
             current_price: float | None = None
             try:

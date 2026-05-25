@@ -2302,6 +2302,67 @@ class Database:
             "sample_size": len(returns),
         }
 
+    async def compute_live_sector_regime(
+        self,
+    ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+        """Live per-sector breadth/avg-return plus per-symbol daily return,
+        for the inference-time `sector_breadth` / `sector_avg_return` /
+        `relative_momentum` features (training computes the same via
+        `_compute_sector_index`). Uses the latest two daily closes of every
+        tracked symbol, grouped by sector via the symbol_sectors map.
+
+        Returns (sector_stats, symbol_returns) where sector_stats[sector] =
+        {"breadth", "avg_return", "n"} and symbol_returns[symbol] = pct
+        change. A sector needs >= 3 peers to get stats (mirrors training's
+        min-peer guard); thinner sectors are simply absent.
+        """
+        cursor = await self.read_conn.execute(
+            """
+            WITH ranked AS (
+                SELECT symbol, close,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY symbol ORDER BY timestamp DESC
+                       ) AS rn
+                FROM ohlcv
+                WHERE interval = 'daily'
+                  AND timestamp >= date('now', '-10 day')
+            )
+            SELECT symbol,
+                   MAX(CASE WHEN rn = 1 THEN close END) AS latest,
+                   MAX(CASE WHEN rn = 2 THEN close END) AS prev
+            FROM ranked
+            WHERE rn <= 2
+            GROUP BY symbol
+            HAVING latest > 0 AND prev > 0
+            """
+        )
+        rows = await cursor.fetchall()
+        symbol_returns: dict[str, float] = {}
+        for sym, latest, prev in rows:
+            try:
+                symbol_returns[sym] = (float(latest) - float(prev)) / float(prev)
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+        if not symbol_returns:
+            return {}, {}
+        sector_map = await self.get_symbol_sectors_map(list(symbol_returns.keys()))
+        by_sector: dict[str, list[float]] = {}
+        for sym, ret in symbol_returns.items():
+            sec = sector_map.get(sym)
+            if sec:
+                by_sector.setdefault(sec, []).append(ret)
+        sector_stats: dict[str, dict[str, float]] = {}
+        for sec, rets in by_sector.items():
+            if len(rets) < 3:
+                continue
+            up = sum(1 for x in rets if x > 0)
+            sector_stats[sec] = {
+                "breadth": up / len(rets),
+                "avg_return": sum(rets) / len(rets),
+                "n": len(rets),
+            }
+        return sector_stats, symbol_returns
+
     async def compute_market_trend(self, ma_window: int = 50) -> dict[str, Any]:
         """Equal-weight market-index trend vs its moving average — the
         long-only circuit-breaker signal. Builds an index from the mean
