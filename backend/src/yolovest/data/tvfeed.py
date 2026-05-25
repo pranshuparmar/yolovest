@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from yolovest.data.base import MarketDataBase
-from yolovest.models.schemas import OHLCVBar
+from yolovest.models.schemas import OHLCVBar, is_valid_ohlc
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,10 @@ class TVDatafeedProvider(MarketDataBase):
 
         bars = []
         for idx, row in df.iterrows():
+            # Skip junk bars (NaN / non-positive) so one bad row doesn't
+            # fail the whole fetch (OHLCVBar enforces gt=0).
+            if not is_valid_ohlc(row["open"], row["high"], row["low"], row["close"]):
+                continue
             ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else datetime.fromisoformat(str(idx))
             if ts.tzinfo is not None:
                 ts = ts.replace(tzinfo=None)

@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from yolovest.data.base import MarketDataBase
-from yolovest.models.schemas import OHLCVBar
+from yolovest.models.schemas import OHLCVBar, is_valid_ohlc
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,10 @@ class JugaadDataProvider(MarketDataBase):
 
         bars = []
         for _, row in df.iterrows():
+            # Skip junk bars (NaN / non-positive) so one bad row doesn't
+            # fail the whole symbol's fetch (OHLCVBar enforces gt=0).
+            if not is_valid_ohlc(row["OPEN"], row["HIGH"], row["LOW"], row["CLOSE"]):
+                continue
             bars.append(
                 OHLCVBar(
                     timestamp=datetime.combine(row["DATE"].date(), datetime.min.time())

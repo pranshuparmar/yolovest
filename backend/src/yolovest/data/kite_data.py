@@ -19,7 +19,7 @@ from yolovest.timezone import now_ist
 from typing import Any
 
 from yolovest.data.base import MarketDataBase
-from yolovest.models.schemas import OHLCVBar
+from yolovest.models.schemas import OHLCVBar, is_valid_ohlc
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +313,7 @@ class KiteDataProvider(MarketDataBase):
                         row.get("open"), row.get("high"),
                         row.get("low"), row.get("close"),
                     )
-                    if any(v is None or v <= 0 for v in (o, h, lo, cl)):
+                    if not is_valid_ohlc(o, h, lo, cl):
                         skipped += 1
                         continue
                     ts = (

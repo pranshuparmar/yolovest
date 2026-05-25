@@ -169,3 +169,17 @@ class TestCanonicalTimestamp:
         bars = await db.get_ohlcv("WW", "daily", days=3650)
         assert len(bars) == 1
         assert bars[0].close == 104  # refreshed
+
+
+class TestIsValidOhlc:
+    def test_accepts_positive(self):
+        from yolovest.models.schemas import is_valid_ohlc
+        assert is_valid_ohlc(100, 105, 99, 102) is True
+
+    def test_rejects_zero_partial_zero_nan_negative_none(self):
+        from yolovest.models.schemas import is_valid_ohlc
+        assert is_valid_ohlc(0.0, 0.0, 0.0, 0.0) is False
+        assert is_valid_ohlc(102, 0.0, 100, 101) is False     # one zero
+        assert is_valid_ohlc(100, 105, 99, float("nan")) is False
+        assert is_valid_ohlc(100, 105, -1, 102) is False
+        assert is_valid_ohlc(None, 105, 99, 102) is False

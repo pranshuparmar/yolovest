@@ -15,7 +15,7 @@ import logging
 import math
 from datetime import datetime
 
-from yolovest.models.schemas import OHLCVBar
+from yolovest.models.schemas import OHLCVBar, is_valid_ohlc
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def _fetch_sync(days: int) -> list[OHLCVBar]:
     bars: list[OHLCVBar] = []
     for idx, row in df.iterrows():
         o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
-        if any(math.isnan(v) for v in (o, h, l, c)):
+        if not is_valid_ohlc(o, h, l, c):
             continue
         ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else datetime.fromisoformat(str(idx))
         if ts.tzinfo is not None:
