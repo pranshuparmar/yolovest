@@ -984,11 +984,12 @@ class RetrainingConfig(BaseModel):
     # 5 years × ~500 symbols ≈ 911K bars OOM-kills the process during
     # feature-matrix construction. 730 days × 500 symbols ≈ 365K bars
     # fits comfortably under 2 GB. Raise on hosts with more memory if
-    # you want the model to see deeper history — the ceiling is 11000
-    # (~30yr, the full available history). WARNING: memory scales with
-    # days × symbols; budget for it (the offline-training box) before
-    # going past ~10yr on the full universe.
-    max_training_days: int = Field(default=730, ge=90, le=11000)
+    # you want the model to see deeper history — the ceiling is 12000
+    # (~33yr), comfortably covering the full available history (daily data
+    # starts ~1996). WARNING: memory scales with days × symbols; budget
+    # for it (the offline-training box) before going past ~10yr on the
+    # full universe.
+    max_training_days: int = Field(default=730, ge=90, le=12000)
     # Honest-edge promotion gate. A model may only be promoted to
     # production when its *argmax* walk-forward Sharpe (the edge of its
     # natural, untuned decisions) is at least this value. The
