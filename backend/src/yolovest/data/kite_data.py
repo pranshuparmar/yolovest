@@ -300,18 +300,37 @@ class KiteDataProvider(MarketDataBase):
                         end,
                         interval,
                     )
-                return [
-                    OHLCVBar(
-                        timestamp=row["date"] if isinstance(row["date"], datetime)
-                        else datetime.combine(row["date"], datetime.min.time()),
-                        open=float(row["open"]),
-                        high=float(row["high"]),
-                        low=float(row["low"]),
-                        close=float(row["close"]),
-                        volume=int(row["volume"]),
+                # Kite returns 0.0-OHLC placeholder bars for pre-listing /
+                # no-trade days (e.g. requesting deep history for a recently
+                # IPO'd symbol like MAZDOCK before its 2020 listing). Skip
+                # any bar with a non-positive O/H/L/C instead of letting one
+                # bad row fail the entire symbol's fetch (OHLCVBar enforces
+                # gt=0). Volume may legitimately be 0, so it isn't filtered.
+                bars: list[OHLCVBar] = []
+                skipped = 0
+                for row in data:
+                    o, h, lo, cl = (
+                        row.get("open"), row.get("high"),
+                        row.get("low"), row.get("close"),
                     )
-                    for row in data
-                ]
+                    if any(v is None or v <= 0 for v in (o, h, lo, cl)):
+                        skipped += 1
+                        continue
+                    ts = (
+                        row["date"] if isinstance(row["date"], datetime)
+                        else datetime.combine(row["date"], datetime.min.time())
+                    )
+                    bars.append(OHLCVBar(
+                        timestamp=ts,
+                        open=float(o), high=float(h), low=float(lo),
+                        close=float(cl), volume=int(row.get("volume") or 0),
+                    ))
+                if skipped:
+                    logger.debug(
+                        "Kite: skipped %d non-positive/placeholder bars for token %s",
+                        skipped, token,
+                    )
+                return bars
             except Exception as e:
                 last_error = e
                 # A TokenException is permanent within this token's
