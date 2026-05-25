@@ -134,12 +134,38 @@ class TestCanonicalTimestamp:
     async def test_upsert_dedupes_kite_tzaware_vs_yfinance_tznaive(self, db):
         # The exact 581k-duplicate bug: same day, kite tz-aware vs yfinance
         # tz-naive. After the canonicalization fix they must collapse to ONE
-        # row (last writer wins via upsert), not two.
+        # row — and the source-priority WHERE makes KITE win regardless of
+        # ingestion order (yfinance can't clobber kite).
         aware = datetime(2024, 3, 15, 0, 0, tzinfo=self._IST)
         naive = datetime(2024, 3, 15, 0, 0)
+        # kite first, then yfinance tries to overwrite → kite must stay.
         await db.upsert_ohlcv("ZZ", "daily", [OHLCVBar(
-            timestamp=aware, open=255, high=256, low=249, close=249, volume=100)], "kite")
+            timestamp=aware, open=255, high=256, low=249, close=249.4, volume=100)], "kite")
         await db.upsert_ohlcv("ZZ", "daily", [OHLCVBar(
-            timestamp=naive, open=218, high=219, low=213, close=213, volume=100)], "yfinance")
+            timestamp=naive, open=218, high=219, low=213, close=213.3, volume=100)], "yfinance")
         bars = await db.get_ohlcv("ZZ", "daily", days=3650)
         assert len(bars) == 1
+        assert bars[0].close == 249.4  # kite kept, yfinance discarded
+
+    async def test_kite_overwrites_existing_lower_source(self, db):
+        # yfinance first, then kite → kite wins (higher priority).
+        naive = datetime(2024, 3, 15, 0, 0)
+        aware = datetime(2024, 3, 15, 0, 0, tzinfo=self._IST)
+        await db.upsert_ohlcv("YY", "daily", [OHLCVBar(
+            timestamp=naive, open=218, high=219, low=213, close=213.3, volume=100)], "yfinance")
+        await db.upsert_ohlcv("YY", "daily", [OHLCVBar(
+            timestamp=aware, open=255, high=256, low=249, close=249.4, volume=100)], "kite")
+        bars = await db.get_ohlcv("YY", "daily", days=3650)
+        assert len(bars) == 1
+        assert bars[0].close == 249.4  # kite won despite arriving second
+
+    async def test_same_source_refreshes(self, db):
+        # Re-ingesting the same source updates the bar (ties allowed).
+        d = datetime(2024, 3, 15, 0, 0)
+        await db.upsert_ohlcv("WW", "daily", [OHLCVBar(
+            timestamp=d, open=100, high=101, low=99, close=100, volume=10)], "kite")
+        await db.upsert_ohlcv("WW", "daily", [OHLCVBar(
+            timestamp=d, open=100, high=105, low=99, close=104, volume=20)], "kite")
+        bars = await db.get_ohlcv("WW", "daily", days=3650)
+        assert len(bars) == 1
+        assert bars[0].close == 104  # refreshed

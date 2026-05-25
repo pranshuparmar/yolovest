@@ -78,6 +78,34 @@ def _canonical_ohlcv_ts(ts: datetime, interval: str) -> str:
     return ts.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+# Provider trust ranking for OHLCV upserts. On a key conflict (same bar from
+# a different provider), the higher-priority source wins REGARDLESS of
+# ingestion order — so yfinance can never clobber a kite bar, and the day's
+# bar doesn't flip-flop with whichever provider ran last. kite (paid,
+# authoritative broker data) is the source of truth; yfinance (questionable
+# NSE adjustment) is lowest. Unknown sources fall to 0 and won't overwrite a
+# known source's bar.
+_SOURCE_PRIORITY: dict[str, int] = {
+    "kite": 7,
+    "bhavcopy": 6,
+    "jugaad": 5,
+    "tvdatafeed": 4,
+    "backfill": 3,
+    "ingester": 3,
+    "universe": 2,
+    "yfinance": 1,
+    "yfinance_vix": 1,
+}
+
+
+def _source_priority_sql(col: str) -> str:
+    """Build a CASE expression mapping a source column to its trust rank.
+    Source keys are hardcoded constants (no user input), so embedding is
+    injection-safe."""
+    whens = " ".join(f"WHEN '{s}' THEN {p}" for s, p in _SOURCE_PRIORITY.items())
+    return f"(CASE {col} {whens} ELSE 0 END)"
+
+
 class Database:
     """Async SQLite database with WAL mode, read/write separation, and migration support.
 
@@ -421,7 +449,12 @@ class Database:
             "ON CONFLICT(symbol, interval, timestamp) DO UPDATE SET "
             "open=excluded.open, high=excluded.high, low=excluded.low, "
             "close=excluded.close, volume=excluded.volume, source=excluded.source, "
-            "ingested_at=datetime('now')",
+            "ingested_at=datetime('now') "
+            # Only overwrite when the incoming source is at least as trusted
+            # as the stored one — so a later yfinance fetch can't clobber a
+            # kite bar, and the day's bar doesn't flip-flop by ingest order.
+            f"WHERE {_source_priority_sql('excluded.source')} "
+            f">= {_source_priority_sql('ohlcv.source')}",
             rows,
         )
         await self.conn.commit()
