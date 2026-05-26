@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, time
 from typing import TYPE_CHECKING, Any, Literal
 
+from yolovest.data.features import IndicatorConfig, compute_features
 from yolovest.strategy.holding_period import (
     adjust_sell_for_holdings,
     apply_session_caps,
@@ -37,6 +38,32 @@ from yolovest.timezone import IST
 if TYPE_CHECKING:
     from yolovest.context import AppContext
     from yolovest.models.schemas import MLPrediction
+
+
+# Intraday inference window — mirrors model_retrain's intraday window_size
+# (200 five-min bars, the longest EMA period) so the live feature window
+# matches the one the intraday model trained on. Fetch a few extra sessions
+# of 5-min bars so holidays/half-days can't leave us short of the window.
+_INTRADAY_WINDOW_SIZE = 200
+_INTRADAY_INFERENCE_DAYS = 6
+
+
+def _intraday_indicator_cfg(ctx: AppContext) -> IndicatorConfig:
+    """IndicatorConfig from the live strategy config — same fields
+    generate_signals + model_retrain build from, so the 5-min features
+    computed here match the intraday model's training set."""
+    s = ctx.config.strategy
+    return IndicatorConfig(
+        ema_periods=s.ema_periods,
+        rsi=s.indicators.rsi,
+        macd=s.indicators.macd,
+        bollinger_bands=s.indicators.bollinger_bands,
+        vwap=s.indicators.vwap,
+        atr=s.indicators.atr,
+        volume_profile=s.indicators.volume_profile,
+        obv=s.indicators.obv,
+        supertrend=s.indicators.supertrend,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -381,19 +408,30 @@ async def evaluate_symbol_signal(
                 expected_days=expected_days,
             )
 
-    # Fetch intraday features when the chooser will need them (pure
-    # intraday mode or balanced mode). Production used to do this in
-    # the loop; centralised here so the dry-run gets the same data.
+    # Build intraday features when the chooser will need them (pure
+    # intraday mode or balanced mode). The intraday model trains on
+    # features computed over a 200-bar 5-min window, so inference must do
+    # the same — feeding it the daily-derived `features` would be a
+    # train/serve mismatch. The broadcast features (news/vix/fno/sector/
+    # institutional) are per-symbol-per-day and identical across bar
+    # intervals, so we overlay the freshly-computed 5-min technicals (and
+    # the time-of-day features compute_features derives from the last bar)
+    # onto the already-enriched daily dict rather than recomputing them.
     is_balanced = effective_mode == "balanced"
     use_intraday = holding_period == "intraday"
     if intraday_features is None and (use_intraday or is_balanced):
         try:
-            intraday_bars = await ctx.db.get_ohlcv(symbol, "5minute", days=1)
-            if intraday_bars:
-                intraday_features = {**features, "close": intraday_bars[-1].close}
+            intraday_bars = await ctx.db.get_ohlcv(
+                symbol, "5minute", days=_INTRADAY_INFERENCE_DAYS,
+            )
+            if len(intraday_bars) >= _INTRADAY_WINDOW_SIZE:
+                window = intraday_bars[-(_INTRADAY_WINDOW_SIZE + 1):]
+                tech = compute_features(window, _intraday_indicator_cfg(ctx))
+                if tech:
+                    intraday_features = {**features, **tech}
         except Exception:
             logger.debug(
-                "intraday-feature fetch failed for %s", symbol, exc_info=True,
+                "intraday-feature build failed for %s", symbol, exc_info=True,
             )
 
     # Step 3: run the model(s) via the right chooser
@@ -496,9 +534,17 @@ async def evaluate_symbol_signal(
                 expected_days=expected_days,
             )
 
-    # Step 9: ATR-based target/SL with sanity cap + interpolation
+    # Step 9: ATR-based target/SL with sanity cap + interpolation.
+    # Intraday geometry must use the 5-min ATR (what the intraday model's
+    # target/SL labels were built from) — the daily ATR is ~5-10× larger
+    # and would blow the SL/target out to swing scale on a same-day trade.
+    geom_features = (
+        intraday_features
+        if (holding_period == "intraday" and intraday_features)
+        else features
+    )
     entry = prediction.entry_price
-    atr = features.get("atr_14", entry * 0.02)
+    atr = geom_features.get("atr_14", entry * 0.02)
     atr_pct = atr / entry if entry > 0 else 0.0
 
     # Hard sanity reject: an ATR% above the ceiling is implausible for an
