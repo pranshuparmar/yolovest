@@ -17,6 +17,7 @@ import aiosqlite
 from typing import Any
 
 from yolovest.models.schemas import EconomicEvent, NewsArticle, OHLCVBar, SentimentResult
+from yolovest.scoring import path_aware_score
 from yolovest.timezone import IST, UTC, now_ist, now_utc
 
 logger = logging.getLogger(__name__)
@@ -5224,32 +5225,68 @@ class Database:
         await self.conn.commit()
         return cursor.rowcount
 
+    async def get_dry_run_ids_needing_scoring(self) -> list[str]:
+        """Run ids that still have at least one unscored signal."""
+        cursor = await self.read_conn.execute(
+            "SELECT DISTINCT run_id FROM dry_run_results WHERE scored_at IS NULL"
+        )
+        return [r[0] for r in await cursor.fetchall()]
+
+    async def get_daily_ohlc_between(
+        self, symbol: str, after_date: str, through_date: str,
+    ) -> list[tuple[Any, ...]]:
+        """Daily OHLC bars with after_date < date <= through_date (ascending).
+
+        Returns (open, high, low, close, date) tuples — the holding-window
+        slice used for path-aware scoring of predictions.
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT open, high, low, close, SUBSTR(timestamp, 1, 10) AS d "
+            "FROM ohlcv WHERE symbol = ? AND interval = 'daily' "
+            "AND SUBSTR(timestamp, 1, 10) > ? AND SUBSTR(timestamp, 1, 10) <= ? "
+            "ORDER BY timestamp ASC",
+            (symbol, after_date, through_date),
+        )
+        return [tuple(r) for r in await cursor.fetchall()]
+
+    async def get_daily_bar_on(
+        self, symbol: str, date: str,
+    ) -> tuple[Any, ...] | None:
+        """Single daily OHLC bar on a given date (for same-day predictions)."""
+        cursor = await self.read_conn.execute(
+            "SELECT open, high, low, close, SUBSTR(timestamp, 1, 10) AS d "
+            "FROM ohlcv WHERE symbol = ? AND interval = 'daily' "
+            "AND SUBSTR(timestamp, 1, 10) = ? LIMIT 1",
+            (symbol, date),
+        )
+        row = await cursor.fetchone()
+        return tuple(row) if row else None
+
     async def score_dry_run(self, run_id: str) -> dict[str, Any]:
-        """Score a dry-run against actual next-day OHLCV data.
+        """Score a dry-run against each signal's TARGET-DATE actuals.
 
-        For each signal, fetch the next trading day's OHLCV and compare.
-        Uses date-only comparison to avoid timestamp format mismatches
-        (dry-run created_at has time, OHLCV timestamp may not).
+        A signal's target date is its as-of date (the date the run was
+        evaluated for; falls back to the run's created date for a
+        latest-data run) plus ``expected_holding_days`` *trading* days —
+        realised by walking the daily bars that exist after the as-of
+        date, so market holidays need no special handling. Scoring is
+        path-aware over that holding window (``target_hit`` = price
+        touched the target on any bar; direction / move measured at the
+        window-end close) and PARTIAL: signals whose window hasn't fully
+        elapsed are left pending, so a mixed-horizon run (balanced /
+        long_term) scores whatever is ready and the rest on a later pass.
 
-        Scoring waits for the next *trading day's* daily bar to exist.
-        Three outcomes possible per signal:
-          - scored: found and compared
-          - same_day: the dry-run was created today (IST) — too early
-          - not_found: previous-day dry-run but next-day OHLCV missing
-            (most often: today's daily bar hasn't been ingested yet)
+        Per-signal outcomes:
+          - scored: full holding window elapsed and compared
+          - pending: window not fully elapsed yet (try again later)
+          - not_found: window should have elapsed but OHLCV is missing
         """
         signals = await self.get_dry_run_signals(run_id)
         if not signals:
             return {"scored": 0, "not_found": 0}
 
-        # Compare in IST so a late-evening-IST dry-run (which is the next
-        # UTC day) is still recognised as "same trading day" and treated
-        # as too-recent-to-score.
-        today_ist = now_ist().strftime("%Y-%m-%d")
-        already_scored = 0
-        scored = 0
-        not_found = 0
-        same_day = 0
+        today = now_ist().date()
+        already_scored = scored = pending = not_found = 0
         unfound: list[dict[str, Any]] = []
 
         for sig in signals:
@@ -5257,64 +5294,65 @@ class Database:
                 already_scored += 1
                 continue
 
-            # created_at is stored as SQLite datetime('now') (UTC) e.g.
-            # "2026-05-15 05:11:30". Convert to IST trading day before
-            # comparing.
-            raw_created = str(sig["created_at"])
-            try:
-                # Parse with assumed UTC if no tzinfo present.
-                ts = datetime.fromisoformat(raw_created.replace(" ", "T"))
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=UTC)
-                created_date = ts.astimezone(IST).strftime("%Y-%m-%d")
-            except Exception:
-                created_date = raw_created[:10]
+            # Base date the signal was evaluated for. as_of (historical
+            # run) is authoritative; otherwise the run's own created date.
+            base_date = sig.get("as_of")
+            if not base_date:
+                raw_created = str(sig["created_at"])
+                try:
+                    ts = datetime.fromisoformat(raw_created.replace(" ", "T"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=UTC)
+                    base_date = ts.astimezone(IST).strftime("%Y-%m-%d")
+                except Exception:
+                    base_date = raw_created[:10]
+            base_date = str(base_date)[:10]
 
-            if created_date >= today_ist:
-                same_day += 1
-                continue
+            horizon = int(sig.get("expected_holding_days") or 0)
+            if horizon < 1:
+                horizon = 1
 
-            # Get the next day's OHLCV after the dry-run date.
-            # Use SUBSTR to compare date portions only, avoiding time format issues.
+            # The first `horizon` trading bars strictly after the as-of date
+            # ARE the holding window; the last is the target date.
             cursor = await self.read_conn.execute(
                 "SELECT open, high, low, close, SUBSTR(timestamp, 1, 10) AS d "
                 "FROM ohlcv WHERE symbol = ? AND interval = 'daily' "
                 "AND SUBSTR(timestamp, 1, 10) > ? "
-                "ORDER BY timestamp ASC LIMIT 1",
-                (sig["symbol"], created_date),
+                "ORDER BY timestamp ASC LIMIT ?",
+                (sig["symbol"], base_date, horizon),
             )
-            row = await cursor.fetchone()
-            if not row:
-                not_found += 1
-                unfound.append({
-                    "symbol": sig["symbol"],
-                    "created_date": created_date,
-                })
+            bars = await cursor.fetchall()
+
+            if len(bars) < horizon:
+                # Window not fully covered. If enough calendar time has
+                # passed that the bars *should* exist, it's a data gap;
+                # otherwise the window simply hasn't elapsed yet.
+                try:
+                    gap_days = (today - datetime.strptime(base_date, "%Y-%m-%d").date()).days
+                except Exception:
+                    gap_days = 0
+                if gap_days > horizon * 2 + 7:
+                    not_found += 1
+                    unfound.append({
+                        "symbol": sig["symbol"], "base_date": base_date,
+                        "have": len(bars), "need": horizon,
+                    })
+                else:
+                    pending += 1
                 continue
 
-            actual_open = row[0]
-            actual_high = row[1]
-            actual_low = row[2]
-            actual_close = row[3]
-            entry = sig["entry_price"]
-
-            if sig["signal_type"] == "BUY":
-                direction_correct = 1 if actual_close > entry else 0
-                target_hit = 1 if actual_high >= sig["target_price"] else 0
-                actual_move_pct = (actual_close - entry) / entry * 100 if entry else 0
-            else:  # SELL
-                direction_correct = 1 if actual_close < entry else 0
-                target_hit = 1 if actual_low <= sig["target_price"] else 0
-                actual_move_pct = (entry - actual_close) / entry * 100 if entry else 0
-
+            m = path_aware_score(
+                bars, sig["entry_price"], sig.get("target_price"),
+                sig.get("stop_loss_price"), sig["signal_type"],
+            )
             await self.conn.execute(
                 "UPDATE dry_run_results SET "
                 "actual_open = ?, actual_close = ?, actual_high = ?, actual_low = ?, "
                 "direction_correct = ?, target_hit = ?, actual_move_pct = ?, "
                 "scored_at = datetime('now') "
                 "WHERE id = ?",
-                (actual_open, actual_close, actual_high, actual_low,
-                 direction_correct, target_hit, round(actual_move_pct, 4),
+                (m["actual_open"], m["actual_close"], m["actual_high"], m["actual_low"],
+                 m["direction_correct"], m["target_hit"], m["actual_move_pct"],
                  sig["id"]),
             )
             scored += 1
@@ -5324,34 +5362,30 @@ class Database:
 
         result: dict[str, Any] = {
             "scored": scored,
-            "not_found": not_found,
             "already_scored": already_scored,
+            "pending": pending,
+            "not_found": not_found,
         }
-        if same_day > 0:
-            result["same_day"] = same_day
+        if scored == 0 and pending > 0 and not_found == 0:
             result["message"] = (
-                "Signals generated today cannot be scored yet — "
-                "next trading day's data is needed. Try again tomorrow."
+                f"{pending} signal(s) not scored yet — the holding window "
+                "hasn't fully elapsed. They'll score automatically once each "
+                "target date passes."
             )
-        if not_found > 0 and not same_day:
-            # Tell the user exactly what's missing. Most common cause:
-            # today's daily bar hasn't landed in OHLCV yet — daily bars
-            # from jugaad / yfinance arrive after market close.
+        if not_found > 0:
             sample = ", ".join(
-                f"{u['symbol']} (created {u['created_date']})"
-                for u in unfound[:5]
+                f"{u['symbol']} (as-of {u['base_date']})" for u in unfound[:5]
             )
             if len(unfound) > 5:
                 sample += f", +{len(unfound) - 5} more"
             result["unfound"] = unfound
             result["message"] = (
-                "Next-day OHLCV not yet in DB for these symbols: "
+                "Holding window elapsed but OHLCV is missing for: "
                 + sample
-                + ". Daily bars are usually ingested after market close "
-                "(~3:30 PM IST); try again later today or tomorrow."
+                + ". Ingest the daily bars covering those target dates, then re-score."
             )
             logger.info(
-                "score_dry_run %s: %d signals could not be scored — %s",
+                "score_dry_run %s: %d signals missing OHLCV — %s",
                 run_id, not_found, sample,
             )
         return result

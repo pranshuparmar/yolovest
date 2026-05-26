@@ -163,6 +163,127 @@ class TestDryRunModelOverride:
         assert run["model_version"] == "swing_v_prod"
 
 
+def _dated_bars(start: str, closes: list[float]) -> list[OHLCVBar]:
+    """Daily bars on consecutive calendar days starting at `start`
+    (YYYY-MM-DD). Each inserted bar acts as one trading day for scoring."""
+    out = []
+    d0 = datetime.strptime(start, "%Y-%m-%d")
+    for i, c in enumerate(closes):
+        out.append(OHLCVBar(
+            timestamp=d0 + timedelta(days=i),
+            open=c, high=c * 1.02, low=c * 0.98, close=c, volume=1000,
+        ))
+    return out
+
+
+def _dr_signal(symbol, entry, target, sl, hold, stype="BUY") -> dict:
+    return {
+        "symbol": symbol, "signal_type": stype, "entry_price": entry,
+        "target_price": target, "stop_loss_price": sl,
+        "confidence_score": 0.7, "expected_holding_days": hold,
+    }
+
+
+class TestPathAwareScore:
+    def test_buy_target_hit_over_window(self):
+        from yolovest.scoring import path_aware_score
+        # target touched on the 2nd bar; direction/move read at window close.
+        bars = [(100, 103, 99, 101, "2024-01-02"), (101, 108, 100, 104, "2024-01-03")]
+        m = path_aware_score(bars, entry=100, target=107, sl=95, direction="BUY")
+        assert m["target_hit"] == 1
+        assert m["direction_correct"] == 1
+        assert m["actual_close"] == 104
+        assert m["target_date"] == "2024-01-03"
+        assert m["actual_move_pct"] == pytest.approx(4.0)
+
+    def test_sell_target_and_sl(self):
+        from yolovest.scoring import path_aware_score
+        bars = [(100, 101, 90, 92, "2024-01-02")]
+        m = path_aware_score(bars, entry=100, target=95, sl=102, direction="SELL")
+        assert m["target_hit"] == 1   # low 90 <= 95
+        assert m["sl_hit"] == 0       # high 101 < 102
+        assert m["direction_correct"] == 1  # close 92 < 100
+
+
+class TestScoreDryRunTargetDate:
+    async def test_scores_against_target_date_path_aware(self, db):
+        # as-of 2024-03-15, 3-day hold → target date is the 3rd bar after.
+        await db.upsert_ohlcv("AAA", "daily", _dated_bars("2024-03-15", [100, 102, 105, 110]), "test")
+        await db.insert_dry_run_results(
+            "dr-tgt", [_dr_signal("AAA", 100.0, 108.0, 95.0, 3)], as_of="2024-03-15")
+        res = await db.score_dry_run("dr-tgt")
+        assert res["scored"] == 1
+        row = (await db.get_dry_run_signals("dr-tgt"))[0]
+        assert row["scored_at"] is not None
+        assert row["actual_close"] == 110.0     # close on the target date (03-18)
+        assert row["direction_correct"] == 1
+        assert row["target_hit"] == 1           # window high 112.2 >= 108
+
+    async def test_partial_scores_ready_flags_missing(self, db):
+        # One run, same as-of, two horizons: AAA's window elapsed (scored);
+        # ZZZ needs 5 bars but only 1 exists at an old date → data gap.
+        await db.upsert_ohlcv("AAA", "daily", _dated_bars("2024-03-15", [100, 102, 105]), "test")
+        await db.upsert_ohlcv("ZZZ", "daily", _dated_bars("2024-03-15", [50, 51]), "test")
+        await db.insert_dry_run_results("dr-part", [
+            _dr_signal("AAA", 100.0, 104.0, 95.0, 2),
+            _dr_signal("ZZZ", 50.0, 55.0, 47.0, 5),
+        ], as_of="2024-03-15")
+        res = await db.score_dry_run("dr-part")
+        assert res["scored"] == 1
+        assert res["not_found"] == 1
+
+    async def test_pending_when_window_not_elapsed(self, db):
+        # Recent as-of, only 1 future bar, 5-day hold → pending (not a gap).
+        recent = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        await db.upsert_ohlcv("CCC", "daily", _dated_bars(recent, [200, 202]), "test")
+        await db.insert_dry_run_results(
+            "dr-pend", [_dr_signal("CCC", 200.0, 210.0, 190.0, 5)], as_of=recent)
+        res = await db.score_dry_run("dr-pend")
+        assert res["scored"] == 0
+        assert res["pending"] == 1
+        assert res["not_found"] == 0
+
+    async def test_ids_needing_scoring_clears_after_scoring(self, db):
+        await db.upsert_ohlcv("AAA", "daily", _dated_bars("2024-03-15", [100, 102, 105]), "test")
+        await db.insert_dry_run_results(
+            "need-1", [_dr_signal("AAA", 100.0, 104.0, 95.0, 2)], as_of="2024-03-15")
+        assert "need-1" in await db.get_dry_run_ids_needing_scoring()
+        await db.score_dry_run("need-1")
+        assert "need-1" not in await db.get_dry_run_ids_needing_scoring()
+
+
+class TestAutoScoreSkill:
+    async def test_scores_pending_dry_runs(self, db):
+        from types import SimpleNamespace
+        from yolovest.skills.auto_score import AutoScoreSkill
+
+        await db.upsert_ohlcv("AAA", "daily", _dated_bars("2024-03-15", [100, 102, 105, 110]), "test")
+        await db.insert_dry_run_results(
+            "auto-1", [_dr_signal("AAA", 100.0, 108.0, 95.0, 3)], as_of="2024-03-15")
+        ctx = SimpleNamespace(
+            db=db,
+            config=SimpleNamespace(
+                scoring=SimpleNamespace(auto_score_enabled=True, auto_score_cron="45 16 * * 1-5"),
+                mode="paper",
+            ),
+        )
+        skill = AutoScoreSkill(ctx)
+        assert skill.should_run() is True
+        assert skill.schedule == "45 16 * * 1-5"
+        res = await skill.execute()
+        assert res.success
+        assert res.data["dry_run_signals_scored"] == 1
+        assert res.data["predictions_scored"] == 0  # none logged
+
+    async def test_disabled_via_config(self, db):
+        from types import SimpleNamespace
+        from yolovest.skills.auto_score import AutoScoreSkill
+        ctx = SimpleNamespace(db=db, config=SimpleNamespace(
+            scoring=SimpleNamespace(auto_score_enabled=False, auto_score_cron="45 16 * * 1-5"),
+            mode="paper"))
+        assert AutoScoreSkill(ctx).should_run() is False
+
+
 class TestCanonicalTimestamp:
     _IST = timezone(timedelta(hours=5, minutes=30))
 

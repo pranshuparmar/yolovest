@@ -1012,6 +1012,23 @@ class NewsDigestConfig(BaseModel):
     max_headlines: int = Field(default=10, ge=1, le=50)
 
 
+class ScoringConfig(BaseModel):
+    """Auto-scoring of dry-runs and predictions against their target dates.
+
+    A daily CRON (after market close, once the day's daily bars are
+    ingested) sweeps every dry-run with unscored signals and every
+    elapsed prediction, and scores each against the actuals on its OWN
+    target date — path-aware over the holding window — rather than today.
+    Partial by construction: signals whose horizon hasn't fully elapsed
+    are left pending and picked up on a later run.
+    """
+
+    auto_score_enabled: bool = True
+    # 16:45 IST weekdays — after daily bars land (~15:30-16:00) and after
+    # report-generate (16:00) / ahead of drift-watch (16:30 reads scores).
+    auto_score_cron: str = "45 16 * * 1-5"
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
     file_level: str = "INFO"  # log file can have a different level
@@ -1074,6 +1091,7 @@ class AppConfig(BaseModel):
     log: LoggingConfig = Field(default_factory=LoggingConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     news_digest: NewsDigestConfig = Field(default_factory=NewsDigestConfig)
+    scoring: ScoringConfig = Field(default_factory=ScoringConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":

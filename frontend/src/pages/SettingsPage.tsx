@@ -91,6 +91,7 @@ const TABS: Tab[] = [
       "strategy",
       "scanning",
       "retraining",
+      "scoring",
     ],
   },
   {
@@ -191,6 +192,7 @@ const CRON_KEYS = [
   "reports.weekly_report_cron",
   "retraining.schedule_cron",
   "database.backup_cron",
+  "scoring.auto_score_cron",
 ];
 
 // Keys to hide from their original sections (shown in virtual sections instead)
@@ -306,6 +308,7 @@ const SECTION_LABELS: Record<string, string> = {
   transaction_costs: "Transaction Costs",
   database: "Data Retention & Backups",
   retraining: "Model Retraining",
+  scoring: "Auto-Scoring",
   reports: "Reports",
   dashboard: "Dashboard",
   notifications: "Notifications",
@@ -466,6 +469,7 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.institutional_flow.fii_aligned_size_multiplier": "Inst. Flow: FII Aligned Multiplier",
   "risk.market_trend_filter.enabled": "Market Trend Filter",
   "risk.market_trend_filter.ma_window": "Trend Filter: MA Window (days)",
+  "scoring.auto_score_enabled": "Auto-Score Enabled",
   // Exit tweaks (new)
   "risk.exit_tweaks.time_stop_enabled": "Intraday Time-Stop",
   "risk.exit_tweaks.intraday_stop_after_min": "Time-Stop: Trigger After (min)",
@@ -836,6 +840,9 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "strategy.holding_periods.long.max_atr_pct_for_target": "Cap on the daily ATR (as fraction of entry price) used when computing the long-holding target / SL distance, so high-ATR names don't get unreachable targets. Set to 0 to disable.",
   "strategy.post_train_min_signal_rate": "Post-train production-path guard: a freshly-trained model must emit at least this fraction of non-HOLD signals when scored on its own training data (0.005 = 0.5%), or the retrain is rejected as a sterile / HOLD-only model. Runs the real production decision path (calibration + tuned thresholds), so it catches a model the live engine would never let signal.",
   "strategy.signal_generation_concurrency": "How many symbols generate-signals evaluates concurrently per chunk (default 10). The watchlist is processed in asyncio.gather chunks of this size — higher = faster heartbeats but more concurrent data/ML load.",
+  // Auto-scoring
+  "scoring.auto_score_enabled": "Run the daily auto-score CRON. When on, a post-close job scores every dry-run with unscored signals and every elapsed prediction against the actuals on its OWN target date (path-aware over the holding window) — no manual 'Score' clicks needed. Partial by design: signals whose horizon hasn't fully elapsed are left pending for a later run.",
+  "scoring.auto_score_cron": "When the auto-score job runs (cron, IST). Default 16:45 on weekdays — after the day's daily bars are ingested (~15:30–16:00) so target dates that closed today can be scored. Only matters when Auto-Score is enabled.",
 };
 
 // Cron key labels (friendly names for the virtual cron section)
@@ -848,6 +855,7 @@ const CRON_LABELS: Record<string, string> = {
   "reports.weekly_report_cron": "Weekly Report",
   "retraining.schedule_cron": "Model Retraining",
   "database.backup_cron": "Database Backup",
+  "scoring.auto_score_cron": "Auto-Score Dry-Runs & Predictions",
 };
 
 function getKeyLabel(fullKey: string): string {

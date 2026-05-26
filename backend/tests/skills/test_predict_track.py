@@ -66,6 +66,9 @@ class TestScorePredictions:
         assert result.data["predictions_scored"] == 0
 
     async def test_score_correct_buy(self, predict_skill):
+        # Scored against the END-date holding window, not today's LTP. The
+        # window bar's close (2620) clears entry and its high (2630) reaches
+        # the 2600 target.
         pending = [{
             "id": "P-001",
             "symbol": "RELIANCE",
@@ -74,10 +77,13 @@ class TestScorePredictions:
             "predicted_target": 2600.0,
             "predicted_stop_loss": 2450.0,
             "confidence": 0.85,
+            "created_at": "2026-02-28T10:00:00",
             "prediction_end_time": "2026-03-01T15:30:00",
         }]
         predict_skill.ctx.db.get_unscored_predictions = AsyncMock(return_value=pending)
-        predict_skill.ctx.market_data.get_ltp = AsyncMock(return_value=2620.0)
+        predict_skill.ctx.db.get_daily_ohlc_between = AsyncMock(
+            return_value=[(2510.0, 2630.0, 2505.0, 2620.0, "2026-03-01")]
+        )
 
         result = await predict_skill.execute(mode="score")
 
@@ -87,11 +93,13 @@ class TestScorePredictions:
 
         # Verify score_prediction was called with correct values
         call_args = predict_skill.ctx.db.score_prediction.call_args
+        assert call_args[1]["actual_price"] == 2620.0
         assert call_args[1]["direction_correct"] is True
         assert call_args[1]["target_hit"] is True
         assert call_args[1]["actual_pnl_pct"] == pytest.approx(0.048, abs=0.001)
 
     async def test_score_incorrect_buy(self, predict_skill):
+        # Window close (2440) is below entry and target never touched.
         pending = [{
             "id": "P-002",
             "symbol": "RELIANCE",
@@ -99,9 +107,13 @@ class TestScorePredictions:
             "entry_price": 2500.0,
             "predicted_target": 2600.0,
             "predicted_stop_loss": 2450.0,
+            "created_at": "2026-02-28T10:00:00",
+            "prediction_end_time": "2026-03-01T15:30:00",
         }]
         predict_skill.ctx.db.get_unscored_predictions = AsyncMock(return_value=pending)
-        predict_skill.ctx.market_data.get_ltp = AsyncMock(return_value=2440.0)
+        predict_skill.ctx.db.get_daily_ohlc_between = AsyncMock(
+            return_value=[(2490.0, 2495.0, 2435.0, 2440.0, "2026-03-01")]
+        )
 
         result = await predict_skill.execute(mode="score")
 
@@ -120,9 +132,13 @@ class TestScorePredictions:
             "entry_price": 3500.0,
             "predicted_target": 3400.0,
             "predicted_stop_loss": 3550.0,
+            "created_at": "2026-02-28T10:00:00",
+            "prediction_end_time": "2026-03-01T15:30:00",
         }]
         predict_skill.ctx.db.get_unscored_predictions = AsyncMock(return_value=pending)
-        predict_skill.ctx.market_data.get_ltp = AsyncMock(return_value=3380.0)
+        predict_skill.ctx.db.get_daily_ohlc_between = AsyncMock(
+            return_value=[(3490.0, 3500.0, 3380.0, 3385.0, "2026-03-01")]
+        )
 
         await predict_skill.execute(mode="score")
 
@@ -137,38 +153,39 @@ class TestScorePredictions:
             "predicted_direction": "BUY",
             "entry_price": 2500.0,
             "predicted_target": 2600.0,
+            "created_at": "2026-02-28T10:00:00",
+            "prediction_end_time": "2026-03-01T15:30:00",
         }]
         predict_skill.ctx.db.get_unscored_predictions = AsyncMock(return_value=pending)
-        predict_skill.ctx.market_data.get_ltp = AsyncMock(return_value=2550.0)
+        predict_skill.ctx.db.get_daily_ohlc_between = AsyncMock(
+            return_value=[(2510.0, 2560.0, 2505.0, 2550.0, "2026-03-01")]
+        )
 
         await predict_skill.execute(mode="score")
 
         predict_skill.ctx.db.refresh_prediction_scoreboard.assert_awaited_once()
 
-    async def test_score_handles_price_error_gracefully(self, predict_skill):
-        from datetime import datetime
-
-        from yolovest.models.schemas import OHLCVBar
-
+    async def test_score_skips_when_end_date_bar_missing(self, predict_skill):
+        # No OHLCV for the holding window yet → left pending, NOT scored
+        # against a stale current price.
         pending = [{
             "id": "P-005",
             "symbol": "RELIANCE",
             "predicted_direction": "BUY",
             "entry_price": 2500.0,
             "predicted_target": 2600.0,
+            "created_at": "2026-02-28T10:00:00",
+            "prediction_end_time": "2026-03-01T15:30:00",
         }]
         predict_skill.ctx.db.get_unscored_predictions = AsyncMock(return_value=pending)
-        predict_skill.ctx.market_data.get_ltp = AsyncMock(side_effect=Exception("no LTP"))
-        predict_skill.ctx.market_data.get_ohlcv = AsyncMock(return_value=[
-            OHLCVBar(
-                timestamp=datetime.now(),
-                open=2500, high=2530, low=2490, close=2520, volume=1000,
-            )
-        ])
+        predict_skill.ctx.db.get_daily_ohlc_between = AsyncMock(return_value=[])
+        predict_skill.ctx.db.get_daily_bar_on = AsyncMock(return_value=None)
 
         result = await predict_skill.execute(mode="score")
 
-        assert result.data["predictions_scored"] == 1
+        assert result.data["predictions_scored"] == 0
+        assert result.data["skipped_awaiting_data"] == 1
+        predict_skill.ctx.db.score_prediction.assert_not_called()
 
     async def test_default_mode_is_score(self, predict_skill):
         result = await predict_skill.execute()
