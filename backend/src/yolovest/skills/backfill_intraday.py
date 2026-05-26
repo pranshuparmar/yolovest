@@ -8,10 +8,11 @@ Mirrors backfill-data but targets the 5-minute interval. KiteDataProvider
 paginates transparently when the requested window exceeds Kite's
 per-call limit for the interval.
 
-Defaults to the **F&O equity universe** (~190 names) rather than the daily
-watchlist — that's the intraday model's tradable universe, and the only
-set worth building deep 5-min history for. Pass an explicit `symbols=` or
-`universe="tracked"` kwarg to override.
+Defaults to the **Nifty 100** universe — the liquid large-caps where
+intraday MIS is actually viable, and the coherent training universe for
+the intraday model (the 1-min label layer is bounded to the same set).
+Pass an explicit `symbols=`, `universe="fno"` (the broader ~190-name F&O
+set), or `universe="tracked"` kwarg to override.
 """
 
 import logging
@@ -26,7 +27,7 @@ class BackfillIntradaySkill(BackfillDataSkill):
     description = "Bulk-fetch historical 5-minute intraday OHLCV"
 
     _DEFAULT_INTERVAL = "5minute"
-    _DEFAULT_UNIVERSE = "fno"
+    _DEFAULT_UNIVERSE = "nifty100"
 
     def _default_days(self) -> int:
         return self.ctx.config.market_data.intraday_backfill_days
@@ -43,8 +44,8 @@ class BackfillIntraday1mSkill(BackfillIntradaySkill):
     backups) sane and because the 1-min data is only consumed at train time
     for label resolution, never at inference:
 
-    - **Universe**: Nifty 100 (the liquid large-caps where intraday MIS is
-      actually viable), not the full ~190-name F&O set the 5-min layer uses.
+    - **Universe**: Nifty 100 (inherited from the 5-min layer) — the liquid
+      large-caps where intraday MIS is actually viable.
     - **Window**: capped at the intraday retention horizon
       (``retention.intraday_ohlcv_days``, ~365d) even when the 5-min backfill
       depth (``intraday_backfill_days``) is set deeper — there's no point
@@ -59,7 +60,6 @@ class BackfillIntraday1mSkill(BackfillIntradaySkill):
     description = "Bulk-fetch historical 1-minute intraday OHLCV (label-precision layer)"
 
     _DEFAULT_INTERVAL = "1m"
-    _DEFAULT_UNIVERSE = "nifty100"
 
     def _default_days(self) -> int:
         md = self.ctx.config.market_data

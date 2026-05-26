@@ -209,17 +209,16 @@ class TestBackfillIntradaySkill:
     """The 5-minute backfill skill mirrors backfill-data with intraday defaults."""
 
     async def test_defaults_to_5minute_interval(self, app_context, fake_bars):
+        import json
         from yolovest.skills.backfill_intraday import BackfillIntradaySkill
 
         skill = BackfillIntradaySkill(app_context)
         skill._PER_SYMBOL_DELAY_SEC = 0
         ctx = skill.ctx
 
-        class FakeKite:
-            def instruments(self, seg):
-                return [{"name": "RELIANCE"}]
-        ctx.broker._kite = FakeKite()
-        ctx.broker._access_token = "real_token"
+        ctx.db.get_system_state = AsyncMock(
+            return_value=json.dumps({"symbols": ["RELIANCE"]})
+        )
         ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
         ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
 
@@ -305,10 +304,10 @@ class TestBackfillIntraday1mSkill:
         assert SKILL_REGISTRY["backfill-intraday-1m"] is BackfillIntraday1mSkill
 
 
-class TestFnoUniverse:
-    """backfill-intraday defaults to the F&O equity universe; backfill-data
-    stays on tracked symbols. The intraday retention floor protects the
-    deep backfill from the nightly prune."""
+class TestIntradayUniverse:
+    """backfill-intraday now defaults to the Nifty 100 universe (the
+    intraday model's coherent tradable set); the broader F&O set stays
+    reachable via universe="fno". backfill-data stays on tracked symbols."""
 
     @pytest.fixture
     def intraday_skill(self, app_context):
@@ -317,7 +316,26 @@ class TestFnoUniverse:
         skill._PER_SYMBOL_DELAY_SEC = 0
         return skill
 
-    async def test_intraday_defaults_to_fno_via_live_fetch(self, intraday_skill, fake_bars):
+    async def test_intraday_defaults_to_nifty100(self, intraday_skill, fake_bars):
+        import json
+        ctx = intraday_skill.ctx
+        ctx.db.get_system_state = AsyncMock(
+            return_value=json.dumps({"symbols": ["RELIANCE", "INFY"]})
+        )
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+        # Should NOT consult the watchlist for an index universe
+        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "TCS"}])
+
+        result = await intraday_skill.execute()
+
+        assert result.success
+        ctx.db.get_system_state.assert_awaited_with("universe_constituents:nifty100")
+        called = sorted(c.args[0] for c in ctx.market_data.get_ohlcv.call_args_list)
+        assert called == ["INFY", "RELIANCE"]
+        ctx.db.get_watchlist.assert_not_called()
+
+    async def test_intraday_fno_via_live_fetch_explicit(self, intraday_skill, fake_bars):
         ctx = intraday_skill.ctx
 
         class FakeKite:
@@ -331,20 +349,16 @@ class TestFnoUniverse:
         ctx.broker._access_token = "real_token"
         ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
         ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
-        # Should NOT consult the watchlist for the fno universe
-        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "TCS"}])
-        ctx.db.get_user_watchlist = AsyncMock(return_value=[])
 
-        result = await intraday_skill.execute()
+        result = await intraday_skill.execute(universe="fno")
 
         assert result.success
         called = sorted(
             c.args[0] for c in ctx.market_data.get_ohlcv.call_args_list
         )
         assert called == ["INFY", "RELIANCE"]  # deduped, index dropped
-        ctx.db.get_watchlist.assert_not_called()
 
-    async def test_intraday_falls_back_to_fno_daily_when_unauthenticated(
+    async def test_intraday_fno_falls_back_to_fno_daily_when_unauthenticated(
         self, intraday_skill, fake_bars
     ):
         ctx = intraday_skill.ctx
@@ -353,7 +367,7 @@ class TestFnoUniverse:
         ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
         ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
 
-        result = await intraday_skill.execute()
+        result = await intraday_skill.execute(universe="fno")
 
         assert result.success
         called = sorted(c.args[0] for c in ctx.market_data.get_ohlcv.call_args_list)
