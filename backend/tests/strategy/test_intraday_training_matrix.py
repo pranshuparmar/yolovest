@@ -213,6 +213,47 @@ class TestIntradayTrainingMatrix:
         # An earlier cutoff drops the post-12:00 decision bars.
         assert len(X_cut) < len(X_full)
 
+    def test_normalizes_and_dedupes_legacy_tz_duplicates(self, skill):
+        # Legacy data stored the same 5-min bar twice — naive + tz-aware
+        # ('+05:30') — which doubles a session and (without normalisation)
+        # crashes the naive-1m bisect. The builder must collapse the aware
+        # copy onto the naive instant: same sample count as the clean set.
+        import yolovest.skills.model_retrain as mr
+        from datetime import timezone
+
+        skill.ctx.config.market_hours.intraday_cutoff = "15:30"
+        first = datetime(2026, 5, 18)
+        dec = _five_min_bars(6, first)
+        minute = _minute_bars(6, first, high_mult=1.05)
+        span = sorted({b["timestamp"][:10] for b in dec})
+        daily = {"bars": _daily_bars(span)}
+
+        ist = timezone(timedelta(hours=5, minutes=30))
+        dec_aware = [
+            {**b, "timestamp": datetime.fromisoformat(b["timestamp"])
+                .replace(tzinfo=ist).isoformat()}
+            for b in dec
+        ]
+        clean = {"decision_bars": dec, "minute_bars": {"X": minute}}
+        dirty = {"decision_bars": dec + dec_aware, "minute_bars": {"X": minute}}
+
+        orig = mr._INTRADAY_DECISION_STRIDE
+        try:
+            mr._INTRADAY_DECISION_STRIDE = 1
+            Xc, *_ = skill._prepare_intraday_training_data(
+                clean, daily, horizon_minutes=375,
+                target_atr_mult=0.6, sl_atr_mult=0.3,
+            )
+            Xd, *_ = skill._prepare_intraday_training_data(
+                dirty, daily, horizon_minutes=375,
+                target_atr_mult=0.6, sl_atr_mult=0.3,
+            )
+        finally:
+            mr._INTRADAY_DECISION_STRIDE = orig
+
+        assert len(Xc) > 0
+        assert len(Xd) == len(Xc)  # aware duplicates collapsed, no crash
+
     def test_skips_symbols_below_window(self, skill):
         first = datetime(2026, 5, 18)
         decision = _five_min_bars(1, first)  # 75 bars < window_size (200)

@@ -1570,19 +1570,38 @@ class ModelRetrainSkill(SkillBase):
                 features.update({k: 0.0 for k in FNO_FEATURE_KEYS})
 
         # ---- Group 5-min decision bars + index 1-min path bars per symbol ----
+        # Normalize every timestamp to naive IST wall-clock (mirrors
+        # data/db._canonical_ohlcv_ts) and dedupe per instant. Legacy rows
+        # predating that canonicaliser left the same 5-min bar stored twice —
+        # once tz-aware ('...+05:30', old kite) and once naive (old fallback
+        # provider) — which (a) doubles a session to ~150 bars and corrupts
+        # the 200-bar feature window's time span, and (b) would raise
+        # TypeError when an aware decision bar is bisected against the naive
+        # 1-min path. Collapsing to one naive bar per instant fixes both.
+        def _norm_bars(rows: Any) -> list[OHLCVBar]:
+            by_ts: dict[datetime, OHLCVBar] = {}
+            for r in rows:
+                bar = OHLCVBar(
+                    timestamp=r["timestamp"], open=r["open"], high=r["high"],
+                    low=r["low"], close=r["close"], volume=r["volume"],
+                )
+                ts = bar.timestamp
+                if ts.tzinfo is not None:
+                    ts = ts.astimezone(IST).replace(tzinfo=None)
+                    bar = bar.model_copy(update={"timestamp": ts})
+                by_ts.setdefault(ts, bar)  # keep first; OHLC of an instant's dupes match
+            return [by_ts[k] for k in sorted(by_ts)]
+
         decision_by_sym: dict[str, list[OHLCVBar]] = {}
+        dec_rows_by_sym: dict[str, list[Any]] = {}
         for r in intraday_data.get("decision_bars", []):
-            decision_by_sym.setdefault(r["symbol"], []).append(OHLCVBar(
-                timestamp=r["timestamp"], open=r["open"], high=r["high"],
-                low=r["low"], close=r["close"], volume=r["volume"],
-            ))
+            dec_rows_by_sym.setdefault(r["symbol"], []).append(r)
+        for sym, rows in dec_rows_by_sym.items():
+            decision_by_sym[sym] = _norm_bars(rows)
         minute_by_sym: dict[str, list[OHLCVBar]] = {}
         minute_ts_by_sym: dict[str, list[datetime]] = {}
         for sym, rows in intraday_data.get("minute_bars", {}).items():
-            mbars = [OHLCVBar(
-                timestamp=r["timestamp"], open=r["open"], high=r["high"],
-                low=r["low"], close=r["close"], volume=r["volume"],
-            ) for r in rows]
+            mbars = _norm_bars(rows)
             minute_by_sym[sym] = mbars
             minute_ts_by_sym[sym] = [b.timestamp for b in mbars]
 
