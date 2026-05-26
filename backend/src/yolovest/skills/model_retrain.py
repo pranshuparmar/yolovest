@@ -1332,6 +1332,338 @@ class ModelRetrainSkill(SkillBase):
 
         return X, y, feature_names, sample_weights, bars_meta
 
+    def _prepare_intraday_training_data(
+        self,
+        intraday_data: dict[str, Any],
+        daily_data: dict[str, Any],
+        *,
+        horizon_minutes: int,
+        target_atr_mult: float,
+        sl_atr_mult: float,
+        feedback_data: dict[str, Any] | None = None,
+        sector_map: dict[str, str] | None = None,
+        bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
+        news_lookup: dict[str, list[tuple[str, str]]] | None = None,
+        vix_timeline: list[tuple[str, float]] | None = None,
+        fno_lookup: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> tuple[
+        list[list[float]], list[int], list[str], list[float], list[dict[str, Any]]
+    ]:
+        """Build the 5-min intraday training matrix.
+
+        Two timeframes, two jobs:
+          - **Features + entry** are computed on the 5-min *decision* bars
+            (`intraday_data["decision_bars"]`). Entry is the next 5-min
+            bar's open (the earliest fillable price), same rule as daily.
+          - **Labels** are resolved on the 1-min *path* bars
+            (`intraday_data["minute_bars"]`) via
+            ``intraday_triple_barrier_label`` — so target-before-SL ordering
+            inside each 5-min bar is decided by real finer data, not HOLD.
+
+        Daily-broadcast features (universe/sector regime, VIX, F&O, bulk
+        deals, delivery%) are merged **as-of the prior session** — the most
+        recent daily date strictly before the bar's date — because at, say,
+        09:35 the same day's EOD aggregates don't exist yet. Using them
+        would be lookahead leakage that inflates the offline Sharpe and
+        evaporates live. News stays timestamp-windowed (leak-free as-of the
+        actual intraday moment), and minutes_since_open / day_phase finally
+        vary intra-session. ``daily_data`` supplies the prior-session
+        context; ``intraday_data`` supplies the bars we actually label.
+
+        Returns (X, y, feature_names, sample_weights, bars_meta), globally
+        sorted by entry_date so the walk-forward CV splits by time.
+        """
+        import bisect
+
+        indicator_cfg = IndicatorConfig(
+            rsi=self.ctx.config.strategy.indicators.rsi,
+            macd=self.ctx.config.strategy.indicators.macd,
+            bollinger_bands=self.ctx.config.strategy.indicators.bollinger_bands,
+            vwap=self.ctx.config.strategy.indicators.vwap,
+            atr=self.ctx.config.strategy.indicators.atr,
+            volume_profile=self.ctx.config.strategy.indicators.volume_profile,
+            obv=self.ctx.config.strategy.indicators.obv,
+            supertrend=self.ctx.config.strategy.indicators.supertrend,
+            ema_periods=self.ctx.config.strategy.ema_periods,
+        )
+        window_size = 200
+
+        _fg = getattr(self.ctx.config.strategy, "feature_groups", None)
+        _disabled_keys: set[str] = set()
+        if _fg is not None:
+            for _group, _keys in _FEATURE_GROUP_KEYS.items():
+                if not getattr(_fg, _group, True):
+                    _disabled_keys |= set(_keys)
+        excluded_keys = set(MODEL_FEATURE_EXCLUSIONS) | _disabled_keys
+
+        sector_map = sector_map or {}
+        bulk_deal_lookup = bulk_deal_lookup or {}
+        news_lookup = news_lookup or {}
+        fno_lookup = fno_lookup or {}
+
+        # ---- Prior-session daily context (built from daily bars) ----
+        daily_rows = daily_data.get("bars", [])
+        daily_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for r in daily_rows:
+            daily_by_symbol.setdefault(r["symbol"], []).append(r)
+        regime_by_ts = self._compute_regime_index(daily_by_symbol)
+        sector_regime, symbol_returns = self._compute_sector_index(
+            daily_by_symbol, sector_map,
+        )
+        # Sorted universe of daily dates for "prior session" resolution.
+        daily_dates_sorted = sorted(regime_by_ts.keys())
+        # Per-symbol daily close + delivery, keyed by date.
+        daily_close_by_sym: dict[str, dict[str, float]] = {}
+        daily_delivery_by_sym: dict[str, dict[str, float]] = {}
+        for r in daily_rows:
+            s = r["symbol"]
+            d = str(r["timestamp"])[:10]
+            try:
+                daily_close_by_sym.setdefault(s, {})[d] = float(r["close"])
+            except (TypeError, ValueError):
+                pass
+            dp = r.get("delivery_pct")
+            if dp is not None:
+                try:
+                    daily_delivery_by_sym.setdefault(s, {})[d] = float(dp)
+                except (TypeError, ValueError):
+                    pass
+
+        def _prior_session(date_str: str) -> str | None:
+            idx = bisect.bisect_left(daily_dates_sorted, date_str)
+            return daily_dates_sorted[idx - 1] if idx > 0 else None
+
+        def _window_dates(end_date: str, n: int) -> list[str]:
+            """Up to `n` daily dates ending at (and including) end_date."""
+            hi = bisect.bisect_right(daily_dates_sorted, end_date)
+            return daily_dates_sorted[max(0, hi - n):hi]
+
+        # Bulk-deal date index + parsed news timeline (mirror daily path).
+        bulk_dates_by_sym: dict[str, list[str]] = {}
+        for (sym_key, date_key) in bulk_deal_lookup.keys():
+            bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
+        for v in bulk_dates_by_sym.values():
+            v.sort()
+        news_parsed_by_sym: dict[str, list[tuple[str, datetime]]] = {}
+        for sym_key, entries in news_lookup.items():
+            parsed: list[tuple[str, datetime]] = []
+            for headline, published_at in entries:
+                try:
+                    dt = datetime.fromisoformat(published_at)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=IST)
+                    parsed.append((headline, dt))
+                except (ValueError, TypeError):
+                    continue
+            if parsed:
+                news_parsed_by_sym[sym_key] = parsed
+
+        def _merge_daily_broadcast(features: dict[str, Any], sym: str, bar_ts: datetime) -> None:
+            """Merge prior-session daily features into `features` in place."""
+            prev = _prior_session(bar_ts.strftime("%Y-%m-%d"))
+
+            reg = regime_by_ts.get(prev) if prev else None
+            features["universe_breadth"] = reg["breadth"] if reg else 0.5
+            features["universe_avg_return"] = reg["avg_return"] if reg else 0.0
+
+            sec = sector_map.get(sym)
+            sec_stats = sector_regime.get((sec, prev)) if (sec and prev) else None
+            stock_ret = symbol_returns.get((sym, prev)) if prev else None
+            if sec_stats and stock_ret is not None:
+                features["sector_breadth"] = sec_stats["breadth"]
+                features["sector_avg_return"] = sec_stats["avg_return"]
+                features["relative_momentum"] = stock_ret - sec_stats["avg_return"]
+            else:
+                features["sector_breadth"] = 0.5
+                features["sector_avg_return"] = 0.0
+                features["relative_momentum"] = 0.0
+
+            bd_buy = bd_sell = 0
+            if prev:
+                win = _window_dates(prev, 5)
+                win_lo = win[0] if win else prev
+                for d in bulk_dates_by_sym.get(sym, []):
+                    if d > prev:
+                        break
+                    if d >= win_lo:
+                        counts = bulk_deal_lookup.get((sym, d), {})
+                        bd_buy += counts.get("buy", 0)
+                        bd_sell += counts.get("sell", 0)
+            features["bulk_deal_buy_5d"] = float(bd_buy)
+            features["bulk_deal_sell_5d"] = float(bd_sell)
+            features["bulk_deal_net_5d"] = float(bd_buy - bd_sell)
+
+            deliveries: list[float] = []
+            if prev:
+                sym_deliv = daily_delivery_by_sym.get(sym, {})
+                for d in _window_dates(prev, 5):
+                    if d in sym_deliv:
+                        deliveries.append(sym_deliv[d])
+            features["delivery_pct_avg_5d"] = (
+                sum(deliveries) / len(deliveries) if deliveries else 0.0
+            )
+
+            news_ts = bar_ts if bar_ts.tzinfo else bar_ts.replace(tzinfo=IST)
+            sym_news = news_parsed_by_sym.get(sym)
+            features.update(
+                compute_news_features(sym_news, news_ts) if sym_news
+                else {k: 0.0 for k in NEWS_FEATURE_KEYS}
+            )
+
+            features.update(
+                compute_vix_features(vix_timeline, prev) if (vix_timeline and prev)
+                else {k: 0.0 for k in VIX_FEATURE_KEYS}
+            )
+
+            sym_fno = fno_lookup.get(sym)
+            if sym_fno and prev:
+                closes = daily_close_by_sym.get(sym, {})
+                win = _window_dates(prev, 2)
+                prior_c = closes.get(win[0]) if len(win) >= 2 else None
+                features.update(compute_fno_features(
+                    sym_fno, prev,
+                    prior_stock_close=prior_c,
+                    current_stock_close=closes.get(prev),
+                ))
+            else:
+                features.update({k: 0.0 for k in FNO_FEATURE_KEYS})
+
+        # ---- Group 5-min decision bars + index 1-min path bars per symbol ----
+        decision_by_sym: dict[str, list[OHLCVBar]] = {}
+        for r in intraday_data.get("decision_bars", []):
+            decision_by_sym.setdefault(r["symbol"], []).append(OHLCVBar(
+                timestamp=r["timestamp"], open=r["open"], high=r["high"],
+                low=r["low"], close=r["close"], volume=r["volume"],
+            ))
+        minute_by_sym: dict[str, list[OHLCVBar]] = {}
+        minute_ts_by_sym: dict[str, list[datetime]] = {}
+        for sym, rows in intraday_data.get("minute_bars", {}).items():
+            mbars = [OHLCVBar(
+                timestamp=r["timestamp"], open=r["open"], high=r["high"],
+                low=r["low"], close=r["close"], volume=r["volume"],
+            ) for r in rows]
+            minute_by_sym[sym] = mbars
+            minute_ts_by_sym[sym] = [b.timestamp for b in mbars]
+
+        X: list[list[float]] = []
+        y: list[int] = []
+        sample_weights: list[float] = []
+        bars_meta: list[dict[str, Any]] = []
+        feature_names: list[str] = []
+        feature_names_set: set[str] = set()
+
+        feedback_data = feedback_data or {}
+        feedback_lookback_days = int(
+            self.ctx.config.strategy.feedback.lookback_days or 60
+        )
+
+        for sym, bars in decision_by_sym.items():
+            if len(bars) < window_size + 2:
+                continue
+
+            symbol_has_recent_failure = False
+            if sym in feedback_data:
+                fb = feedback_data[sym]
+                if min(fb.get("pred_accuracy", 0.5), fb.get("dry_run_accuracy", 0.5)) < 0.5:
+                    symbol_has_recent_failure = True
+
+            mbars = minute_by_sym.get(sym, [])
+            mts = minute_ts_by_sym.get(sym, [])
+
+            # Feature at i, fill at i+1 open, label on the 1-min path.
+            for i in range(window_size, len(bars) - 1):
+                window = bars[i - window_size : i + 1]
+                features = compute_features(window, indicator_cfg)
+                if not features:
+                    continue
+
+                if feedback_data:
+                    merge_feedback_features(features, sym, feedback_data)
+                _merge_daily_broadcast(features, sym, bars[i].timestamp)
+
+                entry_bar = bars[i + 1]
+                next_open = entry_bar.open
+                atr_pct = features.get("atr_pct") or 0.0
+                if next_open <= 0 or atr_pct <= 0 or not mbars:
+                    label = 1
+                    m_start = len(mbars)
+                else:
+                    m_start = bisect.bisect_left(mts, entry_bar.timestamp)
+                    label = intraday_triple_barrier_label(
+                        entry=next_open,
+                        entry_time=entry_bar.timestamp,
+                        horizon_minutes=horizon_minutes,
+                        target_pct=atr_pct * target_atr_mult,
+                        sl_pct=atr_pct * sl_atr_mult,
+                        minute_bars=mbars,
+                        start_idx=m_start,
+                    )
+
+                for k in features:
+                    if k in excluded_keys:
+                        continue
+                    if k not in feature_names_set:
+                        if X:
+                            logger.warning(
+                                "intraday-retrain: feature %s appeared late at "
+                                "sample %d for %s — backfilling 0.0 into %d prior "
+                                "rows.", k, len(X), sym, len(X),
+                            )
+                        feature_names.append(k)
+                        feature_names_set.add(k)
+                        for existing in X:
+                            existing.append(0.0)
+
+                bar_weight = 1.0
+                if symbol_has_recent_failure:
+                    try:
+                        age_days = (bars[-1].timestamp - bars[i].timestamp).days
+                        if 0 <= age_days <= feedback_lookback_days:
+                            bar_weight = self.ctx.config.strategy.feedback.sample_weight_boost
+                    except Exception:
+                        pass
+
+                # 1-min path within the same session + horizon, for the
+                # intraday-aware walk-forward backtest.
+                deadline = entry_bar.timestamp + timedelta(minutes=horizon_minutes)
+                session_date = entry_bar.timestamp.date()
+                path_highs: list[float] = []
+                path_lows: list[float] = []
+                exit_close = next_open
+                for j in range(m_start, len(mbars)):
+                    mb = mbars[j]
+                    if mb.timestamp.date() != session_date or mb.timestamp >= deadline:
+                        break
+                    path_highs.append(mb.high)
+                    path_lows.append(mb.low)
+                    exit_close = mb.close
+
+                X.append([features.get(k, 0.0) for k in feature_names])
+                y.append(label)
+                sample_weights.append(bar_weight)
+                bars_meta.append({
+                    "symbol": sym,
+                    "entry_close": float(next_open),
+                    "exit_close": float(exit_close),
+                    "path_highs": path_highs,
+                    "path_lows": path_lows,
+                    "target_pct": float(atr_pct * target_atr_mult),
+                    "sl_pct": float(atr_pct * sl_atr_mult),
+                    "entry_date": entry_bar.timestamp.strftime("%Y-%m-%d"),
+                })
+
+        if bars_meta:
+            order = sorted(
+                range(len(bars_meta)),
+                key=lambda i: bars_meta[i].get("entry_date", ""),
+            )
+            X = [X[i] for i in order]
+            y = [y[i] for i in order]
+            sample_weights = [sample_weights[i] for i in order]
+            bars_meta = [bars_meta[i] for i in order]
+
+        return X, y, feature_names, sample_weights, bars_meta
+
     @staticmethod
     def _compute_regime_index(
         by_symbol: dict[str, list[dict[str, Any]]],
