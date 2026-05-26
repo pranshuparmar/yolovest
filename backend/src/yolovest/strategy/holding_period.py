@@ -303,6 +303,32 @@ def interpolate_atr_multipliers(
     return (anchors[-1][1], anchors[-1][2])
 
 
+def interpolate_atr_pct_cap(days: int, holding_period_config: Any) -> float:
+    """Interpolate the `max_atr_pct_for_target` ATR cap for the holding days.
+
+    Mirrors `interpolate_atr_multipliers` so the geometry cap tracks the
+    same anchor points (intraday / short_swing / week / long). 0 at every
+    anchor means the cap is disabled for that horizon.
+    """
+    anchors = [
+        (0, holding_period_config.intraday.max_atr_pct_for_target),
+        (3, holding_period_config.short_swing.max_atr_pct_for_target),
+        (5, holding_period_config.week.max_atr_pct_for_target),
+        (22, holding_period_config.long.max_atr_pct_for_target),
+    ]
+    if days <= anchors[0][0]:
+        return anchors[0][1]
+    if days >= anchors[-1][0]:
+        return anchors[-1][1]
+    for i in range(len(anchors) - 1):
+        d0, c0 = anchors[i]
+        d1, c1 = anchors[i + 1]
+        if d0 <= days <= d1:
+            frac = (days - d0) / (d1 - d0) if d1 != d0 else 0
+            return round(c0 + frac * (c1 - c0), 4)
+    return anchors[-1][1]
+
+
 def apply_session_caps(
     signal_type: str,
     target: float,

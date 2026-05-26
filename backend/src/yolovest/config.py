@@ -205,14 +205,23 @@ class HoldingPeriodConfig(BaseModel):
             max_atr_pct_for_target=0.035,
         ),
     )
+    # Swing/CNC buckets also cap the ATR used for geometry so a noisy or
+    # corrupt ATR can't emit an unreachable target / blown-out SL. Wider
+    # than intraday since multi-day holds tolerate larger moves.
     short_swing: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=1.5, stop_loss=0.75),
+        default_factory=lambda: ATRMultipliers(
+            target=1.5, stop_loss=0.75, max_atr_pct_for_target=0.06,
+        ),
     )
     week: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=2.5, stop_loss=1.2),
+        default_factory=lambda: ATRMultipliers(
+            target=2.5, stop_loss=1.2, max_atr_pct_for_target=0.08,
+        ),
     )
     long: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=5.0, stop_loss=2.0),
+        default_factory=lambda: ATRMultipliers(
+            target=5.0, stop_loss=2.0, max_atr_pct_for_target=0.12,
+        ),
     )
 
 
@@ -557,6 +566,12 @@ class StrategyConfig(BaseModel):
     mode: Literal["intraday", "short_term", "balanced", "long_term", "swing"] = "balanced"
     allowed_holding_periods: list[str] | None = None
     holding_periods: HoldingPeriodConfig = Field(default_factory=HoldingPeriodConfig)
+    # Hard sanity ceiling on ATR% (= ATR / entry). A daily ATR above this
+    # fraction of price is implausible for an NSE equity (real ATRs run
+    # ~1-8%) and almost always means corrupt OHLCV — so the signal is
+    # rejected rather than sized off a garbage ATR (which produced e.g. a
+    # +189% target / -94% SL). 0 disables the gate.
+    max_atr_pct_hard_reject: float = Field(default=0.20, ge=0.0, le=1.0)
     volatility: VolatilityConfig = Field(default_factory=VolatilityConfig)
     feedback: FeedbackConfig = Field(default_factory=FeedbackConfig)
     feature_groups: FeatureGroupsConfig = Field(default_factory=FeatureGroupsConfig)

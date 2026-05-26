@@ -640,6 +640,7 @@ class GenerateSignalsSkill(SkillBase):
             if bucket in (
                 "hold_signal", "low_confidence", "sell_on_holding",
                 "short_on_swing_horizon", "intraday_atr_ineligible",
+                "implausible_atr",
             ):
                 outcome_tracker[symbol] = False
             return

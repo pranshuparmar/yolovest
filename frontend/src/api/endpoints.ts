@@ -604,7 +604,7 @@ export const api = {
 
   // Pending Trades (manual approval)
   pendingTrades: () =>
-    apiFetch<{ id: number; symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; position_size: number; confidence_score: number; product: string; created_at: string; is_override?: boolean; is_manual?: boolean }[]>("/api/pending-trades"),
+    apiFetch<{ id: number; symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; position_size: number; confidence_score: number; product: string; created_at: string; expected_holding_days?: number | null; expected_holding_period?: string | null; is_override?: boolean; is_manual?: boolean }[]>("/api/pending-trades"),
 
   approvePendingTrade: (tradeId: number, overrides?: Record<string, unknown>) =>
     apiFetch<{ success: boolean; trade?: Record<string, unknown> }>(`/api/pending-trades/${tradeId}/approve`, {

@@ -4577,13 +4577,31 @@ class Database:
         return pending_id
 
     async def get_pending_trades(self) -> list[dict[str, Any]]:
-        """Get all pending trades awaiting approval."""
+        """Get all pending trades awaiting approval.
+
+        Surfaces the holding-period fields (stored inside `signal_data`) at
+        the top level so the UI can show the expected hold / target date
+        without re-parsing the signal JSON.
+        """
+        import json
         cursor = await self.conn.execute(
             "SELECT * FROM pending_trades WHERE status = 'pending' "
             "ORDER BY created_at DESC"
         )
         rows = await cursor.fetchall()
-        return [dict[str, Any](r) for r in rows]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict[str, Any](r)
+            if "expected_holding_days" not in d or d.get("expected_holding_days") is None:
+                try:
+                    sig = json.loads(d.get("signal_data") or "{}")
+                    d["expected_holding_days"] = sig.get("expected_holding_days")
+                    d["expected_holding_period"] = sig.get("expected_holding_period")
+                except (ValueError, TypeError):
+                    d["expected_holding_days"] = None
+                    d["expected_holding_period"] = None
+            out.append(d)
+        return out
 
     async def get_pending_trade_by_symbol(self, symbol: str) -> dict[str, Any] | None:
         """Get a pending trade by symbol (case-insensitive). Returns None if not found."""

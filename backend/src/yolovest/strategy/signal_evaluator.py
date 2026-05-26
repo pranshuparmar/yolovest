@@ -30,6 +30,7 @@ from yolovest.strategy.holding_period import (
     apply_session_caps,
     decide_holding_period,
     interpolate_atr_multipliers,
+    interpolate_atr_pct_cap,
 )
 from yolovest.timezone import IST
 
@@ -49,6 +50,7 @@ OutcomeT = Literal[
     "short_on_swing_horizon",    # non-held SELL with swing decision
     "intraday_cutoff",           # intraday signal after configured cutoff
     "intraday_atr_ineligible",   # ATR exceeds intraday eligibility cap
+    "implausible_atr",           # ATR% above sanity ceiling — corrupt OHLCV
 ]
 
 
@@ -494,22 +496,40 @@ async def evaluate_symbol_signal(
                 expected_days=expected_days,
             )
 
-    # Step 9: ATR-based target/SL with intraday clamp + interpolation
+    # Step 9: ATR-based target/SL with sanity cap + interpolation
     entry = prediction.entry_price
     atr = features.get("atr_14", entry * 0.02)
-    if holding_period == "intraday":
-        max_atr_pct = float(
-            cfg.strategy.holding_periods.intraday.max_atr_pct_for_target
+    atr_pct = atr / entry if entry > 0 else 0.0
+
+    # Hard sanity reject: an ATR% above the ceiling is implausible for an
+    # NSE equity (real ATRs are ~1-8%) and almost always means corrupt
+    # OHLCV (e.g. a wrong-symbol bar). Sizing off it yields nonsense
+    # target/SL (a +189% target / -94% SL was the live symptom), so reject
+    # rather than emit a tradeable signal.
+    hard_reject = float(getattr(cfg.strategy, "max_atr_pct_hard_reject", 0.0))
+    if hard_reject > 0 and atr_pct > hard_reject:
+        return _evaluation_with_outcome(
+            symbol, "implausible_atr",
+            f"ATR% {atr_pct * 100:.1f}% exceeds sanity ceiling "
+            f"{hard_reject * 100:.0f}% (atr={atr:.2f}, entry={entry:.2f}) — "
+            "likely corrupt OHLCV",
+            prediction=prediction, holding_period=holding_period,
+            product=product, expected_days=expected_days,
         )
-        if max_atr_pct > 0:
-            atr_cap = entry * max_atr_pct
-            if atr > atr_cap:
-                logger.info(
-                    "Clamping intraday ATR for %s: %.2f → %.2f "
-                    "(entry=%.2f, max_atr_pct=%.3f)",
-                    symbol, atr, atr_cap, entry, max_atr_pct,
-                )
-                atr = atr_cap
+
+    # Cap the ATR used for geometry per the (interpolated) holding bucket
+    # so a high or noisy ATR can't produce an unreachable target. Applies
+    # to every bucket now — previously only intraday was clamped, leaving
+    # swing/CNC signals exposed.
+    max_atr_pct = interpolate_atr_pct_cap(expected_days, cfg.strategy.holding_periods)
+    if max_atr_pct > 0:
+        atr_cap = entry * max_atr_pct
+        if atr > atr_cap:
+            logger.info(
+                "Clamping ATR for %s (%s): %.2f → %.2f (entry=%.2f, max_atr_pct=%.3f)",
+                symbol, holding_period, atr, atr_cap, entry, max_atr_pct,
+            )
+            atr = atr_cap
     target_mult, sl_mult = interpolate_atr_multipliers(
         expected_days, cfg.strategy.holding_periods,
     )

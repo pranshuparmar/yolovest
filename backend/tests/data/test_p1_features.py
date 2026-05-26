@@ -187,12 +187,16 @@ class TestFailureAnalysisWiring:
         # Set up 6 predictions that will all fail (direction wrong)
         pending = [
             {"id": f"P-{i}", "symbol": "RELIANCE", "entry_price": 2500,
-             "predicted_direction": "BUY", "predicted_target": 2600}
+             "predicted_direction": "BUY", "predicted_target": 2600,
+             "created_at": "2026-03-01T10:00:00",
+             "prediction_end_time": "2026-03-02T15:30:00"}
             for i in range(6)
         ]
         skill.ctx.db.get_unscored_predictions = AsyncMock(return_value=pending)
-        # LTP is below entry → all predictions wrong
-        skill.ctx.market_data.get_ltp = AsyncMock(return_value=2400.0)
+        # End-date window close is below entry → all predictions wrong
+        skill.ctx.db.get_daily_ohlc_between = AsyncMock(
+            return_value=[(2410.0, 2415.0, 2390.0, 2400.0, "2026-03-02")]
+        )
         skill.ctx.db.get_prediction_outcomes = AsyncMock(return_value=[
             {"direction_correct": False} for _ in range(6)
         ])
@@ -214,11 +218,15 @@ class TestFailureAnalysisWiring:
         # Only 2 failures — below threshold of 5
         pending = [
             {"id": f"P-{i}", "symbol": "TCS", "entry_price": 3500,
-             "predicted_direction": "BUY", "predicted_target": 3600}
+             "predicted_direction": "BUY", "predicted_target": 3600,
+             "created_at": "2026-03-01T10:00:00",
+             "prediction_end_time": "2026-03-02T15:30:00"}
             for i in range(2)
         ]
         skill.ctx.db.get_unscored_predictions = AsyncMock(return_value=pending)
-        skill.ctx.market_data.get_ltp = AsyncMock(return_value=3400.0)
+        skill.ctx.db.get_daily_ohlc_between = AsyncMock(
+            return_value=[(3410.0, 3420.0, 3390.0, 3400.0, "2026-03-02")]
+        )
 
         result = await skill.execute(mode="score")
 
@@ -232,11 +240,15 @@ class TestFailureAnalysisWiring:
 
         pending = [
             {"id": f"P-{i}", "symbol": "INFY", "entry_price": 1800,
-             "predicted_direction": "BUY", "predicted_target": 1900}
+             "predicted_direction": "BUY", "predicted_target": 1900,
+             "created_at": "2026-03-01T10:00:00",
+             "prediction_end_time": "2026-03-02T15:30:00"}
             for i in range(6)
         ]
         skill.ctx.db.get_unscored_predictions = AsyncMock(return_value=pending)
-        skill.ctx.market_data.get_ltp = AsyncMock(return_value=1700.0)
+        skill.ctx.db.get_daily_ohlc_between = AsyncMock(
+            return_value=[(1710.0, 1715.0, 1690.0, 1700.0, "2026-03-02")]
+        )
         skill.ctx.db.get_prediction_outcomes = AsyncMock(return_value=[
             {"direction_correct": False} for _ in range(6)
         ])

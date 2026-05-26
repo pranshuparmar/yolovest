@@ -11,8 +11,30 @@ from typing import Any
 
 from yolovest.data.base import MarketDataBase
 from yolovest.models.schemas import OHLCVBar, is_valid_ohlc
+from yolovest.timezone import IST
 
 logger = logging.getLogger(__name__)
+
+
+def _ist_trading_date(raw: Any) -> date:
+    """Extract the NSE trading date from a jugaad-data DATE value, in IST.
+
+    jugaad-data returns DATE as a (sometimes tz-aware) pandas Timestamp.
+    Reading ``.date()`` off a tz-aware value gives the date in that value's
+    OWN timezone — for a midnight-IST bar carried as UTC that rolls a day
+    back (Mon 00:00 IST == Sun 18:30 UTC), which stamped daily bars on the
+    wrong (often weekend) date. Normalise to IST before taking the date so
+    the bar lands on its real trading day.
+    """
+    if getattr(raw, "tzinfo", None) is not None:
+        try:
+            raw = raw.astimezone(IST)
+        except Exception:
+            pass
+    if hasattr(raw, "date"):
+        return raw.date()
+    return datetime.fromisoformat(str(raw)).date()
+
 
 # jugaad-data's util.py emits this on every call because it converts a
 # tz-aware datetime to np.datetime64, which numpy doesn't support
@@ -93,9 +115,9 @@ class JugaadDataProvider(MarketDataBase):
                 continue
             bars.append(
                 OHLCVBar(
-                    timestamp=datetime.combine(row["DATE"].date(), datetime.min.time())
-                    if hasattr(row["DATE"], "date")
-                    else datetime.fromisoformat(str(row["DATE"])),
+                    timestamp=datetime.combine(
+                        _ist_trading_date(row["DATE"]), datetime.min.time()
+                    ),
                     open=float(row["OPEN"]),
                     high=float(row["HIGH"]),
                     low=float(row["LOW"]),
