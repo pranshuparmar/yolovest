@@ -238,6 +238,39 @@ class TestBackfillIntradaySkill:
         assert SKILL_REGISTRY["backfill-intraday"] is BackfillIntradaySkill
 
 
+class TestBackfillIntraday1mSkill:
+    """The 1-minute label-precision backfill: same F&O backbone, interval=1m."""
+
+    async def test_defaults_to_1m_interval_and_fno(self, app_context, fake_bars):
+        from yolovest.skills.backfill_intraday import BackfillIntraday1mSkill
+
+        skill = BackfillIntraday1mSkill(app_context)
+        skill._PER_SYMBOL_DELAY_SEC = 0
+        ctx = skill.ctx
+
+        class FakeKite:
+            def instruments(self, seg):
+                return [{"name": "RELIANCE"}, {"name": "NIFTY"}]  # index dropped
+        ctx.broker._kite = FakeKite()
+        ctx.broker._access_token = "real_token"
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+
+        result = await skill.execute()
+
+        assert result.success
+        call_args = ctx.market_data.get_ohlcv.call_args_list[0]
+        assert call_args.args[1] == "1m"
+        called = sorted(c.args[0] for c in ctx.market_data.get_ohlcv.call_args_list)
+        assert called == ["RELIANCE"]
+
+    async def test_registered_in_skill_registry(self):
+        from yolovest.skills import SKILL_REGISTRY
+        from yolovest.skills.backfill_intraday import BackfillIntraday1mSkill
+
+        assert SKILL_REGISTRY["backfill-intraday-1m"] is BackfillIntraday1mSkill
+
+
 class TestFnoUniverse:
     """backfill-intraday defaults to the F&O equity universe; backfill-data
     stays on tracked symbols. The intraday retention floor protects the

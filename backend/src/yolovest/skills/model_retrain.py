@@ -227,6 +227,109 @@ def intraday_path_aware_label(
     return 1
 
 
+def intraday_triple_barrier_label(
+    *,
+    entry: float,
+    entry_time: "datetime",
+    horizon_minutes: int,
+    target_pct: float,
+    sl_pct: float,
+    minute_bars: list["OHLCVBar"],
+    start_idx: int,
+) -> int:
+    """Triple-barrier label whose target-before-SL ordering is resolved on
+    the 1-MINUTE path.
+
+    The trade decision and fill are at the 5-min scale — the caller passes
+    ``entry`` (the entry 5-min bar's open, the earliest fillable price) and
+    ``entry_time`` (that bar's start). But which barrier triggers first is
+    walked bar-by-bar on the 1-min series, so the intra-5-min ambiguity
+    ("did the high or the low print first inside the bar?") is decided by
+    real finer-grained data instead of collapsing to HOLD the way a
+    5-min-only walk must (see ``intraday_path_aware_label``).
+
+    Discipline carried over:
+      - **Hard same-session close-out**: the walk stops at the first 1-min
+        bar whose date differs from the entry — no overnight carry (MIS).
+      - **Clock-minute horizon** (`horizon_minutes`): a bar at/after
+        ``entry_time + horizon`` ends the walk. Bar count differs between
+        1-min and 5-min, so the horizon is expressed in minutes, not bars.
+      - **Tie → SL**: when a single 1-min bar still straddles both a
+        direction's target and stop, it counts as the stop (conservative;
+        mirrors ``walk_forward_backtest`` so the label can't be gamed).
+      - **First-winner disambiguation**: if both BUY and SELL would have
+        won, the side that wins on the earlier 1-min bar takes the label;
+        a genuine same-bar cross-direction tie is HOLD.
+
+    ``start_idx`` is the index of the first 1-min bar at/after
+    ``entry_time``. Returns: 2 BUY, 0 SELL, 1 HOLD.
+    """
+    from datetime import timedelta
+
+    if start_idx >= len(minute_bars):
+        return 1
+    session_date = entry_time.date()
+    deadline = entry_time + timedelta(minutes=horizon_minutes)
+
+    buy_target = entry * (1 + target_pct)
+    buy_sl = entry * (1 - sl_pct)
+    sell_target = entry * (1 - target_pct)
+    sell_sl = entry * (1 + sl_pct)
+
+    buy_outcome: str | None = None
+    sell_outcome: str | None = None
+    buy_win_i: int | None = None
+    sell_win_i: int | None = None
+
+    for j in range(start_idx, len(minute_bars)):
+        b = minute_bars[j]
+        if b.timestamp.date() != session_date:
+            break
+        if b.timestamp >= deadline:
+            break
+        hi, lo = b.high, b.low
+
+        if buy_outcome is None:
+            target_now = hi >= buy_target
+            sl_now = lo <= buy_sl
+            if target_now and sl_now:
+                buy_outcome = "loss"  # tie → SL
+            elif target_now:
+                buy_outcome = "win"
+                buy_win_i = j
+            elif sl_now:
+                buy_outcome = "loss"
+
+        if sell_outcome is None:
+            target_now = lo <= sell_target
+            sl_now = hi >= sell_sl
+            if target_now and sl_now:
+                sell_outcome = "loss"
+            elif target_now:
+                sell_outcome = "win"
+                sell_win_i = j
+            elif sl_now:
+                sell_outcome = "loss"
+
+        if buy_outcome is not None and sell_outcome is not None:
+            break
+
+    buy_won = buy_outcome == "win"
+    sell_won = sell_outcome == "win"
+    if buy_won and sell_won:
+        if buy_win_i is not None and sell_win_i is not None:
+            if buy_win_i < sell_win_i:
+                return 2
+            if sell_win_i < buy_win_i:
+                return 0
+        return 1
+    if buy_won:
+        return 2
+    if sell_won:
+        return 0
+    return 1
+
+
 class ModelRetrainSkill(SkillBase):
     name = "model-retrain"
     description = "Retrain ML models, version artifacts, A/B test"
