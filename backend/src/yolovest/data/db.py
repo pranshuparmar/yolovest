@@ -4553,11 +4553,15 @@ class Database:
     ) -> dict[str, Any]:
         """Delete data older than retention periods.
 
-        Daily and intraday OHLCV are trimmed on SEPARATE windows.
-        Daily must cover the training history (`ohlcv_days`); intraday
-        (5-minute etc.) is heavy and only used operationally, so it
-        gets the shorter `intraday_ohlcv_days` (defaults to ohlcv_days
-        for backwards-compat when the caller doesn't pass it).
+        Daily and intraday OHLCV are trimmed on SEPARATE windows because
+        the intraday series (5-min / 1-min) is ~75-375× heavier per day,
+        so it gets its own `intraday_ohlcv_days` (defaults to ohlcv_days
+        for backwards-compat when the caller doesn't pass it). Both windows
+        are training-history windows now: the daily window feeds the swing
+        model, the intraday window feeds the 5-min intraday model — so
+        db_maintenance floors each at the relevant backfill depth before
+        calling this, and neither may be pruned below what the next retrain
+        needs.
         """
         from datetime import timedelta
 
@@ -4572,10 +4576,11 @@ class Database:
         )
         deleted["ohlcv"] = cursor.rowcount
 
-        # Intraday OHLCV retention (decoupled — 5-min bars are ~75×
-        # heavier per day and not used for training). When the caller
-        # doesn't supply intraday_ohlcv_days, fall back to ohlcv_days
-        # so existing behaviour (single retention) is preserved.
+        # Intraday OHLCV retention (decoupled — 5-min / 1-min bars are
+        # ~75-375× heavier per day, so they ride a separate, caller-floored
+        # window that must still cover the intraday model's training depth).
+        # When the caller doesn't supply intraday_ohlcv_days, fall back to
+        # ohlcv_days so existing behaviour (single retention) is preserved.
         intraday_window = (
             intraday_ohlcv_days if intraday_ohlcv_days is not None else ohlcv_days
         )
