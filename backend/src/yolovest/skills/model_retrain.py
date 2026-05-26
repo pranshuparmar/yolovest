@@ -1798,14 +1798,32 @@ class ModelRetrainSkill(SkillBase):
         )
         win = min(int(cfg.max_training_days), intraday_window)
 
-        symbols = await self.ctx.db.get_distinct_ohlcv_symbols("5minute", max_days=win)
+        # Decision bars come from 5-min, but the triple-barrier label and the
+        # per-direction exits resolve on the 1-min path. A symbol with 5-min
+        # bars but no 1-min path can only emit all-HOLD, zero-return samples —
+        # the 5-min universe (~365 syms) is far wider than the 1-min backfill
+        # (~97), so feeding the difference would bury the real BUY/SELL signal
+        # under path-less HOLD noise and drag the backtest Sharpe to zero.
+        # Intersect: the 1-min coverage is the trainable universe.
+        dec_symbols = await self.ctx.db.get_distinct_ohlcv_symbols("5minute", max_days=win)
+        path_symbols = set(
+            await self.ctx.db.get_distinct_ohlcv_symbols("1m", max_days=win)
+        )
+        symbols = [s for s in dec_symbols if s in path_symbols]
         if not symbols:
             logger.warning(
-                "Intraday matrix: no 5-min bars within %dd — run "
-                "backfill-intraday / backfill-intraday-1m first. Skipping.",
-                win,
+                "Intraday matrix: no symbol has BOTH 5-min decision bars and "
+                "1-min path bars within %dd (5m=%d, 1m=%d) — run "
+                "backfill-intraday + backfill-intraday-1m first. Skipping.",
+                win, len(dec_symbols), len(path_symbols),
             )
             return [], [], [], [], []
+        if len(symbols) < len(dec_symbols):
+            logger.info(
+                "Intraday matrix: training on %d symbols with 1-min path "
+                "(dropped %d 5m-only symbols that can't be path-labelled).",
+                len(symbols), len(dec_symbols) - len(symbols),
+            )
 
         canonical: list[str] = []
         canon_idx: dict[str, int] = {}

@@ -293,3 +293,42 @@ class TestBuildIntradayMatrix:
 
         assert (X, y, names, w, meta) == ([], [], [], [], [])
         skill.ctx.db.get_intraday_training_dataset.assert_not_called()
+
+    async def test_drops_5m_symbols_without_1m_path(self, skill):
+        # AAA has both 5m + 1m; CCC has only 5m. Only AAA is trainable —
+        # CCC would emit nothing but all-HOLD, zero-return samples.
+        import yolovest.skills.model_retrain as mr
+        from unittest.mock import AsyncMock
+
+        first = datetime(2026, 5, 18)
+        span = sorted({b["timestamp"][:10] for b in _five_min_bars(5, first)})
+        per_symbol = {
+            "AAA": {
+                "decision_bars": _five_min_bars(5, first, symbol="AAA"),
+                "minute_bars": {
+                    "AAA": _minute_bars(5, first, high_mult=1.05, symbol="AAA")
+                },
+            },
+        }
+        daily = {"bars": _daily_bars(span, symbol="AAA")}
+
+        def _distinct(interval, **kw):
+            return ["AAA", "CCC"] if interval == "5minute" else ["AAA"]
+
+        skill.ctx.db.get_distinct_ohlcv_symbols = AsyncMock(side_effect=_distinct)
+        skill.ctx.db.get_intraday_training_dataset = AsyncMock(
+            side_effect=lambda **kw: per_symbol[kw["symbols"][0]]
+        )
+
+        X, y, names, w, meta = await skill._build_intraday_matrix(
+            daily, horizon_minutes=mr._INTRADAY_TO_CLOSE_HORIZON_MIN,
+            target_atr_mult=0.6, sl_atr_mult=0.3,
+        )
+
+        assert {m["symbol"] for m in meta} == {"AAA"}
+        # Only the path-backed symbol was fetched (CCC never reached the chunk loop).
+        fetched = {
+            c.kwargs["symbols"][0]
+            for c in skill.ctx.db.get_intraday_training_dataset.await_args_list
+        }
+        assert fetched == {"AAA"}
