@@ -226,6 +226,18 @@ and **must carry into any intraday build**:
 - **Horizon**: to session close — `intraday_triple_barrier_label` walked with
   a full-session (375min) horizon so the same-session boundary is the binding
   stop (MIS auto-squares EOD).
+- **Cadence / cutoff**: decision bars sampled every 15min (every 3rd 5-min bar,
+  `_INTRADAY_DECISION_STRIDE`), and only before `market_hours.intraday_cutoff`
+  (14:30) — matches the live heartbeat + no-new-MIS-after-cutoff behaviour, and
+  cuts the heavily overlapping/autocorrelated sample set ~3x.
+- **Compact meta (memory + correctness)**: the to-close path is hundreds of
+  1-min bars; storing `path_highs`/`path_lows` per sample × ~1.8M samples would
+  OOM (~20GB). Instead the builder precomputes the realized per-direction exit
+  (`buy_exit`/`sell_exit`, same tie→SL ordering as `_path_aware_exit`) — two
+  scalars carry everything the backtest needs. `hold_days=1` also fixes the
+  concurrency-slot reservation, which otherwise treated each 1-min path bar as
+  a calendar day (~187-day reservations for a same-day trade). Net effect:
+  ~500K samples, a few GB peak.
 - **Integration**: the existing `intraday` model slot is retrained on 5m+1m
   (no new slot / no ml_signal refactor); `swing` stays daily. The old
   daily-bar intraday model is retired in place. Enters as **shadow** — the

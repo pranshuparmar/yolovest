@@ -128,6 +128,91 @@ class TestIntradayTrainingMatrix:
                 )
                 assert seen <= date_to_vix[span[pos - 1]] + 1e-9
 
+    def test_compact_meta_replaces_raw_path(self, skill):
+        import yolovest.skills.model_retrain as mr
+
+        skill.ctx.config.market_hours.intraday_cutoff = "14:30"
+        first = datetime(2026, 5, 18)
+        decision = _five_min_bars(5, first)
+        minute = _minute_bars(5, first, high_mult=1.05)
+        intraday = {"decision_bars": decision, "minute_bars": {"X": minute}}
+        span = sorted({b["timestamp"][:10] for b in decision})
+        daily = {"bars": _daily_bars(span)}
+
+        X, y, names, w, meta = skill._prepare_intraday_training_data(
+            intraday, daily, horizon_minutes=mr._INTRADAY_TO_CLOSE_HORIZON_MIN,
+            target_atr_mult=0.6, sl_atr_mult=0.3,
+        )
+
+        assert len(X) > 0
+        # Compact meta: per-direction exits + same-day reservation, no raw path
+        # (raw 1-min paths × millions of samples would OOM).
+        m0 = meta[0]
+        assert {"buy_exit", "sell_exit", "hold_days"} <= set(m0.keys())
+        assert "path_highs" not in m0 and "path_lows" not in m0
+        assert all(m["hold_days"] == 1 for m in meta)
+        # Exits are real prices, and a winning BUY exits above entry.
+        assert all(m["buy_exit"] > 0 and m["sell_exit"] > 0 for m in meta)
+
+    def test_stride_reduces_sample_count(self, skill):
+        import yolovest.skills.model_retrain as mr
+
+        skill.ctx.config.market_hours.intraday_cutoff = "15:30"  # no cutoff effect
+        first = datetime(2026, 5, 18)
+        decision = _five_min_bars(6, first)
+        minute = _minute_bars(6, first, high_mult=1.05)
+        intraday = {"decision_bars": decision, "minute_bars": {"X": minute}}
+        span = sorted({b["timestamp"][:10] for b in decision})
+        daily = {"bars": _daily_bars(span)}
+
+        orig = mr._INTRADAY_DECISION_STRIDE
+        try:
+            mr._INTRADAY_DECISION_STRIDE = 1
+            X1, *_ = skill._prepare_intraday_training_data(
+                intraday, daily, horizon_minutes=375,
+                target_atr_mult=0.6, sl_atr_mult=0.3,
+            )
+            mr._INTRADAY_DECISION_STRIDE = 3
+            X3, *_ = skill._prepare_intraday_training_data(
+                intraday, daily, horizon_minutes=375,
+                target_atr_mult=0.6, sl_atr_mult=0.3,
+            )
+        finally:
+            mr._INTRADAY_DECISION_STRIDE = orig
+
+        # Stride 3 yields roughly a third of the stride-1 samples.
+        assert 0 < len(X3) < len(X1)
+        assert abs(len(X3) - len(X1) / 3) <= len(X1) / 3 * 0.2
+
+    def test_cutoff_excludes_late_entries(self, skill):
+        import yolovest.skills.model_retrain as mr
+
+        first = datetime(2026, 5, 18)
+        decision = _five_min_bars(6, first)
+        minute = _minute_bars(6, first, high_mult=1.05)
+        intraday = {"decision_bars": decision, "minute_bars": {"X": minute}}
+        span = sorted({b["timestamp"][:10] for b in decision})
+        daily = {"bars": _daily_bars(span)}
+
+        orig = mr._INTRADAY_DECISION_STRIDE
+        try:
+            mr._INTRADAY_DECISION_STRIDE = 1
+            skill.ctx.config.market_hours.intraday_cutoff = "15:30"
+            X_full, *_ = skill._prepare_intraday_training_data(
+                intraday, daily, horizon_minutes=375,
+                target_atr_mult=0.6, sl_atr_mult=0.3,
+            )
+            skill.ctx.config.market_hours.intraday_cutoff = "12:00"
+            X_cut, *_ = skill._prepare_intraday_training_data(
+                intraday, daily, horizon_minutes=375,
+                target_atr_mult=0.6, sl_atr_mult=0.3,
+            )
+        finally:
+            mr._INTRADAY_DECISION_STRIDE = orig
+
+        # An earlier cutoff drops the post-12:00 decision bars.
+        assert len(X_cut) < len(X_full)
+
     def test_skips_symbols_below_window(self, skill):
         first = datetime(2026, 5, 18)
         decision = _five_min_bars(1, first)  # 75 bars < window_size (200)

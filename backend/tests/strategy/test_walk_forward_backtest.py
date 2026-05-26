@@ -8,10 +8,60 @@ import pytest
 from yolovest.strategy.walk_forward_backtest import (
     BacktestConfig,
     BarMeta,
+    _path_aware_exit,
     _size_position,
     run_walk_forward_backtest,
     sweep_thresholds,
 )
+
+
+class TestPrecomputedExits:
+    """The intraday builder stores realized per-direction exit prices
+    (buy_exit / sell_exit) instead of raw 1-min path arrays. They must
+    take precedence and match what walking the equivalent path yields."""
+
+    def test_precomputed_exits_take_precedence(self):
+        meta = BarMeta(
+            symbol="X", entry_close=100.0, exit_close=100.0,
+            target_pct=0.01, sl_pct=0.005,
+            buy_exit=101.0, sell_exit=99.5,
+        )
+        assert _path_aware_exit(100.0, 1, meta) == 101.0   # BUY → buy_exit
+        assert _path_aware_exit(100.0, -1, meta) == 99.5   # SELL → sell_exit
+
+    def test_precomputed_matches_path_walk(self):
+        entry = 100.0
+        path_highs = [100.4, 101.2, 101.5]
+        path_lows = [98.9, 99.5, 99.0]
+        path_meta = BarMeta(
+            symbol="X", entry_close=entry, exit_close=101.5,
+            target_pct=0.01, sl_pct=0.02,
+            path_highs=path_highs, path_lows=path_lows,
+        )
+        buy_via_path = _path_aware_exit(entry, 1, path_meta)
+        sell_via_path = _path_aware_exit(entry, -1, path_meta)
+        compact = BarMeta(
+            symbol="X", entry_close=entry, exit_close=101.5,
+            target_pct=0.01, sl_pct=0.02,
+            buy_exit=buy_via_path, sell_exit=sell_via_path,
+        )
+        assert _path_aware_exit(entry, 1, compact) == buy_via_path
+        assert _path_aware_exit(entry, -1, compact) == sell_via_path
+
+    def test_hold_days_overrides_path_length_for_reservation(self):
+        # Two intraday trades on consecutive days; with hold_days=1 the
+        # 1-slot cap frees overnight so the 2nd trade is not blocked.
+        cfg = BacktestConfig(max_concurrent_positions=1, initial_capital=100_000.0)
+        metas = [
+            BarMeta(symbol="A", entry_close=100.0, exit_close=101.0,
+                    target_pct=0.01, sl_pct=0.005, buy_exit=101.0,
+                    sell_exit=100.0, hold_days=1, entry_date="2026-05-18"),
+            BarMeta(symbol="B", entry_close=100.0, exit_close=101.0,
+                    target_pct=0.01, sl_pct=0.005, buy_exit=101.0,
+                    sell_exit=100.0, hold_days=1, entry_date="2026-05-19"),
+        ]
+        res = run_walk_forward_backtest([2, 2], metas, cfg)
+        assert res.total_trades == 2
 
 
 class TestPositionSizing:

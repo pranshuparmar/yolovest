@@ -341,6 +341,12 @@ _INTRADAY_TO_CLOSE_HORIZON_MIN = 375
 # so the intraday matrix is built in symbol chunks of this size.
 _INTRADAY_SYMBOL_CHUNK = 15
 
+# Sample a 5-min decision bar every 15 minutes (every 3rd bar), matching the
+# live heartbeat cadence. Avoids training on heavily overlapping 5-min windows
+# whose autocorrelated labels both inflate the walk-forward Sharpe and bloat
+# the feature matrix (~3x fewer samples).
+_INTRADAY_DECISION_STRIDE = 3
+
 
 class ModelRetrainSkill(SkillBase):
     name = "model-retrain"
@@ -1592,6 +1598,18 @@ class ModelRetrainSkill(SkillBase):
             self.ctx.config.strategy.feedback.lookback_days or 60
         )
 
+        # Only sample entries before the intraday cutoff — the live engine
+        # opens no new MIS positions after it, and near-close entries have
+        # almost no runway to target under the to-session-close horizon.
+        cutoff_str = (
+            getattr(self.ctx.config.market_hours, "intraday_cutoff", "14:30")
+            or "14:30"
+        )
+        try:
+            cutoff_time = datetime.strptime(cutoff_str, "%H:%M").time()
+        except (ValueError, TypeError):
+            cutoff_time = datetime.strptime("14:30", "%H:%M").time()
+
         for sym, bars in decision_by_sym.items():
             if len(bars) < window_size + 2:
                 continue
@@ -1606,7 +1624,16 @@ class ModelRetrainSkill(SkillBase):
             mts = minute_ts_by_sym.get(sym, [])
 
             # Feature at i, fill at i+1 open, label on the 1-min path.
-            for i in range(window_size, len(bars) - 1):
+            # Stride = 15-min cadence (every 3rd 5-min bar).
+            for i in range(window_size, len(bars) - 1, _INTRADAY_DECISION_STRIDE):
+                # Skip decision bars at/after the intraday cutoff (IST clock).
+                dts = bars[i].timestamp
+                t_local = (
+                    dts.astimezone(IST).time() if dts.tzinfo else dts.time()
+                )
+                if t_local >= cutoff_time:
+                    continue
+
                 window = bars[i - window_size : i + 1]
                 features = compute_features(window, indicator_cfg)
                 if not features:
@@ -1658,20 +1685,53 @@ class ModelRetrainSkill(SkillBase):
                     except Exception:
                         pass
 
-                # 1-min path within the same session + horizon, for the
-                # intraday-aware walk-forward backtest.
-                deadline = entry_bar.timestamp + timedelta(minutes=horizon_minutes)
-                session_date = entry_bar.timestamp.date()
-                path_highs: list[float] = []
-                path_lows: list[float] = []
-                exit_close = next_open
-                for j in range(m_start, len(mbars)):
-                    mb = mbars[j]
-                    if mb.timestamp.date() != session_date or mb.timestamp >= deadline:
-                        break
-                    path_highs.append(mb.high)
-                    path_lows.append(mb.low)
-                    exit_close = mb.close
+                # Precompute the realized exit per direction on the 1-min
+                # path (same tie→SL ordering as walk_forward's _path_aware_exit)
+                # instead of storing the raw path. At the to-session-close
+                # horizon the path is hundreds of 1-min bars; keeping it per
+                # sample × millions of samples would OOM. Two scalars carry
+                # all the information the backtest's exit walk would extract.
+                target_pct = atr_pct * target_atr_mult
+                sl_pct = atr_pct * sl_atr_mult
+                buy_target = next_open * (1 + target_pct)
+                buy_sl = next_open * (1 - sl_pct)
+                sell_target = next_open * (1 - target_pct)
+                sell_sl = next_open * (1 + sl_pct)
+                buy_exit: float | None = None
+                sell_exit: float | None = None
+                flat_exit = next_open
+                if mbars and next_open > 0:
+                    deadline = entry_bar.timestamp + timedelta(minutes=horizon_minutes)
+                    session_date = entry_bar.timestamp.date()
+                    for j in range(m_start, len(mbars)):
+                        mb = mbars[j]
+                        if mb.timestamp.date() != session_date or mb.timestamp >= deadline:
+                            break
+                        flat_exit = mb.close
+                        hi, lo = mb.high, mb.low
+                        if buy_exit is None:
+                            ht, hs = hi >= buy_target, lo <= buy_sl
+                            if ht and hs:
+                                buy_exit = buy_sl  # tie → SL
+                            elif ht:
+                                buy_exit = buy_target
+                            elif hs:
+                                buy_exit = buy_sl
+                        if sell_exit is None:
+                            ht, hs = lo <= sell_target, hi >= sell_sl
+                            if ht and hs:
+                                sell_exit = sell_sl
+                            elif ht:
+                                sell_exit = sell_target
+                            elif hs:
+                                sell_exit = sell_sl
+                        if buy_exit is not None and sell_exit is not None:
+                            break
+                # Untriggered directions exit flat at the last in-window close.
+                if buy_exit is None:
+                    buy_exit = flat_exit
+                if sell_exit is None:
+                    sell_exit = flat_exit
 
                 X.append([features.get(k, 0.0) for k in feature_names])
                 y.append(label)
@@ -1679,11 +1739,12 @@ class ModelRetrainSkill(SkillBase):
                 bars_meta.append({
                     "symbol": sym,
                     "entry_close": float(next_open),
-                    "exit_close": float(exit_close),
-                    "path_highs": path_highs,
-                    "path_lows": path_lows,
-                    "target_pct": float(atr_pct * target_atr_mult),
-                    "sl_pct": float(atr_pct * sl_atr_mult),
+                    "exit_close": float(flat_exit),
+                    "buy_exit": float(buy_exit),
+                    "sell_exit": float(sell_exit),
+                    "hold_days": 1,  # MIS closes same session
+                    "target_pct": float(target_pct),
+                    "sl_pct": float(sl_pct),
                     "entry_date": entry_bar.timestamp.strftime("%Y-%m-%d"),
                 })
 

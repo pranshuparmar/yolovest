@@ -61,6 +61,19 @@ class BarMeta:
     path-aware label uses. Without them, the simulator falls back to
     close-to-close exit at exit_close.
 
+    `buy_exit` / `sell_exit` are a compact alternative to the raw path
+    arrays: the realized exit price had the trade been taken long / short,
+    precomputed once with the same tie→SL ordering as the path walk. The
+    intraday builder uses these instead of `path_highs`/`path_lows` because
+    its to-session-close path is hundreds of 1-min bars × millions of
+    samples — far too large to hold per sample. When set, they take
+    precedence over the path arrays in `_path_aware_exit`.
+
+    `hold_days` overrides the `max_concurrent_positions` slot reservation
+    (which otherwise treats each path bar as one calendar day). Intraday
+    trades close same-session, so the builder sets this to 1 rather than
+    letting the 1-min path length stand in for days.
+
     entry_date (YYYY-MM-DD) enables daily-aggregated Sharpe — without
     it, per-trade Sharpe massively over-inflates on high-frequency
     strategies because each trade is annualised as if it were a
@@ -74,6 +87,9 @@ class BarMeta:
     target_pct: float = 0.0
     sl_pct: float = 0.0
     entry_date: str = ""
+    buy_exit: float | None = None
+    sell_exit: float | None = None
+    hold_days: int | None = None
 
 
 @dataclass
@@ -148,6 +164,15 @@ def _path_aware_exit(
     Returns `meta.exit_close` when path data is missing or neither
     barrier is touched.
     """
+    # Compact precomputed exits (the intraday builder's path-free form)
+    # take precedence over the raw arrays. None means "not precomputed";
+    # a flat trade that touched no barrier is stored as exit_close, not
+    # None, so a real precompute is never mistaken for "missing".
+    if direction > 0 and meta.buy_exit is not None:
+        return meta.buy_exit
+    if direction < 0 and meta.sell_exit is not None:
+        return meta.sell_exit
+
     if (
         not meta.path_highs
         or not meta.path_lows
@@ -334,7 +359,10 @@ def run_walk_forward_backtest(
         # more signals than strictly necessary — fine for a more
         # honest backtest.
         if cfg.max_concurrent_positions > 0 and entry_dt is not None:
-            lookahead = max(1, len(meta.path_highs))
+            lookahead = (
+                meta.hold_days if meta.hold_days is not None
+                else max(1, len(meta.path_highs))
+            )
             in_flight_exits.append(entry_dt + _td(days=lookahead))
 
         ret = net / position_value

@@ -965,6 +965,9 @@ class XGBoostSignalModel(MLBase):
                             target_pct=float(meta.get("target_pct") or 0.0),
                             sl_pct=float(meta.get("sl_pct") or 0.0),
                             entry_date=str(meta.get("entry_date") or ""),
+                            buy_exit=meta.get("buy_exit"),
+                            sell_exit=meta.get("sell_exit"),
+                            hold_days=meta.get("hold_days"),
                         ))
                 else:
                     # Legacy synthetic payoff — kept for backwards compat
@@ -1073,6 +1076,9 @@ class XGBoostSignalModel(MLBase):
                             target_pct=float(m.get("target_pct") or 0.0),
                             sl_pct=float(m.get("sl_pct") or 0.0),
                             entry_date=str(m.get("entry_date") or ""),
+                            buy_exit=m.get("buy_exit"),
+                            sell_exit=m.get("sell_exit"),
+                            hold_days=m.get("hold_days"),
                         )
                         for m in bars_meta_raw[_cut:]
                     ]
