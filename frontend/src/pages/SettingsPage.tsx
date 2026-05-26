@@ -464,6 +464,8 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.institutional_flow.bulk_deal_size_multiplier": "Inst. Flow: Bulk-Deal Multiplier",
   "risk.institutional_flow.fii_net_threshold_cr": "Inst. Flow: FII Net Threshold (₹ Cr)",
   "risk.institutional_flow.fii_aligned_size_multiplier": "Inst. Flow: FII Aligned Multiplier",
+  "risk.market_trend_filter.enabled": "Market Trend Filter",
+  "risk.market_trend_filter.ma_window": "Trend Filter: MA Window (days)",
   // Exit tweaks (new)
   "risk.exit_tweaks.time_stop_enabled": "Intraday Time-Stop",
   "risk.exit_tweaks.intraday_stop_after_min": "Time-Stop: Trigger After (min)",
@@ -708,6 +710,9 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "risk.institutional_flow.bulk_deal_size_multiplier": "Position size multiplier when bulk deals (in lookback) align with signal direction. Opposing direction divides by this.",
   "risk.institutional_flow.fii_net_threshold_cr": "FII net flow (₹ crore) above which the day counts as 'buying'; below the negative of this, 'selling'.",
   "risk.institutional_flow.fii_aligned_size_multiplier": "Position size multiplier when FII direction agrees with signal direction.",
+  // Market trend filter (long-only circuit breaker)
+  "risk.market_trend_filter.enabled": "Long-only circuit breaker: refuse NEW BUY entries when the equal-weight universe index sits below its moving average (a downtrend). SELLs and closing existing positions are never blocked. The standard drawdown protection for a long-biased swing book — enable before running auto unattended. Default off.",
+  "risk.market_trend_filter.ma_window": "Lookback (trading days) for the index moving average the trend is measured against. 50 ≈ 10 trading weeks. Higher = slower, fewer regime flips.",
   // Exit tweaks
   "risk.exit_tweaks.time_stop_enabled": "Intraday positions still open after intraday_stop_after_min with target-progress below threshold get market-exited. Catches the chop trade that neither works nor breaks. Applies to client-side-managed positions only.",
   "risk.exit_tweaks.intraday_stop_after_min": "Minutes a stuck intraday position can stay open before time-stop considers it.",
