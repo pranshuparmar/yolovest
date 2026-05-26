@@ -239,30 +239,64 @@ class TestBackfillIntradaySkill:
 
 
 class TestBackfillIntraday1mSkill:
-    """The 1-minute label-precision backfill: same F&O backbone, interval=1m."""
+    """The 1-minute label-precision backfill is deliberately bounded:
+    Nifty 100 universe (not the full F&O set) and a window capped at the
+    intraday retention horizon, so it can't re-bloat the operational DB."""
 
-    async def test_defaults_to_1m_interval_and_fno(self, app_context, fake_bars):
+    async def test_defaults_to_nifty100_and_1m_interval(self, app_context, fake_bars):
+        import json
         from yolovest.skills.backfill_intraday import BackfillIntraday1mSkill
 
         skill = BackfillIntraday1mSkill(app_context)
         skill._PER_SYMBOL_DELAY_SEC = 0
         ctx = skill.ctx
 
-        class FakeKite:
-            def instruments(self, seg):
-                return [{"name": "RELIANCE"}, {"name": "NIFTY"}]  # index dropped
-        ctx.broker._kite = FakeKite()
-        ctx.broker._access_token = "real_token"
+        # Constituents come from the ingest-universe cache.
+        ctx.db.get_system_state = AsyncMock(
+            return_value=json.dumps({"symbols": ["RELIANCE", "TCS"]})
+        )
         ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
         ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
 
         result = await skill.execute()
 
         assert result.success
+        ctx.db.get_system_state.assert_awaited_with("universe_constituents:nifty100")
         call_args = ctx.market_data.get_ohlcv.call_args_list[0]
         assert call_args.args[1] == "1m"
         called = sorted(c.args[0] for c in ctx.market_data.get_ohlcv.call_args_list)
-        assert called == ["RELIANCE"]
+        assert called == ["RELIANCE", "TCS"]
+
+    async def test_window_capped_at_intraday_retention(self, app_context):
+        from yolovest.skills.backfill_intraday import BackfillIntraday1mSkill
+
+        skill = BackfillIntraday1mSkill(app_context)
+        ctx = skill.ctx
+        # Even with a deep 5-min backfill depth, the 1-min layer is capped
+        # at the intraday retention horizon.
+        ctx.config.market_data.intraday_backfill_days = 750
+        ctx.config.database.retention.intraday_ohlcv_days = 365
+        assert skill._default_days() == 365
+
+    async def test_skips_when_constituents_unresolvable(
+        self, app_context, fake_bars, monkeypatch
+    ):
+        """No cache + live fetch unavailable → do nothing rather than
+        backfilling the broad ~500-name bundled list."""
+        import yolovest.skills.backfill_data as bf
+        from yolovest.skills.backfill_intraday import BackfillIntraday1mSkill
+
+        skill = BackfillIntraday1mSkill(app_context)
+        skill._PER_SYMBOL_DELAY_SEC = 0
+        ctx = skill.ctx
+        ctx.db.get_system_state = AsyncMock(return_value=None)
+        monkeypatch.setattr(bf, "fetch_live_constituents", AsyncMock(return_value=None))
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+
+        result = await skill.execute()
+
+        assert result.success
+        ctx.market_data.get_ohlcv.assert_not_called()
 
     async def test_registered_in_skill_registry(self):
         from yolovest.skills import SKILL_REGISTRY

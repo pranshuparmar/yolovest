@@ -13,9 +13,11 @@ Typical use:
 """
 
 import asyncio
+import json
 import logging
 from typing import Any
 
+from yolovest.data.nse_symbols import fetch_live_constituents
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 logger = logging.getLogger(__name__)
@@ -143,7 +145,51 @@ class BackfillDataSkill(SkillBase):
         """Resolve the symbol set for the requested universe."""
         if universe == "fno":
             return await self._collect_fno_symbols()
+        if universe in ("nifty50", "nifty100", "nifty200", "nifty500"):
+            return await self._collect_index_symbols(universe)
         return await self._collect_tracked_symbols()
+
+    async def _collect_index_symbols(self, universe: str) -> list[str]:
+        """Resolve a Nifty index universe to its exact constituents.
+
+        Prefers the constituent cache ingest-universe writes, then a live
+        niftyindices.com fetch. Deliberately does NOT fall back to the
+        bundled static list: for nifty100/200/500 the bundled fallback is
+        the broad ~500-name set, so falling back to it would defeat the
+        point of bounding a heavy (intraday 1-min) backfill. If neither
+        source yields a bounded list we return nothing and let the operator
+        run ingest-universe first rather than silently backfilling 500 names.
+        """
+        raw: list[str] | None = None
+        cache_key = f"universe_constituents:{universe}"
+        try:
+            cached = await self.ctx.db.get_system_state(cache_key)
+            if cached:
+                payload = json.loads(cached)
+                syms = payload.get("symbols")
+                if isinstance(syms, list) and syms:
+                    raw = [str(s) for s in syms]
+        except Exception:
+            logger.debug(
+                "%s: could not read %s cache", self.name, cache_key, exc_info=True,
+            )
+        if not raw:
+            try:
+                raw = await fetch_live_constituents(universe)  # type: ignore[arg-type]
+            except Exception:
+                logger.warning(
+                    "%s: live %s constituent fetch failed",
+                    self.name, universe, exc_info=True,
+                )
+        if not raw:
+            logger.error(
+                "%s: could not resolve %s constituents (no cache + live fetch "
+                "failed) — run ingest-universe first. Skipping rather than "
+                "backfilling the broad bundled list.",
+                self.name, universe,
+            )
+            return []
+        return await self.ctx.db.resolve_symbols_with_replacements(sorted(set(raw)))
 
     async def _collect_fno_symbols(self) -> list[str]:
         """F&O equity underlyings — the intraday-model universe.

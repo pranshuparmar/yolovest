@@ -37,13 +37,33 @@ class BackfillIntraday1mSkill(BackfillIntradaySkill):
 
     The intraday model decides/trades on 5-min bars, but the triple-barrier
     label resolves the target-before-SL ordering *inside* each 5-min bar on
-    the 1-min series. That needs 1-min coverage over the same F&O universe
-    and window as the 5-min backfill, so this runs the identical backbone
-    with interval='1m'. 1-min is ~5x heavier and Kite pages it at 60
-    days/request, so expect a long run.
+    the 1-min series. 1-min bars are by far the heaviest series in the DB
+    (~375 bars/symbol/day), so this layer is deliberately bounded — both to
+    keep the operational SQLite file (and its boot-time WAL checkpoint +
+    backups) sane and because the 1-min data is only consumed at train time
+    for label resolution, never at inference:
+
+    - **Universe**: Nifty 100 (the liquid large-caps where intraday MIS is
+      actually viable), not the full ~190-name F&O set the 5-min layer uses.
+    - **Window**: capped at the intraday retention horizon
+      (``retention.intraday_ohlcv_days``, ~365d) even when the 5-min backfill
+      depth (``intraday_backfill_days``) is set deeper — there's no point
+      holding 1-min bars the retention sweep would never let us keep anyway.
+
+    1-min is paged at 60 days/request by Kite, so even bounded this is a long
+    run. Prefer running it after-hours / on a weekend so it doesn't starve
+    the heartbeat's ingest of the Kite rate budget.
     """
 
     name = "backfill-intraday-1m"
     description = "Bulk-fetch historical 1-minute intraday OHLCV (label-precision layer)"
 
     _DEFAULT_INTERVAL = "1m"
+    _DEFAULT_UNIVERSE = "nifty100"
+
+    def _default_days(self) -> int:
+        md = self.ctx.config.market_data
+        return min(
+            md.intraday_backfill_days,
+            self.ctx.config.database.retention.intraday_ohlcv_days,
+        )
