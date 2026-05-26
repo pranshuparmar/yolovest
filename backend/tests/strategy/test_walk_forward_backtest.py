@@ -10,9 +10,38 @@ from yolovest.strategy.walk_forward_backtest import (
     BarMeta,
     _path_aware_exit,
     _size_position,
+    backtest_by_period,
     run_walk_forward_backtest,
     sweep_thresholds,
 )
+
+
+class TestBacktestByPeriod:
+    def test_buckets_trades_by_entry_year(self):
+        # Two BUY trades in 2024 (winners), one in 2025 (loser).
+        metas = [
+            BarMeta(symbol="A", entry_close=100.0, exit_close=101.0,
+                    buy_exit=101.0, sell_exit=100.0, entry_date="2024-03-01"),
+            BarMeta(symbol="B", entry_close=100.0, exit_close=101.0,
+                    buy_exit=101.0, sell_exit=100.0, entry_date="2024-06-01"),
+            BarMeta(symbol="C", entry_close=100.0, exit_close=99.0,
+                    buy_exit=99.0, sell_exit=100.0, entry_date="2025-02-01"),
+        ]
+        preds = [2, 2, 2]  # all BUY
+        out = backtest_by_period(preds, metas, BacktestConfig())
+        assert set(out.keys()) == {"2024", "2025"}
+        assert out["2024"].total_trades == 2
+        assert out["2025"].total_trades == 1
+        assert out["2024"].net_pnl > 0   # winners
+        assert out["2025"].net_pnl < 0   # loser (incl. costs)
+
+    def test_drops_trades_without_entry_date(self):
+        metas = [
+            BarMeta(symbol="A", entry_close=100.0, exit_close=101.0,
+                    buy_exit=101.0, sell_exit=100.0, entry_date=""),
+        ]
+        out = backtest_by_period([2], metas, BacktestConfig())
+        assert out == {}
 
 
 class TestPrecomputedExits:

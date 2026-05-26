@@ -463,6 +463,40 @@ def run_walk_forward_backtest(
     )
 
 
+def backtest_by_period(
+    preds: list[int],
+    bars_meta: list[BarMeta],
+    cfg: BacktestConfig,
+    *,
+    key: "Callable[[BarMeta], str]" = lambda m: (m.entry_date or "")[:4],
+) -> dict[str, BacktestResult]:
+    """Run the walk-forward backtest separately per period (default: the
+    calendar year of ``entry_date``) so the edge can be inspected over time.
+
+    A single headline Sharpe can't tell a recent regime shift from a steady
+    edge decay; bucketing the realized trades by year does. Each period is
+    backtested independently — the concurrency cap and capital base reset per
+    bucket — so this is a diagnostic of *directional edge over time*, not a
+    continuous equity curve. Returns ``{period_key: BacktestResult}`` sorted
+    by key. Trades whose ``entry_date`` doesn't yield a key are dropped.
+    """
+    from collections import defaultdict
+
+    groups: dict[str, tuple[list[int], list[BarMeta]]] = defaultdict(
+        lambda: ([], [])
+    )
+    for p, m in zip(preds, bars_meta, strict=False):
+        k = key(m)
+        if not k:
+            continue
+        groups[k][0].append(p)
+        groups[k][1].append(m)
+    return {
+        k: run_walk_forward_backtest(preds=ps, bars_meta=ms, config=cfg)
+        for k, (ps, ms) in sorted(groups.items())
+    }
+
+
 _DEFAULT_THRESHOLD_GRID: tuple[float, ...] = (
     0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80,
 )

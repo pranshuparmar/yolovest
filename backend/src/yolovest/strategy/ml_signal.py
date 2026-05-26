@@ -851,6 +851,7 @@ class XGBoostSignalModel(MLBase):
                 BacktestConfig,
                 BarMeta,
                 _bootstrap_sharpe_lower_bound,
+                backtest_by_period,
                 run_walk_forward_backtest,
                 sweep_thresholds,
             )
@@ -1202,6 +1203,36 @@ class XGBoostSignalModel(MLBase):
                     "tuned_sharpe": tuned_bt.sharpe,
                     "threshold_holdout_used": _holdout_used,
                 }
+                # Per-calendar-year OOS edge profile at the DEPLOYED
+                # thresholds — diagnoses regime shift vs edge decay. We
+                # apply the single chosen (buy, sell) cutoff across the
+                # whole holdout and bucket realized trades by entry year,
+                # so a Sharpe that's positive in older years and negative
+                # only recently reads as regime/decay rather than "never
+                # worked". Diagnostic only (logged + stashed in metrics);
+                # never feeds the deploy/promote decision.
+                try:
+                    _bp_probas = _ho_probas if use_final_holdout else collected_probas
+                    _bp_meta = _ho_meta if use_final_holdout else collected_meta
+                    _bp_preds = _apply_thresholds(_bp_probas, tuned_buy, tuned_sell)
+                    _by_year: dict[str, Any] = {}
+                    for _yr, _res in backtest_by_period(
+                        _bp_preds, _bp_meta, bt_cfg,
+                    ).items():
+                        _by_year[_yr] = {
+                            "sharpe": round(_res.sharpe, 3),
+                            "win_rate": round(_res.win_rate, 3),
+                            "trades": _res.total_trades,
+                            "net_pnl": round(_res.net_pnl, 1),
+                        }
+                        logger.info(
+                            "  %s OOS @ tuned: sharpe=%.2f win=%.2f trades=%d net=%.0f",
+                            _yr, _res.sharpe, _res.win_rate,
+                            _res.total_trades, _res.net_pnl,
+                        )
+                    metrics["per_year_oos"] = _by_year
+                except Exception:
+                    logger.debug("per-year OOS breakdown failed", exc_info=True)
             else:
                 # Legacy synthetic metrics — kept for tests / older callers
                 returns_arr = np.array(synthetic_returns)
