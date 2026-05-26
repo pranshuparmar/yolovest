@@ -175,6 +175,45 @@ class TestDataQualityValidation:
         assert len(result) == 3
 
 
+class TestSubTickClamp:
+    """Sub-tick open/close outside [low, high] (1-min feed rounding) is
+    clamped into range and retained; gross violations still hard-drop."""
+
+    def test_open_sub_tick_below_low_is_clamped(self):
+        # The exact shape from the backfill logs: open 0.02 below low.
+        bars = [OHLCVBar(timestamp=datetime(2024, 6, 25, 9, 15),
+                         open=238.5, high=239.55, low=238.52,
+                         close=239.55, volume=26552)]
+        out = MarketDataIngester._validate_bars(bars, "1m", "kite", "X")
+        assert len(out) == 1
+        assert out[0].open == 238.52  # clamped up to low
+
+    def test_close_sub_tick_above_high_is_clamped(self):
+        bars = [OHLCVBar(timestamp=datetime(2024, 6, 25, 9, 16),
+                         open=100.0, high=100.5, low=99.5,
+                         close=100.52, volume=1000)]
+        out = MarketDataIngester._validate_bars(bars, "1m", "kite", "X")
+        assert len(out) == 1
+        assert out[0].close == 100.5  # clamped down to high
+
+    def test_gross_open_violation_still_dropped(self):
+        # 200 vs a [238.52, 239.55] band — wrong scale, not a rounding blip.
+        bars = [OHLCVBar(timestamp=datetime(2024, 6, 25, 9, 15),
+                         open=200.0, high=239.55, low=238.52,
+                         close=239.0, volume=1000)]
+        out = MarketDataIngester._validate_bars(bars, "1m", "kite", "X")
+        assert out == []
+
+    def test_high_priced_bar_uses_relative_tolerance(self):
+        # 5030 open vs 5032.1 low (the second log line): 2.1 < 0.1% of 5065.
+        bars = [OHLCVBar(timestamp=datetime(2024, 6, 25, 9, 15),
+                         open=5030.0, high=5065.2, low=5032.1,
+                         close=5064.5, volume=6048)]
+        out = MarketDataIngester._validate_bars(bars, "1m", "kite", "X")
+        assert len(out) == 1
+        assert out[0].open == 5032.1
+
+
 class TestIntradayRouting:
     async def test_intraday_uses_intraday_provider(self):
         # Intraday bars must be very recent (within stale_threshold_minutes)

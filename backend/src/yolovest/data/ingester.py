@@ -264,16 +264,33 @@ class MarketDataIngester(MarketDataBase):
           poison ATR and produce nonsense target/SL, so drop them at ingest.
         """
         valid = []
+        # Sub-tick OHLC repair tolerance. A 1-min feed often prints an
+        # open/close a hair outside [low, high] (aggregation rounding) —
+        # dropping the whole bar loses data the labelers need. Clamp the
+        # offending value into range when the violation is within the
+        # larger of one default tick (0.05) or 0.1% of price; gross
+        # violations (wrong scale / wrong symbol) still hard-drop.
+        _tick_tol = 0.05
+        _rel_tol = 0.001
         for bar in bars:
             if bar.high < bar.low:
                 logger.warning("Dropping bar with high < low: %s", bar)
                 continue
+            tol = max(_tick_tol, bar.high * _rel_tol)
             if bar.close < bar.low or bar.close > bar.high:
-                logger.warning("Dropping bar with close outside [low, high]: %s", bar)
-                continue
+                clamped = min(max(bar.close, bar.low), bar.high)
+                if abs(bar.close - clamped) <= tol:
+                    bar.close = clamped
+                else:
+                    logger.warning("Dropping bar with close outside [low, high]: %s", bar)
+                    continue
             if bar.open < bar.low or bar.open > bar.high:
-                logger.warning("Dropping bar with open outside [low, high]: %s", bar)
-                continue
+                clamped = min(max(bar.open, bar.low), bar.high)
+                if abs(bar.open - clamped) <= tol:
+                    bar.open = clamped
+                else:
+                    logger.warning("Dropping bar with open outside [low, high]: %s", bar)
+                    continue
             if (
                 interval in ("daily", "1d")
                 and source != "kite"
