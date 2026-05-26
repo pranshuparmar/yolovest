@@ -556,6 +556,19 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "notifications.telegram.alerts.weekly_summary": "Alert: Weekly Summary",
   "notifications.telegram.alerts.errors": "Alert: Errors",
   "notifications.telegram.alerts.kill_switch": "Alert: Kill Switch",
+  // Previously unlabeled (rendered with humanized fallback)
+  "retraining.min_argmax_sharpe_for_promotion": "Min Edge (argmax) Sharpe to Promote",
+  "risk.depth_gate.min_size_multiplier": "Depth: Min Size Multiplier",
+  "risk.reentry.confidence_tolerance": "Re-entry: Confidence Tolerance",
+  "risk.reentry.min_reentry_confidence": "Re-entry: Min Confidence Floor",
+  "risk.risk_uplift_cap": "Risk Uplift Cap (multiplier ceiling)",
+  "risk.tuned_min_signal_rate": "Tuning: Min Signal Rate",
+  "risk.tuned_threshold_max_value": "Tuning: Max Threshold Value",
+  "strategy.holding_periods.short_swing.max_atr_pct_for_target": "Short-Swing ATR Cap (target geometry)",
+  "strategy.holding_periods.week.max_atr_pct_for_target": "Week ATR Cap (target geometry)",
+  "strategy.holding_periods.long.max_atr_pct_for_target": "Long ATR Cap (target geometry)",
+  "strategy.post_train_min_signal_rate": "Post-Train Min Signal Rate",
+  "strategy.signal_generation_concurrency": "Signal Generation Concurrency",
 };
 
 // Info descriptions for (i) tooltip
@@ -810,6 +823,19 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "reports.weekly_report_cron": "When to generate the weekly performance report.",
   "retraining.schedule_cron": "When to retrain ML models with recent data.",
   "database.backup_cron": "When to run the daily database backup.",
+  // Previously undocumented
+  "retraining.min_argmax_sharpe_for_promotion": "Edge gate: a freshly-trained shadow model must clear this argmax (untuned) backtest Sharpe to be promoted to production. Argmax is the honest edge of the model's natural decisions, before any threshold tuning — a model whose backtest profit lives entirely in a threshold-selected tail (high tuned Sharpe but negative argmax) is blocked here. 0.0 = require non-negative edge. Negative = disable the gate.",
+  "risk.depth_gate.min_size_multiplier": "Floor for the depth-gate size multiplier. The order-book imbalance maps to a position-size multiplier between this floor and 1.0: a neutral/favourable book → full size, the worst-possible opposing book → this fraction (0.4 = 40%). The depth gate sizes down rather than blocking outright.",
+  "risk.reentry.confidence_tolerance": "After a stop-out, a re-entry signal's confidence must be at least this fraction of the ORIGINAL entry's confidence (0.85 = within 15% of it). ML confidence naturally decays as a trend matures, so a strict 'must be higher' rejected most valid re-entries; this tolerance plus the absolute floor below replaces it.",
+  "risk.reentry.min_reentry_confidence": "Absolute confidence floor a re-entry signal must exceed regardless of the original entry's confidence (0.55). Guards against re-entering on a weak signal just because the original was also weak.",
+  "risk.risk_uplift_cap": "Ceiling on the stacked conviction / regime / institutional-flow size multipliers. They compose multiplicatively (e.g. 1.5 × 1.5 × 1.2 = 2.7×); after all of them, risk-check re-clamps so the effective rupees-at-risk never exceeds max_risk_per_trade_pct × this cap (1.5). Stops a strongly-favourable signal from silently running 5%+ risk.",
+  "risk.tuned_min_signal_rate": "Minimum fraction of non-HOLD predictions a (BUY, SELL) threshold cell must produce during the tuning sweep to be eligible (0.02 = 2%). Stops the sweep from picking cutoffs so high the model would signal almost never — the 'every prediction collapses to HOLD' failure.",
+  "risk.tuned_threshold_max_value": "Inference-time cap on a tuned class threshold (0.60). The live model clamps any tuned threshold above this so it stays reachable by the deployed model's probability scale. Bypassed per-side by buy_threshold_override / sell_threshold_override.",
+  "strategy.holding_periods.short_swing.max_atr_pct_for_target": "Cap on the daily ATR (as fraction of entry price) used when computing the short-swing target / SL distance, so high-ATR names don't get unreachable targets. Set to 0 to disable.",
+  "strategy.holding_periods.week.max_atr_pct_for_target": "Cap on the daily ATR (as fraction of entry price) used when computing the week-holding target / SL distance, so high-ATR names don't get unreachable targets. Set to 0 to disable.",
+  "strategy.holding_periods.long.max_atr_pct_for_target": "Cap on the daily ATR (as fraction of entry price) used when computing the long-holding target / SL distance, so high-ATR names don't get unreachable targets. Set to 0 to disable.",
+  "strategy.post_train_min_signal_rate": "Post-train production-path guard: a freshly-trained model must emit at least this fraction of non-HOLD signals when scored on its own training data (0.005 = 0.5%), or the retrain is rejected as a sterile / HOLD-only model. Runs the real production decision path (calibration + tuned thresholds), so it catches a model the live engine would never let signal.",
+  "strategy.signal_generation_concurrency": "How many symbols generate-signals evaluates concurrently per chunk (default 10). The watchlist is processed in asyncio.gather chunks of this size — higher = faster heartbeats but more concurrent data/ML load.",
 };
 
 // Cron key labels (friendly names for the virtual cron section)
