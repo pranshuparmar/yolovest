@@ -537,10 +537,15 @@ class ModelRetrainSkill(SkillBase):
         # setups enough room for the 1.5×ATR target to develop without the
         # 0.75×ATR SL noise-tripping on the same window — at 5 bars the SL
         # fires constantly and the labeler classes most outcomes as HOLD
-        # even after the first-winner disambiguation. (The intraday model
-        # no longer uses a bar-lookahead — it walks the 1-min path to the
-        # session close; see _build_intraday_matrix.)
-        lookahead_map = {"swing": 10}
+        # even after the first-winner disambiguation.
+        #
+        # The intraday model doesn't use a bar-lookahead for its LABEL (it
+        # walks the 1-min path to the session close — see
+        # _build_intraday_matrix), but it still needs a lookahead value as
+        # the CV purge gap: its labels resolve within the entry day, so 1
+        # trading day is the right gap to drop train rows whose label window
+        # overlaps the test fold (ml_signal converts it to calendar days).
+        lookahead_map = {"intraday": 1, "swing": 10}
 
         # Match each model's path-aware label geometry to the holding
         # bucket it actually trades at runtime: intraday uses the tight
@@ -577,6 +582,10 @@ class ModelRetrainSkill(SkillBase):
         for model_type in ("intraday", "swing"):
             # Build feature matrix with model-specific labeling + feedback features
             target_mult, sl_mult = atr_mult_map[model_type]
+            # Bound for BOTH branches: intraday uses it only as the CV purge
+            # gap (its label walks to session close, not a bar count); swing
+            # uses it as both the label lookahead and the purge gap.
+            lookahead = lookahead_map[model_type]
             if model_type == "intraday":
                 # The intraday model trains on 5-min decision bars with 1-min
                 # triple-barrier label resolution, walked to the session close
@@ -599,7 +608,6 @@ class ModelRetrainSkill(SkillBase):
                     )
                 )
             else:
-                lookahead = lookahead_map[model_type]
                 logger.info(
                     "=== Retraining %s model: label geometry lookahead=%d bars, "
                     "target=%.2f×ATR, SL=%.2f×ATR ===",
