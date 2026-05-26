@@ -1670,6 +1670,67 @@ class Database:
         rows = await cursor.fetchall()
         return {"bars": [dict[str, Any](row) for row in rows]}
 
+    async def get_intraday_training_dataset(
+        self,
+        *,
+        max_days: int | None = None,
+        interval: str = "5minute",
+        minute_interval: str = "1m",
+        symbols: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Load intraday training data: 5-min *decision* bars + 1-min *path* bars.
+
+        The intraday model computes features and takes entries on the
+        ``interval`` (5-min) series, but the triple-barrier label resolves
+        target-before-SL ordering on the finer ``minute_interval`` (1-min)
+        series (see ``intraday_triple_barrier_label``). Both are returned,
+        scoped to the same window, so every decision bar has the 1-min path
+        needed to label it.
+
+        ``symbols`` scopes both queries — chunk the F&O universe through it
+        to bound memory, since 1-min × the full universe is large. ``max_days``
+        caps history (timestamps are ISO, so the lexical date compare is safe
+        for intraday timestamps too).
+
+        Returns::
+
+            {
+              "decision_bars": [ {symbol, timestamp, open, high, low, close, volume}, ... ],
+              "minute_bars": { symbol: [ {timestamp, open, high, low, close, volume}, ... ] },
+            }
+
+        ``decision_bars`` is ordered by (symbol, timestamp); each
+        ``minute_bars[symbol]`` list is ascending by timestamp.
+        """
+        def _build(iv: str) -> tuple[str, list[Any]]:
+            q = (
+                "SELECT symbol, timestamp, open, high, low, close, volume "
+                "FROM ohlcv WHERE interval = ?"
+            )
+            params: list[Any] = [iv]
+            if max_days is not None and max_days > 0:
+                q += " AND timestamp >= date('now', ?)"
+                params.append(f"-{int(max_days)} day")
+            if symbols:
+                placeholders = ",".join("?" * len(symbols))
+                q += f" AND symbol IN ({placeholders})"
+                params.extend(symbols)
+            q += " ORDER BY symbol, timestamp"
+            return q, params
+
+        dec_q, dec_params = _build(interval)
+        dec_rows = await self.read_conn.execute_fetchall(dec_q, tuple(dec_params))
+        decision_bars = [dict[str, Any](r) for r in dec_rows]
+
+        min_q, min_params = _build(minute_interval)
+        min_rows = await self.read_conn.execute_fetchall(min_q, tuple(min_params))
+        minute_bars: dict[str, list[dict[str, Any]]] = {}
+        for r in min_rows:
+            row = dict[str, Any](r)
+            minute_bars.setdefault(row["symbol"], []).append(row)
+
+        return {"decision_bars": decision_bars, "minute_bars": minute_bars}
+
     async def get_bulk_deals_timeline(self) -> list[dict[str, Any]]:
         """Return all bulk/block deals across history, ordered by date.
         Used by model_retrain to build a (symbol, date) → net-count
