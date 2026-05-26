@@ -330,6 +330,18 @@ def intraday_triple_barrier_label(
     return 1
 
 
+# Intraday MIS positions are squared off by session end (broker auto-squares
+# at 15:30), so a 5-min entry's label/backtest path runs to the session close,
+# not a fixed bar count. The full NSE session is 375 minutes (09:15-15:30);
+# passing it as the horizon makes the same-session boundary in
+# intraday_triple_barrier_label the binding stop = "to session close".
+_INTRADAY_TO_CLOSE_HORIZON_MIN = 375
+
+# 1-min bars for the whole intraday universe at once would OOM a small host,
+# so the intraday matrix is built in symbol chunks of this size.
+_INTRADAY_SYMBOL_CHUNK = 15
+
+
 class ModelRetrainSkill(SkillBase):
     name = "model-retrain"
     description = "Retrain ML models, version artifacts, A/B test"
@@ -515,13 +527,14 @@ class ModelRetrainSkill(SkillBase):
         results: dict[str, Any] = {}
         shadow_deployed = []
 
-        # Lookahead periods: intraday uses 1-bar, swing uses 10-bar
-        # returns. 10 bars (~2 weeks) gives genuine swing setups
-        # enough room for the 1.5×ATR target to develop without the
-        # 0.75×ATR SL noise-tripping on the same window — at 5 bars
-        # the SL fires constantly and the labeler classes most
-        # outcomes as HOLD even after the first-winner disambiguation.
-        lookahead_map = {"intraday": 1, "swing": 10}
+        # Swing lookahead: 10 daily bars (~2 weeks) gives genuine swing
+        # setups enough room for the 1.5×ATR target to develop without the
+        # 0.75×ATR SL noise-tripping on the same window — at 5 bars the SL
+        # fires constantly and the labeler classes most outcomes as HOLD
+        # even after the first-winner disambiguation. (The intraday model
+        # no longer uses a bar-lookahead — it walks the 1-min path to the
+        # session close; see _build_intraday_matrix.)
+        lookahead_map = {"swing": 10}
 
         # Match each model's path-aware label geometry to the holding
         # bucket it actually trades at runtime: intraday uses the tight
@@ -557,22 +570,44 @@ class ModelRetrainSkill(SkillBase):
 
         for model_type in ("intraday", "swing"):
             # Build feature matrix with model-specific labeling + feedback features
-            lookahead = lookahead_map[model_type]
             target_mult, sl_mult = atr_mult_map[model_type]
-            logger.info(
-                "=== Retraining %s model: label geometry lookahead=%d bars, "
-                "target=%.2f×ATR, SL=%.2f×ATR ===",
-                model_type, lookahead, target_mult, sl_mult,
-            )
-            X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
-                training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
-                target_atr_mult=target_mult, sl_atr_mult=sl_mult,
-                sector_map=sector_map,
-                bulk_deal_lookup=bulk_deal_lookup,
-                news_lookup=news_lookup,
-                vix_timeline=vix_timeline,
-                fno_lookup=fno_lookup,
-            )
+            if model_type == "intraday":
+                # The intraday model trains on 5-min decision bars with 1-min
+                # triple-barrier label resolution, walked to the session close
+                # (MIS auto-squares EOD). The old daily-bar "intraday" model
+                # (1-day lookahead) was really a next-day predictor with no
+                # real intraday edge — see docs/intraday-model-design.md.
+                logger.info(
+                    "=== Retraining intraday (5-min) model: 1-min path labels, "
+                    "to-session-close horizon, target=%.2f×ATR, SL=%.2f×ATR ===",
+                    target_mult, sl_mult,
+                )
+                X, y, feat_names, sample_weights, bars_meta = (
+                    await self._build_intraday_matrix(
+                        training_data,
+                        horizon_minutes=_INTRADAY_TO_CLOSE_HORIZON_MIN,
+                        target_atr_mult=target_mult, sl_atr_mult=sl_mult,
+                        feedback_data=feedback_data, sector_map=sector_map,
+                        bulk_deal_lookup=bulk_deal_lookup, news_lookup=news_lookup,
+                        vix_timeline=vix_timeline, fno_lookup=fno_lookup,
+                    )
+                )
+            else:
+                lookahead = lookahead_map[model_type]
+                logger.info(
+                    "=== Retraining %s model: label geometry lookahead=%d bars, "
+                    "target=%.2f×ATR, SL=%.2f×ATR ===",
+                    model_type, lookahead, target_mult, sl_mult,
+                )
+                X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
+                    training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
+                    target_atr_mult=target_mult, sl_atr_mult=sl_mult,
+                    sector_map=sector_map,
+                    bulk_deal_lookup=bulk_deal_lookup,
+                    news_lookup=news_lookup,
+                    vix_timeline=vix_timeline,
+                    fno_lookup=fno_lookup,
+                )
             # Spell out exactly what this model trained on: total feature
             # count + which support groups actually landed in the matrix
             # (so a disabled/empty group is visibly absent).
@@ -1663,6 +1698,109 @@ class ModelRetrainSkill(SkillBase):
             bars_meta = [bars_meta[i] for i in order]
 
         return X, y, feature_names, sample_weights, bars_meta
+
+    async def _build_intraday_matrix(
+        self,
+        daily_data: dict[str, Any],
+        *,
+        horizon_minutes: int,
+        target_atr_mult: float,
+        sl_atr_mult: float,
+        feedback_data: dict[str, Any] | None = None,
+        sector_map: dict[str, str] | None = None,
+        bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
+        news_lookup: dict[str, list[tuple[str, str]]] | None = None,
+        vix_timeline: list[tuple[str, float]] | None = None,
+        fno_lookup: dict[str, Any] | None = None,
+    ) -> tuple[
+        list[list[float]], list[int], list[str], list[float], list[dict[str, Any]]
+    ]:
+        """Memory-safe builder for the 5-min intraday training matrix.
+
+        1-min path bars for the whole intraday universe at once would OOM a
+        small host, so we walk the symbol set in chunks: fetch each chunk's
+        5-min + 1-min bars, run ``_prepare_intraday_training_data`` on it, and
+        concatenate. Per-chunk ``feature_names`` are realigned to a canonical
+        column order (a feature absent from a chunk → 0.0) before concat, and
+        the combined matrix is globally re-sorted by entry_date so the
+        walk-forward CV still splits cleanly by time.
+
+        ``daily_data`` (the full-universe daily set already loaded for the
+        swing model) supplies the prior-session broadcast context for every
+        chunk.
+        """
+        import gc as _gc
+
+        cfg = self.ctx.config.retraining
+        intraday_window = int(
+            getattr(self.ctx.config.database.retention, "intraday_ohlcv_days", 365)
+        )
+        win = min(int(cfg.max_training_days), intraday_window)
+
+        symbols = await self.ctx.db.get_distinct_ohlcv_symbols("5minute", max_days=win)
+        if not symbols:
+            logger.warning(
+                "Intraday matrix: no 5-min bars within %dd — run "
+                "backfill-intraday / backfill-intraday-1m first. Skipping.",
+                win,
+            )
+            return [], [], [], [], []
+
+        canonical: list[str] = []
+        canon_idx: dict[str, int] = {}
+        X_all: list[list[float]] = []
+        y_all: list[int] = []
+        w_all: list[float] = []
+        meta_all: list[dict[str, Any]] = []
+
+        for start in range(0, len(symbols), _INTRADAY_SYMBOL_CHUNK):
+            chunk = symbols[start : start + _INTRADAY_SYMBOL_CHUNK]
+            intraday_data = await self.ctx.db.get_intraday_training_dataset(
+                max_days=win, symbols=chunk,
+            )
+            Xc, yc, namesc, wc, metac = self._prepare_intraday_training_data(
+                intraday_data, daily_data,
+                horizon_minutes=horizon_minutes,
+                target_atr_mult=target_atr_mult, sl_atr_mult=sl_atr_mult,
+                feedback_data=feedback_data, sector_map=sector_map,
+                bulk_deal_lookup=bulk_deal_lookup, news_lookup=news_lookup,
+                vix_timeline=vix_timeline, fno_lookup=fno_lookup,
+            )
+            del intraday_data
+            if yc:
+                for nm in namesc:
+                    if nm not in canon_idx:
+                        canon_idx[nm] = len(canonical)
+                        canonical.append(nm)
+                        for r in X_all:
+                            r.append(0.0)
+                col = {nm: i for i, nm in enumerate(namesc)}
+                for row in Xc:
+                    X_all.append(
+                        [row[col[nm]] if nm in col else 0.0 for nm in canonical]
+                    )
+                y_all.extend(yc)
+                w_all.extend(wc)
+                meta_all.extend(metac)
+            _gc.collect()
+
+        if meta_all:
+            order = sorted(
+                range(len(meta_all)),
+                key=lambda i: meta_all[i].get("entry_date", ""),
+            )
+            X_all = [X_all[i] for i in order]
+            y_all = [y_all[i] for i in order]
+            w_all = [w_all[i] for i in order]
+            meta_all = [meta_all[i] for i in order]
+
+        logger.info(
+            "Intraday matrix: %d samples across %d symbols | %d feature cols "
+            "| chunked %d/fetch | window=%dd",
+            len(y_all), len(symbols), len(canonical),
+            _INTRADAY_SYMBOL_CHUNK, win,
+        )
+        return X_all, y_all, canonical, w_all, meta_all
 
     @staticmethod
     def _compute_regime_index(

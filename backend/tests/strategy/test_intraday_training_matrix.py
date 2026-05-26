@@ -23,7 +23,8 @@ def skill(app_context):
     return ModelRetrainSkill(app_context)
 
 
-def _five_min_bars(sessions: int, first_day: datetime, base: float = 100.0):
+def _five_min_bars(sessions: int, first_day: datetime, base: float = 100.0,
+                   symbol: str = "X"):
     """`sessions` trading days × 75 five-min bars each, 09:15 start."""
     bars = []
     day = first_day.replace(hour=9, minute=15, second=0, microsecond=0)
@@ -32,7 +33,7 @@ def _five_min_bars(sessions: int, first_day: datetime, base: float = 100.0):
         for _ in range(_PER_SESSION):
             px = base + len(bars) * 0.02
             bars.append({
-                "symbol": "X", "timestamp": t.isoformat(),
+                "symbol": symbol, "timestamp": t.isoformat(),
                 "open": px, "high": px + 0.3, "low": px - 0.3,
                 "close": px + 0.05, "volume": 10000 + len(bars),
             })
@@ -44,7 +45,7 @@ def _five_min_bars(sessions: int, first_day: datetime, base: float = 100.0):
 
 
 def _minute_bars(sessions: int, first_day: datetime, base: float = 100.0,
-                 high_mult: float = 1.0):
+                 high_mult: float = 1.0, symbol: str = "X"):
     bars = []
     day = first_day.replace(hour=9, minute=15, second=0, microsecond=0)
     for _ in range(sessions):
@@ -52,7 +53,7 @@ def _minute_bars(sessions: int, first_day: datetime, base: float = 100.0,
         for _ in range(_PER_SESSION * 5):
             px = base + len(bars) * 0.004
             bars.append({
-                "symbol": "X", "timestamp": t.isoformat(),
+                "symbol": symbol, "timestamp": t.isoformat(),
                 "open": px, "high": px * high_mult + 0.1, "low": px - 0.1,
                 "close": px, "volume": 2000,
             })
@@ -61,9 +62,9 @@ def _minute_bars(sessions: int, first_day: datetime, base: float = 100.0,
     return bars
 
 
-def _daily_bars(dates, close=100.0):
+def _daily_bars(dates, close=100.0, symbol: str = "X"):
     return [{
-        "symbol": "X", "timestamp": d, "open": close, "high": close + 1,
+        "symbol": symbol, "timestamp": d, "open": close, "high": close + 1,
         "low": close - 1, "close": close, "volume": 1_000_000,
         "delivery_pct": 55.0,
     } for d in dates]
@@ -137,3 +138,73 @@ class TestIntradayTrainingMatrix:
             target_atr_mult=0.6, sl_atr_mult=0.3,
         )
         assert X == [] and y == [] and meta == []
+
+
+class TestBuildIntradayMatrix:
+    """The chunked builder fetches the intraday set per symbol-chunk and
+    concatenates into one matrix, realigning feature columns and re-sorting
+    globally by entry_date so the walk-forward CV still splits by time."""
+
+    async def test_chunks_concatenate_and_align(self, skill, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        import yolovest.skills.model_retrain as mr
+
+        # Force one symbol per chunk so the cross-chunk concat path runs.
+        monkeypatch.setattr(mr, "_INTRADAY_SYMBOL_CHUNK", 1)
+
+        first = datetime(2026, 5, 18)
+        span = sorted({
+            b["timestamp"][:10] for b in _five_min_bars(5, first)
+        })
+        per_symbol = {
+            sym: {
+                "decision_bars": _five_min_bars(5, first, symbol=sym),
+                "minute_bars": {
+                    sym: _minute_bars(5, first, high_mult=1.05, symbol=sym)
+                },
+            }
+            for sym in ("AAA", "BBB")
+        }
+        daily = {"bars": (
+            _daily_bars(span, symbol="AAA") + _daily_bars(span, symbol="BBB")
+        )}
+
+        skill.ctx.db.get_distinct_ohlcv_symbols = AsyncMock(
+            return_value=["AAA", "BBB"]
+        )
+        skill.ctx.db.get_intraday_training_dataset = AsyncMock(
+            side_effect=lambda **kw: per_symbol[kw["symbols"][0]]
+        )
+
+        X, y, names, w, meta = await skill._build_intraday_matrix(
+            daily, horizon_minutes=mr._INTRADAY_TO_CLOSE_HORIZON_MIN,
+            target_atr_mult=0.6, sl_atr_mult=0.3,
+        )
+
+        # Both symbols contributed.
+        syms = {m["symbol"] for m in meta}
+        assert syms == {"AAA", "BBB"}
+        # Rectangular: every row matches the canonical column count.
+        assert len(X) == len(y) == len(w) == len(meta) > 0
+        assert all(len(row) == len(names) for row in X)
+        assert set(y) <= {0, 1, 2}
+        # Globally re-sorted by entry_date (non-decreasing across chunks).
+        dates = [m["entry_date"] for m in meta]
+        assert dates == sorted(dates)
+        # Two symbols × one-per-chunk → two dataset fetches.
+        assert skill.ctx.db.get_intraday_training_dataset.await_count == 2
+
+    async def test_empty_when_no_intraday_symbols(self, skill):
+        from unittest.mock import AsyncMock
+
+        skill.ctx.db.get_distinct_ohlcv_symbols = AsyncMock(return_value=[])
+        skill.ctx.db.get_intraday_training_dataset = AsyncMock()
+
+        X, y, names, w, meta = await skill._build_intraday_matrix(
+            {"bars": []}, horizon_minutes=375,
+            target_atr_mult=0.6, sl_atr_mult=0.3,
+        )
+
+        assert (X, y, names, w, meta) == ([], [], [], [], [])
+        skill.ctx.db.get_intraday_training_dataset.assert_not_called()

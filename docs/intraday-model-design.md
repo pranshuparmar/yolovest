@@ -218,3 +218,25 @@ and **must carry into any intraday build**:
 - Horizon: fixed N-bars vs to-session-close vs first-target-touch?
 - Is the edge net-of-cost positive at all on this universe? (Decide early
   with a cheap baseline before investing in features.)
+
+## Decisions & progress (2026-05-26)
+
+- **Universe**: Nifty 100 (liquid large-caps; intraday MIS viability). Both
+  `backfill-intraday` (5m) and `backfill-intraday-1m` default to it.
+- **Horizon**: to session close — `intraday_triple_barrier_label` walked with
+  a full-session (375min) horizon so the same-session boundary is the binding
+  stop (MIS auto-squares EOD).
+- **Integration**: the existing `intraday` model slot is retrained on 5m+1m
+  (no new slot / no ml_signal refactor); `swing` stays daily. The old
+  daily-bar intraday model is retired in place. Enters as **shadow** — the
+  lower-bound-Sharpe + live-accuracy promotion gate still guards production.
+- **Done**: `get_intraday_training_dataset`, dual-resolution labels,
+  `_prepare_intraday_training_data` (prior-session broadcast, leak-free),
+  `_build_intraday_matrix` (memory-safe symbol-chunked fetch + concat),
+  execute() wiring (MIS-cost walk-forward already keyed off `product`).
+- **Next**: confirm net-of-cost baseline Sharpe once the clean backfill lands
+  (decide go/no-go before feature work); then live 5m inference in
+  generate-signals (§8) + intraday-specific features (§2).
+- **Open**: 5m can be backfilled deeper (`intraday_backfill_days`) than the
+  1m window (`intraday_ohlcv_days`); only the 1m-covered span is labelable,
+  so the older 5m is inert — fine, but keep the windows in mind.

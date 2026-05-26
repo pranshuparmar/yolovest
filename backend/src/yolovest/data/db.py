@@ -1817,6 +1817,26 @@ class Database:
         await self.conn.commit()
         return len(rows)
 
+    async def get_distinct_ohlcv_symbols(
+        self, interval: str, max_days: int | None = None,
+    ) -> list[str]:
+        """Distinct symbols that have bars at ``interval`` within ``max_days``.
+
+        Cheap symbol-list lookup used to chunk the intraday training fetch:
+        loading 1-min bars for the whole universe at once would OOM a small
+        host, so model-retrain walks symbol chunks, and this is the index it
+        chunks over. ``max_days`` mirrors get_intraday_training_dataset's
+        lexical ISO date compare.
+        """
+        q = "SELECT DISTINCT symbol FROM ohlcv WHERE interval = ?"
+        params: list[Any] = [interval]
+        if max_days is not None and max_days > 0:
+            q += " AND timestamp >= date('now', ?)"
+            params.append(f"-{int(max_days)} day")
+        q += " ORDER BY symbol"
+        rows = await self.read_conn.execute_fetchall(q, tuple(params))
+        return [r[0] for r in rows if r[0]]
+
     async def get_distinct_fno_underlyings(self) -> list[str]:
         """Distinct F&O underlying symbols seen in fno_daily.
 
