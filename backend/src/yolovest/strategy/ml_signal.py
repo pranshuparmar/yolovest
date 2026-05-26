@@ -1226,8 +1226,8 @@ class XGBoostSignalModel(MLBase):
                             "net_pnl": round(_res.net_pnl, 1),
                         }
                         logger.info(
-                            "  %s OOS @ tuned: sharpe=%.2f win=%.2f trades=%d net=%.0f",
-                            _yr, _res.sharpe, _res.win_rate,
+                            "  [%s] %s OOS @ tuned: sharpe=%.2f win=%.2f trades=%d net=%.0f",
+                            model_type, _yr, _res.sharpe, _res.win_rate,
                             _res.total_trades, _res.net_pnl,
                         )
                     metrics["per_year_oos"] = _by_year
