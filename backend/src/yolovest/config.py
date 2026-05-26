@@ -96,7 +96,11 @@ class MarketDataConfig(BaseModel):
     stale_threshold_minutes: int = 30
     sentiment_ttl_hours: int = 48  # sentiment older than this is ignored in scanning
     backfill_days: int = 1095  # daily-bar history window for backfill-data and ingest-universe
-    intraday_backfill_days: int = 365  # 5-minute-bar history window for backfill-intraday
+    # 5-minute-bar history window for backfill-intraday. Also acts as the
+    # intraday retention floor (database-maintenance won't prune intraday
+    # bars newer than this), so raising it for the intraday model (e.g. 730)
+    # keeps the deep backfill from being trimmed back to intraday_ohlcv_days.
+    intraday_backfill_days: int = 365
     # Reject a symbol from signal generation when its latest daily bar
     # is older than this many trading days behind the most recent
     # completed trading day. Default 1 covers the normal "mid-session

@@ -30,6 +30,11 @@ class BackfillDataSkill(SkillBase):
     # Subclasses (e.g. BackfillIntradaySkill) override these to switch interval.
     _DEFAULT_INTERVAL = "daily"
 
+    # Default symbol universe when neither `symbols` nor `universe` is passed.
+    # "tracked" = watchlist + user_watchlist + regime index.
+    # "fno"     = the live F&O equity underlyings (intraday-model universe).
+    _DEFAULT_UNIVERSE = "tracked"
+
     # Pacing is now handled centrally by KiteRateLimiter (general 10 req/s)
     # plus KiteDataProvider._throttle_historical (tighter 2.5 req/s on the
     # historical_data endpoint). The per-symbol skill-level sleep this used
@@ -49,7 +54,8 @@ class BackfillDataSkill(SkillBase):
 
         symbols = kwargs.get("symbols")
         if symbols is None:
-            symbols = await self._collect_tracked_symbols()
+            universe = kwargs.get("universe", self._DEFAULT_UNIVERSE)
+            symbols = await self._collect_symbols(universe)
 
         results: dict[str, Any] = {
             "interval": interval,
@@ -132,6 +138,45 @@ class BackfillDataSkill(SkillBase):
                 "skipped on the next run.",
                 self.name, symbol, reason,
             )
+
+    async def _collect_symbols(self, universe: str) -> list[str]:
+        """Resolve the symbol set for the requested universe."""
+        if universe == "fno":
+            return await self._collect_fno_symbols()
+        return await self._collect_tracked_symbols()
+
+    async def _collect_fno_symbols(self) -> list[str]:
+        """F&O equity underlyings — the intraday-model universe.
+
+        Prefers a live NFO instrument-master fetch (authoritative, current);
+        falls back to whatever ingest-fno has accumulated in fno_daily, then
+        to the tracked set if neither is available.
+        """
+        from yolovest.data.fno_provider import fetch_fno_underlyings
+
+        names: list[str] = []
+        kite = getattr(self.ctx.broker, "_kite", None)
+        token = getattr(self.ctx.broker, "_access_token", None)
+        if kite is not None and token and token != "paper_token":
+            try:
+                names = await fetch_fno_underlyings(kite)
+            except Exception:
+                logger.warning(
+                    "%s: live F&O underlying fetch failed", self.name, exc_info=True,
+                )
+        if not names:
+            try:
+                names = await self.ctx.db.get_distinct_fno_underlyings()
+            except Exception:
+                logger.debug("%s: fno_daily lookup failed", self.name, exc_info=True)
+        if not names:
+            logger.warning(
+                "%s: no F&O underlyings resolved (authenticate Kite or run "
+                "ingest-fno first) — falling back to tracked symbols",
+                self.name,
+            )
+            return await self._collect_tracked_symbols()
+        return await self.ctx.db.resolve_symbols_with_replacements(sorted(set(names)))
 
     async def _collect_tracked_symbols(self) -> list[str]:
         """Default symbol set: every stock the system currently tracks.

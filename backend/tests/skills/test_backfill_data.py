@@ -214,18 +214,21 @@ class TestBackfillIntradaySkill:
         skill = BackfillIntradaySkill(app_context)
         skill._PER_SYMBOL_DELAY_SEC = 0
         ctx = skill.ctx
-        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "RELIANCE"}])
-        ctx.db.get_user_watchlist = AsyncMock(return_value=[])
+
+        class FakeKite:
+            def instruments(self, seg):
+                return [{"name": "RELIANCE"}]
+        ctx.broker._kite = FakeKite()
+        ctx.broker._access_token = "real_token"
         ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
         ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
-        ctx.config.strategy.market_regime.enabled = False
 
         result = await skill.execute()
 
         assert result.success
         call_args = ctx.market_data.get_ohlcv.call_args_list[0]
         assert call_args.args[1] == "5minute"
-        # 1y default — not the 3y daily backfill window
+        # 1y default window — not the 3y daily backfill window
         assert result.data["days_requested"] == 365
 
     async def test_registered_in_skill_registry(self):
@@ -233,3 +236,86 @@ class TestBackfillIntradaySkill:
         from yolovest.skills.backfill_intraday import BackfillIntradaySkill
 
         assert SKILL_REGISTRY["backfill-intraday"] is BackfillIntradaySkill
+
+
+class TestFnoUniverse:
+    """backfill-intraday defaults to the F&O equity universe; backfill-data
+    stays on tracked symbols. The intraday retention floor protects the
+    deep backfill from the nightly prune."""
+
+    @pytest.fixture
+    def intraday_skill(self, app_context):
+        from yolovest.skills.backfill_intraday import BackfillIntradaySkill
+        skill = BackfillIntradaySkill(app_context)
+        skill._PER_SYMBOL_DELAY_SEC = 0
+        return skill
+
+    async def test_intraday_defaults_to_fno_via_live_fetch(self, intraday_skill, fake_bars):
+        ctx = intraday_skill.ctx
+
+        class FakeKite:
+            def instruments(self, seg):
+                return [
+                    {"name": "RELIANCE"}, {"name": "INFY"},
+                    {"name": "INFY"},  # dup underlying
+                    {"name": "NIFTY"},  # index — excluded
+                ]
+        ctx.broker._kite = FakeKite()
+        ctx.broker._access_token = "real_token"
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+        # Should NOT consult the watchlist for the fno universe
+        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "TCS"}])
+        ctx.db.get_user_watchlist = AsyncMock(return_value=[])
+
+        result = await intraday_skill.execute()
+
+        assert result.success
+        called = sorted(
+            c.args[0] for c in ctx.market_data.get_ohlcv.call_args_list
+        )
+        assert called == ["INFY", "RELIANCE"]  # deduped, index dropped
+        ctx.db.get_watchlist.assert_not_called()
+
+    async def test_intraday_falls_back_to_fno_daily_when_unauthenticated(
+        self, intraday_skill, fake_bars
+    ):
+        ctx = intraday_skill.ctx
+        ctx.broker._kite = None  # no live client
+        ctx.db.get_distinct_fno_underlyings = AsyncMock(return_value=["HDFCBANK", "ICICIBANK"])
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+
+        result = await intraday_skill.execute()
+
+        assert result.success
+        called = sorted(c.args[0] for c in ctx.market_data.get_ohlcv.call_args_list)
+        assert called == ["HDFCBANK", "ICICIBANK"]
+
+    async def test_intraday_universe_tracked_override(self, intraday_skill, fake_bars):
+        ctx = intraday_skill.ctx
+        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "WIPRO"}])
+        ctx.db.get_user_watchlist = AsyncMock(return_value=[])
+        ctx.config.strategy.market_regime.enabled = False
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+
+        result = await intraday_skill.execute(universe="tracked")
+
+        assert result.success
+        called = [c.args[0] for c in ctx.market_data.get_ohlcv.call_args_list]
+        assert called == ["WIPRO"]
+
+    async def test_daily_backfill_still_defaults_tracked(self, backfill_skill, fake_bars):
+        ctx = backfill_skill.ctx
+        ctx.db.get_watchlist = AsyncMock(return_value=[{"symbol": "RELIANCE"}])
+        ctx.db.get_user_watchlist = AsyncMock(return_value=[])
+        ctx.config.strategy.market_regime.enabled = False
+        ctx.db.upsert_ohlcv = AsyncMock(return_value=1)
+        ctx.market_data.get_ohlcv = AsyncMock(return_value=fake_bars)
+
+        result = await backfill_skill.execute()
+
+        assert result.success
+        called = [c.args[0] for c in ctx.market_data.get_ohlcv.call_args_list]
+        assert called == ["RELIANCE"]

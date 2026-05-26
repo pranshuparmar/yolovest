@@ -1756,6 +1756,18 @@ class Database:
         await self.conn.commit()
         return len(rows)
 
+    async def get_distinct_fno_underlyings(self) -> list[str]:
+        """Distinct F&O underlying symbols seen in fno_daily.
+
+        Offline fallback for resolving the F&O universe when a live NFO
+        instrument-master fetch isn't available (broker unauthenticated).
+        Only as complete as ingest-fno's accumulated history.
+        """
+        rows = await self.read_conn.execute_fetchall(
+            "SELECT DISTINCT symbol FROM fno_daily ORDER BY symbol"
+        )
+        return [r[0] for r in rows if r[0]]
+
     async def get_fno_timeline(
         self, date_from: str | None = None,
     ) -> dict[str, list[tuple[str, dict[str, float]]]]:

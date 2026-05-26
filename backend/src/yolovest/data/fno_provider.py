@@ -28,6 +28,41 @@ logger = logging.getLogger(__name__)
 _QUOTE_BATCH_SIZE = 200
 _MIN_QUOTE_INTERVAL_SEC = 0.4
 
+# Index underlyings carried in the NFO master alongside single-stock names.
+# The intraday equity model trades stocks, not index derivatives, and these
+# have no NSE-equity 5-min series to train on, so they're excluded from the
+# F&O *underlying* list by default.
+_FNO_INDEX_NAMES = frozenset({
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50",
+    "SENSEX", "BANKEX", "SENSEX50",
+})
+
+
+async def fetch_fno_underlyings(
+    kite: Any, *, include_indices: bool = False,
+) -> list[str]:
+    """Return the sorted list of F&O equity underlyings (~190 names).
+
+    A single, cheap trip through the NFO instrument master — just the
+    distinct underlying ``name`` values, no quote calls. Index underlyings
+    (NIFTY/BANKNIFTY/...) are dropped unless ``include_indices`` is set.
+    Empty list on any failure (caller decides how to fall back).
+    """
+    try:
+        instruments = await asyncio.to_thread(kite.instruments, "NFO")
+    except Exception:
+        logger.exception("kite.instruments(NFO) failed")
+        return []
+    names: set[str] = set()
+    for inst in instruments:
+        name = inst.get("name")
+        if not name:
+            continue
+        if not include_indices and name in _FNO_INDEX_NAMES:
+            continue
+        names.add(name)
+    return sorted(names)
+
 
 def _nearest_expiry(expiries: list[date]) -> date | None:
     today = date.today()

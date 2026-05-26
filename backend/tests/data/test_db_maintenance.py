@@ -24,6 +24,11 @@ def _make_ctx(backup_enabled=True, backup_cron="0 18 * * *", backup_dir="./backu
     # test sees the configured 730 unchanged.
     ctx.config.retraining.max_training_days = 730
     ctx.config.market_data.backfill_days = 730
+    # Intraday floor inputs: backfill depth floors the intraday retention
+    # window so a deep 5-min backfill isn't pruned. Default equal so the
+    # baseline test sees the configured window unchanged.
+    ctx.config.database.retention.intraday_ohlcv_days = 365
+    ctx.config.market_data.intraday_backfill_days = 365
     ctx.db.backup = AsyncMock(return_value="/backups/yolovest_20260322_180000.db")
     ctx.db.run_retention_cleanup = AsyncMock(
         return_value={"ohlcv": 5, "audit_log": 2, "predictions": 1}
@@ -84,8 +89,21 @@ class TestDatabaseMaintenanceSkill:
 
         _, kwargs = ctx.db.run_retention_cleanup.call_args
         assert kwargs["ohlcv_days"] == 1825
-        # Intraday is NOT floored — it isn't used for training.
-        assert kwargs["intraday_ohlcv_days"] == ctx.config.database.retention.intraday_ohlcv_days
+        # Intraday floor uses intraday_backfill_days (365 here) — equal to the
+        # retention window, so unchanged.
+        assert kwargs["intraday_ohlcv_days"] == 365
+
+    async def test_retention_floors_intraday_window_to_backfill_depth(self):
+        # A deep 5-min backfill (intraday_backfill_days) for the intraday
+        # model must not be pruned back to the default intraday retention.
+        ctx = _make_ctx()
+        ctx.config.database.retention.intraday_ohlcv_days = 365
+        ctx.config.market_data.intraday_backfill_days = 730
+        skill = DatabaseMaintenanceSkill(ctx)
+        await skill.execute()
+
+        _, kwargs = ctx.db.run_retention_cleanup.call_args
+        assert kwargs["intraday_ohlcv_days"] == 730
 
     async def test_backup_failure_still_runs_retention(self):
         ctx = _make_ctx()
