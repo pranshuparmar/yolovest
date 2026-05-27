@@ -161,8 +161,11 @@ class Database:
         # Wait up to 5s for locks instead of failing immediately with SQLITE_BUSY
         await self._conn.execute("PRAGMA busy_timeout=5000")
 
-        # -- Integrity check on startup (fast check, not full page scan) --
-        await self._check_integrity()
+        # NOTE: the integrity check is intentionally NOT run here. On a
+        # multi-GB DB, PRAGMA quick_check scans the whole file from disk
+        # (minutes) and the result was advisory only — it never aborted
+        # startup — so it was pure boot tax. It now runs off the boot path,
+        # nightly inside the database-maintenance CRON (see check_integrity).
 
         # Read connection — separate, for concurrent reads during writes.
         # Opens in read-only mode so it can't accidentally mutate data.
@@ -203,16 +206,20 @@ class Database:
             "enabled" if self._dashboard_read_conn else "disabled",
         )
 
-    async def _check_integrity(self) -> None:
-        """Run a quick integrity check on startup.
+    async def check_integrity(self) -> str:
+        """Run `PRAGMA quick_check` and return its result ("ok" or the first
+        corruption message, "unknown" if no row, "error: ..." if it raised).
 
-        Uses `PRAGMA quick_check` (checks B-tree structure without scanning
-        every page) which is much faster than `PRAGMA integrity_check`.
-        Logs a critical warning if corruption is detected but does NOT
-        abort — allows the app to start so backups can be taken.
+        Uses quick_check (B-tree structure, no per-page cross-checks) rather
+        than integrity_check, but on a multi-GB DB it still scans the whole
+        file from disk — so this is NOT run on the startup path. The
+        database-maintenance CRON calls it nightly (off-hours), where a
+        minutes-long full read is acceptable. Runs on the read connection so
+        it never holds the write connection. Logs critical on failure; the
+        caller is responsible for alerting.
         """
         try:
-            cursor = await self._conn.execute("PRAGMA quick_check")
+            cursor = await self.read_conn.execute("PRAGMA quick_check")
             row = await cursor.fetchone()
             result = row[0] if row else "unknown"
             if result != "ok":
@@ -222,9 +229,11 @@ class Database:
                     result,
                 )
             else:
-                logger.debug("Database integrity check passed")
+                logger.info("Database integrity check passed")
+            return result
         except Exception as e:
             logger.warning("Database integrity check could not run: %s", e)
+            return f"error: {e}"
 
     async def close(self) -> None:
         """Close all database connections."""
