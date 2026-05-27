@@ -31,6 +31,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from yolovest.context import AppContext, MarketHoursChecker
+from yolovest.data.db import DASHBOARD_READ_CONN
 
 logger = logging.getLogger(__name__)
 
@@ -720,6 +721,30 @@ def _compute_scan_scores(stock: dict[str, Any], min_vol: int, vol_cfg: Any = Non
     }
 
 
+class _DashboardReadConnMiddleware:
+    """Pure-ASGI middleware that flags each HTTP request so DB reads route to
+    the dedicated dashboard read connection (see db.DASHBOARD_READ_CONN).
+
+    Set on the inbound path before any downstream middleware/endpoint runs, so
+    the value is captured when Starlette's BaseHTTPMiddleware copies the
+    context into its task. WebSocket/lifespan scopes are passed through
+    untouched (they default to the engine read connection).
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        token = DASHBOARD_READ_CONN.set(True)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            DASHBOARD_READ_CONN.reset(token)
+
+
 def create_app(ctx: AppContext) -> FastAPI:
     """Create and configure the FastAPI dashboard application."""
     app = FastAPI(
@@ -769,6 +794,12 @@ def create_app(ctx: AppContext) -> FastAPI:
                         content={"detail": "Invalid CSRF token"},
                     )
         return await call_next(request)
+
+    # Route DB reads for HTTP requests to the dedicated dashboard read
+    # connection. Registered last so it's the outermost middleware — the flag
+    # is set before any inner middleware spawns its own task and copies the
+    # context, so it propagates all the way to the endpoint.
+    app.add_middleware(_DashboardReadConnMiddleware)
 
     # Store context for dependency injection
     app.state.ctx = ctx
