@@ -61,6 +61,19 @@ class BarMeta:
     path-aware label uses. Without them, the simulator falls back to
     close-to-close exit at exit_close.
 
+    `buy_exit` / `sell_exit` are a compact alternative to the raw path
+    arrays: the realized exit price had the trade been taken long / short,
+    precomputed once with the same tie→SL ordering as the path walk. The
+    intraday builder uses these instead of `path_highs`/`path_lows` because
+    its to-session-close path is hundreds of 1-min bars × millions of
+    samples — far too large to hold per sample. When set, they take
+    precedence over the path arrays in `_path_aware_exit`.
+
+    `hold_days` overrides the `max_concurrent_positions` slot reservation
+    (which otherwise treats each path bar as one calendar day). Intraday
+    trades close same-session, so the builder sets this to 1 rather than
+    letting the 1-min path length stand in for days.
+
     entry_date (YYYY-MM-DD) enables daily-aggregated Sharpe — without
     it, per-trade Sharpe massively over-inflates on high-frequency
     strategies because each trade is annualised as if it were a
@@ -74,6 +87,9 @@ class BarMeta:
     target_pct: float = 0.0
     sl_pct: float = 0.0
     entry_date: str = ""
+    buy_exit: float | None = None
+    sell_exit: float | None = None
+    hold_days: int | None = None
 
 
 @dataclass
@@ -148,6 +164,15 @@ def _path_aware_exit(
     Returns `meta.exit_close` when path data is missing or neither
     barrier is touched.
     """
+    # Compact precomputed exits (the intraday builder's path-free form)
+    # take precedence over the raw arrays. None means "not precomputed";
+    # a flat trade that touched no barrier is stored as exit_close, not
+    # None, so a real precompute is never mistaken for "missing".
+    if direction > 0 and meta.buy_exit is not None:
+        return meta.buy_exit
+    if direction < 0 and meta.sell_exit is not None:
+        return meta.sell_exit
+
     if (
         not meta.path_highs
         or not meta.path_lows
@@ -334,7 +359,10 @@ def run_walk_forward_backtest(
         # more signals than strictly necessary — fine for a more
         # honest backtest.
         if cfg.max_concurrent_positions > 0 and entry_dt is not None:
-            lookahead = max(1, len(meta.path_highs))
+            lookahead = (
+                meta.hold_days if meta.hold_days is not None
+                else max(1, len(meta.path_highs))
+            )
             in_flight_exits.append(entry_dt + _td(days=lookahead))
 
         ret = net / position_value
@@ -435,6 +463,40 @@ def run_walk_forward_backtest(
     )
 
 
+def backtest_by_period(
+    preds: list[int],
+    bars_meta: list[BarMeta],
+    cfg: BacktestConfig,
+    *,
+    key: "Callable[[BarMeta], str]" = lambda m: (m.entry_date or "")[:4],
+) -> dict[str, BacktestResult]:
+    """Run the walk-forward backtest separately per period (default: the
+    calendar year of ``entry_date``) so the edge can be inspected over time.
+
+    A single headline Sharpe can't tell a recent regime shift from a steady
+    edge decay; bucketing the realized trades by year does. Each period is
+    backtested independently — the concurrency cap and capital base reset per
+    bucket — so this is a diagnostic of *directional edge over time*, not a
+    continuous equity curve. Returns ``{period_key: BacktestResult}`` sorted
+    by key. Trades whose ``entry_date`` doesn't yield a key are dropped.
+    """
+    from collections import defaultdict
+
+    groups: dict[str, tuple[list[int], list[BarMeta]]] = defaultdict(
+        lambda: ([], [])
+    )
+    for p, m in zip(preds, bars_meta, strict=False):
+        k = key(m)
+        if not k:
+            continue
+        groups[k][0].append(p)
+        groups[k][1].append(m)
+    return {
+        k: run_walk_forward_backtest(preds=ps, bars_meta=ms, config=cfg)
+        for k, (ps, ms) in sorted(groups.items())
+    }
+
+
 _DEFAULT_THRESHOLD_GRID: tuple[float, ...] = (
     0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80,
 )
@@ -495,6 +557,7 @@ def sweep_thresholds(
     grid: tuple[float, ...] = _DEFAULT_THRESHOLD_GRID,
     min_trades: int = 100,
     min_class_share: float = 0.10,
+    min_signal_rate: float = 0.0,
     bootstrap_iterations: int = 200,
     bootstrap_percentile: float = 25.0,
     max_threshold: float | None = None,
@@ -591,19 +654,27 @@ def sweep_thresholds(
             result = run_walk_forward_backtest(preds, bars_meta, cfg)
             if result.total_trades < min_trades:
                 continue
+            buy_count = sum(1 for p in preds if p == _LABEL_BUY)
+            sell_count = sum(1 for p in preds if p == _LABEL_SELL)
+            total_nh = buy_count + sell_count
+            # Signal-RATE floor (fraction of samples that produce a
+            # signal), not just an absolute trade count. On a large
+            # holdout `min_trades=100` is a trivial 0.2% rate, so the sweep
+            # can still park at an ultra-selective ceiling cell that fires
+            # ~never live. Computed from non-HOLD predictions (not executed
+            # trades, which the concurrent-position cap throttles).
+            if (min_signal_rate > 0.0 and probas
+                    and (total_nh / len(probas)) < min_signal_rate):
+                continue
             # Class-collapse floor. Reject cells where one side
             # produces less than `min_class_share` of total trades
             # — those translate to "0 BUY signals in 7 days" in
             # production even when Sharpe looks great on the holdout.
-            if min_class_share > 0.0:
-                buy_count = sum(1 for p in preds if p == _LABEL_BUY)
-                sell_count = sum(1 for p in preds if p == _LABEL_SELL)
-                total_nh = buy_count + sell_count
-                if total_nh > 0:
-                    buy_share = buy_count / total_nh
-                    sell_share = sell_count / total_nh
-                    if buy_share < min_class_share or sell_share < min_class_share:
-                        continue
+            if min_class_share > 0.0 and total_nh > 0:
+                buy_share = buy_count / total_nh
+                sell_share = sell_count / total_nh
+                if buy_share < min_class_share or sell_share < min_class_share:
+                    continue
 
             # Robust ranking: bootstrap the SAME series result.sharpe is
             # computed from (daily-aggregated when available, else

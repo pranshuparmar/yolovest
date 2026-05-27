@@ -47,6 +47,8 @@ class RiskCheckSkill(SkillBase):
         super().__init__(context)
         self._regime: dict[str, float] | None = None
         self._regime_at: float = 0.0
+        self._market_trend: dict[str, Any] | None = None
+        self._market_trend_at: float = 0.0
         # Per-heartbeat beta cache. Inputs to compute_symbol_beta are
         # identical for every signal in the same cycle (last 60 days
         # of daily bars across the universe), so caching here saves
@@ -74,6 +76,25 @@ class RiskCheckSkill(SkillBase):
             self._regime = {"breadth": 0.5, "avg_return": 0.0, "sample_size": 0}
         self._regime_at = now
         return self._regime
+
+    async def _get_market_trend(self, ma_window: int) -> dict[str, Any]:
+        import time as _time
+        now = _time.monotonic()
+        if (
+            self._market_trend is not None
+            and (now - self._market_trend_at) < self._regime_ttl_sec
+        ):
+            return self._market_trend
+        try:
+            self._market_trend = await self.ctx.db.compute_market_trend(ma_window)
+        except Exception:
+            logger.debug("compute_market_trend failed", exc_info=True)
+            self._market_trend = {
+                "in_uptrend": True, "index_level": 1.0, "ma": 1.0,
+                "sample_size": 0, "ma_window": ma_window,
+            }
+        self._market_trend_at = now
+        return self._market_trend
 
     async def _get_symbol_beta(self, symbol: str) -> float | None:
         """Per-heartbeat cached beta lookup. Falls through to the DB
@@ -313,6 +334,23 @@ class RiskCheckSkill(SkillBase):
                     f"{signal.get('signal_type', 'BUY')} "
                     f"(thresholds: BUY≥{cfg.regime_gate.min_breadth_for_buy}, "
                     f"SELL≤{cfg.regime_gate.max_breadth_for_sell})",
+                )
+
+        # Market-trend circuit breaker — stand aside on NEW long entries
+        # when the broad index is below its moving average (a downtrend).
+        # Long-only bear protection; exits are never blocked. Fail-open
+        # when there isn't enough history (sample_size == 0).
+        if (
+            cfg.market_trend_filter.enabled
+            and signal.get("signal_type", "BUY") == "BUY"
+        ):
+            trend = await self._get_market_trend(cfg.market_trend_filter.ma_window)
+            if trend.get("sample_size", 0) > 0 and not trend.get("in_uptrend", True):
+                return self._reject(
+                    signal,
+                    f"Market-trend filter: index {trend['index_level']:.3f} below "
+                    f"{trend['ma_window']}d MA {trend['ma']:.3f} — standing aside "
+                    f"on new longs (market downtrend)",
                 )
 
         # Mandatory stop-loss

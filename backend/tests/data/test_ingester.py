@@ -18,12 +18,20 @@ def _make_bars(n: int = 3, age_days: int = 0) -> list[OHLCVBar]:
     Uses naive timestamps in IST-equivalent time so staleness checks work
     correctly with the IST-aware ingester.
     """
-    # Use IST-aware now, then strip timezone (providers return naive IST)
-    now_ist = datetime.now(IST).replace(tzinfo=None)
-    base = now_ist - timedelta(days=age_days + n)
+    # Use IST-aware now, then strip timezone (providers return naive IST).
+    # Daily bars only fall on weekdays — the ingester now drops weekend-dated
+    # daily bars from non-kite providers, so the fixture must reflect that.
+    end = datetime.now(IST).replace(tzinfo=None) - timedelta(days=age_days)
+    days: list[datetime] = []
+    d = end
+    while len(days) < n:
+        if d.weekday() < 5:
+            days.append(d)
+        d -= timedelta(days=1)
+    days.reverse()
     return [
         OHLCVBar(
-            timestamp=base + timedelta(days=i),
+            timestamp=days[i],
             open=100.0 + i,
             high=105.0 + i,
             low=95.0 + i,
@@ -45,6 +53,7 @@ def _make_provider(bars=None, quote=None, healthy=True, fail=False):
         provider.get_ohlcv = AsyncMock(return_value=bars or [])
         provider.get_quote = AsyncMock(return_value=quote or {"ltp": 100.0})
         provider.health_check = AsyncMock(return_value=healthy)
+    provider.source_name = "jugaad"
     return provider
 
 
@@ -166,6 +175,45 @@ class TestDataQualityValidation:
         assert len(result) == 3
 
 
+class TestSubTickClamp:
+    """Sub-tick open/close outside [low, high] (1-min feed rounding) is
+    clamped into range and retained; gross violations still hard-drop."""
+
+    def test_open_sub_tick_below_low_is_clamped(self):
+        # The exact shape from the backfill logs: open 0.02 below low.
+        bars = [OHLCVBar(timestamp=datetime(2024, 6, 25, 9, 15),
+                         open=238.5, high=239.55, low=238.52,
+                         close=239.55, volume=26552)]
+        out = MarketDataIngester._validate_bars(bars, "1m", "kite", "X")
+        assert len(out) == 1
+        assert out[0].open == 238.52  # clamped up to low
+
+    def test_close_sub_tick_above_high_is_clamped(self):
+        bars = [OHLCVBar(timestamp=datetime(2024, 6, 25, 9, 16),
+                         open=100.0, high=100.5, low=99.5,
+                         close=100.52, volume=1000)]
+        out = MarketDataIngester._validate_bars(bars, "1m", "kite", "X")
+        assert len(out) == 1
+        assert out[0].close == 100.5  # clamped down to high
+
+    def test_gross_open_violation_still_dropped(self):
+        # 200 vs a [238.52, 239.55] band — wrong scale, not a rounding blip.
+        bars = [OHLCVBar(timestamp=datetime(2024, 6, 25, 9, 15),
+                         open=200.0, high=239.55, low=238.52,
+                         close=239.0, volume=1000)]
+        out = MarketDataIngester._validate_bars(bars, "1m", "kite", "X")
+        assert out == []
+
+    def test_high_priced_bar_uses_relative_tolerance(self):
+        # 5030 open vs 5032.1 low (the second log line): 2.1 < 0.1% of 5065.
+        bars = [OHLCVBar(timestamp=datetime(2024, 6, 25, 9, 15),
+                         open=5030.0, high=5065.2, low=5032.1,
+                         close=5064.5, volume=6048)]
+        out = MarketDataIngester._validate_bars(bars, "1m", "kite", "X")
+        assert len(out) == 1
+        assert out[0].open == 5032.1
+
+
 class TestIntradayRouting:
     async def test_intraday_uses_intraday_provider(self):
         # Intraday bars must be very recent (within stale_threshold_minutes)
@@ -262,3 +310,60 @@ class TestIntegrationFallbackToDB:
         assert stored[0].open == bars[0].open
 
         await db.close()
+
+
+class TestCorruptionGuards:
+    """Inter-bar guards that drop the systematic free-provider corruption
+    (weekend-dated bars from a UTC/IST off-by-one; wrong-symbol price
+    spikes). kite (paid primary) is trusted and exempt from both."""
+
+    @staticmethod
+    def _bar(d: datetime, close: float) -> OHLCVBar:
+        return OHLCVBar(
+            timestamp=d, open=close, high=close * 1.01,
+            low=close * 0.99, close=close, volume=1000,
+        )
+
+    def test_weekend_daily_dropped_for_non_kite(self):
+        # 2026-05-23 is a Saturday, 05-24 Sunday, 05-22 Fri / 05-25 Mon.
+        bars = [self._bar(datetime(2026, 5, 22), 100),
+                self._bar(datetime(2026, 5, 23), 101),
+                self._bar(datetime(2026, 5, 25), 102)]
+        out = MarketDataIngester._validate_bars(bars, "daily", "jugaad", "X")
+        dates = {b.timestamp.date().isoformat() for b in out}
+        assert "2026-05-23" not in dates
+        assert len(out) == 2
+
+    def test_weekend_kept_for_kite(self):
+        # Real special session (Muhurat / Budget Saturday) — kite is exempt.
+        bars = [self._bar(datetime(2026, 5, 23), 100)]
+        out = MarketDataIngester._validate_bars(bars, "daily", "kite", "X")
+        assert len(out) == 1
+
+    def test_price_outlier_dropped_for_non_kite(self):
+        bars = [self._bar(datetime(2026, 5, 11), 100),
+                self._bar(datetime(2026, 5, 12), 101),
+                self._bar(datetime(2026, 5, 13), 102),
+                self._bar(datetime(2026, 5, 14), 103),
+                self._bar(datetime(2026, 5, 15), 104),
+                self._bar(datetime(2026, 5, 18), 800)]  # ~7.8x median → wrong symbol
+        out = MarketDataIngester._validate_bars(bars, "daily", "jugaad", "M&MFIN")
+        assert 800 not in [b.close for b in out]
+        assert len(out) == 5
+
+    def test_price_outlier_kept_for_kite(self):
+        bars = [self._bar(datetime(2026, 5, 11), 100),
+                self._bar(datetime(2026, 5, 12), 101),
+                self._bar(datetime(2026, 5, 13), 102),
+                self._bar(datetime(2026, 5, 14), 103),
+                self._bar(datetime(2026, 5, 15), 104),
+                self._bar(datetime(2026, 5, 18), 800)]
+        out = MarketDataIngester._validate_bars(bars, "daily", "kite", "X")
+        assert any(b.close == 800 for b in out)
+
+    def test_intraday_interval_not_weekend_filtered(self):
+        # Intraday bars legitimately span any clock time; weekend guard is
+        # daily-only.
+        bars = [self._bar(datetime(2026, 5, 23, 10, 0), 100)]
+        out = MarketDataIngester._validate_bars(bars, "5minute", "tvdatafeed", "X")
+        assert len(out) == 1

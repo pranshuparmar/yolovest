@@ -8,10 +8,89 @@ import pytest
 from yolovest.strategy.walk_forward_backtest import (
     BacktestConfig,
     BarMeta,
+    _path_aware_exit,
     _size_position,
+    backtest_by_period,
     run_walk_forward_backtest,
     sweep_thresholds,
 )
+
+
+class TestBacktestByPeriod:
+    def test_buckets_trades_by_entry_year(self):
+        # Two BUY trades in 2024 (winners), one in 2025 (loser).
+        metas = [
+            BarMeta(symbol="A", entry_close=100.0, exit_close=101.0,
+                    buy_exit=101.0, sell_exit=100.0, entry_date="2024-03-01"),
+            BarMeta(symbol="B", entry_close=100.0, exit_close=101.0,
+                    buy_exit=101.0, sell_exit=100.0, entry_date="2024-06-01"),
+            BarMeta(symbol="C", entry_close=100.0, exit_close=99.0,
+                    buy_exit=99.0, sell_exit=100.0, entry_date="2025-02-01"),
+        ]
+        preds = [2, 2, 2]  # all BUY
+        out = backtest_by_period(preds, metas, BacktestConfig())
+        assert set(out.keys()) == {"2024", "2025"}
+        assert out["2024"].total_trades == 2
+        assert out["2025"].total_trades == 1
+        assert out["2024"].net_pnl > 0   # winners
+        assert out["2025"].net_pnl < 0   # loser (incl. costs)
+
+    def test_drops_trades_without_entry_date(self):
+        metas = [
+            BarMeta(symbol="A", entry_close=100.0, exit_close=101.0,
+                    buy_exit=101.0, sell_exit=100.0, entry_date=""),
+        ]
+        out = backtest_by_period([2], metas, BacktestConfig())
+        assert out == {}
+
+
+class TestPrecomputedExits:
+    """The intraday builder stores realized per-direction exit prices
+    (buy_exit / sell_exit) instead of raw 1-min path arrays. They must
+    take precedence and match what walking the equivalent path yields."""
+
+    def test_precomputed_exits_take_precedence(self):
+        meta = BarMeta(
+            symbol="X", entry_close=100.0, exit_close=100.0,
+            target_pct=0.01, sl_pct=0.005,
+            buy_exit=101.0, sell_exit=99.5,
+        )
+        assert _path_aware_exit(100.0, 1, meta) == 101.0   # BUY → buy_exit
+        assert _path_aware_exit(100.0, -1, meta) == 99.5   # SELL → sell_exit
+
+    def test_precomputed_matches_path_walk(self):
+        entry = 100.0
+        path_highs = [100.4, 101.2, 101.5]
+        path_lows = [98.9, 99.5, 99.0]
+        path_meta = BarMeta(
+            symbol="X", entry_close=entry, exit_close=101.5,
+            target_pct=0.01, sl_pct=0.02,
+            path_highs=path_highs, path_lows=path_lows,
+        )
+        buy_via_path = _path_aware_exit(entry, 1, path_meta)
+        sell_via_path = _path_aware_exit(entry, -1, path_meta)
+        compact = BarMeta(
+            symbol="X", entry_close=entry, exit_close=101.5,
+            target_pct=0.01, sl_pct=0.02,
+            buy_exit=buy_via_path, sell_exit=sell_via_path,
+        )
+        assert _path_aware_exit(entry, 1, compact) == buy_via_path
+        assert _path_aware_exit(entry, -1, compact) == sell_via_path
+
+    def test_hold_days_overrides_path_length_for_reservation(self):
+        # Two intraday trades on consecutive days; with hold_days=1 the
+        # 1-slot cap frees overnight so the 2nd trade is not blocked.
+        cfg = BacktestConfig(max_concurrent_positions=1, initial_capital=100_000.0)
+        metas = [
+            BarMeta(symbol="A", entry_close=100.0, exit_close=101.0,
+                    target_pct=0.01, sl_pct=0.005, buy_exit=101.0,
+                    sell_exit=100.0, hold_days=1, entry_date="2026-05-18"),
+            BarMeta(symbol="B", entry_close=100.0, exit_close=101.0,
+                    target_pct=0.01, sl_pct=0.005, buy_exit=101.0,
+                    sell_exit=100.0, hold_days=1, entry_date="2026-05-19"),
+        ]
+        res = run_walk_forward_backtest([2, 2], metas, cfg)
+        assert res.total_trades == 2
 
 
 class TestPositionSizing:
@@ -217,6 +296,36 @@ class TestSweepThresholds:
         # so only the 0.80-conviction winners survive.
         assert buy_t > 0.55
         assert result.win_rate >= 0.99
+
+    def test_min_signal_rate_rejects_ultra_selective_cell(self):
+        # 8 ultra-high-conviction winners (P(BUY)=0.90) + 92 moderate
+        # mixed-outcome signals (P(BUY)=0.58). A cell at buy_t in
+        # (0.58, 0.90] fires on only the 8 winners — 8% signal rate, best
+        # Sharpe (pure winners). Without a signal-rate floor the sweep
+        # picks it: a cutoff that fires ~never live. With the floor it must
+        # pick a reachable cell that fires on the moderate mass (P=0.58),
+        # i.e. a threshold <= 0.58. This is the silent-model fix.
+        hi = [BarMeta("HI", 100.0, 100.0 + (i % 3 + 2)) for i in range(8)]  # +2..+4%
+        mod_win = [BarMeta("MW", 100.0, 102.0) for _ in range(46)]
+        mod_lose = [BarMeta("ML", 100.0, 98.0) for _ in range(46)]
+        bars = hi + mod_win + mod_lose
+        probas = [[0.05, 0.05, 0.90]] * 8 + [[0.05, 0.37, 0.58]] * 92
+        cfg = BacktestConfig(initial_capital=100_000.0, entry_slippage_pct=0.0)
+
+        buy_no, _, _ = sweep_thresholds(
+            probas, bars, cfg, min_trades=3, min_class_share=0.0,
+            min_signal_rate=0.0,
+        )
+        buy_floor, _, _ = sweep_thresholds(
+            probas, bars, cfg, min_trades=3, min_class_share=0.0,
+            min_signal_rate=0.10,  # require >=10% of samples to signal
+        )
+        # No floor → can lock onto the ultra-selective 8% cell (buy_t > 0.58).
+        assert buy_no > 0.58
+        # With the floor → forced down to a reachable cell firing on the
+        # moderate mass (P=0.58), so buy_t <= 0.58.
+        assert buy_floor <= 0.58 + 1e-9
+        assert buy_floor < buy_no
 
     def test_bounds_restrict_sweep_to_reachable_thresholds(self):
         # 40 high-conviction winners (P(BUY)=0.80, +5%) and 40 losers

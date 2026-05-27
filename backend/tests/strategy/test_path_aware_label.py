@@ -120,3 +120,59 @@ class TestPathAwareLabel:
             _bar(5, 100, 100.2, 99.8, 100),
         ]
         assert _label(bars) == 1  # HOLD
+
+
+class TestIntradayPathAwareLabel:
+    """`intraday_path_aware_label` mirrors the daily geometry but with a
+    hard same-session close-out — a barrier touched only in a later
+    session must not count toward the label."""
+
+    @staticmethod
+    def _ibar(day: int, hh: int, mm: int, h: float, lo: float) -> OHLCVBar:
+        return OHLCVBar(
+            symbol="TEST",
+            timestamp=datetime(2026, 5, 20 + day, hh, mm),
+            open=100.0, high=h, low=lo, close=100.0, volume=1_000_000,
+        )
+
+    def _ilabel(self, bars: list[OHLCVBar], lookahead: int = 6) -> int:
+        from yolovest.skills.model_retrain import intraday_path_aware_label
+        return intraday_path_aware_label(
+            bars=bars, start_idx=0, lookahead=lookahead,
+            entry=100.0, target_pct=0.006, sl_pct=0.003,
+        )
+
+    def test_buy_wins_same_session(self):
+        bars = [self._ibar(0, 9, 15, 100, 100),
+                self._ibar(0, 9, 20, 100.7, 99.9)]
+        assert self._ilabel(bars) == 2
+
+    def test_sell_wins_same_session(self):
+        bars = [self._ibar(0, 9, 15, 100, 100),
+                self._ibar(0, 9, 20, 100.1, 99.3)]
+        assert self._ilabel(bars) == 0
+
+    def test_sl_only_is_hold(self):
+        # BUY SL touched, no clean win → HOLD.
+        bars = [self._ibar(0, 9, 15, 100, 100),
+                self._ibar(0, 9, 20, 100.2, 99.6)]
+        assert self._ilabel(bars) == 1
+
+    def test_timeout_within_session_is_hold(self):
+        bars = [self._ibar(0, 9, 15, 100, 100),
+                self._ibar(0, 9, 20, 100.2, 99.8),
+                self._ibar(0, 9, 25, 100.2, 99.8)]
+        assert self._ilabel(bars) == 1
+
+    def test_cross_session_barrier_does_not_count(self):
+        # Target is only reached on the NEXT day — same-day close-out must
+        # stop the walk at the boundary and return HOLD, not BUY.
+        bars = [self._ibar(0, 9, 15, 100, 100),
+                self._ibar(0, 15, 25, 100.2, 99.8),
+                self._ibar(1, 9, 15, 101.0, 99.0)]
+        assert self._ilabel(bars) == 1
+
+    def test_ambiguous_same_bar_is_hold(self):
+        bars = [self._ibar(0, 9, 15, 100, 100),
+                self._ibar(0, 9, 20, 100.7, 99.3)]
+        assert self._ilabel(bars) == 1

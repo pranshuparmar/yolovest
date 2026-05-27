@@ -839,6 +839,8 @@ export interface DryRunSummary {
   correct: number | null;
   scored: number;
   strategy_mode: string | null;
+  as_of?: string | null;
+  model_version?: string | null;
 }
 
 export interface HoldingsResponse {
@@ -872,10 +874,18 @@ export interface ManualOrder {
   trigger_price?: number;
 }
 
+export interface DryRunSelectedModel {
+  version: string;
+  model_type: string;
+  status: string | null;
+}
+
 export interface DryRunResult {
   success: boolean;
   run_id: string;
   mode?: string;
+  as_of?: string | null;
+  selected_model?: DryRunSelectedModel | null;
   universe_size: number;
   shortlist_size: number;
   signals: DryRunSignal[];

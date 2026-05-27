@@ -285,6 +285,19 @@ def mock_db() -> AsyncMock:
     db.get_news_timeline = AsyncMock(return_value={})
     db.get_bulk_deals_timeline = AsyncMock(return_value={})
     db.get_symbol_sectors_map = AsyncMock(return_value={})
+    # Live inference-feature context (load_inference_feature_context +
+    # enrich_features). compute_live_regime's result is consumed UNGUARDED
+    # in enrich_features, so a bare AsyncMock (returns a mock, not a dict)
+    # poisons every per-symbol eval and silently zeroes the signal list.
+    # Neutral defaults mirror the production fail-open values.
+    db.compute_live_regime = AsyncMock(
+        return_value={"breadth": 0.5, "avg_return": 0.0, "sample_size": 0},
+    )
+    db.compute_live_sector_regime = AsyncMock(return_value=({}, {}))
+    db.count_recent_bulk_deals = AsyncMock(
+        return_value={"buy_count": 0, "sell_count": 0},
+    )
+    db.get_recent_delivery_pct = AsyncMock(return_value=None)
     db.get_live_metrics_for_model = AsyncMock(return_value={
         "total": 0, "scored": 0, "direction_accuracy": 0.0,
         "target_hit_rate": 0.0, "avg_pnl_pct": 0.0,

@@ -37,6 +37,30 @@ from yolovest.timezone import IST
 logger = logging.getLogger(__name__)
 
 
+# Optional feature-group → feature-key sets, for the train-time
+# feature_groups gate (config.strategy.feature_groups). Price/technical
+# features are always kept (primary source of truth); these supporting
+# groups can be excluded to train a leaner, price-primary model and verify
+# they aren't diluting the core signal.
+_FEATURE_GROUP_KEYS: dict[str, frozenset[str]] = {
+    "regime": frozenset({"universe_breadth", "universe_avg_return"}),
+    "sector": frozenset({"sector_breadth", "sector_avg_return", "relative_momentum"}),
+    "institutional": frozenset({
+        "bulk_deal_buy_5d", "bulk_deal_sell_5d", "bulk_deal_net_5d",
+        "delivery_pct_avg_5d",
+    }),
+    "news": frozenset(NEWS_FEATURE_KEYS),
+    "vix": frozenset(VIX_FEATURE_KEYS),
+    "fno": frozenset(FNO_FEATURE_KEYS),
+    "feedback": frozenset({
+        "fb_pred_accuracy", "fb_pred_target_hit", "fb_pred_avg_pnl",
+        "fb_dry_run_accuracy", "fb_dry_run_avg_move", "fb_trade_win_rate",
+        "fb_trade_avg_pnl", "fb_trade_avg_slippage", "fb_recent_loss_count",
+        "fb_has_data",
+    }),
+}
+
+
 def _decision_sharpe(
     candidate: dict[str, Any], incumbent: dict[str, Any] | None,
 ) -> tuple[float, float]:
@@ -72,6 +96,256 @@ def _decision_sharpe(
     if i_pt is None:
         i_pt = _num(inc.get("sharpe"))
     return (c_pt or 0.0), (i_pt or 0.0)
+
+
+def passes_edge_gate(
+    metrics: dict[str, Any], min_argmax_sharpe: float,
+) -> tuple[bool, str]:
+    """Honest-edge promotion gate.
+
+    A model may trade live only if its *argmax* walk-forward Sharpe — the
+    edge of its natural, untuned decisions — clears `min_argmax_sharpe`.
+    The threshold-tuned Sharpe stored as the headline metric is
+    selection-biased: a threshold sweep can find a tiny high-probability
+    tail that backtests beautifully while the model's argmax actually
+    loses money (the real failure that put a -7 argmax Sharpe intraday
+    model on a live account). Gating on `argmax_sharpe` blocks that.
+
+    Returns ``(passes, reason)``. When `argmax_sharpe` is absent — legacy
+    artifacts and the synthetic-payoff training path don't produce it —
+    the gate is skipped (``passes=True``) so honest older models aren't
+    spuriously blocked. The gate is disabled entirely when
+    `min_argmax_sharpe` is negative.
+    """
+    if min_argmax_sharpe < 0:
+        return True, "edge gate disabled (min_argmax_sharpe < 0)"
+    raw = metrics.get("argmax_sharpe")
+    if raw is None:
+        return True, "no argmax_sharpe in metrics — edge gate skipped"
+    try:
+        argmax = float(raw)
+    except (TypeError, ValueError):
+        return True, "argmax_sharpe unparseable — edge gate skipped"
+    if argmax < min_argmax_sharpe:
+        return False, (
+            f"argmax Sharpe {argmax:.2f} < required {min_argmax_sharpe:.2f}: "
+            f"the model has no honest edge — its backtest profit relies on a "
+            f"threshold-selected tail and it must not trade live"
+        )
+    return True, f"argmax Sharpe {argmax:.2f} >= {min_argmax_sharpe:.2f}"
+
+
+def intraday_path_aware_label(
+    *,
+    bars: list["OHLCVBar"],
+    start_idx: int,
+    lookahead: int,
+    entry: float,
+    target_pct: float,
+    sl_pct: float,
+) -> int:
+    """Path-aware label for an intraday (same-session) trade.
+
+    Same target-before-SL geometry as the daily ``_path_aware_label`` but
+    with a HARD same-day close-out: the forward walk stops at the session
+    boundary — the first bar whose calendar date differs from the entry
+    bar's. There is no overnight carry for MIS, so a move that only
+    materialises in a later session must not count toward the label
+    (the contamination the daily labels suffer). A trade that hits
+    neither barrier within ``lookahead`` bars OR before the session ends
+    is a no-trade → HOLD.
+
+    `entry` is the fill price (the caller passes ``bars[start_idx+1].open``
+    — the next-bar open, the earliest an intraday signal computed at
+    ``bars[start_idx].close`` can actually fill). Barriers are checked
+    from the entry bar onward.
+
+    Returns: 2 BUY, 0 SELL, 1 HOLD.
+    """
+    if start_idx + 1 >= len(bars):
+        return 1
+    session_date = bars[start_idx + 1].timestamp.date()
+
+    buy_target = entry * (1 + target_pct)
+    buy_sl = entry * (1 - sl_pct)
+    sell_target = entry * (1 - target_pct)
+    sell_sl = entry * (1 + sl_pct)
+
+    buy_outcome: str | None = None
+    sell_outcome: str | None = None
+    buy_win_bar: int | None = None
+    sell_win_bar: int | None = None
+
+    end_idx = min(start_idx + lookahead, len(bars) - 1)
+    for k in range(start_idx + 1, end_idx + 1):
+        bar = bars[k]
+        # Hard same-session close-out — never look across the day boundary.
+        if bar.timestamp.date() != session_date:
+            break
+        hi, lo = bar.high, bar.low
+
+        if buy_outcome is None:
+            target_now = hi >= buy_target
+            sl_now = lo <= buy_sl
+            if target_now and sl_now:
+                buy_outcome = "ambiguous"
+            elif target_now:
+                buy_outcome = "win"
+                buy_win_bar = k
+            elif sl_now:
+                buy_outcome = "loss"
+
+        if sell_outcome is None:
+            target_now = lo <= sell_target
+            sl_now = hi >= sell_sl
+            if target_now and sl_now:
+                sell_outcome = "ambiguous"
+            elif target_now:
+                sell_outcome = "win"
+                sell_win_bar = k
+            elif sl_now:
+                sell_outcome = "loss"
+
+        if buy_outcome is not None and sell_outcome is not None:
+            break
+
+    buy_won = buy_outcome == "win"
+    sell_won = sell_outcome == "win"
+
+    if buy_won and sell_won:
+        # First-winner disambiguation; same-bar cross-direction → HOLD.
+        if buy_win_bar is not None and sell_win_bar is not None:
+            if buy_win_bar < sell_win_bar:
+                return 2
+            if sell_win_bar < buy_win_bar:
+                return 0
+        return 1
+    if buy_won:
+        return 2
+    if sell_won:
+        return 0
+    return 1
+
+
+def intraday_triple_barrier_label(
+    *,
+    entry: float,
+    entry_time: "datetime",
+    horizon_minutes: int,
+    target_pct: float,
+    sl_pct: float,
+    minute_bars: list["OHLCVBar"],
+    start_idx: int,
+) -> int:
+    """Triple-barrier label whose target-before-SL ordering is resolved on
+    the 1-MINUTE path.
+
+    The trade decision and fill are at the 5-min scale — the caller passes
+    ``entry`` (the entry 5-min bar's open, the earliest fillable price) and
+    ``entry_time`` (that bar's start). But which barrier triggers first is
+    walked bar-by-bar on the 1-min series, so the intra-5-min ambiguity
+    ("did the high or the low print first inside the bar?") is decided by
+    real finer-grained data instead of collapsing to HOLD the way a
+    5-min-only walk must (see ``intraday_path_aware_label``).
+
+    Discipline carried over:
+      - **Hard same-session close-out**: the walk stops at the first 1-min
+        bar whose date differs from the entry — no overnight carry (MIS).
+      - **Clock-minute horizon** (`horizon_minutes`): a bar at/after
+        ``entry_time + horizon`` ends the walk. Bar count differs between
+        1-min and 5-min, so the horizon is expressed in minutes, not bars.
+      - **Tie → SL**: when a single 1-min bar still straddles both a
+        direction's target and stop, it counts as the stop (conservative;
+        mirrors ``walk_forward_backtest`` so the label can't be gamed).
+      - **First-winner disambiguation**: if both BUY and SELL would have
+        won, the side that wins on the earlier 1-min bar takes the label;
+        a genuine same-bar cross-direction tie is HOLD.
+
+    ``start_idx`` is the index of the first 1-min bar at/after
+    ``entry_time``. Returns: 2 BUY, 0 SELL, 1 HOLD.
+    """
+    from datetime import timedelta
+
+    if start_idx >= len(minute_bars):
+        return 1
+    session_date = entry_time.date()
+    deadline = entry_time + timedelta(minutes=horizon_minutes)
+
+    buy_target = entry * (1 + target_pct)
+    buy_sl = entry * (1 - sl_pct)
+    sell_target = entry * (1 - target_pct)
+    sell_sl = entry * (1 + sl_pct)
+
+    buy_outcome: str | None = None
+    sell_outcome: str | None = None
+    buy_win_i: int | None = None
+    sell_win_i: int | None = None
+
+    for j in range(start_idx, len(minute_bars)):
+        b = minute_bars[j]
+        if b.timestamp.date() != session_date:
+            break
+        if b.timestamp >= deadline:
+            break
+        hi, lo = b.high, b.low
+
+        if buy_outcome is None:
+            target_now = hi >= buy_target
+            sl_now = lo <= buy_sl
+            if target_now and sl_now:
+                buy_outcome = "loss"  # tie → SL
+            elif target_now:
+                buy_outcome = "win"
+                buy_win_i = j
+            elif sl_now:
+                buy_outcome = "loss"
+
+        if sell_outcome is None:
+            target_now = lo <= sell_target
+            sl_now = hi >= sell_sl
+            if target_now and sl_now:
+                sell_outcome = "loss"
+            elif target_now:
+                sell_outcome = "win"
+                sell_win_i = j
+            elif sl_now:
+                sell_outcome = "loss"
+
+        if buy_outcome is not None and sell_outcome is not None:
+            break
+
+    buy_won = buy_outcome == "win"
+    sell_won = sell_outcome == "win"
+    if buy_won and sell_won:
+        if buy_win_i is not None and sell_win_i is not None:
+            if buy_win_i < sell_win_i:
+                return 2
+            if sell_win_i < buy_win_i:
+                return 0
+        return 1
+    if buy_won:
+        return 2
+    if sell_won:
+        return 0
+    return 1
+
+
+# Intraday MIS positions are squared off by session end (broker auto-squares
+# at 15:30), so a 5-min entry's label/backtest path runs to the session close,
+# not a fixed bar count. The full NSE session is 375 minutes (09:15-15:30);
+# passing it as the horizon makes the same-session boundary in
+# intraday_triple_barrier_label the binding stop = "to session close".
+_INTRADAY_TO_CLOSE_HORIZON_MIN = 375
+
+# 1-min bars for the whole intraday universe at once would OOM a small host,
+# so the intraday matrix is built in symbol chunks of this size.
+_INTRADAY_SYMBOL_CHUNK = 15
+
+# Sample a 5-min decision bar every 15 minutes (every 3rd bar), matching the
+# live heartbeat cadence. Avoids training on heavily overlapping 5-min windows
+# whose autocorrelated labels both inflate the walk-forward Sharpe and bloat
+# the feature matrix (~3x fewer samples).
+_INTRADAY_DECISION_STRIDE = 3
 
 
 class ModelRetrainSkill(SkillBase):
@@ -113,6 +387,35 @@ class ModelRetrainSkill(SkillBase):
             row.get("symbol", "") for row in training_data.get("bars", [])
             if row.get("symbol")
         })
+
+        # Training-data coverage summary — what history the models will
+        # actually learn from. Timestamps are ISO strings so min/max are
+        # lexical. Also report the thinnest symbol so survivorship / short
+        # listings are visible.
+        _all_bars = training_data.get("bars", [])
+        if _all_bars:
+            _ts = [r["timestamp"] for r in _all_bars if r.get("timestamp")]
+            _lo, _hi = (min(_ts), max(_ts)) if _ts else ("?", "?")
+            _per_sym: dict[str, int] = {}
+            for r in _all_bars:
+                s = r.get("symbol")
+                if s:
+                    _per_sym[s] = _per_sym.get(s, 0) + 1
+            _counts = sorted(_per_sym.values())
+            _median = _counts[len(_counts) // 2] if _counts else 0
+            _yrs = (max(_counts) / 252.0) if _counts else 0.0
+            logger.info(
+                "Training data: %d daily bars | %d symbols | %s -> %s "
+                "(deepest ~%.1f yrs) | bars/symbol min=%d median=%d max=%d | "
+                "max_training_days=%d, min_training_samples=%d",
+                len(_all_bars), len(unique_symbols), str(_lo)[:10], str(_hi)[:10],
+                _yrs, _counts[0] if _counts else 0, _median,
+                _counts[-1] if _counts else 0,
+                cfg.max_training_days, min_samples,
+            )
+        else:
+            logger.warning("Training data: 0 bars loaded — nothing to train on")
+
         try:
             sector_map = await self.ctx.db.get_symbol_sectors_map(unique_symbols)
         except Exception:
@@ -230,12 +533,18 @@ class ModelRetrainSkill(SkillBase):
         results: dict[str, Any] = {}
         shadow_deployed = []
 
-        # Lookahead periods: intraday uses 1-bar, swing uses 10-bar
-        # returns. 10 bars (~2 weeks) gives genuine swing setups
-        # enough room for the 1.5×ATR target to develop without the
-        # 0.75×ATR SL noise-tripping on the same window — at 5 bars
-        # the SL fires constantly and the labeler classes most
-        # outcomes as HOLD even after the first-winner disambiguation.
+        # Swing lookahead: 10 daily bars (~2 weeks) gives genuine swing
+        # setups enough room for the 1.5×ATR target to develop without the
+        # 0.75×ATR SL noise-tripping on the same window — at 5 bars the SL
+        # fires constantly and the labeler classes most outcomes as HOLD
+        # even after the first-winner disambiguation.
+        #
+        # The intraday model doesn't use a bar-lookahead for its LABEL (it
+        # walks the 1-min path to the session close — see
+        # _build_intraday_matrix), but it still needs a lookahead value as
+        # the CV purge gap: its labels resolve within the entry day, so 1
+        # trading day is the right gap to drop train rows whose label window
+        # overlaps the test fold (ml_signal converts it to calendar days).
         lookahead_map = {"intraday": 1, "swing": 10}
 
         # Match each model's path-aware label geometry to the holding
@@ -256,18 +565,76 @@ class ModelRetrainSkill(SkillBase):
         # leaving _gc unbound for the post-loop collect() below.
         import gc as _gc
 
+        # Log the exact feature-group configuration this retrain will use,
+        # so the artifact's feature set is never a mystery. Price/technical
+        # features are always trained on; these support groups are toggled
+        # via config.strategy.feature_groups.
+        _fg = getattr(self.ctx.config.strategy, "feature_groups", None)
+        if _fg is not None:
+            _fg_state = " ".join(
+                f"{g}={'ON' if getattr(_fg, g, True) else 'OFF'}"
+                for g in _FEATURE_GROUP_KEYS
+            )
+            logger.info(
+                "Retrain feature groups (price/technical always ON): %s", _fg_state,
+            )
+
         for model_type in ("intraday", "swing"):
             # Build feature matrix with model-specific labeling + feedback features
-            lookahead = lookahead_map[model_type]
             target_mult, sl_mult = atr_mult_map[model_type]
-            X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
-                training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
-                target_atr_mult=target_mult, sl_atr_mult=sl_mult,
-                sector_map=sector_map,
-                bulk_deal_lookup=bulk_deal_lookup,
-                news_lookup=news_lookup,
-                vix_timeline=vix_timeline,
-                fno_lookup=fno_lookup,
+            # Bound for BOTH branches: intraday uses it only as the CV purge
+            # gap (its label walks to session close, not a bar count); swing
+            # uses it as both the label lookahead and the purge gap.
+            lookahead = lookahead_map[model_type]
+            if model_type == "intraday":
+                # The intraday model trains on 5-min decision bars with 1-min
+                # triple-barrier label resolution, walked to the session close
+                # (MIS auto-squares EOD). The old daily-bar "intraday" model
+                # (1-day lookahead) was really a next-day predictor with no
+                # real intraday edge — see docs/intraday-model-design.md.
+                logger.info(
+                    "=== Retraining intraday (5-min) model: 1-min path labels, "
+                    "to-session-close horizon, target=%.2f×ATR, SL=%.2f×ATR ===",
+                    target_mult, sl_mult,
+                )
+                X, y, feat_names, sample_weights, bars_meta = (
+                    await self._build_intraday_matrix(
+                        training_data,
+                        horizon_minutes=_INTRADAY_TO_CLOSE_HORIZON_MIN,
+                        target_atr_mult=target_mult, sl_atr_mult=sl_mult,
+                        feedback_data=feedback_data, sector_map=sector_map,
+                        bulk_deal_lookup=bulk_deal_lookup, news_lookup=news_lookup,
+                        vix_timeline=vix_timeline, fno_lookup=fno_lookup,
+                    )
+                )
+            else:
+                logger.info(
+                    "=== Retraining %s model: label geometry lookahead=%d bars, "
+                    "target=%.2f×ATR, SL=%.2f×ATR ===",
+                    model_type, lookahead, target_mult, sl_mult,
+                )
+                X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
+                    training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
+                    target_atr_mult=target_mult, sl_atr_mult=sl_mult,
+                    sector_map=sector_map,
+                    bulk_deal_lookup=bulk_deal_lookup,
+                    news_lookup=news_lookup,
+                    vix_timeline=vix_timeline,
+                    fno_lookup=fno_lookup,
+                )
+            # Spell out exactly what this model trained on: total feature
+            # count + which support groups actually landed in the matrix
+            # (so a disabled/empty group is visibly absent).
+            _present = {
+                g for g, keys in _FEATURE_GROUP_KEYS.items()
+                if any(k in feat_names for k in keys)
+            }
+            _absent = [g for g in _FEATURE_GROUP_KEYS if g not in _present]
+            logger.info(
+                "%s training matrix: %d features | support groups present: %s | "
+                "absent: %s",
+                model_type, len(feat_names),
+                sorted(_present) or "none", _absent or "none",
             )
             if len(y) < min_samples:
                 logger.warning(
@@ -399,23 +766,25 @@ class ModelRetrainSkill(SkillBase):
                         "HOLD": round(class_weights.get(1, 0.0), 4),
                         "SELL": round(class_weights.get(0, 0.0), 4),
                     }
-                # Post-train class check: run the fresh model on the
-                # most recent N training rows and verify all three
-                # classes are reachable. Catches calibration-collapse
-                # or feature-dominance cases where the label balance
-                # was fine but the model still never picks a class.
+                # Post-train guard: run the fresh model on the most recent
+                # N training rows through the FULL PRODUCTION PATH
+                # (calibration + tuned thresholds) — not the raw booster
+                # argmax — and verify it still produces a non-trivial
+                # non-HOLD signal rate. The raw-argmax check passes even
+                # when the deployed model fires ~zero signals live (the
+                # silent-model failure: thresholds unreachable after
+                # calibration). This catches that end-to-end.
                 if self.ctx.config.strategy.post_train_class_check_enabled:
                     try:
-                        import numpy as np  # noqa: PLC0415
-
-                        booster = self.ctx.ml._get_model(model_type)  # noqa: SLF001
-                        # Sample the freshest N rows — that's what the
-                        # production model will see first in live use.
+                        # Sample the freshest N rows — what the production
+                        # model sees first in live use.
                         n_check = min(1000, len(X))
-                        X_check = np.asarray(X[-n_check:])
-                        preds = booster.predict(X_check)
+                        X_check = X[-n_check:]
+                        prod_labels = self.ctx.ml.predict_labels_batch(
+                            X_check, model_type,
+                        )
                         pred_counts = {0: 0, 1: 0, 2: 0}
-                        for p in preds:
+                        for p in prod_labels:
                             pred_counts[int(p)] = pred_counts.get(int(p), 0) + 1
                         # Map: 0=SELL, 1=HOLD, 2=BUY.
                         pred_dist = {
@@ -423,22 +792,30 @@ class ModelRetrainSkill(SkillBase):
                             "HOLD": pred_counts.get(1, 0),
                             "BUY": pred_counts.get(2, 0),
                         }
+                        n_eval = len(prod_labels) or 1
+                        non_hold = pred_dist["BUY"] + pred_dist["SELL"]
+                        signal_rate = non_hold / n_eval
                         logger.info(
-                            "Post-train prediction distribution for %s "
-                            "(n=%d): BUY=%d, HOLD=%d, SELL=%d",
+                            "Post-train production-path distribution for %s "
+                            "(n=%d): BUY=%d, HOLD=%d, SELL=%d (signal_rate=%.2f%%)",
                             model_type, n_check,
                             pred_dist["BUY"], pred_dist["HOLD"], pred_dist["SELL"],
+                            signal_rate * 100,
                         )
                         metrics["post_train_pred_dist"] = pred_dist
+                        metrics["post_train_signal_rate"] = round(signal_rate, 4)
 
-                        missing = [k for k, v in pred_dist.items() if v == 0]
-                        if missing:
+                        min_rate = self.ctx.config.strategy.post_train_min_signal_rate
+                        if min_rate > 0 and signal_rate < min_rate:
                             msg = (
-                                f"Refusing to save {model_type}: trained "
-                                f"booster never predicts class(es) "
-                                f"{', '.join(missing)} on the most recent "
-                                f"{n_check} samples. Production would see "
-                                f"zero of those signals."
+                                f"Refusing to save {model_type}: through the "
+                                f"production path (calibration + tuned "
+                                f"thresholds) it signals on only "
+                                f"{signal_rate * 100:.2f}% of the most recent "
+                                f"{n_check} samples (< {min_rate * 100:.2f}% "
+                                f"floor) — it would be near-silent live. "
+                                f"Thresholds are likely unreachable; check "
+                                f"the tuned cutoffs / tuned_min_signal_rate."
                             )
                             logger.warning(msg)
                             try:
@@ -454,6 +831,7 @@ class ModelRetrainSkill(SkillBase):
                             results[model_type] = {
                                 "error": msg,
                                 "post_train_pred_dist": pred_dist,
+                                "post_train_signal_rate": round(signal_rate, 4),
                                 "label_pct": label_pct,
                             }
                             continue
@@ -461,7 +839,7 @@ class ModelRetrainSkill(SkillBase):
                         # Inference inside the guard shouldn't crash
                         # the retrain — fall through and save the model.
                         logger.debug(
-                            "Post-train class check failed; saving anyway",
+                            "Post-train signal-rate check failed; saving anyway",
                             exc_info=True,
                         )
 
@@ -632,6 +1010,26 @@ class ModelRetrainSkill(SkillBase):
         sample_weights: list[float] = []
         feature_names: list[str] = []
         feature_names_set: set[str] = set()
+
+        # Train-time feature-group gate. Price/technical features always
+        # stay; disabled support groups (config.strategy.feature_groups)
+        # are excluded from the feature matrix so the model trains
+        # price-primary. Folded into MODEL_FEATURE_EXCLUSIONS so the filter
+        # below is a single check.
+        _fg = getattr(self.ctx.config.strategy, "feature_groups", None)
+        _disabled_keys: set[str] = set()
+        if _fg is not None:
+            for _group, _keys in _FEATURE_GROUP_KEYS.items():
+                if not getattr(_fg, _group, True):
+                    _disabled_keys |= set(_keys)
+        excluded_keys = set(MODEL_FEATURE_EXCLUSIONS) | _disabled_keys
+        if _disabled_keys:
+            logger.info(
+                "Feature groups DISABLED for training: %s — excluding %d "
+                "support features (price/technical core retained)",
+                [g for g in _FEATURE_GROUP_KEYS if not getattr(_fg, g, True)],
+                len(_disabled_keys),
+            )
         # Parallel to X/y — used by the walk-forward backtest to
         # simulate real PnL instead of the legacy +1%/-0.5% fiction.
         bars_meta: list[dict[str, Any]] = []
@@ -894,7 +1292,7 @@ class ModelRetrainSkill(SkillBase):
                 # the features dict for the inference layer's entry-price
                 # lookups but the trained model never sees them.
                 for k in features:
-                    if k in MODEL_FEATURE_EXCLUSIONS:
+                    if k in excluded_keys:
                         continue
                     if k not in feature_names_set:
                         # With window_size = 200 every iteration should
@@ -982,6 +1380,533 @@ class ModelRetrainSkill(SkillBase):
             bars_meta = [bars_meta[i] for i in order]
 
         return X, y, feature_names, sample_weights, bars_meta
+
+    def _prepare_intraday_training_data(
+        self,
+        intraday_data: dict[str, Any],
+        daily_data: dict[str, Any],
+        *,
+        horizon_minutes: int,
+        target_atr_mult: float,
+        sl_atr_mult: float,
+        feedback_data: dict[str, Any] | None = None,
+        sector_map: dict[str, str] | None = None,
+        bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
+        news_lookup: dict[str, list[tuple[str, str]]] | None = None,
+        vix_timeline: list[tuple[str, float]] | None = None,
+        fno_lookup: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> tuple[
+        list[list[float]], list[int], list[str], list[float], list[dict[str, Any]]
+    ]:
+        """Build the 5-min intraday training matrix.
+
+        Two timeframes, two jobs:
+          - **Features + entry** are computed on the 5-min *decision* bars
+            (`intraday_data["decision_bars"]`). Entry is the next 5-min
+            bar's open (the earliest fillable price), same rule as daily.
+          - **Labels** are resolved on the 1-min *path* bars
+            (`intraday_data["minute_bars"]`) via
+            ``intraday_triple_barrier_label`` — so target-before-SL ordering
+            inside each 5-min bar is decided by real finer data, not HOLD.
+
+        Daily-broadcast features (universe/sector regime, VIX, F&O, bulk
+        deals, delivery%) are merged **as-of the prior session** — the most
+        recent daily date strictly before the bar's date — because at, say,
+        09:35 the same day's EOD aggregates don't exist yet. Using them
+        would be lookahead leakage that inflates the offline Sharpe and
+        evaporates live. News stays timestamp-windowed (leak-free as-of the
+        actual intraday moment), and minutes_since_open / day_phase finally
+        vary intra-session. ``daily_data`` supplies the prior-session
+        context; ``intraday_data`` supplies the bars we actually label.
+
+        Returns (X, y, feature_names, sample_weights, bars_meta), globally
+        sorted by entry_date so the walk-forward CV splits by time.
+        """
+        import bisect
+
+        indicator_cfg = IndicatorConfig(
+            rsi=self.ctx.config.strategy.indicators.rsi,
+            macd=self.ctx.config.strategy.indicators.macd,
+            bollinger_bands=self.ctx.config.strategy.indicators.bollinger_bands,
+            vwap=self.ctx.config.strategy.indicators.vwap,
+            atr=self.ctx.config.strategy.indicators.atr,
+            volume_profile=self.ctx.config.strategy.indicators.volume_profile,
+            obv=self.ctx.config.strategy.indicators.obv,
+            supertrend=self.ctx.config.strategy.indicators.supertrend,
+            ema_periods=self.ctx.config.strategy.ema_periods,
+        )
+        window_size = 200
+
+        _fg = getattr(self.ctx.config.strategy, "feature_groups", None)
+        _disabled_keys: set[str] = set()
+        if _fg is not None:
+            for _group, _keys in _FEATURE_GROUP_KEYS.items():
+                if not getattr(_fg, _group, True):
+                    _disabled_keys |= set(_keys)
+        excluded_keys = set(MODEL_FEATURE_EXCLUSIONS) | _disabled_keys
+
+        sector_map = sector_map or {}
+        bulk_deal_lookup = bulk_deal_lookup or {}
+        news_lookup = news_lookup or {}
+        fno_lookup = fno_lookup or {}
+
+        # ---- Prior-session daily context (built from daily bars) ----
+        daily_rows = daily_data.get("bars", [])
+        daily_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for r in daily_rows:
+            daily_by_symbol.setdefault(r["symbol"], []).append(r)
+        regime_by_ts = self._compute_regime_index(daily_by_symbol)
+        sector_regime, symbol_returns = self._compute_sector_index(
+            daily_by_symbol, sector_map,
+        )
+        # Sorted universe of daily dates for "prior session" resolution.
+        daily_dates_sorted = sorted(regime_by_ts.keys())
+        # Per-symbol daily close + delivery, keyed by date.
+        daily_close_by_sym: dict[str, dict[str, float]] = {}
+        daily_delivery_by_sym: dict[str, dict[str, float]] = {}
+        for r in daily_rows:
+            s = r["symbol"]
+            d = str(r["timestamp"])[:10]
+            try:
+                daily_close_by_sym.setdefault(s, {})[d] = float(r["close"])
+            except (TypeError, ValueError):
+                pass
+            dp = r.get("delivery_pct")
+            if dp is not None:
+                try:
+                    daily_delivery_by_sym.setdefault(s, {})[d] = float(dp)
+                except (TypeError, ValueError):
+                    pass
+
+        def _prior_session(date_str: str) -> str | None:
+            idx = bisect.bisect_left(daily_dates_sorted, date_str)
+            return daily_dates_sorted[idx - 1] if idx > 0 else None
+
+        def _window_dates(end_date: str, n: int) -> list[str]:
+            """Up to `n` daily dates ending at (and including) end_date."""
+            hi = bisect.bisect_right(daily_dates_sorted, end_date)
+            return daily_dates_sorted[max(0, hi - n):hi]
+
+        # Bulk-deal date index + parsed news timeline (mirror daily path).
+        bulk_dates_by_sym: dict[str, list[str]] = {}
+        for (sym_key, date_key) in bulk_deal_lookup.keys():
+            bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
+        for v in bulk_dates_by_sym.values():
+            v.sort()
+        news_parsed_by_sym: dict[str, list[tuple[str, datetime]]] = {}
+        for sym_key, entries in news_lookup.items():
+            parsed: list[tuple[str, datetime]] = []
+            for headline, published_at in entries:
+                try:
+                    dt = datetime.fromisoformat(published_at)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=IST)
+                    parsed.append((headline, dt))
+                except (ValueError, TypeError):
+                    continue
+            if parsed:
+                news_parsed_by_sym[sym_key] = parsed
+
+        def _merge_daily_broadcast(features: dict[str, Any], sym: str, bar_ts: datetime) -> None:
+            """Merge prior-session daily features into `features` in place."""
+            prev = _prior_session(bar_ts.strftime("%Y-%m-%d"))
+
+            reg = regime_by_ts.get(prev) if prev else None
+            features["universe_breadth"] = reg["breadth"] if reg else 0.5
+            features["universe_avg_return"] = reg["avg_return"] if reg else 0.0
+
+            sec = sector_map.get(sym)
+            sec_stats = sector_regime.get((sec, prev)) if (sec and prev) else None
+            stock_ret = symbol_returns.get((sym, prev)) if prev else None
+            if sec_stats and stock_ret is not None:
+                features["sector_breadth"] = sec_stats["breadth"]
+                features["sector_avg_return"] = sec_stats["avg_return"]
+                features["relative_momentum"] = stock_ret - sec_stats["avg_return"]
+            else:
+                features["sector_breadth"] = 0.5
+                features["sector_avg_return"] = 0.0
+                features["relative_momentum"] = 0.0
+
+            bd_buy = bd_sell = 0
+            if prev:
+                win = _window_dates(prev, 5)
+                win_lo = win[0] if win else prev
+                for d in bulk_dates_by_sym.get(sym, []):
+                    if d > prev:
+                        break
+                    if d >= win_lo:
+                        counts = bulk_deal_lookup.get((sym, d), {})
+                        bd_buy += counts.get("buy", 0)
+                        bd_sell += counts.get("sell", 0)
+            features["bulk_deal_buy_5d"] = float(bd_buy)
+            features["bulk_deal_sell_5d"] = float(bd_sell)
+            features["bulk_deal_net_5d"] = float(bd_buy - bd_sell)
+
+            deliveries: list[float] = []
+            if prev:
+                sym_deliv = daily_delivery_by_sym.get(sym, {})
+                for d in _window_dates(prev, 5):
+                    if d in sym_deliv:
+                        deliveries.append(sym_deliv[d])
+            features["delivery_pct_avg_5d"] = (
+                sum(deliveries) / len(deliveries) if deliveries else 0.0
+            )
+
+            news_ts = bar_ts if bar_ts.tzinfo else bar_ts.replace(tzinfo=IST)
+            sym_news = news_parsed_by_sym.get(sym)
+            features.update(
+                compute_news_features(sym_news, news_ts) if sym_news
+                else {k: 0.0 for k in NEWS_FEATURE_KEYS}
+            )
+
+            features.update(
+                compute_vix_features(vix_timeline, prev) if (vix_timeline and prev)
+                else {k: 0.0 for k in VIX_FEATURE_KEYS}
+            )
+
+            sym_fno = fno_lookup.get(sym)
+            if sym_fno and prev:
+                closes = daily_close_by_sym.get(sym, {})
+                win = _window_dates(prev, 2)
+                prior_c = closes.get(win[0]) if len(win) >= 2 else None
+                features.update(compute_fno_features(
+                    sym_fno, prev,
+                    prior_stock_close=prior_c,
+                    current_stock_close=closes.get(prev),
+                ))
+            else:
+                features.update({k: 0.0 for k in FNO_FEATURE_KEYS})
+
+        # ---- Group 5-min decision bars + index 1-min path bars per symbol ----
+        # Normalize every timestamp to naive IST wall-clock (mirrors
+        # data/db._canonical_ohlcv_ts) and dedupe per instant. Legacy rows
+        # predating that canonicaliser left the same 5-min bar stored twice —
+        # once tz-aware ('...+05:30', old kite) and once naive (old fallback
+        # provider) — which (a) doubles a session to ~150 bars and corrupts
+        # the 200-bar feature window's time span, and (b) would raise
+        # TypeError when an aware decision bar is bisected against the naive
+        # 1-min path. Collapsing to one naive bar per instant fixes both.
+        def _norm_bars(rows: Any) -> list[OHLCVBar]:
+            by_ts: dict[datetime, OHLCVBar] = {}
+            for r in rows:
+                bar = OHLCVBar(
+                    timestamp=r["timestamp"], open=r["open"], high=r["high"],
+                    low=r["low"], close=r["close"], volume=r["volume"],
+                )
+                ts = bar.timestamp
+                if ts.tzinfo is not None:
+                    ts = ts.astimezone(IST).replace(tzinfo=None)
+                    bar = bar.model_copy(update={"timestamp": ts})
+                by_ts.setdefault(ts, bar)  # keep first; OHLC of an instant's dupes match
+            return [by_ts[k] for k in sorted(by_ts)]
+
+        decision_by_sym: dict[str, list[OHLCVBar]] = {}
+        dec_rows_by_sym: dict[str, list[Any]] = {}
+        for r in intraday_data.get("decision_bars", []):
+            dec_rows_by_sym.setdefault(r["symbol"], []).append(r)
+        for sym, rows in dec_rows_by_sym.items():
+            decision_by_sym[sym] = _norm_bars(rows)
+        minute_by_sym: dict[str, list[OHLCVBar]] = {}
+        minute_ts_by_sym: dict[str, list[datetime]] = {}
+        for sym, rows in intraday_data.get("minute_bars", {}).items():
+            mbars = _norm_bars(rows)
+            minute_by_sym[sym] = mbars
+            minute_ts_by_sym[sym] = [b.timestamp for b in mbars]
+
+        X: list[list[float]] = []
+        y: list[int] = []
+        sample_weights: list[float] = []
+        bars_meta: list[dict[str, Any]] = []
+        feature_names: list[str] = []
+        feature_names_set: set[str] = set()
+
+        feedback_data = feedback_data or {}
+        feedback_lookback_days = int(
+            self.ctx.config.strategy.feedback.lookback_days or 60
+        )
+
+        # Only sample entries before the intraday cutoff — the live engine
+        # opens no new MIS positions after it, and near-close entries have
+        # almost no runway to target under the to-session-close horizon.
+        cutoff_str = (
+            getattr(self.ctx.config.market_hours, "intraday_cutoff", "14:30")
+            or "14:30"
+        )
+        try:
+            cutoff_time = datetime.strptime(cutoff_str, "%H:%M").time()
+        except (ValueError, TypeError):
+            cutoff_time = datetime.strptime("14:30", "%H:%M").time()
+
+        for sym, bars in decision_by_sym.items():
+            if len(bars) < window_size + 2:
+                continue
+
+            symbol_has_recent_failure = False
+            if sym in feedback_data:
+                fb = feedback_data[sym]
+                if min(fb.get("pred_accuracy", 0.5), fb.get("dry_run_accuracy", 0.5)) < 0.5:
+                    symbol_has_recent_failure = True
+
+            mbars = minute_by_sym.get(sym, [])
+            mts = minute_ts_by_sym.get(sym, [])
+
+            # Feature at i, fill at i+1 open, label on the 1-min path.
+            # Stride = 15-min cadence (every 3rd 5-min bar).
+            for i in range(window_size, len(bars) - 1, _INTRADAY_DECISION_STRIDE):
+                # Skip decision bars at/after the intraday cutoff (IST clock).
+                dts = bars[i].timestamp
+                t_local = (
+                    dts.astimezone(IST).time() if dts.tzinfo else dts.time()
+                )
+                if t_local >= cutoff_time:
+                    continue
+
+                window = bars[i - window_size : i + 1]
+                features = compute_features(window, indicator_cfg)
+                if not features:
+                    continue
+
+                if feedback_data:
+                    merge_feedback_features(features, sym, feedback_data)
+                _merge_daily_broadcast(features, sym, bars[i].timestamp)
+
+                entry_bar = bars[i + 1]
+                next_open = entry_bar.open
+                atr_pct = features.get("atr_pct") or 0.0
+                if next_open <= 0 or atr_pct <= 0 or not mbars:
+                    label = 1
+                    m_start = len(mbars)
+                else:
+                    m_start = bisect.bisect_left(mts, entry_bar.timestamp)
+                    label = intraday_triple_barrier_label(
+                        entry=next_open,
+                        entry_time=entry_bar.timestamp,
+                        horizon_minutes=horizon_minutes,
+                        target_pct=atr_pct * target_atr_mult,
+                        sl_pct=atr_pct * sl_atr_mult,
+                        minute_bars=mbars,
+                        start_idx=m_start,
+                    )
+
+                for k in features:
+                    if k in excluded_keys:
+                        continue
+                    if k not in feature_names_set:
+                        if X:
+                            logger.warning(
+                                "intraday-retrain: feature %s appeared late at "
+                                "sample %d for %s — backfilling 0.0 into %d prior "
+                                "rows.", k, len(X), sym, len(X),
+                            )
+                        feature_names.append(k)
+                        feature_names_set.add(k)
+                        for existing in X:
+                            existing.append(0.0)
+
+                bar_weight = 1.0
+                if symbol_has_recent_failure:
+                    try:
+                        age_days = (bars[-1].timestamp - bars[i].timestamp).days
+                        if 0 <= age_days <= feedback_lookback_days:
+                            bar_weight = self.ctx.config.strategy.feedback.sample_weight_boost
+                    except Exception:
+                        pass
+
+                # Precompute the realized exit per direction on the 1-min
+                # path (same tie→SL ordering as walk_forward's _path_aware_exit)
+                # instead of storing the raw path. At the to-session-close
+                # horizon the path is hundreds of 1-min bars; keeping it per
+                # sample × millions of samples would OOM. Two scalars carry
+                # all the information the backtest's exit walk would extract.
+                target_pct = atr_pct * target_atr_mult
+                sl_pct = atr_pct * sl_atr_mult
+                buy_target = next_open * (1 + target_pct)
+                buy_sl = next_open * (1 - sl_pct)
+                sell_target = next_open * (1 - target_pct)
+                sell_sl = next_open * (1 + sl_pct)
+                buy_exit: float | None = None
+                sell_exit: float | None = None
+                flat_exit = next_open
+                if mbars and next_open > 0:
+                    deadline = entry_bar.timestamp + timedelta(minutes=horizon_minutes)
+                    session_date = entry_bar.timestamp.date()
+                    for j in range(m_start, len(mbars)):
+                        mb = mbars[j]
+                        if mb.timestamp.date() != session_date or mb.timestamp >= deadline:
+                            break
+                        flat_exit = mb.close
+                        hi, lo = mb.high, mb.low
+                        if buy_exit is None:
+                            ht, hs = hi >= buy_target, lo <= buy_sl
+                            if ht and hs:
+                                buy_exit = buy_sl  # tie → SL
+                            elif ht:
+                                buy_exit = buy_target
+                            elif hs:
+                                buy_exit = buy_sl
+                        if sell_exit is None:
+                            ht, hs = lo <= sell_target, hi >= sell_sl
+                            if ht and hs:
+                                sell_exit = sell_sl
+                            elif ht:
+                                sell_exit = sell_target
+                            elif hs:
+                                sell_exit = sell_sl
+                        if buy_exit is not None and sell_exit is not None:
+                            break
+                # Untriggered directions exit flat at the last in-window close.
+                if buy_exit is None:
+                    buy_exit = flat_exit
+                if sell_exit is None:
+                    sell_exit = flat_exit
+
+                X.append([features.get(k, 0.0) for k in feature_names])
+                y.append(label)
+                sample_weights.append(bar_weight)
+                bars_meta.append({
+                    "symbol": sym,
+                    "entry_close": float(next_open),
+                    "exit_close": float(flat_exit),
+                    "buy_exit": float(buy_exit),
+                    "sell_exit": float(sell_exit),
+                    "hold_days": 1,  # MIS closes same session
+                    "target_pct": float(target_pct),
+                    "sl_pct": float(sl_pct),
+                    "entry_date": entry_bar.timestamp.strftime("%Y-%m-%d"),
+                })
+
+        if bars_meta:
+            order = sorted(
+                range(len(bars_meta)),
+                key=lambda i: bars_meta[i].get("entry_date", ""),
+            )
+            X = [X[i] for i in order]
+            y = [y[i] for i in order]
+            sample_weights = [sample_weights[i] for i in order]
+            bars_meta = [bars_meta[i] for i in order]
+
+        return X, y, feature_names, sample_weights, bars_meta
+
+    async def _build_intraday_matrix(
+        self,
+        daily_data: dict[str, Any],
+        *,
+        horizon_minutes: int,
+        target_atr_mult: float,
+        sl_atr_mult: float,
+        feedback_data: dict[str, Any] | None = None,
+        sector_map: dict[str, str] | None = None,
+        bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
+        news_lookup: dict[str, list[tuple[str, str]]] | None = None,
+        vix_timeline: list[tuple[str, float]] | None = None,
+        fno_lookup: dict[str, Any] | None = None,
+    ) -> tuple[
+        list[list[float]], list[int], list[str], list[float], list[dict[str, Any]]
+    ]:
+        """Memory-safe builder for the 5-min intraday training matrix.
+
+        1-min path bars for the whole intraday universe at once would OOM a
+        small host, so we walk the symbol set in chunks: fetch each chunk's
+        5-min + 1-min bars, run ``_prepare_intraday_training_data`` on it, and
+        concatenate. Per-chunk ``feature_names`` are realigned to a canonical
+        column order (a feature absent from a chunk → 0.0) before concat, and
+        the combined matrix is globally re-sorted by entry_date so the
+        walk-forward CV still splits cleanly by time.
+
+        ``daily_data`` (the full-universe daily set already loaded for the
+        swing model) supplies the prior-session broadcast context for every
+        chunk.
+        """
+        import gc as _gc
+
+        cfg = self.ctx.config.retraining
+        intraday_window = int(
+            getattr(self.ctx.config.database.retention, "intraday_ohlcv_days", 365)
+        )
+        win = min(int(cfg.max_training_days), intraday_window)
+
+        # Decision bars come from 5-min, but the triple-barrier label and the
+        # per-direction exits resolve on the 1-min path. A symbol with 5-min
+        # bars but no 1-min path can only emit all-HOLD, zero-return samples —
+        # the 5-min universe (~365 syms) is far wider than the 1-min backfill
+        # (~97), so feeding the difference would bury the real BUY/SELL signal
+        # under path-less HOLD noise and drag the backtest Sharpe to zero.
+        # Intersect: the 1-min coverage is the trainable universe.
+        dec_symbols = await self.ctx.db.get_distinct_ohlcv_symbols("5minute", max_days=win)
+        path_symbols = set(
+            await self.ctx.db.get_distinct_ohlcv_symbols("1m", max_days=win)
+        )
+        symbols = [s for s in dec_symbols if s in path_symbols]
+        if not symbols:
+            logger.warning(
+                "Intraday matrix: no symbol has BOTH 5-min decision bars and "
+                "1-min path bars within %dd (5m=%d, 1m=%d) — run "
+                "backfill-intraday + backfill-intraday-1m first. Skipping.",
+                win, len(dec_symbols), len(path_symbols),
+            )
+            return [], [], [], [], []
+        if len(symbols) < len(dec_symbols):
+            logger.info(
+                "Intraday matrix: training on %d symbols with 1-min path "
+                "(dropped %d 5m-only symbols that can't be path-labelled).",
+                len(symbols), len(dec_symbols) - len(symbols),
+            )
+
+        canonical: list[str] = []
+        canon_idx: dict[str, int] = {}
+        X_all: list[list[float]] = []
+        y_all: list[int] = []
+        w_all: list[float] = []
+        meta_all: list[dict[str, Any]] = []
+
+        for start in range(0, len(symbols), _INTRADAY_SYMBOL_CHUNK):
+            chunk = symbols[start : start + _INTRADAY_SYMBOL_CHUNK]
+            intraday_data = await self.ctx.db.get_intraday_training_dataset(
+                max_days=win, symbols=chunk,
+            )
+            Xc, yc, namesc, wc, metac = self._prepare_intraday_training_data(
+                intraday_data, daily_data,
+                horizon_minutes=horizon_minutes,
+                target_atr_mult=target_atr_mult, sl_atr_mult=sl_atr_mult,
+                feedback_data=feedback_data, sector_map=sector_map,
+                bulk_deal_lookup=bulk_deal_lookup, news_lookup=news_lookup,
+                vix_timeline=vix_timeline, fno_lookup=fno_lookup,
+            )
+            del intraday_data
+            if yc:
+                for nm in namesc:
+                    if nm not in canon_idx:
+                        canon_idx[nm] = len(canonical)
+                        canonical.append(nm)
+                        for r in X_all:
+                            r.append(0.0)
+                col = {nm: i for i, nm in enumerate(namesc)}
+                for row in Xc:
+                    X_all.append(
+                        [row[col[nm]] if nm in col else 0.0 for nm in canonical]
+                    )
+                y_all.extend(yc)
+                w_all.extend(wc)
+                meta_all.extend(metac)
+            _gc.collect()
+
+        if meta_all:
+            order = sorted(
+                range(len(meta_all)),
+                key=lambda i: meta_all[i].get("entry_date", ""),
+            )
+            X_all = [X_all[i] for i in order]
+            y_all = [y_all[i] for i in order]
+            w_all = [w_all[i] for i in order]
+            meta_all = [meta_all[i] for i in order]
+
+        logger.info(
+            "Intraday matrix: %d samples across %d symbols | %d feature cols "
+            "| chunked %d/fetch | window=%dd",
+            len(y_all), len(symbols), len(canonical),
+            _INTRADAY_SYMBOL_CHUNK, win,
+        )
+        return X_all, y_all, canonical, w_all, meta_all
 
     @staticmethod
     def _compute_regime_index(
@@ -1266,7 +2191,14 @@ class ModelRetrainSkill(SkillBase):
                         f"(diff {diff:+.2%}, tolerance ±{tolerance:.0%})"
                     )
 
-            if backtest_pass and live_pass:
+            # Honest-edge gate — the model's untuned (argmax) Sharpe must
+            # clear the floor. Blocks promoting a model whose backtest
+            # profit lives entirely in a threshold-selected tail.
+            edge_pass, edge_reason = passes_edge_gate(
+                shadow, self.ctx.config.retraining.min_argmax_sharpe_for_promotion,
+            )
+
+            if backtest_pass and live_pass and edge_pass:
                 # Promote shadow to production
                 await self.ctx.db.promote_model(model_type, shadow["version"])
                 if self.ctx.ml:
@@ -1308,6 +2240,8 @@ class ModelRetrainSkill(SkillBase):
                     )
                 if not live_pass:
                     fail_reason_parts.append(f"live: {live_reason}")
+                if not edge_pass:
+                    fail_reason_parts.append(f"edge: {edge_reason}")
                 promotions.append({
                     "model_type": model_type,
                     "version": shadow["version"],

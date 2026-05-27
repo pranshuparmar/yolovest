@@ -19,11 +19,27 @@ Scoring (HEARTBEAT trigger):
 """
 
 import logging
+from datetime import datetime
 from typing import Any
+from yolovest.scoring import path_aware_score
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
-from yolovest.timezone import IST
+from yolovest.timezone import IST, UTC
 
 logger = logging.getLogger(__name__)
+
+
+def _ist_date(raw: Any) -> str | None:
+    """ISO/UTC timestamp → IST trading-day string (YYYY-MM-DD)."""
+    if not raw:
+        return None
+    s = str(raw).replace(" ", "T")
+    try:
+        ts = datetime.fromisoformat(s)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        return ts.astimezone(IST).strftime("%Y-%m-%d")
+    except Exception:
+        return s[:10]
 
 
 class PredictTrackSkill(SkillBase):
@@ -95,60 +111,59 @@ class PredictTrackSkill(SkillBase):
         )
 
     async def _score_elapsed_predictions(self) -> SkillResult:
-        """Score predictions whose timeframe has elapsed."""
+        """Score predictions whose timeframe has elapsed.
+
+        Scores against the actuals on the prediction's END date — the
+        actual daily bars over the (created, end] holding window, path-aware
+        for target-hit — rather than today's (possibly drifted) LTP. When
+        the end-date bar isn't in the DB yet the prediction is left
+        pending instead of scored against a stale price.
+        """
         pending = await self.ctx.db.get_unscored_predictions(mode=self.ctx.config.mode)
         scored = 0
         correct = 0
+        skipped = 0
 
         for pred in pending:
             try:
                 symbol = pred.get("symbol")
-                if not symbol:
-                    continue
-
-                # Fetch current price (for elapsed predictions, current price is the outcome)
-                try:
-                    actual_price = await self.ctx.market_data.get_ltp(symbol)
-                except Exception:
-                    logger.debug("LTP unavailable for prediction scoring %s, using bar close", symbol)
-                    # Fall back to latest OHLCV close
-                    bars = await self.ctx.market_data.get_ohlcv(symbol, "daily", days=1)
-                    if bars:
-                        actual_price = bars[-1].close
-                    else:
-                        logger.warning("Cannot get price for %s, skipping", symbol)
-                        continue
-
                 entry = pred.get("entry_price", 0)
-                if not entry or entry <= 0:
+                if not symbol or not entry or entry <= 0:
                     continue
 
                 direction = pred.get("predicted_direction", "BUY")
+                created_date = _ist_date(pred.get("created_at"))
+                end_date = _ist_date(pred.get("prediction_end_time"))
+                if not end_date:
+                    continue
 
-                # Score: direction correct?
-                if direction == "BUY":
-                    direction_correct = actual_price > entry
-                    actual_pnl_pct = (actual_price - entry) / entry
-                else:
-                    direction_correct = actual_price < entry
-                    actual_pnl_pct = (entry - actual_price) / entry
-
-                # Target hit?
-                target = pred.get("predicted_target", 0)
-                target_hit = (
-                    (direction == "BUY" and actual_price >= target)
-                    or (direction == "SELL" and actual_price <= target)
+                # Holding window (created, end]; same-day predictions fall
+                # back to the end-date bar alone (intraday path within the day).
+                bars = await self.ctx.db.get_daily_ohlc_between(
+                    symbol, created_date or end_date, end_date,
                 )
+                if not bars:
+                    one = await self.ctx.db.get_daily_bar_on(symbol, end_date)
+                    bars = [one] if one else []
+                if not bars:
+                    # End-date OHLCV not ingested yet — wait, don't score
+                    # against a stale current price.
+                    skipped += 1
+                    continue
 
+                m = path_aware_score(
+                    bars, entry, pred.get("predicted_target"),
+                    pred.get("predicted_stop_loss"), direction,
+                )
                 await self.ctx.db.score_prediction(
                     pred["id"],
-                    actual_price=actual_price,
-                    direction_correct=direction_correct,
-                    target_hit=target_hit,
-                    actual_pnl_pct=actual_pnl_pct,
+                    actual_price=m["actual_close"],
+                    direction_correct=bool(m["direction_correct"]),
+                    target_hit=bool(m["target_hit"]),
+                    actual_pnl_pct=m["actual_move_pct"] / 100.0,
                 )
                 scored += 1
-                if direction_correct:
+                if m["direction_correct"]:
                     correct += 1
 
             except Exception as e:
@@ -166,9 +181,10 @@ class PredictTrackSkill(SkillBase):
 
         if scored > 0 or pending:
             logger.info(
-                "predict-track: scored %d/%d predictions, accuracy=%.0f%%%s",
+                "predict-track: scored %d/%d predictions, accuracy=%.0f%%%s%s",
                 correct, scored,
                 (correct / scored * 100) if scored > 0 else 0,
+                f", {skipped} awaiting end-date data" if skipped else "",
                 ", failure analysis triggered" if failure_analysis_run else "",
             )
 
@@ -179,6 +195,7 @@ class PredictTrackSkill(SkillBase):
                 "mode": "score",
                 "predictions_scored": scored,
                 "correct": correct,
+                "skipped_awaiting_data": skipped,
                 "accuracy": correct / scored if scored > 0 else None,
                 "failure_analysis_triggered": failure_analysis_run,
             },

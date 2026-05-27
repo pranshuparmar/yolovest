@@ -633,6 +633,52 @@ class XGBoostSignalModel(MLBase):
             attribution=attribution,
         )
 
+    def predict_labels_batch(self, X: Any, model_type: str) -> list[int]:  # noqa: N803
+        """Production-path class labels for a batch of feature vectors.
+
+        Mirrors `_predict`'s decision exactly — raw probabilities, then
+        calibrated probabilities adopted ONLY when the calibrator agrees on
+        argmax AND is more confident, then the tuned-threshold gate — but
+        vectorised over a batch with none of the per-symbol entry-price /
+        attribution work. Used by the post-train guard to verify the
+        *deployed* model (calibration + thresholds), not the raw booster
+        argmax, actually produces non-HOLD signals at its thresholds.
+
+        Returns a list of int labels (0=SELL, 1=HOLD, 2=BUY).
+        """
+        import numpy as np
+
+        model = self._get_model(model_type)
+        if model is None:
+            return []
+        Xa = np.asarray(X)
+        raw = model.predict_proba(Xa)
+        calibrator = self._get_calibrator(model_type)
+        cal = calibrator.predict_proba(Xa) if calibrator is not None else None
+        thresholds = self._get_effective_thresholds(model_type)
+        labels: list[int] = []
+        for i in range(len(raw)):
+            rp = raw[i]
+            raw_label = int(np.argmax(rp))
+            chosen = rp
+            if cal is not None:
+                cp = cal[i]
+                cal_label = int(np.argmax(cp))
+                if cal_label == raw_label and float(cp[cal_label]) > float(rp[raw_label]):
+                    chosen = cp
+            if thresholds and len(chosen) >= 3:
+                buy_p = float(chosen[_LABEL_BUY])
+                sell_p = float(chosen[_LABEL_SELL])
+                if buy_p >= thresholds["buy"] and buy_p >= sell_p:
+                    labels.append(_LABEL_BUY)
+                elif sell_p >= thresholds["sell"] and sell_p > buy_p:
+                    labels.append(_LABEL_SELL)
+                else:
+                    labels.append(_LABEL_HOLD)
+            else:
+                labels.append(int(np.argmax(chosen)))
+        return labels
+
     @staticmethod
     def _compute_attribution(
         model: Any,
@@ -805,6 +851,7 @@ class XGBoostSignalModel(MLBase):
                 BacktestConfig,
                 BarMeta,
                 _bootstrap_sharpe_lower_bound,
+                backtest_by_period,
                 run_walk_forward_backtest,
                 sweep_thresholds,
             )
@@ -919,6 +966,9 @@ class XGBoostSignalModel(MLBase):
                             target_pct=float(meta.get("target_pct") or 0.0),
                             sl_pct=float(meta.get("sl_pct") or 0.0),
                             entry_date=str(meta.get("entry_date") or ""),
+                            buy_exit=meta.get("buy_exit"),
+                            sell_exit=meta.get("sell_exit"),
+                            hold_days=meta.get("hold_days"),
                         ))
                 else:
                     # Legacy synthetic payoff — kept for backwards compat
@@ -982,6 +1032,12 @@ class XGBoostSignalModel(MLBase):
                     float(getattr(_risk_cfg, "tuned_threshold_max_diff", 0.05))
                     if _risk_cfg is not None else None
                 )
+                # Signal-rate floor so the sweep can't pick an unreachable
+                # ceiling cell that fires ~never live (the silent-model bug).
+                _sweep_min_signal_rate = (
+                    float(getattr(_risk_cfg, "tuned_min_signal_rate", 0.0))
+                    if _risk_cfg is not None else 0.0
+                )
 
                 if use_final_holdout:
                     # Final-scale holdout. Train a tuning model on the
@@ -1021,6 +1077,9 @@ class XGBoostSignalModel(MLBase):
                             target_pct=float(m.get("target_pct") or 0.0),
                             sl_pct=float(m.get("sl_pct") or 0.0),
                             entry_date=str(m.get("entry_date") or ""),
+                            buy_exit=m.get("buy_exit"),
+                            sell_exit=m.get("sell_exit"),
+                            hold_days=m.get("hold_days"),
                         )
                         for m in bars_meta_raw[_cut:]
                     ]
@@ -1031,6 +1090,7 @@ class XGBoostSignalModel(MLBase):
                         config=bt_cfg,
                         max_threshold=_sweep_max_value,
                         max_diff=_sweep_max_diff,
+                        min_signal_rate=_sweep_min_signal_rate,
                     )
                     _ht_preds = _apply_thresholds(
                         _ho_probas[_sub:], tuned_buy, tuned_sell,
@@ -1064,6 +1124,7 @@ class XGBoostSignalModel(MLBase):
                             config=bt_cfg,
                             max_threshold=_sweep_max_value,
                             max_diff=_sweep_max_diff,
+                            min_signal_rate=_sweep_min_signal_rate,
                         )
                         _holdout_tuned_preds = _apply_thresholds(
                             collected_probas[_split:], tuned_buy, tuned_sell,
@@ -1091,6 +1152,7 @@ class XGBoostSignalModel(MLBase):
                             config=bt_cfg,
                             max_threshold=_sweep_max_value,
                             max_diff=_sweep_max_diff,
+                            min_signal_rate=_sweep_min_signal_rate,
                         )
                         _holdout_used = False
                 # When tuned thresholds beat the argmax baseline, report
@@ -1141,6 +1203,36 @@ class XGBoostSignalModel(MLBase):
                     "tuned_sharpe": tuned_bt.sharpe,
                     "threshold_holdout_used": _holdout_used,
                 }
+                # Per-calendar-year OOS edge profile at the DEPLOYED
+                # thresholds — diagnoses regime shift vs edge decay. We
+                # apply the single chosen (buy, sell) cutoff across the
+                # whole holdout and bucket realized trades by entry year,
+                # so a Sharpe that's positive in older years and negative
+                # only recently reads as regime/decay rather than "never
+                # worked". Diagnostic only (logged + stashed in metrics);
+                # never feeds the deploy/promote decision.
+                try:
+                    _bp_probas = _ho_probas if use_final_holdout else collected_probas
+                    _bp_meta = _ho_meta if use_final_holdout else collected_meta
+                    _bp_preds = _apply_thresholds(_bp_probas, tuned_buy, tuned_sell)
+                    _by_year: dict[str, Any] = {}
+                    for _yr, _res in backtest_by_period(
+                        _bp_preds, _bp_meta, bt_cfg,
+                    ).items():
+                        _by_year[_yr] = {
+                            "sharpe": round(_res.sharpe, 3),
+                            "win_rate": round(_res.win_rate, 3),
+                            "trades": _res.total_trades,
+                            "net_pnl": round(_res.net_pnl, 1),
+                        }
+                        logger.info(
+                            "  [%s] %s OOS @ tuned: sharpe=%.2f win=%.2f trades=%d net=%.0f",
+                            model_type, _yr, _res.sharpe, _res.win_rate,
+                            _res.total_trades, _res.net_pnl,
+                        )
+                    metrics["per_year_oos"] = _by_year
+                except Exception:
+                    logger.debug("per-year OOS breakdown failed", exc_info=True)
             else:
                 # Legacy synthetic metrics — kept for tests / older callers
                 returns_arr = np.array(synthetic_returns)

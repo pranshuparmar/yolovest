@@ -96,7 +96,11 @@ class MarketDataConfig(BaseModel):
     stale_threshold_minutes: int = 30
     sentiment_ttl_hours: int = 48  # sentiment older than this is ignored in scanning
     backfill_days: int = 1095  # daily-bar history window for backfill-data and ingest-universe
-    intraday_backfill_days: int = 365  # 5-minute-bar history window for backfill-intraday
+    # 5-minute-bar history window for backfill-intraday. Also acts as the
+    # intraday retention floor (database-maintenance won't prune intraday
+    # bars newer than this), so raising it for the intraday model (e.g. 730)
+    # keeps the deep backfill from being trimmed back to intraday_ohlcv_days.
+    intraday_backfill_days: int = 365
     # Reject a symbol from signal generation when its latest daily bar
     # is older than this many trading days behind the most recent
     # completed trading day. Default 1 covers the normal "mid-session
@@ -205,14 +209,23 @@ class HoldingPeriodConfig(BaseModel):
             max_atr_pct_for_target=0.035,
         ),
     )
+    # Swing/CNC buckets also cap the ATR used for geometry so a noisy or
+    # corrupt ATR can't emit an unreachable target / blown-out SL. Wider
+    # than intraday since multi-day holds tolerate larger moves.
     short_swing: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=1.5, stop_loss=0.75),
+        default_factory=lambda: ATRMultipliers(
+            target=1.5, stop_loss=0.75, max_atr_pct_for_target=0.06,
+        ),
     )
     week: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=2.5, stop_loss=1.2),
+        default_factory=lambda: ATRMultipliers(
+            target=2.5, stop_loss=1.2, max_atr_pct_for_target=0.08,
+        ),
     )
     long: ATRMultipliers = Field(
-        default_factory=lambda: ATRMultipliers(target=5.0, stop_loss=2.0),
+        default_factory=lambda: ATRMultipliers(
+            target=5.0, stop_loss=2.0, max_atr_pct_for_target=0.12,
+        ),
     )
 
 
@@ -244,6 +257,7 @@ _MODE_HOLDING_DAYS: dict[str, tuple[int, int]] = {
     "short_term": (2, 5),      # 2–5 trading days
     "balanced": (0, 15),       # model decides: intraday up to 3 weeks
     "long_term": (5, 66),      # 1 week to ~3 months (configurable via max_holding_days)
+    "swing": (2, 66),          # short + long combined, NEVER intraday/MIS (CNC only)
 }
 
 # Kept for backwards compatibility — maps mode to discrete period labels
@@ -252,6 +266,7 @@ _MODE_HOLDING_PERIODS: dict[str, list[str]] = {
     "short_term": ["short_term"],
     "balanced": ["intraday", "short_term", "long_term"],
     "long_term": ["long_term"],
+    "swing": ["short_term", "long_term"],   # swing model across the full 2–66d range, no MIS
 }
 
 
@@ -483,6 +498,26 @@ class RegimeGateConfig(BaseModel):
     bearish_size_multiplier: float = Field(default=1.20, ge=1.0, le=2.0)
 
 
+class MarketTrendFilterConfig(BaseModel):
+    """Market-trend circuit breaker for a long-only book.
+
+    Builds an equal-weight market index from the universe's daily closes
+    and refuses NEW long (BUY) entries when the index is below its
+    `ma_window`-day moving average (a downtrend). Exits (SELLs / closing
+    holdings) are never blocked. This is the standard, robust protection
+    for a long-biased systematic strategy: ride uptrends, stand aside in
+    downtrends. Unlike the breadth `regime_gate` (noisy day-to-day), the
+    index-vs-MA trend is the signal that actually bounds drawdowns in a
+    sustained bear — the regime a bull-heavy backtest can't validate.
+
+    Default off (opt-in). Enable before running a long-only swing book
+    unattended in `auto` mode.
+    """
+
+    enabled: bool = False
+    ma_window: int = Field(default=50, ge=5, le=400)
+
+
 class ReentryConfig(BaseModel):
     """Smart re-entry — allow re-entering after SL hit if conditions improve."""
 
@@ -505,12 +540,45 @@ class ReentryConfig(BaseModel):
     min_reentry_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
 
 
+class FeatureGroupsConfig(BaseModel):
+    """Which OPTIONAL (non-technical) feature groups the model trains on.
+
+    Price/technical features (RSI, MACD, EMA, ATR, …) computed from the
+    historical OHLCV are ALWAYS used — they're the primary source of truth.
+    The groups below are supporting signals layered on top. Each defaults
+    on, but can be disabled so the model trains on a leaner, price-primary
+    feature set — useful when a support source is sparse/noisy and you want
+    to confirm (via a retrain + dry-run conviction comparison) that it
+    isn't diluting the core signal. Disabling a group excludes its features
+    from the trained model entirely; inference then never feeds them, so
+    there's no train/inference mismatch.
+    """
+
+    regime: bool = True          # universe breadth / avg-return
+    sector: bool = True          # sector breadth / avg-return / relative momentum
+    institutional: bool = True   # bulk-deal counts + delivery %
+    news: bool = True            # news-sentiment features
+    vix: bool = True             # India VIX features
+    # F&O is forward-only (Kite exposes no option-chain history), so until
+    # months of daily ingest accumulate it's ~all-neutral in training and
+    # can only add noise — default OFF, flip on once data exists.
+    fno: bool = False
+    feedback: bool = True        # fb_* prediction/trade feedback loop
+
+
 class StrategyConfig(BaseModel):
-    mode: Literal["intraday", "short_term", "balanced", "long_term"] = "balanced"
+    mode: Literal["intraday", "short_term", "balanced", "long_term", "swing"] = "balanced"
     allowed_holding_periods: list[str] | None = None
     holding_periods: HoldingPeriodConfig = Field(default_factory=HoldingPeriodConfig)
+    # Hard sanity ceiling on ATR% (= ATR / entry). A daily ATR above this
+    # fraction of price is implausible for an NSE equity (real ATRs run
+    # ~1-8%) and almost always means corrupt OHLCV — so the signal is
+    # rejected rather than sized off a garbage ATR (which produced e.g. a
+    # +189% target / -94% SL). 0 disables the gate.
+    max_atr_pct_hard_reject: float = Field(default=0.20, ge=0.0, le=1.0)
     volatility: VolatilityConfig = Field(default_factory=VolatilityConfig)
     feedback: FeedbackConfig = Field(default_factory=FeedbackConfig)
+    feature_groups: FeatureGroupsConfig = Field(default_factory=FeatureGroupsConfig)
     ema_periods: list[int] = Field(default_factory=lambda: [9, 21, 50, 200])
     indicators: IndicatorsConfig = Field(default_factory=IndicatorsConfig)
     min_training_samples: int = 200
@@ -544,6 +612,14 @@ class StrategyConfig(BaseModel):
     # collapse, feature dominance). Default-on. Cheap (one matmul on
     # ~hundreds of samples). Disable if you trust the train-time guard.
     post_train_class_check_enabled: bool = True
+    # Minimum fraction of recent samples that must produce a NON-HOLD
+    # signal through the FULL production path (calibration + tuned
+    # thresholds), checked after training. The raw-argmax class check
+    # above can pass while the deployed model — after calibration and the
+    # threshold gate — fires ~zero signals live (the silent-model failure
+    # that shipped a never-trading model). This catches that end-to-end.
+    # 0.005 = "at least 0.5% of recent rows must signal". Set 0 to disable.
+    post_train_min_signal_rate: float = Field(default=0.005, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "StrategyConfig":
@@ -723,6 +799,16 @@ class RiskConfig(BaseModel):
     # below `min_confidence_buy` / `min_confidence_sell` doesn't add
     # value since those floors still apply downstream.
     tuned_threshold_max_value: float = Field(default=0.60, ge=0.5, le=1.0)
+    # Minimum fraction of holdout samples a tuned-threshold cell must
+    # signal on (BUY or SELL) to be eligible. The threshold sweep ranks by
+    # Sharpe, and max selectivity tends to maximise Sharpe — so without a
+    # signal-RATE floor the tuner parks at the most selective (highest)
+    # cell, which fires ~never on the live feed and collapses every signal
+    # to HOLD (the silent-model failure). The pre-existing `min_trades`
+    # floor is absolute (100), a trivial 0.2% rate on a large holdout, so
+    # it doesn't catch this. 0.02 = "the chosen cutoff must produce a
+    # signal on at least 2% of samples". Set 0.0 to disable.
+    tuned_min_signal_rate: float = Field(default=0.02, ge=0.0, le=1.0)
     # Hard overrides on the model's tuned probability thresholds.
     # When set, these REPLACE the saved tuned values entirely (the
     # diff cap above no longer applies). Use when the model's saved
@@ -750,6 +836,9 @@ class RiskConfig(BaseModel):
     depth_gate: DepthGateConfig = Field(default_factory=DepthGateConfig)
     liquidity_gate: LiquidityGateConfig = Field(default_factory=LiquidityGateConfig)
     regime_gate: RegimeGateConfig = Field(default_factory=RegimeGateConfig)
+    market_trend_filter: MarketTrendFilterConfig = Field(
+        default_factory=MarketTrendFilterConfig
+    )
     institutional_flow: InstitutionalFlowConfig = Field(default_factory=InstitutionalFlowConfig)
     exit_tweaks: ExitTweaksConfig = Field(default_factory=ExitTweaksConfig)
     reentry: ReentryConfig = Field(default_factory=ReentryConfig)
@@ -914,8 +1003,21 @@ class RetrainingConfig(BaseModel):
     # 5 years × ~500 symbols ≈ 911K bars OOM-kills the process during
     # feature-matrix construction. 730 days × 500 symbols ≈ 365K bars
     # fits comfortably under 2 GB. Raise on hosts with more memory if
-    # you want the model to see deeper history.
-    max_training_days: int = Field(default=730, ge=90, le=3650)
+    # you want the model to see deeper history — the ceiling is 12000
+    # (~33yr), comfortably covering the full available history (daily data
+    # starts ~1996). WARNING: memory scales with days × symbols; budget
+    # for it (the offline-training box) before going past ~10yr on the
+    # full universe.
+    max_training_days: int = Field(default=730, ge=90, le=12000)
+    # Honest-edge promotion gate. A model may only be promoted to
+    # production when its *argmax* walk-forward Sharpe (the edge of its
+    # natural, untuned decisions) is at least this value. The
+    # threshold-tuned Sharpe is selection-biased — a model can score
+    # well only on a cherry-picked high-probability tail that the live
+    # model may never reach — so promotion decisions must clear the
+    # untuned edge first. Default 0.0 blocks net-losing models. Set
+    # negative to disable (not recommended on a live account).
+    min_argmax_sharpe_for_promotion: float = Field(default=0.0, ge=-100.0, le=100.0)
 
 
 class ReportsConfig(BaseModel):
@@ -927,6 +1029,23 @@ class NewsDigestConfig(BaseModel):
     enabled: bool = True
     schedule_cron: str = "0 9 * * *"  # 9:00 AM IST, every day
     max_headlines: int = Field(default=10, ge=1, le=50)
+
+
+class ScoringConfig(BaseModel):
+    """Auto-scoring of dry-runs and predictions against their target dates.
+
+    A daily CRON (after market close, once the day's daily bars are
+    ingested) sweeps every dry-run with unscored signals and every
+    elapsed prediction, and scores each against the actuals on its OWN
+    target date — path-aware over the holding window — rather than today.
+    Partial by construction: signals whose horizon hasn't fully elapsed
+    are left pending and picked up on a later run.
+    """
+
+    auto_score_enabled: bool = True
+    # 16:45 IST weekdays — after daily bars land (~15:30-16:00) and after
+    # report-generate (16:00) / ahead of drift-watch (16:30 reads scores).
+    auto_score_cron: str = "45 16 * * 1-5"
 
 
 class LoggingConfig(BaseModel):
@@ -991,6 +1110,7 @@ class AppConfig(BaseModel):
     log: LoggingConfig = Field(default_factory=LoggingConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     news_digest: NewsDigestConfig = Field(default_factory=NewsDigestConfig)
+    scoring: ScoringConfig = Field(default_factory=ScoringConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":

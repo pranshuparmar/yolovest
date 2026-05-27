@@ -604,7 +604,7 @@ export const api = {
 
   // Pending Trades (manual approval)
   pendingTrades: () =>
-    apiFetch<{ id: number; symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; position_size: number; confidence_score: number; product: string; created_at: string; is_override?: boolean; is_manual?: boolean }[]>("/api/pending-trades"),
+    apiFetch<{ id: number; symbol: string; signal_type: string; entry_price: number; target_price: number; stop_loss_price: number; position_size: number; confidence_score: number; product: string; created_at: string; expected_holding_days?: number | null; expected_holding_period?: string | null; is_override?: boolean; is_manual?: boolean }[]>("/api/pending-trades"),
 
   approvePendingTrade: (tradeId: number, overrides?: Record<string, unknown>) =>
     apiFetch<{ success: boolean; trade?: Record<string, unknown> }>(`/api/pending-trades/${tradeId}/approve`, {
@@ -639,11 +639,17 @@ export const api = {
     apiFetch<{ status: string; reloaded: string[] }>("/api/config/reload", { method: "POST" }),
 
   // Dry-Run Signal Preview
-  runDryRun: (mode?: string) =>
-    apiFetch<DryRunResult>(
-      `/api/dry-run${mode ? `?mode=${mode}` : ""}`,
+  runDryRun: (mode?: string, asOf?: string, modelVersion?: string) => {
+    const params = new URLSearchParams();
+    if (mode) params.set("mode", mode);
+    if (asOf) params.set("as_of", asOf);
+    if (modelVersion) params.set("model_version", modelVersion);
+    const qs = params.toString();
+    return apiFetch<DryRunResult>(
+      `/api/dry-run${qs ? `?${qs}` : ""}`,
       { method: "POST" },
-    ),
+    );
+  },
 
   dryRunHistory: (limit = 10) =>
     apiFetch<DryRunSummary[]>(`/api/dry-run/history?limit=${limit}`),
@@ -652,7 +658,7 @@ export const api = {
     apiFetch<DryRunSignal[]>(`/api/dry-run/${runId}`),
 
   scoreDryRun: (runId: string) =>
-    apiFetch<{ scored: number; not_found: number; same_day?: number; message?: string }>(`/api/dry-run/${runId}/score`, { method: "POST" }),
+    apiFetch<{ scored: number; not_found: number; pending?: number; already_scored?: number; message?: string }>(`/api/dry-run/${runId}/score`, { method: "POST" }),
 
   deleteDryRun: (runId: string) =>
     apiFetch<{ success: boolean; deleted: number }>(`/api/dry-run/${runId}`, { method: "DELETE" }),

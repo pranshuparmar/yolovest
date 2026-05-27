@@ -1,8 +1,38 @@
 # Designing a Proper Intraday Model
 
-> Status: **design / not built**. Captures why the current "intraday" model
-> is really a next-day daily predictor, and what a genuine intraday model
-> would require. Start a fresh session from this doc.
+> Status: **shelved (2026-05-24)** after a cheap baseline showed no
+> net-of-cost edge — see "Baseline result" below. Originally captured why
+> the current "intraday" model is really a next-day daily predictor and
+> what a genuine intraday model would require. Kept for the record; revisit
+> only if the universe / cost structure / data (e.g. order-flow) changes.
+
+## Baseline result (2026-05-24) — decision: do NOT build
+
+`backend/scripts/intraday_baseline.py` answered the "is there ANY
+net-of-cost edge?" gate before investing in the full build. Setup: top 50
+liquid names with ~1y of 5-min bars, XGBoost argmax, 60-min horizon,
+sqrt(horizon)-scaled ATR barriers (2.08/1.04 x 5-min ATR), 1x-capital cap,
+MIS cost stack + slippage, daily-aggregated equity.
+
+| Features | Gross PnL/trade | Win rate | Net/trade |
+|----------|-----------------|----------|-----------|
+| Basic technicals (on 5-min) | -Rs 32.4 (~0%) | 28% | -Rs 117 |
+| + intraday-specific (OR, session-VWAP, time-of-day, rel-volume) | -Rs 32.7 (~0%) | 28% | -Rs 112 |
+
+The intraday-specific features moved gross edge by ~Rs 1.4/trade —
+statistically nothing. Gross edge is flat coin-flip with *or without* the
+features the design (section 3) bet on; the **0.085%/trade MIS cost wall**
+turns flat-zero gross into a guaranteed net loss. This is a real "no edge
+on this universe", not a tuning miss. The cheap baseline (a day of work)
+saved the multi-week full build below.
+
+Conditions that would justify revisiting: a different universe, materially
+lower costs, or new data the daily features can't proxy (order-book
+depth/imbalance, which is forward-only — see section 3). Until then,
+**run swing-only modes (short_term / long_term); never `intraday` or
+`balanced`** — the daily-trained "intraday" model has negative real edge
+(argmax Sharpe ~ -7) and the Phase-0 honest-edge gate will retire it on
+the next retrain.
 
 ## TL;DR
 
@@ -188,3 +218,37 @@ and **must carry into any intraday build**:
 - Horizon: fixed N-bars vs to-session-close vs first-target-touch?
 - Is the edge net-of-cost positive at all on this universe? (Decide early
   with a cheap baseline before investing in features.)
+
+## Decisions & progress (2026-05-26)
+
+- **Universe**: Nifty 100 (liquid large-caps; intraday MIS viability). Both
+  `backfill-intraday` (5m) and `backfill-intraday-1m` default to it.
+- **Horizon**: to session close — `intraday_triple_barrier_label` walked with
+  a full-session (375min) horizon so the same-session boundary is the binding
+  stop (MIS auto-squares EOD).
+- **Cadence / cutoff**: decision bars sampled every 15min (every 3rd 5-min bar,
+  `_INTRADAY_DECISION_STRIDE`), and only before `market_hours.intraday_cutoff`
+  (14:30) — matches the live heartbeat + no-new-MIS-after-cutoff behaviour, and
+  cuts the heavily overlapping/autocorrelated sample set ~3x.
+- **Compact meta (memory + correctness)**: the to-close path is hundreds of
+  1-min bars; storing `path_highs`/`path_lows` per sample × ~1.8M samples would
+  OOM (~20GB). Instead the builder precomputes the realized per-direction exit
+  (`buy_exit`/`sell_exit`, same tie→SL ordering as `_path_aware_exit`) — two
+  scalars carry everything the backtest needs. `hold_days=1` also fixes the
+  concurrency-slot reservation, which otherwise treated each 1-min path bar as
+  a calendar day (~187-day reservations for a same-day trade). Net effect:
+  ~500K samples, a few GB peak.
+- **Integration**: the existing `intraday` model slot is retrained on 5m+1m
+  (no new slot / no ml_signal refactor); `swing` stays daily. The old
+  daily-bar intraday model is retired in place. Enters as **shadow** — the
+  lower-bound-Sharpe + live-accuracy promotion gate still guards production.
+- **Done**: `get_intraday_training_dataset`, dual-resolution labels,
+  `_prepare_intraday_training_data` (prior-session broadcast, leak-free),
+  `_build_intraday_matrix` (memory-safe symbol-chunked fetch + concat),
+  execute() wiring (MIS-cost walk-forward already keyed off `product`).
+- **Next**: confirm net-of-cost baseline Sharpe once the clean backfill lands
+  (decide go/no-go before feature work); then live 5m inference in
+  generate-signals (§8) + intraday-specific features (§2).
+- **Open**: 5m can be backfilled deeper (`intraday_backfill_days`) than the
+  1m window (`intraday_ohlcv_days`); only the 1m-covered span is labelable,
+  so the older 5m is inert — fine, but keep the windows in mind.

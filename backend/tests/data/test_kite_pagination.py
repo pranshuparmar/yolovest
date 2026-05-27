@@ -176,3 +176,37 @@ class TestInstrumentCachePrewarming:
 
         assert prov._token_cache_warmed is False
         assert prov._token_cache == {}
+
+
+@pytest.mark.skipif(
+    not _has_module("kiteconnect"),
+    reason="kiteconnect not installed",
+)
+class TestKiteZeroBarFilter:
+    """Kite returns 0.0-OHLC placeholder bars for pre-listing days; one such
+    row must not fail the whole symbol's fetch."""
+
+    async def test_fetch_skips_nonpositive_bars(self):
+        from datetime import date as _date
+
+        from yolovest.data.kite_data import KiteDataProvider
+
+        prov = KiteDataProvider(api_key="x", access_token="y")
+
+        class _FakeKite:
+            def historical_data(self, *a, **k):
+                return [
+                    {"date": datetime(2020, 10, 1), "open": 0.0, "high": 0.0,
+                     "low": 0.0, "close": 0.0, "volume": 0},          # pre-listing → skip
+                    {"date": datetime(2020, 10, 5), "open": 100.0, "high": 105.0,
+                     "low": 99.0, "close": 102.0, "volume": 1000},    # real → keep
+                    {"date": datetime(2020, 10, 6), "open": 102.0, "high": 0.0,
+                     "low": 100.0, "close": 101.0, "volume": 500},    # partial-zero → skip
+                ]
+
+        prov._get_kite = lambda: _FakeKite()
+        bars = await prov._fetch_historical(
+            12345, "day", _date(2020, 1, 1), _date(2020, 12, 31),
+        )
+        assert len(bars) == 1
+        assert bars[0].close == 102.0

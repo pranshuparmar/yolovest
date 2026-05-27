@@ -215,6 +215,21 @@ SQLite with WAL mode. Schema versioned via numbered migration scripts in `backen
 
 **Migrations are schema only.** This is an OSS project — every user runs the same migrations against their own data. Never put data-cleanup queries (deduping rows, normalising existing values, backfilling content) into a migration file. A duplicate-row problem on one user's server is not something every fresh install needs to "fix". Limit `.sql` files to `CREATE TABLE` / `ALTER TABLE` / `CREATE INDEX` / `DROP …`. If you need a one-off data fix for a specific deployment, surface it as a `docker exec yolovest-backend python -c "..."` snippet in chat or the operational docs, never as a migration.
 
+**Server DB queries — always hand the user this exact runnable form.** The DB lives inside the `yolovest-backend` container at `/app/data/yolovest.db`; the user runs ad-hoc queries/cleanups via `docker exec`. Always provide them as a Python heredoc (the `sqlite3` CLI may not be installed in the image; Python always is). Use **bound parameters** for every literal so the SQL carries no nested quotes — this keeps the whole thing safe inside the double-quoted `sh -c` wrapper. Template:
+
+```bash
+docker exec yolovest-backend sh -c "python - <<'PY'
+import sqlite3
+con = sqlite3.connect('/app/data/yolovest.db')
+q = ('SELECT ... WHERE interval IN (?, ?) ...')
+for r in con.execute(q, ('5minute', '1m')).fetchall():
+    print(r)
+con.close()
+PY"
+```
+
+For writes/cleanups: build the snippet to print a before/after count, keep destructive `executemany` lines commented for a dry run first, and remind the user to back up. Never run such snippets yourself — you have no access to the server's container; hand them the command.
+
 ### Key Tables
 
 | Table | Purpose |

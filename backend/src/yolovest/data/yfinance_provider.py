@@ -5,14 +5,13 @@ Yahoo Finance via .NS suffix. 20 years history. Fragile rate limits.
 
 import asyncio
 import logging
-import math
 from datetime import datetime, timedelta
 
 from yolovest.timezone import now_ist
 from typing import Any
 
 from yolovest.data.base import MarketDataBase
-from yolovest.models.schemas import OHLCVBar
+from yolovest.models.schemas import OHLCVBar, is_valid_ohlc
 
 logger = logging.getLogger(__name__)
 
@@ -118,10 +117,10 @@ class YFinanceProvider(MarketDataBase):
 
         bars = []
         for idx, row in df.iterrows():
-            # Skip rows with NaN values — yfinance sometimes returns
-            # incomplete bars for recently listed or illiquid stocks
+            # Skip junk bars (NaN / non-positive) — yfinance returns
+            # incomplete or 0.0 rows for recently-listed / illiquid stocks.
             o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
-            if any(math.isnan(v) for v in (o, h, l, c)):
+            if not is_valid_ohlc(o, h, l, c):
                 continue
 
             ts = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else datetime.fromisoformat(str(idx))

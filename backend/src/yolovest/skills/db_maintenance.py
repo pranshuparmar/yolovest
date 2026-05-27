@@ -78,9 +78,24 @@ class DatabaseMaintenanceSkill(SkillBase):
                     "preserves exited/delisted symbols for the next retrain.",
                     retention.ohlcv_days, effective_ohlcv_days,
                 )
+            # Same survivorship floor for the 5-minute series: a deliberate
+            # deep backfill (intraday_backfill_days, for the intraday model)
+            # must not be silently pruned back to the default retention
+            # window by the nightly maintenance run.
+            intraday_floor = int(
+                getattr(self.ctx.config.market_data, "intraday_backfill_days", 0)
+            )
+            effective_intraday_days = max(retention.intraday_ohlcv_days, intraday_floor)
+            if effective_intraday_days > retention.intraday_ohlcv_days:
+                logger.info(
+                    "Retention: intraday OHLCV window raised %dd -> %dd to cover "
+                    "the backfill depth (intraday_backfill_days); preserves "
+                    "intraday training history.",
+                    retention.intraday_ohlcv_days, effective_intraday_days,
+                )
             deleted = await self.ctx.db.run_retention_cleanup(
                 ohlcv_days=effective_ohlcv_days,
-                intraday_ohlcv_days=retention.intraday_ohlcv_days,
+                intraday_ohlcv_days=effective_intraday_days,
                 audit_days=retention.audit_log_days,
                 predictions_days=retention.predictions_days,
                 news_days=retention.news_days,

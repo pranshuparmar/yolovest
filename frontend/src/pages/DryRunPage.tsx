@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   useDryRunHistory,
   useDryRunDetail,
@@ -6,6 +6,7 @@ import {
   useRunSkill,
   useScoreDryRun,
   useDeleteDryRun,
+  useMLModels,
 } from "../hooks/queries";
 import clsx from "clsx";
 import { formatPriceMovePct, priceMovePct } from "../utils/priceMove";
@@ -33,9 +34,29 @@ export function DryRunPage() {
   const deleteDryRun = useDeleteDryRun();
   const [scoreMsg, setScoreMsg] = useState<{ text: string; type: "info" | "warn" } | null>(null);
   const [selectedMode, setSelectedMode] = useState<string>("balanced");
+  const [asOf, setAsOf] = useState<string>("");
+  const [selectedModel, setSelectedModel] = useState<string>("");
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const { data: signals, isLoading: detailLoading } =
     useDryRunDetail(selectedRun);
+  const { data: mlModels } = useMLModels();
+
+  // Flatten production / shadow / retired into one labelled list. Value is
+  // the version string (passed as model_version); empty value = production.
+  const modelOptions = useMemo(() => {
+    const opts: { version: string; label: string }[] = [];
+    if (!mlModels) return opts;
+    for (const [mt, m] of Object.entries(mlModels.production)) {
+      if (m?.version) opts.push({ version: m.version, label: `${mt} · ${m.version} · production` });
+    }
+    for (const m of mlModels.shadow ?? []) {
+      if (m?.version) opts.push({ version: m.version, label: `${m.model_type} · ${m.version} · shadow` });
+    }
+    for (const m of mlModels.retired ?? []) {
+      if (m?.version) opts.push({ version: m.version, label: `${m.model_type} · ${m.version} · retired` });
+    }
+    return opts;
+  }, [mlModels]);
 
   // Auto-select the most recent run on page load
   useEffect(() => {
@@ -45,11 +66,18 @@ export function DryRunPage() {
   }, [history, selectedRun]);
 
   const handleRun = () => {
-    runDryRun.mutate(selectedMode, {
-      onSuccess: (result) => {
-        if (result.run_id) setSelectedRun(result.run_id);
+    runDryRun.mutate(
+      {
+        mode: selectedMode,
+        asOf: asOf || undefined,
+        modelVersion: selectedModel || undefined,
       },
-    });
+      {
+        onSuccess: (result) => {
+          if (result.run_id) setSelectedRun(result.run_id);
+        },
+      },
+    );
   };
 
   const scored = signals?.filter((s) => s.scored_at) ?? [];
@@ -79,6 +107,37 @@ export function DryRunPage() {
             <option value="short_term">Short Term</option>
             <option value="balanced">Balanced</option>
             <option value="long_term">Long Term</option>
+            <option value="swing">Swing (Short + Long)</option>
+          </select>
+          <input
+            type="date"
+            value={asOf}
+            max={new Date().toISOString().slice(0, 10)}
+            onChange={(e) => setAsOf(e.target.value)}
+            title="Evaluate as of a past date (leave blank for latest)"
+            className="px-3 py-2 rounded text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-emerald-500"
+          />
+          {asOf && (
+            <button
+              onClick={() => setAsOf("")}
+              title="Clear date — use latest data"
+              className="px-2 py-2 rounded text-sm text-gray-400 hover:text-gray-200"
+            >
+              ×
+            </button>
+          )}
+          <select
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            title="Evaluate against a specific model version (shadow / retired). Defaults to the production model."
+            className="px-3 py-2 rounded text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-emerald-500 max-w-[16rem]"
+          >
+            <option value="">Production model (default)</option>
+            {modelOptions.map((m) => (
+              <option key={m.version} value={m.version}>
+                {m.label}
+              </option>
+            ))}
           </select>
           <button
             onClick={handleRun}
@@ -94,7 +153,11 @@ export function DryRunPage() {
       {runDryRun.isSuccess && runDryRun.data && (
         <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3 text-sm text-emerald-400">
           Dry run <span className="font-mono">{runDryRun.data.run_id}</span>{" "}
-          ({runDryRun.data.mode ?? "balanced"} mode) complete: scanned{" "}
+          ({runDryRun.data.mode ?? "balanced"} mode
+          {runDryRun.data.as_of ? `, as of ${runDryRun.data.as_of}` : ""}
+          {runDryRun.data.selected_model
+            ? `, model ${runDryRun.data.selected_model.version} (${runDryRun.data.selected_model.status ?? "?"})`
+            : ""}) complete: scanned{" "}
           {runDryRun.data.universe_size} stocks, shortlisted{" "}
           {runDryRun.data.shortlist_size}, generated{" "}
           <span className="font-semibold">
@@ -277,12 +340,28 @@ export function DryRunPage() {
               Signals for run{" "}
               <span className="font-mono text-emerald-400">{selectedRun}</span>
               {(() => {
-                const runMode = history?.find((r) => r.run_id === selectedRun)?.strategy_mode;
-                return runMode ? (
-                  <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-gray-800 text-gray-400 capitalize">
-                    {runMode.replace("_", " ")}
-                  </span>
-                ) : null;
+                const run = history?.find((r) => r.run_id === selectedRun);
+                if (!run) return null;
+                return (
+                  <>
+                    {run.strategy_mode && (
+                      <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-gray-800 text-gray-400 capitalize">
+                        {run.strategy_mode.replace("_", " ")}
+                      </span>
+                    )}
+                    <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-gray-800 text-gray-400">
+                      as of {run.as_of ?? "latest"}
+                    </span>
+                    {run.model_version && (
+                      <span
+                        className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-gray-800 text-gray-400 font-mono"
+                        title="Model version that produced these signals"
+                      >
+                        {run.model_version}
+                      </span>
+                    )}
+                  </>
+                );
               })()}
             </h3>
             {scored.length > 0 && (

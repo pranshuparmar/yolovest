@@ -5,8 +5,12 @@ skills via this registry based on triggers (heartbeat, cron, event, manual).
 """
 
 from yolovest.skills.auth_broker import AuthBrokerSkill
+from yolovest.skills.auto_score import AutoScoreSkill
 from yolovest.skills.backfill_data import BackfillDataSkill
-from yolovest.skills.backfill_intraday import BackfillIntradaySkill
+from yolovest.skills.backfill_intraday import (
+    BackfillIntraday1mSkill,
+    BackfillIntradaySkill,
+)
 from yolovest.skills.cdsl_auth_check import CdslAuthCheckSkill
 from yolovest.skills.db_maintenance import DatabaseMaintenanceSkill
 from yolovest.skills.drift_watch import DriftWatchSkill
@@ -37,6 +41,7 @@ SKILL_REGISTRY: dict[str, type] = {
     "auth-broker": AuthBrokerSkill,
     "backfill-data": BackfillDataSkill,
     "backfill-intraday": BackfillIntradaySkill,
+    "backfill-intraday-1m": BackfillIntraday1mSkill,
     "ingest-data": IngestDataSkill,
     "ingest-fno": IngestFnoSkill,
     "ingest-premarket": IngestPremarketSkill,
@@ -58,6 +63,7 @@ SKILL_REGISTRY: dict[str, type] = {
     "database-maintenance": DatabaseMaintenanceSkill,
     "news-digest": NewsDigestSkill,
     "drift-watch": DriftWatchSkill,
+    "auto-score": AutoScoreSkill,
     "expire-pending-trades": ExpirePendingSkill,
     "reprice-pending-trades": RepricePendingSkill,
     "funds-snapshot": FundsSnapshotSkill,

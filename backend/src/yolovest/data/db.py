@@ -17,6 +17,7 @@ import aiosqlite
 from typing import Any
 
 from yolovest.models.schemas import EconomicEvent, NewsArticle, OHLCVBar, SentimentResult
+from yolovest.scoring import path_aware_score
 from yolovest.timezone import IST, UTC, now_ist, now_utc
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,47 @@ class DuplicateSignalError(Exception):
         )
         self.signal_id = signal_id
         self.existing_trade_id = existing_trade_id
+
+
+def _canonical_ohlcv_ts(ts: datetime, interval: str) -> str:
+    """Canonical tz-NAIVE timestamp string for an OHLCV bar so the same bar
+    from different providers collapses onto ONE unique key instead of
+    duplicating. The root cause of 581K duplicate day-rows was kite writing
+    tz-aware ('...+05:30') and yfinance/jugaad writing tz-naive ('...T00:00:00')
+    for the same day — different strings, so the (symbol, interval, timestamp)
+    constraint didn't dedupe. Daily → date at midnight; intraday → wall-clock
+    to the second (all bars are IST clock time, so dropping tz is correct)."""
+    if interval == "daily":
+        return ts.strftime("%Y-%m-%dT00:00:00")
+    return ts.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+# Provider trust ranking for OHLCV upserts. On a key conflict (same bar from
+# a different provider), the higher-priority source wins REGARDLESS of
+# ingestion order — so yfinance can never clobber a kite bar, and the day's
+# bar doesn't flip-flop with whichever provider ran last. kite (paid,
+# authoritative broker data) is the source of truth; yfinance (questionable
+# NSE adjustment) is lowest. Unknown sources fall to 0 and won't overwrite a
+# known source's bar.
+_SOURCE_PRIORITY: dict[str, int] = {
+    "kite": 7,
+    "bhavcopy": 6,
+    "jugaad": 5,
+    "tvdatafeed": 4,
+    "backfill": 3,
+    "ingester": 3,
+    "universe": 2,
+    "yfinance": 1,
+    "yfinance_vix": 1,
+}
+
+
+def _source_priority_sql(col: str) -> str:
+    """Build a CASE expression mapping a source column to its trust rank.
+    Source keys are hardcoded constants (no user input), so embedding is
+    injection-safe."""
+    whens = " ".join(f"WHEN '{s}' THEN {p}" for s, p in _SOURCE_PRIORITY.items())
+    return f"(CASE {col} {whens} ELSE 0 END)"
 
 
 class Database:
@@ -392,7 +434,7 @@ class Database:
             (
                 symbol,
                 interval,
-                bar.timestamp.isoformat(),
+                _canonical_ohlcv_ts(bar.timestamp, interval),
                 bar.open,
                 bar.high,
                 bar.low,
@@ -408,7 +450,12 @@ class Database:
             "ON CONFLICT(symbol, interval, timestamp) DO UPDATE SET "
             "open=excluded.open, high=excluded.high, low=excluded.low, "
             "close=excluded.close, volume=excluded.volume, source=excluded.source, "
-            "ingested_at=datetime('now')",
+            "ingested_at=datetime('now') "
+            # Only overwrite when the incoming source is at least as trusted
+            # as the stored one — so a later yfinance fetch can't clobber a
+            # kite bar, and the day's bar doesn't flip-flop by ingest order.
+            f"WHERE {_source_priority_sql('excluded.source')} "
+            f">= {_source_priority_sql('ohlcv.source')}",
             rows,
         )
         await self.conn.commit()
@@ -454,19 +501,30 @@ class Database:
         return float(row[0])
 
     async def get_ohlcv(
-        self, symbol: str, interval: str, days: int = 30
+        self, symbol: str, interval: str, days: int = 30,
+        end: datetime | None = None,
     ) -> list[OHLCVBar]:
-        """Fetch OHLCV bars for a symbol, most recent `days` days."""
+        """Fetch OHLCV bars for a symbol.
+
+        By default returns the most recent `days` days. When `end` is set
+        (an "as of" timestamp), returns the `days`-day window ENDING at
+        `end` instead — used by the historical dry-run to evaluate signals
+        as they would have looked on a past date (no look-ahead).
+        """
         from datetime import timedelta
 
-        cutoff = (now_utc() - timedelta(days=days)).isoformat()
-        cursor = await self.read_conn.execute(
+        end_dt = end or now_utc()
+        cutoff = (end_dt - timedelta(days=days)).isoformat()
+        query = (
             "SELECT timestamp, open, high, low, close, volume FROM ohlcv "
-            "WHERE symbol = ? AND interval = ? "
-            "AND timestamp >= ? "
-            "ORDER BY timestamp ASC",
-            (symbol, interval, cutoff),
+            "WHERE symbol = ? AND interval = ? AND timestamp >= ? "
         )
+        params: list[Any] = [symbol, interval, cutoff]
+        if end is not None:
+            query += "AND timestamp <= ? "
+            params.append(end_dt.isoformat())
+        query += "ORDER BY timestamp ASC"
+        cursor = await self.read_conn.execute(query, tuple(params))
         rows = await cursor.fetchall()
         return [
             OHLCVBar(
@@ -1469,15 +1527,16 @@ class Database:
         """Save a new model version record."""
         await self.conn.execute(
             "INSERT INTO model_versions (model_type, version, file_path, "
-            "sharpe_ratio, sharpe_lower, max_drawdown_pct, win_rate, profit_factor, "
-            "status, shadow_start_date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'shadow', datetime('now'))",
+            "sharpe_ratio, sharpe_lower, argmax_sharpe, max_drawdown_pct, "
+            "win_rate, profit_factor, status, shadow_start_date) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'shadow', datetime('now'))",
             (
                 model_type,
                 version,
                 file_path,
                 metrics.get("sharpe") or metrics.get("sharpe_ratio"),
                 metrics.get("sharpe_lower"),
+                metrics.get("argmax_sharpe"),
                 metrics.get("max_drawdown_pct"),
                 metrics.get("win_rate"),
                 metrics.get("profit_factor"),
@@ -1492,6 +1551,15 @@ class Database:
             "WHERE model_type = ? AND status = 'production' "
             "ORDER BY created_at DESC LIMIT 1",
             (model_type,),
+        )
+        row = await cursor.fetchone()
+        return dict[str, Any](row) if row else None
+
+    async def get_model_version(self, version: str) -> dict[str, Any] | None:
+        """Look up a single model_versions row by version string (any status)."""
+        cursor = await self.read_conn.execute(
+            "SELECT * FROM model_versions WHERE version = ? LIMIT 1",
+            (version,),
         )
         row = await cursor.fetchone()
         return dict[str, Any](row) if row else None
@@ -1602,6 +1670,67 @@ class Database:
         rows = await cursor.fetchall()
         return {"bars": [dict[str, Any](row) for row in rows]}
 
+    async def get_intraday_training_dataset(
+        self,
+        *,
+        max_days: int | None = None,
+        interval: str = "5minute",
+        minute_interval: str = "1m",
+        symbols: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Load intraday training data: 5-min *decision* bars + 1-min *path* bars.
+
+        The intraday model computes features and takes entries on the
+        ``interval`` (5-min) series, but the triple-barrier label resolves
+        target-before-SL ordering on the finer ``minute_interval`` (1-min)
+        series (see ``intraday_triple_barrier_label``). Both are returned,
+        scoped to the same window, so every decision bar has the 1-min path
+        needed to label it.
+
+        ``symbols`` scopes both queries — chunk the F&O universe through it
+        to bound memory, since 1-min × the full universe is large. ``max_days``
+        caps history (timestamps are ISO, so the lexical date compare is safe
+        for intraday timestamps too).
+
+        Returns::
+
+            {
+              "decision_bars": [ {symbol, timestamp, open, high, low, close, volume}, ... ],
+              "minute_bars": { symbol: [ {timestamp, open, high, low, close, volume}, ... ] },
+            }
+
+        ``decision_bars`` is ordered by (symbol, timestamp); each
+        ``minute_bars[symbol]`` list is ascending by timestamp.
+        """
+        def _build(iv: str) -> tuple[str, list[Any]]:
+            q = (
+                "SELECT symbol, timestamp, open, high, low, close, volume "
+                "FROM ohlcv WHERE interval = ?"
+            )
+            params: list[Any] = [iv]
+            if max_days is not None and max_days > 0:
+                q += " AND timestamp >= date('now', ?)"
+                params.append(f"-{int(max_days)} day")
+            if symbols:
+                placeholders = ",".join("?" * len(symbols))
+                q += f" AND symbol IN ({placeholders})"
+                params.extend(symbols)
+            q += " ORDER BY symbol, timestamp"
+            return q, params
+
+        dec_q, dec_params = _build(interval)
+        dec_rows = await self.read_conn.execute_fetchall(dec_q, tuple(dec_params))
+        decision_bars = [dict[str, Any](r) for r in dec_rows]
+
+        min_q, min_params = _build(minute_interval)
+        min_rows = await self.read_conn.execute_fetchall(min_q, tuple(min_params))
+        minute_bars: dict[str, list[dict[str, Any]]] = {}
+        for r in min_rows:
+            row = dict[str, Any](r)
+            minute_bars.setdefault(row["symbol"], []).append(row)
+
+        return {"decision_bars": decision_bars, "minute_bars": minute_bars}
+
     async def get_bulk_deals_timeline(self) -> list[dict[str, Any]]:
         """Return all bulk/block deals across history, ordered by date.
         Used by model_retrain to build a (symbol, date) → net-count
@@ -1687,6 +1816,38 @@ class Database:
         )
         await self.conn.commit()
         return len(rows)
+
+    async def get_distinct_ohlcv_symbols(
+        self, interval: str, max_days: int | None = None,
+    ) -> list[str]:
+        """Distinct symbols that have bars at ``interval`` within ``max_days``.
+
+        Cheap symbol-list lookup used to chunk the intraday training fetch:
+        loading 1-min bars for the whole universe at once would OOM a small
+        host, so model-retrain walks symbol chunks, and this is the index it
+        chunks over. ``max_days`` mirrors get_intraday_training_dataset's
+        lexical ISO date compare.
+        """
+        q = "SELECT DISTINCT symbol FROM ohlcv WHERE interval = ?"
+        params: list[Any] = [interval]
+        if max_days is not None and max_days > 0:
+            q += " AND timestamp >= date('now', ?)"
+            params.append(f"-{int(max_days)} day")
+        q += " ORDER BY symbol"
+        rows = await self.read_conn.execute_fetchall(q, tuple(params))
+        return [r[0] for r in rows if r[0]]
+
+    async def get_distinct_fno_underlyings(self) -> list[str]:
+        """Distinct F&O underlying symbols seen in fno_daily.
+
+        Offline fallback for resolving the F&O universe when a live NFO
+        instrument-master fetch isn't available (broker unauthenticated).
+        Only as complete as ingest-fno's accumulated history.
+        """
+        rows = await self.read_conn.execute_fetchall(
+            "SELECT DISTINCT symbol FROM fno_daily ORDER BY symbol"
+        )
+        return [r[0] for r in rows if r[0]]
 
     async def get_fno_timeline(
         self, date_from: str | None = None,
@@ -2288,6 +2449,128 @@ class Database:
             "breadth": up / len(returns),
             "avg_return": sum(returns) / len(returns),
             "sample_size": len(returns),
+        }
+
+    async def compute_live_sector_regime(
+        self,
+    ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+        """Live per-sector breadth/avg-return plus per-symbol daily return,
+        for the inference-time `sector_breadth` / `sector_avg_return` /
+        `relative_momentum` features (training computes the same via
+        `_compute_sector_index`). Uses the latest two daily closes of every
+        tracked symbol, grouped by sector via the symbol_sectors map.
+
+        Returns (sector_stats, symbol_returns) where sector_stats[sector] =
+        {"breadth", "avg_return", "n"} and symbol_returns[symbol] = pct
+        change. A sector needs >= 3 peers to get stats (mirrors training's
+        min-peer guard); thinner sectors are simply absent.
+        """
+        cursor = await self.read_conn.execute(
+            """
+            WITH ranked AS (
+                SELECT symbol, close,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY symbol ORDER BY timestamp DESC
+                       ) AS rn
+                FROM ohlcv
+                WHERE interval = 'daily'
+                  AND timestamp >= date('now', '-10 day')
+            )
+            SELECT symbol,
+                   MAX(CASE WHEN rn = 1 THEN close END) AS latest,
+                   MAX(CASE WHEN rn = 2 THEN close END) AS prev
+            FROM ranked
+            WHERE rn <= 2
+            GROUP BY symbol
+            HAVING latest > 0 AND prev > 0
+            """
+        )
+        rows = await cursor.fetchall()
+        symbol_returns: dict[str, float] = {}
+        for sym, latest, prev in rows:
+            try:
+                symbol_returns[sym] = (float(latest) - float(prev)) / float(prev)
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+        if not symbol_returns:
+            return {}, {}
+        sector_map = await self.get_symbol_sectors_map(list(symbol_returns.keys()))
+        by_sector: dict[str, list[float]] = {}
+        for sym, ret in symbol_returns.items():
+            sec = sector_map.get(sym)
+            if sec:
+                by_sector.setdefault(sec, []).append(ret)
+        sector_stats: dict[str, dict[str, float]] = {}
+        for sec, rets in by_sector.items():
+            if len(rets) < 3:
+                continue
+            up = sum(1 for x in rets if x > 0)
+            sector_stats[sec] = {
+                "breadth": up / len(rets),
+                "avg_return": sum(rets) / len(rets),
+                "n": len(rets),
+            }
+        return sector_stats, symbol_returns
+
+    async def compute_market_trend(self, ma_window: int = 50) -> dict[str, Any]:
+        """Equal-weight market-index trend vs its moving average — the
+        long-only circuit-breaker signal. Builds an index from the mean
+        daily return across all tracked symbols, then reports whether the
+        latest index level is at/above its trailing `ma_window`-day MA.
+
+        Returns: {"in_uptrend": bool, "index_level": float, "ma": float,
+                  "sample_size": int, "ma_window": int}. Neutral
+        (in_uptrend=True, sample_size=0) when there isn't enough history —
+        fail-open so a cold cache never blocks trading.
+        """
+        lookback = ma_window + 10
+        cursor = await self.read_conn.execute(
+            "SELECT symbol, timestamp, close FROM ohlcv "
+            "WHERE interval = 'daily' AND timestamp >= date('now', ?) "
+            "ORDER BY symbol, timestamp",
+            (f"-{int(lookback)} day",),
+        )
+        rows = await cursor.fetchall()
+        neutral = {
+            "in_uptrend": True, "index_level": 1.0, "ma": 1.0,
+            "sample_size": 0, "ma_window": ma_window,
+        }
+        if not rows:
+            return neutral
+        by_symbol: dict[str, list[tuple[str, float]]] = {}
+        for sym, ts, close in rows:
+            try:
+                c = float(close)
+            except (TypeError, ValueError):
+                continue
+            by_symbol.setdefault(sym, []).append((str(ts)[:10], c))
+        ret_sum: dict[str, float] = {}
+        ret_cnt: dict[str, int] = {}
+        for series in by_symbol.values():
+            series.sort()
+            for i in range(1, len(series)):
+                pc = series[i - 1][1]
+                if pc > 0:
+                    d = series[i][0]
+                    ret_sum[d] = ret_sum.get(d, 0.0) + (series[i][1] / pc - 1)
+                    ret_cnt[d] = ret_cnt.get(d, 0) + 1
+        dates = sorted(ret_cnt)
+        if len(dates) < 2:
+            return neutral
+        level = 1.0
+        levels: list[float] = []
+        for d in dates:
+            level *= (1 + ret_sum[d] / ret_cnt[d])
+            levels.append(level)
+        window = levels[-ma_window:] if len(levels) >= ma_window else levels
+        ma = sum(window) / len(window)
+        latest = levels[-1]
+        return {
+            "in_uptrend": latest >= ma,
+            "index_level": latest,
+            "ma": ma,
+            "sample_size": ret_cnt[dates[-1]],
+            "ma_window": ma_window,
         }
 
     async def minutes_since_last_loss_for_symbol(
@@ -4270,11 +4553,15 @@ class Database:
     ) -> dict[str, Any]:
         """Delete data older than retention periods.
 
-        Daily and intraday OHLCV are trimmed on SEPARATE windows.
-        Daily must cover the training history (`ohlcv_days`); intraday
-        (5-minute etc.) is heavy and only used operationally, so it
-        gets the shorter `intraday_ohlcv_days` (defaults to ohlcv_days
-        for backwards-compat when the caller doesn't pass it).
+        Daily and intraday OHLCV are trimmed on SEPARATE windows because
+        the intraday series (5-min / 1-min) is ~75-375× heavier per day,
+        so it gets its own `intraday_ohlcv_days` (defaults to ohlcv_days
+        for backwards-compat when the caller doesn't pass it). Both windows
+        are training-history windows now: the daily window feeds the swing
+        model, the intraday window feeds the 5-min intraday model — so
+        db_maintenance floors each at the relevant backfill depth before
+        calling this, and neither may be pruned below what the next retrain
+        needs.
         """
         from datetime import timedelta
 
@@ -4289,10 +4576,11 @@ class Database:
         )
         deleted["ohlcv"] = cursor.rowcount
 
-        # Intraday OHLCV retention (decoupled — 5-min bars are ~75×
-        # heavier per day and not used for training). When the caller
-        # doesn't supply intraday_ohlcv_days, fall back to ohlcv_days
-        # so existing behaviour (single retention) is preserved.
+        # Intraday OHLCV retention (decoupled — 5-min / 1-min bars are
+        # ~75-375× heavier per day, so they ride a separate, caller-floored
+        # window that must still cover the intraday model's training depth).
+        # When the caller doesn't supply intraday_ohlcv_days, fall back to
+        # ohlcv_days so existing behaviour (single retention) is preserved.
         intraday_window = (
             intraday_ohlcv_days if intraday_ohlcv_days is not None else ohlcv_days
         )
@@ -4387,13 +4675,31 @@ class Database:
         return pending_id
 
     async def get_pending_trades(self) -> list[dict[str, Any]]:
-        """Get all pending trades awaiting approval."""
+        """Get all pending trades awaiting approval.
+
+        Surfaces the holding-period fields (stored inside `signal_data`) at
+        the top level so the UI can show the expected hold / target date
+        without re-parsing the signal JSON.
+        """
+        import json
         cursor = await self.conn.execute(
             "SELECT * FROM pending_trades WHERE status = 'pending' "
             "ORDER BY created_at DESC"
         )
         rows = await cursor.fetchall()
-        return [dict[str, Any](r) for r in rows]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict[str, Any](r)
+            if "expected_holding_days" not in d or d.get("expected_holding_days") is None:
+                try:
+                    sig = json.loads(d.get("signal_data") or "{}")
+                    d["expected_holding_days"] = sig.get("expected_holding_days")
+                    d["expected_holding_period"] = sig.get("expected_holding_period")
+                except (ValueError, TypeError):
+                    d["expected_holding_days"] = None
+                    d["expected_holding_period"] = None
+            out.append(d)
+        return out
 
     async def get_pending_trade_by_symbol(self, symbol: str) -> dict[str, Any] | None:
         """Get a pending trade by symbol (case-insensitive). Returns None if not found."""
@@ -4934,9 +5240,14 @@ class Database:
         return {row[1] for row in await cursor.fetchall()}
 
     async def insert_dry_run_results(
-        self, run_id: str, signals: list[dict[str, Any]]
+        self, run_id: str, signals: list[dict[str, Any]], as_of: str | None = None
     ) -> int:
-        """Save dry-run signal results for next-day comparison."""
+        """Save dry-run signal results for next-day comparison.
+
+        ``as_of`` is the historical date the run was evaluated against
+        (None = latest data); stamped on every row so the history view can
+        show which date a past run's signals were generated for.
+        """
         columns = await self._get_table_columns("dry_run_results")
 
         # Ensure strategy_mode column exists (may be missing if migration 013 was skipped)
@@ -4959,10 +5270,10 @@ class Database:
             "composite_score", "technical_score", "volume_momentum_score",
             "news_sentiment_score", "fundamental_score", "created_at",
         ]
-        # Optional columns (from migration 013+, 016+)
+        # Optional columns (from migration 013+, 016+, 047+)
         optional_cols = [
             "holding_period", "product", "volatility_score",
-            "estimated_costs", "strategy_mode", "expected_holding_days",
+            "estimated_costs", "strategy_mode", "expected_holding_days", "as_of",
         ]
         insert_cols = base_cols + [c for c in optional_cols if c in columns]
         placeholders = ", ".join("?" if c != "created_at" else "datetime('now')" for c in insert_cols)
@@ -4972,6 +5283,7 @@ class Database:
         for s in signals:
             values = tuple(
                 run_id if c == "run_id"
+                else as_of if c == "as_of"
                 else s.get(c)
                 for c in value_cols
             )
@@ -4990,18 +5302,20 @@ class Database:
                 "MIN(created_at) as created_at, "
                 "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
                 "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored, "
-                "MAX(strategy_mode) as strategy_mode "
+                "MAX(strategy_mode) as strategy_mode, "
+                "MAX(as_of) as as_of, MAX(model_version) as model_version "
                 "FROM dry_run_results "
                 "GROUP BY run_id ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
         except Exception:
-            # Fallback if strategy_mode column doesn't exist (pre-migration 013)
+            # Fallback if strategy_mode / as_of columns don't exist (pre-migration 013/047)
             cursor = await self.conn.execute(
                 "SELECT run_id, COUNT(*) as signal_count, "
                 "MIN(created_at) as created_at, "
                 "SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END) as correct, "
-                "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored "
+                "SUM(CASE WHEN scored_at IS NOT NULL THEN 1 ELSE 0 END) as scored, "
+                "MAX(model_version) as model_version "
                 "FROM dry_run_results "
                 "GROUP BY run_id ORDER BY created_at DESC LIMIT ?",
                 (limit,),
@@ -5027,32 +5341,68 @@ class Database:
         await self.conn.commit()
         return cursor.rowcount
 
+    async def get_dry_run_ids_needing_scoring(self) -> list[str]:
+        """Run ids that still have at least one unscored signal."""
+        cursor = await self.read_conn.execute(
+            "SELECT DISTINCT run_id FROM dry_run_results WHERE scored_at IS NULL"
+        )
+        return [r[0] for r in await cursor.fetchall()]
+
+    async def get_daily_ohlc_between(
+        self, symbol: str, after_date: str, through_date: str,
+    ) -> list[tuple[Any, ...]]:
+        """Daily OHLC bars with after_date < date <= through_date (ascending).
+
+        Returns (open, high, low, close, date) tuples — the holding-window
+        slice used for path-aware scoring of predictions.
+        """
+        cursor = await self.read_conn.execute(
+            "SELECT open, high, low, close, SUBSTR(timestamp, 1, 10) AS d "
+            "FROM ohlcv WHERE symbol = ? AND interval = 'daily' "
+            "AND SUBSTR(timestamp, 1, 10) > ? AND SUBSTR(timestamp, 1, 10) <= ? "
+            "ORDER BY timestamp ASC",
+            (symbol, after_date, through_date),
+        )
+        return [tuple(r) for r in await cursor.fetchall()]
+
+    async def get_daily_bar_on(
+        self, symbol: str, date: str,
+    ) -> tuple[Any, ...] | None:
+        """Single daily OHLC bar on a given date (for same-day predictions)."""
+        cursor = await self.read_conn.execute(
+            "SELECT open, high, low, close, SUBSTR(timestamp, 1, 10) AS d "
+            "FROM ohlcv WHERE symbol = ? AND interval = 'daily' "
+            "AND SUBSTR(timestamp, 1, 10) = ? LIMIT 1",
+            (symbol, date),
+        )
+        row = await cursor.fetchone()
+        return tuple(row) if row else None
+
     async def score_dry_run(self, run_id: str) -> dict[str, Any]:
-        """Score a dry-run against actual next-day OHLCV data.
+        """Score a dry-run against each signal's TARGET-DATE actuals.
 
-        For each signal, fetch the next trading day's OHLCV and compare.
-        Uses date-only comparison to avoid timestamp format mismatches
-        (dry-run created_at has time, OHLCV timestamp may not).
+        A signal's target date is its as-of date (the date the run was
+        evaluated for; falls back to the run's created date for a
+        latest-data run) plus ``expected_holding_days`` *trading* days —
+        realised by walking the daily bars that exist after the as-of
+        date, so market holidays need no special handling. Scoring is
+        path-aware over that holding window (``target_hit`` = price
+        touched the target on any bar; direction / move measured at the
+        window-end close) and PARTIAL: signals whose window hasn't fully
+        elapsed are left pending, so a mixed-horizon run (balanced /
+        long_term) scores whatever is ready and the rest on a later pass.
 
-        Scoring waits for the next *trading day's* daily bar to exist.
-        Three outcomes possible per signal:
-          - scored: found and compared
-          - same_day: the dry-run was created today (IST) — too early
-          - not_found: previous-day dry-run but next-day OHLCV missing
-            (most often: today's daily bar hasn't been ingested yet)
+        Per-signal outcomes:
+          - scored: full holding window elapsed and compared
+          - pending: window not fully elapsed yet (try again later)
+          - not_found: window should have elapsed but OHLCV is missing
         """
         signals = await self.get_dry_run_signals(run_id)
         if not signals:
             return {"scored": 0, "not_found": 0}
 
-        # Compare in IST so a late-evening-IST dry-run (which is the next
-        # UTC day) is still recognised as "same trading day" and treated
-        # as too-recent-to-score.
-        today_ist = now_ist().strftime("%Y-%m-%d")
-        already_scored = 0
-        scored = 0
-        not_found = 0
-        same_day = 0
+        today = now_ist().date()
+        already_scored = scored = pending = not_found = 0
         unfound: list[dict[str, Any]] = []
 
         for sig in signals:
@@ -5060,64 +5410,65 @@ class Database:
                 already_scored += 1
                 continue
 
-            # created_at is stored as SQLite datetime('now') (UTC) e.g.
-            # "2026-05-15 05:11:30". Convert to IST trading day before
-            # comparing.
-            raw_created = str(sig["created_at"])
-            try:
-                # Parse with assumed UTC if no tzinfo present.
-                ts = datetime.fromisoformat(raw_created.replace(" ", "T"))
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=UTC)
-                created_date = ts.astimezone(IST).strftime("%Y-%m-%d")
-            except Exception:
-                created_date = raw_created[:10]
+            # Base date the signal was evaluated for. as_of (historical
+            # run) is authoritative; otherwise the run's own created date.
+            base_date = sig.get("as_of")
+            if not base_date:
+                raw_created = str(sig["created_at"])
+                try:
+                    ts = datetime.fromisoformat(raw_created.replace(" ", "T"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=UTC)
+                    base_date = ts.astimezone(IST).strftime("%Y-%m-%d")
+                except Exception:
+                    base_date = raw_created[:10]
+            base_date = str(base_date)[:10]
 
-            if created_date >= today_ist:
-                same_day += 1
-                continue
+            horizon = int(sig.get("expected_holding_days") or 0)
+            if horizon < 1:
+                horizon = 1
 
-            # Get the next day's OHLCV after the dry-run date.
-            # Use SUBSTR to compare date portions only, avoiding time format issues.
+            # The first `horizon` trading bars strictly after the as-of date
+            # ARE the holding window; the last is the target date.
             cursor = await self.read_conn.execute(
                 "SELECT open, high, low, close, SUBSTR(timestamp, 1, 10) AS d "
                 "FROM ohlcv WHERE symbol = ? AND interval = 'daily' "
                 "AND SUBSTR(timestamp, 1, 10) > ? "
-                "ORDER BY timestamp ASC LIMIT 1",
-                (sig["symbol"], created_date),
+                "ORDER BY timestamp ASC LIMIT ?",
+                (sig["symbol"], base_date, horizon),
             )
-            row = await cursor.fetchone()
-            if not row:
-                not_found += 1
-                unfound.append({
-                    "symbol": sig["symbol"],
-                    "created_date": created_date,
-                })
+            bars = await cursor.fetchall()
+
+            if len(bars) < horizon:
+                # Window not fully covered. If enough calendar time has
+                # passed that the bars *should* exist, it's a data gap;
+                # otherwise the window simply hasn't elapsed yet.
+                try:
+                    gap_days = (today - datetime.strptime(base_date, "%Y-%m-%d").date()).days
+                except Exception:
+                    gap_days = 0
+                if gap_days > horizon * 2 + 7:
+                    not_found += 1
+                    unfound.append({
+                        "symbol": sig["symbol"], "base_date": base_date,
+                        "have": len(bars), "need": horizon,
+                    })
+                else:
+                    pending += 1
                 continue
 
-            actual_open = row[0]
-            actual_high = row[1]
-            actual_low = row[2]
-            actual_close = row[3]
-            entry = sig["entry_price"]
-
-            if sig["signal_type"] == "BUY":
-                direction_correct = 1 if actual_close > entry else 0
-                target_hit = 1 if actual_high >= sig["target_price"] else 0
-                actual_move_pct = (actual_close - entry) / entry * 100 if entry else 0
-            else:  # SELL
-                direction_correct = 1 if actual_close < entry else 0
-                target_hit = 1 if actual_low <= sig["target_price"] else 0
-                actual_move_pct = (entry - actual_close) / entry * 100 if entry else 0
-
+            m = path_aware_score(
+                bars, sig["entry_price"], sig.get("target_price"),
+                sig.get("stop_loss_price"), sig["signal_type"],
+            )
             await self.conn.execute(
                 "UPDATE dry_run_results SET "
                 "actual_open = ?, actual_close = ?, actual_high = ?, actual_low = ?, "
                 "direction_correct = ?, target_hit = ?, actual_move_pct = ?, "
                 "scored_at = datetime('now') "
                 "WHERE id = ?",
-                (actual_open, actual_close, actual_high, actual_low,
-                 direction_correct, target_hit, round(actual_move_pct, 4),
+                (m["actual_open"], m["actual_close"], m["actual_high"], m["actual_low"],
+                 m["direction_correct"], m["target_hit"], m["actual_move_pct"],
                  sig["id"]),
             )
             scored += 1
@@ -5127,34 +5478,30 @@ class Database:
 
         result: dict[str, Any] = {
             "scored": scored,
-            "not_found": not_found,
             "already_scored": already_scored,
+            "pending": pending,
+            "not_found": not_found,
         }
-        if same_day > 0:
-            result["same_day"] = same_day
+        if scored == 0 and pending > 0 and not_found == 0:
             result["message"] = (
-                "Signals generated today cannot be scored yet — "
-                "next trading day's data is needed. Try again tomorrow."
+                f"{pending} signal(s) not scored yet — the holding window "
+                "hasn't fully elapsed. They'll score automatically once each "
+                "target date passes."
             )
-        if not_found > 0 and not same_day:
-            # Tell the user exactly what's missing. Most common cause:
-            # today's daily bar hasn't landed in OHLCV yet — daily bars
-            # from jugaad / yfinance arrive after market close.
+        if not_found > 0:
             sample = ", ".join(
-                f"{u['symbol']} (created {u['created_date']})"
-                for u in unfound[:5]
+                f"{u['symbol']} (as-of {u['base_date']})" for u in unfound[:5]
             )
             if len(unfound) > 5:
                 sample += f", +{len(unfound) - 5} more"
             result["unfound"] = unfound
             result["message"] = (
-                "Next-day OHLCV not yet in DB for these symbols: "
+                "Holding window elapsed but OHLCV is missing for: "
                 + sample
-                + ". Daily bars are usually ingested after market close "
-                "(~3:30 PM IST); try again later today or tomorrow."
+                + ". Ingest the daily bars covering those target dates, then re-score."
             )
             logger.info(
-                "score_dry_run %s: %d signals could not be scored — %s",
+                "score_dry_run %s: %d signals missing OHLCV — %s",
                 run_id, not_found, sample,
             )
         return result

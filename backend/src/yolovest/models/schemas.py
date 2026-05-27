@@ -28,6 +28,27 @@ class OHLCVBar(BaseModel):
     volume: int = Field(ge=0)
 
 
+def is_valid_ohlc(*values: Any) -> bool:
+    """True only when every O/H/L/C value is a real positive number.
+
+    Data providers return junk bars — None, NaN, or 0.0 placeholders for
+    pre-listing / no-trade / illiquid days (e.g. Kite's pre-IPO rows for a
+    recently-listed symbol). OHLCVBar enforces gt=0, so a single junk bar
+    would otherwise raise and fail the WHOLE symbol's fetch. Providers call
+    this to skip such bars instead. Volume isn't checked here (0 volume is
+    a legitimate bar)."""
+    for v in values:
+        if v is None:
+            return False
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return False
+        if f != f or f <= 0:  # NaN (f != f) or non-positive
+            return False
+    return True
+
+
 class PremarketContext(BaseModel):
     """Pre-market global cues collected before market open."""
 

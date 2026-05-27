@@ -9,6 +9,25 @@ function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
+// Approximate exit-by date for the pending banner: add `days` trading days
+// (skipping weekends) to today. Calendar-only — the engine counts real
+// trading days incl. holidays, hence the "≈".
+function holdLabel(days?: number | null, period?: string | null): { text: string; date: string } | null {
+  if ((days == null || Number.isNaN(days)) && !period) return null;
+  if (period === "intraday" || (days != null && days <= 0)) {
+    return { text: "Intraday", date: "today" };
+  }
+  const n = days && days > 0 ? days : 1;
+  const d = new Date();
+  let added = 0;
+  while (added < n) {
+    d.setDate(d.getDate() + 1);
+    const wd = d.getDay();
+    if (wd !== 0 && wd !== 6) added++;
+  }
+  return { text: `${n}d hold`, date: d.toLocaleDateString("en-IN", { day: "numeric", month: "short" }) };
+}
+
 interface Override {
   [key: string]: unknown;
   signal_type?: string;
@@ -146,6 +165,8 @@ function OverrideRow({
       <td className="py-2 px-3 text-right font-mono text-gray-300">
         {"₹"}{fmt(entry * qty, 0)}
       </td>
+      {/* Exit-by column placeholder — read row populates it. */}
+      <td className="py-2 px-3 text-right text-gray-600">—</td>
       <td className="py-2 px-3 text-center">
         <div className="flex items-center justify-center gap-1.5">
           <button
@@ -273,6 +294,7 @@ export function PendingTradesBanner() {
               <th className="py-2 px-3 text-right">SL</th>
               <th className="py-2 px-3 text-right">Qty</th>
               <th className="py-2 px-3 text-right">Investment</th>
+              <th className="py-2 px-3 text-right">Exit by</th>
               <th className="py-2 px-3 text-center">Actions</th>
             </tr>
           </thead>
@@ -357,6 +379,18 @@ export function PendingTradesBanner() {
                   <td className="py-2 px-3 text-right text-gray-400">{t.position_size}</td>
                   <td className="py-2 px-3 text-right font-mono text-gray-300">
                     {"₹"}{fmt(t.entry_price * t.position_size, 0)}
+                  </td>
+                  <td className="py-2 px-3 text-right whitespace-nowrap">
+                    {(() => {
+                      const h = holdLabel(t.expected_holding_days, t.expected_holding_period);
+                      if (!h) return <span className="text-gray-600">—</span>;
+                      return (
+                        <div>
+                          <div className="text-gray-300 text-xs">{h.text}</div>
+                          <div className="text-[10px] text-gray-500">≈ {h.date}</div>
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="py-2 px-3 text-center">
                     <div className="flex items-center justify-center gap-1.5">

@@ -87,9 +87,11 @@ const TABS: Tab[] = [
       "_strategy_top",
       "_strategy_mis",
       "_strategy_cnc",
+      "_strategy_features",
       "strategy",
       "scanning",
       "retraining",
+      "scoring",
     ],
   },
   {
@@ -147,6 +149,19 @@ const STRATEGY_CNC_KEYS = [
   "strategy.holding_periods.long.stop_loss",
 ];
 
+// Optional support feature groups the model trains on (price/technical
+// features are always the primary core). Grouped into their own card so
+// it's clear these are toggleable add-ons.
+const STRATEGY_FEATURE_KEYS = [
+  "strategy.feature_groups.regime",
+  "strategy.feature_groups.sector",
+  "strategy.feature_groups.institutional",
+  "strategy.feature_groups.news",
+  "strategy.feature_groups.vix",
+  "strategy.feature_groups.fno",
+  "strategy.feature_groups.feedback",
+];
+
 // Per-product risk settings — intraday/swing in the model maps 1:1 to
 // MIS/CNC at the broker, so these virtual sections group the knobs the
 // user actually thinks about as "MIS rules" vs "CNC rules".
@@ -177,6 +192,7 @@ const CRON_KEYS = [
   "reports.weekly_report_cron",
   "retraining.schedule_cron",
   "database.backup_cron",
+  "scoring.auto_score_cron",
 ];
 
 // Keys to hide from their original sections (shown in virtual sections instead)
@@ -186,6 +202,7 @@ const RELOCATED_KEYS = new Set([
   ...STRATEGY_TOP_KEYS,
   ...STRATEGY_MIS_KEYS,
   ...STRATEGY_CNC_KEYS,
+  ...STRATEGY_FEATURE_KEYS,
   ...RISK_MIS_KEYS,
   ...RISK_CNC_KEYS,
 ]);
@@ -204,6 +221,7 @@ const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
     { value: "short_term", label: "Short Term" },
     { value: "balanced", label: "Balanced" },
     { value: "long_term", label: "Long Term" },
+    { value: "swing", label: "Swing (Short + Long, no MIS)" },
   ],
   "scanning.universe": [
     { value: "nifty50", label: "Nifty 50" },
@@ -274,6 +292,7 @@ const SECTION_LABELS: Record<string, string> = {
   _strategy_top: "Strategy — Core",
   _strategy_mis: "MIS (Intraday) — Holding Geometry",
   _strategy_cnc: "CNC (Delivery) — Holding Geometry",
+  _strategy_features: "Feature Groups (price/technical always on)",
   _cron_schedules: "Cron Schedules",
   _risk_mis: "MIS (Intraday) Specific",
   _risk_cnc: "CNC (Delivery) Specific",
@@ -289,6 +308,7 @@ const SECTION_LABELS: Record<string, string> = {
   transaction_costs: "Transaction Costs",
   database: "Data Retention & Backups",
   retraining: "Model Retraining",
+  scoring: "Auto-Scoring",
   reports: "Reports",
   dashboard: "Dashboard",
   notifications: "Notifications",
@@ -365,6 +385,13 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "strategy.market_regime.bear_max_holding_days": "Bear Max Holding Days",
   "strategy.market_regime.range_prefer_mean_reversion": "Range: Prefer Mean Reversion",
   // Feedback
+  "strategy.feature_groups.regime": "Support: Market Regime",
+  "strategy.feature_groups.sector": "Support: Sector-Relative",
+  "strategy.feature_groups.institutional": "Support: Bulk Deals / Delivery",
+  "strategy.feature_groups.news": "Support: News Sentiment",
+  "strategy.feature_groups.vix": "Support: India VIX",
+  "strategy.feature_groups.fno": "Support: F&O Option Chain",
+  "strategy.feature_groups.feedback": "Support: Feedback Loop",
   "strategy.feedback.enabled": "ML Feedback Loop",
   "strategy.feedback.lookback_days": "Feedback Lookback (days)",
   "strategy.feedback.sample_weight_boost": "Sample Weight Boost",
@@ -440,6 +467,9 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "risk.institutional_flow.bulk_deal_size_multiplier": "Inst. Flow: Bulk-Deal Multiplier",
   "risk.institutional_flow.fii_net_threshold_cr": "Inst. Flow: FII Net Threshold (₹ Cr)",
   "risk.institutional_flow.fii_aligned_size_multiplier": "Inst. Flow: FII Aligned Multiplier",
+  "risk.market_trend_filter.enabled": "Market Trend Filter",
+  "risk.market_trend_filter.ma_window": "Trend Filter: MA Window (days)",
+  "scoring.auto_score_enabled": "Auto-Score Enabled",
   // Exit tweaks (new)
   "risk.exit_tweaks.time_stop_enabled": "Intraday Time-Stop",
   "risk.exit_tweaks.intraday_stop_after_min": "Time-Stop: Trigger After (min)",
@@ -530,6 +560,19 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "notifications.telegram.alerts.weekly_summary": "Alert: Weekly Summary",
   "notifications.telegram.alerts.errors": "Alert: Errors",
   "notifications.telegram.alerts.kill_switch": "Alert: Kill Switch",
+  // Previously unlabeled (rendered with humanized fallback)
+  "retraining.min_argmax_sharpe_for_promotion": "Min Edge (argmax) Sharpe to Promote",
+  "risk.depth_gate.min_size_multiplier": "Depth: Min Size Multiplier",
+  "risk.reentry.confidence_tolerance": "Re-entry: Confidence Tolerance",
+  "risk.reentry.min_reentry_confidence": "Re-entry: Min Confidence Floor",
+  "risk.risk_uplift_cap": "Risk Uplift Cap (multiplier ceiling)",
+  "risk.tuned_min_signal_rate": "Tuning: Min Signal Rate",
+  "risk.tuned_threshold_max_value": "Tuning: Max Threshold Value",
+  "strategy.holding_periods.short_swing.max_atr_pct_for_target": "Short-Swing ATR Cap (target geometry)",
+  "strategy.holding_periods.week.max_atr_pct_for_target": "Week ATR Cap (target geometry)",
+  "strategy.holding_periods.long.max_atr_pct_for_target": "Long ATR Cap (target geometry)",
+  "strategy.post_train_min_signal_rate": "Post-Train Min Signal Rate",
+  "strategy.signal_generation_concurrency": "Signal Generation Concurrency",
 };
 
 // Info descriptions for (i) tooltip
@@ -602,6 +645,13 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "strategy.market_regime.bear_max_holding_days": "In bear regime, cap holding days at this value.",
   "strategy.market_regime.range_prefer_mean_reversion": "In range regime, prefer oversold/overbought mean-reversion entries.",
   // Feedback
+  "strategy.feature_groups.regime": "Train on universe breadth / average return. Off = leaner price-primary model. Takes effect on next retrain; doesn't affect the current model.",
+  "strategy.feature_groups.sector": "Train on sector breadth / relative momentum. Off = price-primary. Next-retrain only.",
+  "strategy.feature_groups.institutional": "Train on bulk-deal counts + delivery %. Sparse data — candidate to disable if it adds noise. Next-retrain only.",
+  "strategy.feature_groups.news": "Train on news-sentiment features. Sparse for many symbols. Next-retrain only.",
+  "strategy.feature_groups.vix": "Train on India VIX features. Next-retrain only.",
+  "strategy.feature_groups.fno": "Train on F&O option-chain features. Forward-only data (very little history yet) — off by default until months accumulate. Next-retrain only.",
+  "strategy.feature_groups.feedback": "Train on the fb_* prediction/trade feedback loop. Next-retrain only.",
   "strategy.feedback.enabled": "Enable ML feedback loop — model learns from its own performance.",
   "strategy.feedback.lookback_days": "How far back to aggregate feedback data for retraining.",
   "strategy.feedback.sample_weight_boost": "Weight multiplier for symbols where model performed poorly.",
@@ -677,6 +727,9 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "risk.institutional_flow.bulk_deal_size_multiplier": "Position size multiplier when bulk deals (in lookback) align with signal direction. Opposing direction divides by this.",
   "risk.institutional_flow.fii_net_threshold_cr": "FII net flow (₹ crore) above which the day counts as 'buying'; below the negative of this, 'selling'.",
   "risk.institutional_flow.fii_aligned_size_multiplier": "Position size multiplier when FII direction agrees with signal direction.",
+  // Market trend filter (long-only circuit breaker)
+  "risk.market_trend_filter.enabled": "Long-only circuit breaker: refuse NEW BUY entries when the equal-weight universe index sits below its moving average (a downtrend). SELLs and closing existing positions are never blocked. The standard drawdown protection for a long-biased swing book — enable before running auto unattended. Default off.",
+  "risk.market_trend_filter.ma_window": "Lookback (trading days) for the index moving average the trend is measured against. 50 ≈ 10 trading weeks. Higher = slower, fewer regime flips.",
   // Exit tweaks
   "risk.exit_tweaks.time_stop_enabled": "Intraday positions still open after intraday_stop_after_min with target-progress below threshold get market-exited. Catches the chop trade that neither works nor breaks. Applies to client-side-managed positions only.",
   "risk.exit_tweaks.intraday_stop_after_min": "Minutes a stuck intraday position can stay open before time-stop considers it.",
@@ -774,6 +827,23 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "reports.weekly_report_cron": "When to generate the weekly performance report.",
   "retraining.schedule_cron": "When to retrain ML models with recent data.",
   "database.backup_cron": "When to run the daily database backup.",
+  // Previously undocumented
+  "retraining.min_argmax_sharpe_for_promotion": "Edge gate: a freshly-trained shadow model must clear this argmax (untuned) backtest Sharpe to be promoted to production. Argmax is the honest edge of the model's natural decisions, before any threshold tuning — a model whose backtest profit lives entirely in a threshold-selected tail (high tuned Sharpe but negative argmax) is blocked here. 0.0 = require non-negative edge. Negative = disable the gate.",
+  "risk.depth_gate.min_size_multiplier": "Floor for the depth-gate size multiplier. The order-book imbalance maps to a position-size multiplier between this floor and 1.0: a neutral/favourable book → full size, the worst-possible opposing book → this fraction (0.4 = 40%). The depth gate sizes down rather than blocking outright.",
+  "risk.reentry.confidence_tolerance": "After a stop-out, a re-entry signal's confidence must be at least this fraction of the ORIGINAL entry's confidence (0.85 = within 15% of it). ML confidence naturally decays as a trend matures, so a strict 'must be higher' rejected most valid re-entries; this tolerance plus the absolute floor below replaces it.",
+  "risk.reentry.min_reentry_confidence": "Absolute confidence floor a re-entry signal must exceed regardless of the original entry's confidence (0.55). Guards against re-entering on a weak signal just because the original was also weak.",
+  "risk.risk_uplift_cap": "Ceiling on the stacked conviction / regime / institutional-flow size multipliers. They compose multiplicatively (e.g. 1.5 × 1.5 × 1.2 = 2.7×); after all of them, risk-check re-clamps so the effective rupees-at-risk never exceeds max_risk_per_trade_pct × this cap (1.5). Stops a strongly-favourable signal from silently running 5%+ risk.",
+  "risk.tuned_min_signal_rate": "Minimum fraction of non-HOLD predictions a (BUY, SELL) threshold cell must produce during the tuning sweep to be eligible (0.02 = 2%). Stops the sweep from picking cutoffs so high the model would signal almost never — the 'every prediction collapses to HOLD' failure.",
+  "risk.tuned_threshold_max_value": "Inference-time cap on a tuned class threshold (0.60). The live model clamps any tuned threshold above this so it stays reachable by the deployed model's probability scale. Bypassed per-side by buy_threshold_override / sell_threshold_override.",
+  "strategy.holding_periods.short_swing.max_atr_pct_for_target": "Cap on the daily ATR (as fraction of entry price) used when computing the short-swing target / SL distance, so high-ATR names don't get unreachable targets. Set to 0 to disable.",
+  "strategy.holding_periods.week.max_atr_pct_for_target": "Cap on the daily ATR (as fraction of entry price) used when computing the week-holding target / SL distance, so high-ATR names don't get unreachable targets. Set to 0 to disable.",
+  "strategy.holding_periods.long.max_atr_pct_for_target": "Cap on the daily ATR (as fraction of entry price) used when computing the long-holding target / SL distance, so high-ATR names don't get unreachable targets. Set to 0 to disable.",
+  "strategy.post_train_min_signal_rate": "Post-train production-path guard: a freshly-trained model must emit at least this fraction of non-HOLD signals when scored on its own training data (0.005 = 0.5%), or the retrain is rejected as a sterile / HOLD-only model. Runs the real production decision path (calibration + tuned thresholds), so it catches a model the live engine would never let signal.",
+  "strategy.signal_generation_concurrency": "How many symbols generate-signals evaluates concurrently per chunk (default 10). The watchlist is processed in asyncio.gather chunks of this size — higher = faster heartbeats but more concurrent data/ML load.",
+  "strategy.max_atr_pct_hard_reject": "Hard sanity ceiling on ATR% (= ATR ÷ entry price). A daily ATR above this fraction of price is implausible for an NSE equity (real ATRs run ~1–8%) and almost always means corrupt OHLCV (e.g. a wrong-symbol bar) — so the signal is rejected outright instead of being sized off a garbage ATR (which otherwise produces nonsense like a +189% target / −94% SL). Default 0.20 (20%). Set 0 to disable.",
+  // Auto-scoring
+  "scoring.auto_score_enabled": "Run the daily auto-score CRON. When on, a post-close job scores every dry-run with unscored signals and every elapsed prediction against the actuals on its OWN target date (path-aware over the holding window) — no manual 'Score' clicks needed. Partial by design: signals whose horizon hasn't fully elapsed are left pending for a later run.",
+  "scoring.auto_score_cron": "When the auto-score job runs (cron, IST). Default 16:45 on weekdays — after the day's daily bars are ingested (~15:30–16:00) so target dates that closed today can be scored. Only matters when Auto-Score is enabled.",
 };
 
 // Cron key labels (friendly names for the virtual cron section)
@@ -786,6 +856,7 @@ const CRON_LABELS: Record<string, string> = {
   "reports.weekly_report_cron": "Weekly Report",
   "retraining.schedule_cron": "Model Retraining",
   "database.backup_cron": "Database Backup",
+  "scoring.auto_score_cron": "Auto-Score Dry-Runs & Predictions",
 };
 
 function getKeyLabel(fullKey: string): string {
@@ -1415,6 +1486,9 @@ export default function SettingsPage() {
     }
     if (sectionKey === "_strategy_cnc") {
       return STRATEGY_CNC_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
+    }
+    if (sectionKey === "_strategy_features") {
+      return STRATEGY_FEATURE_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
     }
     // Normal section — filter out relocated keys
     return Object.entries(localConfig[sectionKey] ?? {}).filter(([k]) => !RELOCATED_KEYS.has(k));
