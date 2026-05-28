@@ -852,7 +852,7 @@ class ModelRetrainSkill(SkillBase):
                     "win_rate": metrics.get("win_rate"),
                 })
                 await self.ctx.db.save_model_version(
-                    model_type, version, f"models/{model_type}_{version}.pkl", metrics
+                    model_type, version, f"models/{version}.pkl", metrics
                 )
 
                 # Step 5: Compare with production on the robust
