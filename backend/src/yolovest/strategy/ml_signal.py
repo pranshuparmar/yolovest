@@ -1146,6 +1146,11 @@ class XGBoostSignalModel(MLBase):
                     if _risk_cfg is not None else 0.0
                 )
 
+                # Deflated Sharpe of the chosen cell — captured from the
+                # sweep (which holds the full grid of trial Sharpes) so the
+                # reported metric corrects for selection across the 81-cell
+                # search, which the per-cell bootstrap lower bound can't.
+                _dsr: float | None = None
                 if use_final_holdout:
                     # Final-scale holdout. Train a tuning model on the
                     # chronological early data only, score the strict-
@@ -1254,6 +1259,7 @@ class XGBoostSignalModel(MLBase):
                         max_diff=_sweep_max_diff,
                         min_signal_rate=_sweep_min_signal_rate,
                     )
+                    _dsr = _tune_bt.deflated_sharpe
                     _ht_preds = _apply_thresholds(
                         _ho_probas[_sub:], tuned_buy, tuned_sell,
                     )
@@ -1288,6 +1294,7 @@ class XGBoostSignalModel(MLBase):
                             max_diff=_sweep_max_diff,
                             min_signal_rate=_sweep_min_signal_rate,
                         )
+                        _dsr = _tune_bt.deflated_sharpe
                         _holdout_tuned_preds = _apply_thresholds(
                             collected_probas[_split:], tuned_buy, tuned_sell,
                         )
@@ -1316,6 +1323,7 @@ class XGBoostSignalModel(MLBase):
                             max_diff=_sweep_max_diff,
                             min_signal_rate=_sweep_min_signal_rate,
                         )
+                        _dsr = tuned_bt.deflated_sharpe
                         _holdout_used = False
                 # When tuned thresholds beat the argmax baseline, report
                 # the tuned metrics as the headline numbers — that's what
@@ -1364,7 +1372,19 @@ class XGBoostSignalModel(MLBase):
                     "argmax_sharpe": bt.sharpe,
                     "tuned_sharpe": tuned_bt.sharpe,
                     "threshold_holdout_used": _holdout_used,
+                    # Selection-bias-adjusted confidence the chosen cell's
+                    # edge is real (P(true Sharpe > 0) after correcting for
+                    # the number of grid trials + return skew/kurtosis).
+                    # None when there weren't enough trials to estimate it.
+                    "deflated_sharpe": _dsr,
                 }
+                if _dsr is not None and _dsr < 0.95:
+                    logger.warning(
+                        "%s: deflated Sharpe %.3f < 0.95 — the tuned edge may "
+                        "be a selection-bias artifact of the threshold sweep, "
+                        "not a real signal.",
+                        model_type, _dsr,
+                    )
                 # Per-calendar-year OOS edge profile at the DEPLOYED
                 # thresholds — diagnoses regime shift vs edge decay. We
                 # apply the single chosen (buy, sell) cutoff across the

@@ -149,6 +149,10 @@ class BacktestResult:
     # opportunity the cap closes off (and decide whether
     # max_open_positions is set sensibly).
     signals_skipped_at_cap: int = 0
+    # Deflated Sharpe Ratio — only set by sweep_thresholds on the chosen
+    # cell (it needs the full grid of trial Sharpes to estimate the
+    # selection-bias correction). None elsewhere.
+    deflated_sharpe: float | None = None
 
 
 def _path_aware_exit(
@@ -550,6 +554,65 @@ def _bootstrap_sharpe_lower_bound(
     return sharpes[idx]
 
 
+def deflated_sharpe_ratio(
+    returns: list[float],
+    trial_sharpes: list[float],
+    *,
+    annualization: int = 252,
+) -> float | None:
+    """Deflated Sharpe Ratio (Bailey & López de Prado, 2014).
+
+    Estimates P(true Sharpe > 0) for the SELECTED strategy after correcting
+    for (a) the number of trials searched (selection bias), (b) the sample
+    length, and (c) the skew/kurtosis of the selected return series. >0.95
+    is the usual bar for "this edge is real, not the luckiest of N draws."
+    The per-cell bootstrap lower bound discounts estimation noise WITHIN a
+    cell but not the bias of picking the max ACROSS cells — this does.
+
+    `returns` is the selected cell's per-period return series (per-period
+    Sharpe + higher moments come from it). `trial_sharpes` are the
+    ANNUALIZED point Sharpes of every cell compared in the search; their
+    spread sets the expected-max-under-null benchmark. Returns None when
+    there aren't enough trials/observations to estimate it.
+    """
+    import math
+    from statistics import NormalDist
+
+    n_trials = len(trial_sharpes)
+    n_obs = len(returns)
+    if n_trials < 2 or n_obs < 4:
+        return None
+    mean = sum(returns) / n_obs
+    m2 = sum((r - mean) ** 2 for r in returns) / n_obs
+    m3 = sum((r - mean) ** 3 for r in returns) / n_obs
+    m4 = sum((r - mean) ** 4 for r in returns) / n_obs
+    if m2 <= 0:
+        return None
+    sr = mean / math.sqrt(m2)  # per-period Sharpe
+    skew = m3 / (m2 ** 1.5)
+    kurt = m4 / (m2 ** 2)  # non-excess (Normal = 3)
+
+    # Expected maximum Sharpe under the null of zero true edge across
+    # n_trials strategies. Trial Sharpes are annualized; convert their
+    # stdev to per-period to match `sr`.
+    tmean = sum(trial_sharpes) / n_trials
+    tvar = sum((s - tmean) ** 2 for s in trial_sharpes) / (n_trials - 1)
+    sr_std = math.sqrt(tvar) / math.sqrt(annualization)
+    if sr_std <= 0:
+        return None
+    nd = NormalDist()
+    euler = 0.5772156649015329  # Euler–Mascheroni
+    sr0 = sr_std * (
+        (1 - euler) * nd.inv_cdf(1 - 1.0 / n_trials)
+        + euler * nd.inv_cdf(1 - 1.0 / (n_trials * math.e))
+    )
+    denom = 1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr * sr
+    if denom <= 0:
+        return None
+    z = (sr - sr0) * math.sqrt(n_obs - 1) / math.sqrt(denom)
+    return float(nd.cdf(z))
+
+
 def sweep_thresholds(
     probas: list[list[float]],
     bars_meta: list[BarMeta],
@@ -629,6 +692,9 @@ def sweep_thresholds(
     best_sell: float | None = None
     best_result: BacktestResult | None = None
     best_lower_sharpe: float = float("-inf")
+    # Point Sharpe of every eligible cell — feeds the Deflated Sharpe
+    # selection-bias correction on the winner.
+    trial_sharpes: list[float] = []
 
     # Tiny epsilon so clean 0.05-step grid values aren't excluded by
     # float-representation noise (e.g. abs(0.60-0.55) == 0.0500000…1).
@@ -676,6 +742,10 @@ def sweep_thresholds(
                 if buy_share < min_class_share or sell_share < min_class_share:
                     continue
 
+            # Eligible cell — count it as a trial for the selection-bias
+            # (Deflated Sharpe) correction on the eventual winner.
+            trial_sharpes.append(result.sharpe)
+
             # Robust ranking: bootstrap the SAME series result.sharpe is
             # computed from (daily-aggregated when available, else
             # per-trade) so the lower bound is a true lower bound of the
@@ -719,12 +789,22 @@ def sweep_thresholds(
         return 0.5, 0.5, baseline
 
     assert best_buy is not None and best_sell is not None
+    # Selection-bias-adjusted confidence on the winner, using the spread of
+    # all eligible trial Sharpes. Annualization matches the winner's series.
+    _dsr_annual = 252 if best_result.daily_returns else cfg.annualization_factor
+    best_result.deflated_sharpe = deflated_sharpe_ratio(
+        best_result.daily_returns or best_result.returns,
+        trial_sharpes,
+        annualization=_dsr_annual,
+    )
     logger.info(
         "sweep_thresholds: chose buy=%.2f / sell=%.2f — "
         "point Sharpe=%.3f, bootstrap-lower=%.3f (p%.0f, %d iters), "
-        "trades=%d, win_rate=%.2f",
+        "deflated=%s, trades=%d, win_rate=%.2f",
         best_buy, best_sell, best_result.sharpe, best_lower_sharpe,
         bootstrap_percentile, bootstrap_iterations,
+        f"{best_result.deflated_sharpe:.3f}"
+        if best_result.deflated_sharpe is not None else "n/a",
         best_result.total_trades, best_result.win_rate,
     )
     return best_buy, best_sell, best_result
