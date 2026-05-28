@@ -22,9 +22,11 @@ from typing import Any
 from datetime import datetime, timedelta
 
 from yolovest.data.features import (
+    DAILY_TREND_FEATURE_KEYS,
     MODEL_FEATURE_EXCLUSIONS,
     IndicatorConfig,
     compute_features,
+    daily_trend_features_series,
     merge_feedback_features,
 )
 from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
@@ -1455,6 +1457,28 @@ class ModelRetrainSkill(SkillBase):
         daily_by_symbol: dict[str, list[dict[str, Any]]] = {}
         for r in daily_rows:
             daily_by_symbol.setdefault(r["symbol"], []).append(r)
+
+        # Per (symbol, date) higher-timeframe trend context, precomputed in
+        # one EMA pass per symbol. _merge_daily_broadcast looks this up by the
+        # PRIOR session date, so the intraday feature uses only completed
+        # daily sessions (no intraday-day lookahead) — symmetric with the
+        # inference path in generate_signals.
+        daily_trend_by_sym: dict[str, dict[str, dict[str, float]]] = {}
+        for _sym, _rows in daily_by_symbol.items():
+            _sorted = sorted(_rows, key=lambda r: str(r["timestamp"]))
+            _closes: list[float] = []
+            _dates: list[str] = []
+            for _r in _sorted:
+                try:
+                    _closes.append(float(_r["close"]))
+                    _dates.append(str(_r["timestamp"])[:10])
+                except (TypeError, ValueError):
+                    pass
+            if len(_closes) < 21:
+                continue
+            _series = daily_trend_features_series(_closes)
+            daily_trend_by_sym[_sym] = dict(zip(_dates, _series, strict=False))
+
         regime_by_ts = self._compute_regime_index(daily_by_symbol)
         sector_regime, symbol_returns = self._compute_sector_index(
             daily_by_symbol, sector_map,
@@ -1510,6 +1534,11 @@ class ModelRetrainSkill(SkillBase):
         def _merge_daily_broadcast(features: dict[str, Any], sym: str, bar_ts: datetime) -> None:
             """Merge prior-session daily features into `features` in place."""
             prev = _prior_session(bar_ts.strftime("%Y-%m-%d"))
+
+            # Higher-timeframe daily trend (always-on core feature — not in
+            # any optional group). Keyed by the prior completed session.
+            dt = daily_trend_by_sym.get(sym, {}).get(prev) if prev else None
+            features.update(dt if dt else {k: 0.0 for k in DAILY_TREND_FEATURE_KEYS})
 
             reg = regime_by_ts.get(prev) if prev else None
             features["universe_breadth"] = reg["breadth"] if reg else 0.5

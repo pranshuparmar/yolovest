@@ -568,6 +568,60 @@ def _ema_series(values: list[float], period: int) -> list[float] | None:
     return ema
 
 
+DAILY_TREND_FEATURE_KEYS: tuple[str, ...] = (
+    "daily_ema9_vs_ema21_pct",
+    "daily_close_vs_ema50_pct",
+)
+
+
+def daily_trend_features_series(closes: list[float]) -> list[dict[str, float]]:
+    """Per-index higher-timeframe (daily) trend features.
+
+    Element ``i`` is the trend context derived from ``closes[:i+1]`` — i.e.
+    using only data up to and including bar ``i``. Equivalent to calling
+    :func:`compute_daily_trend_features` on each prefix, but runs the EMA
+    passes once (the intraday retrain precomputes per (symbol, date) this
+    way to avoid O(n^2) cost). Because ``_ema_series`` seeds from the first
+    ``period`` values and is purely recursive, the EMA at index ``i`` is
+    identical whether computed over the full series or the prefix — so the
+    one-pass precompute matches the per-prefix inference call exactly.
+
+    Both features are price-invariant ratios (transfer across the universe)
+    and default to 0.0 (neutral) when the series is too short.
+    """
+    n = len(closes)
+    out = [
+        {"daily_ema9_vs_ema21_pct": 0.0, "daily_close_vs_ema50_pct": 0.0}
+        for _ in range(n)
+    ]
+    e9 = _ema_series(closes, 9)
+    e21 = _ema_series(closes, 21)
+    e50 = _ema_series(closes, 50)
+    for i in range(n):
+        if e9 is not None and e21 is not None and i >= 20:
+            b = e21[i - 20]
+            if b > 0:
+                out[i]["daily_ema9_vs_ema21_pct"] = (e9[i - 8] - b) / b
+        if e50 is not None and i >= 49:
+            c = e50[i - 49]
+            if c > 0:
+                out[i]["daily_close_vs_ema50_pct"] = (closes[i] - c) / c
+    return out
+
+
+def compute_daily_trend_features(closes: list[float]) -> dict[str, float]:
+    """Daily trend context for the most recent close in ``closes``.
+
+    Used at inference (intraday path) on the prior-session daily window so
+    the intraday model can condition entries on the higher-timeframe trend
+    rather than 5-min noise alone. Symmetric with the retrain precompute
+    via :func:`daily_trend_features_series`.
+    """
+    if not closes:
+        return {k: 0.0 for k in DAILY_TREND_FEATURE_KEYS}
+    return daily_trend_features_series(closes)[-1]
+
+
 def _minutes_since_open(ts: str | None) -> int | None:
     """Minutes elapsed since 09:15 IST market open for the given timestamp.
 
