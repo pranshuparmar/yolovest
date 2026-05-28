@@ -1004,8 +1004,33 @@ class DatabaseConfig(BaseModel):
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
 
 
+class XGBoostConfig(BaseModel):
+    """XGBoost training hyperparameters. Defaults favour generalization on
+    noisy financial features: a lower learning rate with more trees gated
+    by early stopping, plus row/column subsampling and a higher
+    min_child_weight (the core variance-reduction knobs). Tune via Settings
+    for offline training; the live retrain reads these."""
+    max_depth: int = Field(default=6, ge=1, le=16)
+    learning_rate: float = Field(default=0.05, gt=0.0, le=1.0)
+    # Upper bound on trees; early stopping usually selects far fewer.
+    n_estimators: int = Field(default=400, ge=10, le=5000)
+    min_child_weight: float = Field(default=5.0, ge=0.0, le=1000.0)
+    subsample: float = Field(default=0.8, gt=0.0, le=1.0)
+    colsample_bytree: float = Field(default=0.8, gt=0.0, le=1.0)
+    gamma: float = Field(default=0.0, ge=0.0, le=10.0)
+    reg_lambda: float = Field(default=1.0, ge=0.0, le=100.0)
+    reg_alpha: float = Field(default=0.0, ge=0.0, le=100.0)
+    # Early stopping: probe the tree count on a purged chronological
+    # validation tail, then refit on all data at that count. 0 = off.
+    early_stopping_rounds: int = Field(default=50, ge=0, le=500)
+    # Corpora below this skip the probe and keep the configured n_estimators
+    # (the validation tail would be too small to trust).
+    early_stopping_min_samples: int = Field(default=2000, ge=0)
+
+
 class RetrainingConfig(BaseModel):
     schedule_cron: str = "0 6 * * 6"
+    xgb: XGBoostConfig = Field(default_factory=XGBoostConfig)
     shadow_mode_days: int = 7
     shadow_min_predictions: int = 10
     retired_model_cleanup_days: int = 30

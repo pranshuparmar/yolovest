@@ -821,10 +821,35 @@ class XGBoostSignalModel(MLBase):
             # Walk-forward split via TimeSeriesSplit
             tscv = TimeSeriesSplit(n_splits=min(5, len(y_arr) // 50 or 2))
 
+            # Hyperparameter resolution precedence: explicit `params`
+            # (caller / test override) > config.retraining.xgb > literal
+            # default. The literals mirror the XGBoostConfig defaults so a
+            # config-less model (config=None, or a config without a
+            # retraining section) still trains with the same regularized
+            # setup. Subsample / colsample / min_child_weight / gamma /
+            # reg_lambda are the core variance-reduction knobs for noisy
+            # financial features — fixed n_estimators=100 / max_depth=6 with
+            # no regularization over-fits daily and under-fits the much
+            # larger 5-min corpus.
+            _xgbc = getattr(getattr(self._config, "retraining", None), "xgb", None)
+
+            def _hp(name: str, literal: Any) -> Any:
+                if name in params:
+                    return params[name]
+                if _xgbc is not None:
+                    return getattr(_xgbc, name, literal)
+                return literal
+
             xgb_params = {
-                "n_estimators": params.get("n_estimators", 100),
-                "max_depth": params.get("max_depth", 6),
-                "learning_rate": params.get("learning_rate", 0.1),
+                "n_estimators": _hp("n_estimators", 400),
+                "max_depth": _hp("max_depth", 6),
+                "learning_rate": _hp("learning_rate", 0.05),
+                "min_child_weight": _hp("min_child_weight", 5.0),
+                "subsample": _hp("subsample", 0.8),
+                "colsample_bytree": _hp("colsample_bytree", 0.8),
+                "gamma": _hp("gamma", 0.0),
+                "reg_lambda": _hp("reg_lambda", 1.0),
+                "reg_alpha": _hp("reg_alpha", 0.0),
                 "objective": "multi:softprob",
                 "num_class": 3,
                 "eval_metric": "mlogloss",
@@ -841,6 +866,11 @@ class XGBoostSignalModel(MLBase):
                 # if you're training offline and want full parallelism.
                 "n_jobs": params.get("n_jobs", 1),
             }
+            # Early-stopping knobs (read here so the final-fit block can use
+            # them). 0 rounds = off; small corpora below the min-samples
+            # floor also skip it.
+            _es_rounds = int(_hp("early_stopping_rounds", 0))
+            _es_min_samples = int(_hp("early_stopping_min_samples", 2000))
 
             # Train on full data first
             model = xgb.XGBClassifier(**xgb_params)
@@ -1024,6 +1054,51 @@ class XGBoostSignalModel(MLBase):
             # doubling memory. On a 2 GB host this can OOM without the
             # collect.
             _gc.collect()
+            # Early stopping: a fixed n_estimators either over-fits (too
+            # many trees on noise) or under-fits. Probe the right tree count
+            # on a purged chronological validation TAIL, then refit the
+            # deployed model on ALL data at that count — so it still sees the
+            # full history but stops boosting where validation logloss
+            # plateaus. Gated on a min sample count; small corpora keep the
+            # configured n_estimators.
+            n_est_final = xgb_params["n_estimators"]
+            if _es_rounds > 0 and n_samples >= _es_min_samples:
+                _es_cut = int(n_samples * 0.85)
+                _es_train_end = (
+                    _purge_boundary(
+                        bars_meta_raw, _es_cut, lookahead_bars,
+                        min_keep=max(50, int(n_samples * 0.4)),
+                        embargo_days=_embargo_days,
+                    )
+                    if bars_meta_raw is not None else _es_cut
+                )
+                if _es_train_end > 50 and (n_samples - _es_cut) >= 50:
+                    # n_estimators is the UPPER BOUND; early stopping picks
+                    # the best count <= it on the validation tail.
+                    _es_ceiling = int(xgb_params["n_estimators"])
+                    _probe = xgb.XGBClassifier(
+                        **{**xgb_params, "n_estimators": _es_ceiling,
+                           "early_stopping_rounds": _es_rounds}
+                    )
+                    _w_es = (
+                        weights_arr[:_es_train_end] if weights_arr is not None else None
+                    )
+                    _probe.fit(
+                        X_arr[:_es_train_end], y_arr[:_es_train_end],
+                        sample_weight=_w_es,
+                        eval_set=[(X_arr[_es_cut:], y_arr[_es_cut:])],
+                        verbose=False,
+                    )
+                    _bi = getattr(_probe, "best_iteration", None)
+                    if _bi is not None and 0 < int(_bi) + 1 < _es_ceiling:
+                        n_est_final = int(_bi) + 1
+                        logger.info(
+                            "Early stopping: n_estimators %d → %d (%d rounds)",
+                            _es_ceiling, n_est_final, _es_rounds,
+                        )
+                    del _probe
+                    _gc.collect()
+            model.set_params(n_estimators=n_est_final)
             # Final model trained on all data (with sample weights if available)
             model.fit(X_arr, y_arr, sample_weight=weights_arr, verbose=False)
 
