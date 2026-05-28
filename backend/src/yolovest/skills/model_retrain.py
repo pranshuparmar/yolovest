@@ -334,6 +334,16 @@ def intraday_triple_barrier_label(
     return 1
 
 
+def _time_decay_multipliers(n: int, last_weight: float) -> list[float]:
+    """Linear time-decay multipliers for `n` chronologically-ordered
+    samples: index 0 (oldest) → `last_weight`, index n-1 (newest) → 1.0.
+    `last_weight` >= 1.0 (or n <= 1) returns all-ones (decay disabled)."""
+    if last_weight >= 1.0 or n <= 1:
+        return [1.0] * max(0, n)
+    span = n - 1
+    return [last_weight + (1.0 - last_weight) * (i / span) for i in range(n)]
+
+
 # Intraday MIS positions are squared off by session end (broker auto-squares
 # at 15:30), so a 5-min entry's label/backtest path runs to the session close,
 # not a fixed bar count. The full NSE session is 375 minutes (09:15-15:30);
@@ -737,6 +747,24 @@ class ModelRetrainSkill(SkillBase):
                     class_weights.get(2, 0.0),
                     class_weights.get(1, 0.0),
                     class_weights.get(0, 0.0),
+                )
+
+            # Time-decay weighting (opt-in). sample_weights is already in
+            # chronological order (the builders sort by entry_date), so the
+            # list index is the chronological rank. Multiplies on top of the
+            # per-bar feedback boost + class weights.
+            _last_w = float(
+                getattr(self.ctx.config.strategy, "time_decay_last_weight", 1.0)
+            )
+            if _last_w < 1.0 and len(sample_weights) > 1:
+                _decay = _time_decay_multipliers(len(sample_weights), _last_w)
+                sample_weights = [
+                    sw * d
+                    for sw, d in zip(sample_weights, _decay, strict=False)
+                ]
+                logger.info(
+                    "Time-decay weights for %s: oldest×%.2f → newest×1.00",
+                    model_type, _last_w,
                 )
 
             try:

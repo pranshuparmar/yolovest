@@ -609,6 +609,14 @@ class StrategyConfig(BaseModel):
     # the same barrier it was labelled against. Set False for legacy
     # gross-return labels.
     label_cost_floor_enabled: bool = True
+    # Time-decay sample weighting: older training samples get a linearly
+    # decaying weight down to this floor (newest sample = 1.0). Tilts the
+    # model toward recent regimes on a non-stationary market. 1.0 = off
+    # (every sample weighted equally). Kept off by default — an expanding
+    # training window deliberately retains rare old-regime samples (2008 /
+    # 2020 crashes), and aggressive decay discards that coverage; lower to
+    # ~0.5 to tilt toward recent data once a paper run confirms it helps.
+    time_decay_last_weight: float = Field(default=1.0, ge=0.0, le=1.0)
     # Refuse to save a model when any of {BUY, HOLD, SELL} accounts for
     # less than this fraction of training labels. Catches the
     # "BUY is functionally extinct in the data" failure mode at train
