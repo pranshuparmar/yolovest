@@ -30,6 +30,7 @@ from yolovest.data.features import (
     daily_trend_features_series,
     merge_feedback_features,
 )
+from yolovest.costs import round_trip_cost_floor_pct
 from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
@@ -585,6 +586,17 @@ class ModelRetrainSkill(SkillBase):
         for model_type in ("intraday", "swing"):
             # Build feature matrix with model-specific labeling + feedback features
             target_mult, sl_mult = atr_mult_map[model_type]
+            # Cost-aware label floor: the triple-barrier target must clear the
+            # round-trip cost + slippage of the product this model trades
+            # (MIS for intraday, CNC for swing), else a "win" is a net loss.
+            # Computed once per model from the same cost model the backtest
+            # uses; 0 disables it (legacy gross-return labels).
+            label_product = "MIS" if model_type == "intraday" else "CNC"
+            cost_floor = 0.0
+            if self.ctx.config.strategy.label_cost_floor_enabled:
+                cost_floor = round_trip_cost_floor_pct(
+                    label_product, self.ctx.config.transaction_costs,
+                )
             # Bound for BOTH branches: intraday uses it only as the CV purge
             # gap (its label walks to session close, not a bar count); swing
             # uses it as both the label lookahead and the purge gap.
@@ -605,6 +617,7 @@ class ModelRetrainSkill(SkillBase):
                         training_data,
                         horizon_minutes=_INTRADAY_TO_CLOSE_HORIZON_MIN,
                         target_atr_mult=target_mult, sl_atr_mult=sl_mult,
+                        cost_floor_pct=cost_floor,
                         feedback_data=feedback_data, sector_map=sector_map,
                         bulk_deal_lookup=bulk_deal_lookup, news_lookup=news_lookup,
                         vix_timeline=vix_timeline, fno_lookup=fno_lookup,
@@ -619,6 +632,7 @@ class ModelRetrainSkill(SkillBase):
                 X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
                     training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
                     target_atr_mult=target_mult, sl_atr_mult=sl_mult,
+                    cost_floor_pct=cost_floor,
                     sector_map=sector_map,
                     bulk_deal_lookup=bulk_deal_lookup,
                     news_lookup=news_lookup,
@@ -948,6 +962,7 @@ class ModelRetrainSkill(SkillBase):
         feedback_data: dict[str, dict[str, float]] | None = None,
         target_atr_mult: float = 1.5,
         sl_atr_mult: float = 0.75,
+        cost_floor_pct: float = 0.0,
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
         news_lookup: dict[str, list[tuple[str, str]]] | None = None,
@@ -1270,6 +1285,12 @@ class ModelRetrainSkill(SkillBase):
                 next_open = bars[i + 1].open if i + 1 < len(bars) else current_close
                 future_close = bars[i + lookahead_bars].close
                 atr_pct = features.get("atr_pct") or 0.0
+                # Cost-aware target: a win must clear round-trip costs, else
+                # it's a net loss. Floor leaves the swing geometry unchanged
+                # whenever the ATR target already exceeds costs. The same
+                # value flows into bars_meta so the backtest exits at the
+                # labelled barrier.
+                eff_target_pct = max(atr_pct * target_atr_mult, cost_floor_pct)
                 if next_open <= 0 or atr_pct <= 0:
                     label = 1
                 else:
@@ -1278,7 +1299,7 @@ class ModelRetrainSkill(SkillBase):
                         start_idx=i,
                         lookahead=lookahead_bars,
                         entry=next_open,
-                        target_pct=atr_pct * target_atr_mult,
+                        target_pct=eff_target_pct,
                         sl_pct=atr_pct * sl_atr_mult,
                     )
 
@@ -1353,7 +1374,7 @@ class ModelRetrainSkill(SkillBase):
                     "exit_close": float(future_close),
                     "path_highs": path_highs,
                     "path_lows": path_lows,
-                    "target_pct": float(atr_pct * target_atr_mult),
+                    "target_pct": float(eff_target_pct),
                     "sl_pct": float(atr_pct * sl_atr_mult),
                     # YYYY-MM-DD — walk_forward_backtest aggregates by
                     # this to compute daily-equity-curve Sharpe instead
@@ -1392,6 +1413,7 @@ class ModelRetrainSkill(SkillBase):
         horizon_minutes: int,
         target_atr_mult: float,
         sl_atr_mult: float,
+        cost_floor_pct: float = 0.0,
         feedback_data: dict[str, Any] | None = None,
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
@@ -1707,6 +1729,10 @@ class ModelRetrainSkill(SkillBase):
                 entry_bar = bars[i + 1]
                 next_open = entry_bar.open
                 atr_pct = features.get("atr_pct") or 0.0
+                # Cost-aware target floor (MIS round-trip + slippage), same
+                # value reused for the precomputed exits + bars_meta below so
+                # label and backtest agree on the barrier.
+                eff_target_pct = max(atr_pct * target_atr_mult, cost_floor_pct)
                 if next_open <= 0 or atr_pct <= 0 or not mbars:
                     label = 1
                     m_start = len(mbars)
@@ -1716,7 +1742,7 @@ class ModelRetrainSkill(SkillBase):
                         entry=next_open,
                         entry_time=entry_bar.timestamp,
                         horizon_minutes=horizon_minutes,
-                        target_pct=atr_pct * target_atr_mult,
+                        target_pct=eff_target_pct,
                         sl_pct=atr_pct * sl_atr_mult,
                         minute_bars=mbars,
                         start_idx=m_start,
@@ -1752,7 +1778,7 @@ class ModelRetrainSkill(SkillBase):
                 # horizon the path is hundreds of 1-min bars; keeping it per
                 # sample × millions of samples would OOM. Two scalars carry
                 # all the information the backtest's exit walk would extract.
-                target_pct = atr_pct * target_atr_mult
+                target_pct = eff_target_pct
                 sl_pct = atr_pct * sl_atr_mult
                 buy_target = next_open * (1 + target_pct)
                 buy_sl = next_open * (1 - sl_pct)
@@ -1828,6 +1854,7 @@ class ModelRetrainSkill(SkillBase):
         horizon_minutes: int,
         target_atr_mult: float,
         sl_atr_mult: float,
+        cost_floor_pct: float = 0.0,
         feedback_data: dict[str, Any] | None = None,
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
@@ -1902,6 +1929,7 @@ class ModelRetrainSkill(SkillBase):
                 intraday_data, daily_data,
                 horizon_minutes=horizon_minutes,
                 target_atr_mult=target_atr_mult, sl_atr_mult=sl_atr_mult,
+                cost_floor_pct=cost_floor_pct,
                 feedback_data=feedback_data, sector_map=sector_map,
                 bulk_deal_lookup=bulk_deal_lookup, news_lookup=news_lookup,
                 vix_timeline=vix_timeline, fno_lookup=fno_lookup,

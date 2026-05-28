@@ -60,6 +60,37 @@ def compute_transaction_costs(
     return round(entry_brokerage + exit_brokerage + stt + other, 2)
 
 
+def round_trip_cost_floor_pct(
+    product: str = "MIS",
+    cost_config: TransactionCostConfig | None = None,
+    slippage_pct: float = 0.0005,
+) -> float:
+    """Round-trip transaction cost + slippage as a fraction of notional.
+
+    Used as a *label* floor: a triple-barrier "win" whose target move is
+    smaller than this is a net loss after costs, so labelling it a win
+    teaches the model an unprofitable target (worst on the tight 0.6×ATR
+    intraday geometry). The percentage components mirror
+    compute_transaction_costs — the same cost model the walk-forward
+    backtest uses — so labels and backtest agree on what "profitable"
+    means. The per-leg brokerage CAP is intentionally ignored: at the cap
+    the percentage drag only shrinks, so this stays a conservative floor.
+    `slippage_pct` is per side and mirrors BacktestConfig.entry_slippage_pct.
+    """
+    brokerage_pct = 0.0003
+    stt_pct = 0.00025 if product == "MIS" else 0.001
+    other_pct = 0.0001
+    if cost_config is not None:
+        brokerage_pct = cost_config.brokerage_per_leg_pct
+        stt_pct = (
+            cost_config.stt_intraday_pct if product == "MIS"
+            else cost_config.stt_delivery_pct
+        )
+        other_pct = cost_config.other_charges_pct
+    # brokerage both legs + STT (sell only) + other both legs + slippage both sides
+    return 2 * brokerage_pct + stt_pct + 2 * other_pct + 2 * slippage_pct
+
+
 def evaluate_net_rr(
     *,
     signal_type: str,

@@ -599,6 +599,16 @@ class StrategyConfig(BaseModel):
     # output is a failure mode users will hit on first deploy without
     # it; disable if you ever want the unbalanced classifier back.
     class_balance_enabled: bool = True
+    # Floor the triple-barrier TARGET at the round-trip transaction-cost +
+    # slippage level when labelling. A "win" whose ATR-derived target is
+    # smaller than the round-trip cost is a net loss — labelling it BUY/SELL
+    # teaches the model an unprofitable, unreachable target (worst on the
+    # tight 0.6×ATR intraday geometry). When the ATR target already clears
+    # costs (typical swing), the label is unchanged. The same effective
+    # target is stored in bars_meta so the walk-forward backtest exits at
+    # the same barrier it was labelled against. Set False for legacy
+    # gross-return labels.
+    label_cost_floor_enabled: bool = True
     # Refuse to save a model when any of {BUY, HOLD, SELL} accounts for
     # less than this fraction of training labels. Catches the
     # "BUY is functionally extinct in the data" failure mode at train
