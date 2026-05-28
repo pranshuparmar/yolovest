@@ -35,6 +35,7 @@ def _purge_boundary(
     cut: int,
     lookahead_bars: int,
     min_keep: int,
+    embargo_days: int = 0,
 ) -> int:
     """Largest index ≤ `cut` a tuning model may train up to without its
     label window peeking into the holdout that begins at `cut`.
@@ -43,11 +44,13 @@ def _purge_boundary(
     future bars; if that reaches the holdout's first date the label saw
     holdout-period data → leakage into the tuning model. Walk back from
     `cut` past any sample within the lookahead (converted to calendar
-    days) of the holdout start. Floored at `min_keep` so the tuning fit
-    is never starved. Returns `cut` unchanged when there's no lookahead
-    or dates are unusable.
+    days) plus `embargo_days` of the holdout start. The embargo widens the
+    gap beyond label overlap to absorb serial-correlation leakage between
+    the train tail and the holdout head. Floored at `min_keep` so the
+    tuning fit is never starved. Returns `cut` unchanged when there's no
+    lookahead/embargo or dates are unusable.
     """
-    if lookahead_bars <= 0 or not bars_meta_raw or cut <= 0:
+    if (lookahead_bars <= 0 and embargo_days <= 0) or not bars_meta_raw or cut <= 0:
         return cut
     from datetime import date as _date
     from datetime import timedelta as _td
@@ -61,7 +64,7 @@ def _purge_boundary(
     ho_start = _md(cut) if cut < len(bars_meta_raw) else None
     if ho_start is None:
         return cut
-    boundary = ho_start - _td(days=int(lookahead_bars * 7 / 5) + 2)
+    boundary = ho_start - _td(days=int(lookahead_bars * 7 / 5) + 2 + max(0, embargo_days))
     j = cut
     while j > min_keep:
         d = _md(j - 1)
@@ -893,6 +896,33 @@ class XGBoostSignalModel(MLBase):
                 and int(n_samples * _holdout_frac) >= 2 * _min_each_side
             )
 
+            # Embargo (López de Prado): an extra purge buffer beyond label
+            # overlap, absorbing serial-correlation / delayed-reaction
+            # leakage between the train tail and the test/holdout head.
+            # Sized as a fraction of the data's calendar span; bars_meta_raw
+            # is chronologically sorted so index 0/-1 are the span ends.
+            _embargo_days = 0
+            _embargo_frac = (
+                float(getattr(getattr(self._config, "retraining", None),
+                              "cv_embargo_frac", 0.0) or 0.0)
+                if self._config is not None else 0.0
+            )
+            if _embargo_frac > 0 and bars_meta_raw:
+                from datetime import date as _edate
+
+                def _span_date(i: int) -> "_edate | None":
+                    try:
+                        return _edate.fromisoformat(
+                            str(bars_meta_raw[i].get("entry_date", ""))[:10]
+                        )
+                    except (ValueError, TypeError, IndexError, AttributeError):
+                        return None
+
+                _first_d = _span_date(0)
+                _last_d = _span_date(len(bars_meta_raw) - 1)
+                if _first_d and _last_d and _last_d > _first_d:
+                    _embargo_days = int((_last_d - _first_d).days * _embargo_frac)
+
             for train_idx, test_idx in tscv.split(X_arr):
                 if use_final_holdout:
                     break
@@ -924,8 +954,10 @@ class XGBoostSignalModel(MLBase):
                     test_dates = [d for d in (_meta_date(i) for i in test_idx) if d]
                     if test_dates:
                         test_min = min(test_dates)
-                        # trading days → calendar days (×7/5) + slack
-                        purge_calendar_days = int(lookahead_bars * 7 / 5) + 2
+                        # trading days → calendar days (×7/5) + slack + embargo
+                        purge_calendar_days = (
+                            int(lookahead_bars * 7 / 5) + 2 + _embargo_days
+                        )
                         cutoff = test_min - _td(days=purge_calendar_days)
                         kept = [
                             i for i in train_idx
@@ -1055,6 +1087,7 @@ class XGBoostSignalModel(MLBase):
                     _cut = int(n_samples * (1.0 - _holdout_frac))
                     _purge_cut = _purge_boundary(
                         bars_meta_raw, _cut, lookahead_bars, _min_each_side,
+                        embargo_days=_embargo_days,
                     )
                     _tw = weights_arr[:_purge_cut] if weights_arr is not None else None
                     _tuning_model = xgb.XGBClassifier(**xgb_params)

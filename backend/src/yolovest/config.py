@@ -1028,6 +1028,16 @@ class RetrainingConfig(BaseModel):
     # untuned edge first. Default 0.0 blocks net-losing models. Set
     # negative to disable (not recommended on a live account).
     min_argmax_sharpe_for_promotion: float = Field(default=0.0, ge=-100.0, le=100.0)
+    # CV/holdout embargo (López de Prado). The label-overlap purge already
+    # drops train rows whose label window reaches the test/holdout start;
+    # the embargo adds a further buffer to absorb serial-correlation and
+    # delayed-market-reaction leakage between the train tail and the
+    # test/holdout head (features near the boundary stay correlated even
+    # when label windows don't overlap). Expressed as a fraction of the
+    # data's calendar span (~0.01 = 1% is the standard rule of thumb).
+    # Widens both the K-fold purge gap and the final-scale tuning-holdout
+    # gap. 0 disables (legacy: label-overlap purge only).
+    cv_embargo_frac: float = Field(default=0.01, ge=0.0, le=0.2)
 
 
 class ReportsConfig(BaseModel):
