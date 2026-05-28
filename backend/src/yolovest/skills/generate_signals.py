@@ -17,7 +17,11 @@ import asyncio
 import logging
 from datetime import datetime, time, timedelta
 from typing import Any
-from yolovest.data.features import IndicatorConfig, compute_features
+from yolovest.data.features import (
+    IndicatorConfig,
+    compute_daily_trend_features,
+    compute_features,
+)
 from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
@@ -491,6 +495,19 @@ class GenerateSignalsSkill(SkillBase):
                     "reason": "feature_computation_failed",
                     "detail": "compute_features returned empty",
                 }
+
+            # Higher-timeframe (daily) trend context for the intraday model.
+            # Closes strictly before the decision day mirror the prior-session
+            # window the intraday training labels see — same train/serve keys,
+            # no intraday-day lookahead. Survives the {**features, **tech}
+            # merge in signal_evaluator (compute_features emits no daily_* key).
+            _decision_day = now.date()
+            _prior_closes = [
+                float(b.close)
+                for b in daily_bars
+                if b.close is not None and b.timestamp.date() < _decision_day
+            ]
+            features.update(compute_daily_trend_features(_prior_closes))
 
             try:
                 news_from = (now - timedelta(days=7)).isoformat()

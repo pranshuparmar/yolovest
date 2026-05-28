@@ -9,6 +9,7 @@ import math
 from dataclasses import dataclass
 
 from yolovest.models.schemas import OHLCVBar
+from yolovest.timezone import IST
 
 # Bump this whenever a change makes a previously-trained model artifact
 # unsafe to load against the current code: the feature vocabulary changes
@@ -23,7 +24,10 @@ from yolovest.models.schemas import OHLCVBar
 # History:
 #   1 — initial schema versioning (base TA + sector/regime/institutional/
 #       time/news/vix/fno/feedback features, path-aware labels).
-MODEL_SCHEMA_VERSION = 1
+#   2 — intraday gains higher-timeframe daily-trend features
+#       (daily_ema9_vs_ema21_pct, daily_close_vs_ema50_pct) and
+#       session-relative features (session_vwap_dist_pct, session_orb_pos).
+MODEL_SCHEMA_VERSION = 2
 
 # Feature keys that compute_features emits but the ML model should NOT
 # see. These are raw absolute prices, raw cumulative levels, or raw
@@ -566,6 +570,127 @@ def _ema_series(values: list[float], period: int) -> list[float] | None:
         ema.append((values[i] - ema[-1]) * multiplier + ema[-1])
 
     return ema
+
+
+DAILY_TREND_FEATURE_KEYS: tuple[str, ...] = (
+    "daily_ema9_vs_ema21_pct",
+    "daily_close_vs_ema50_pct",
+)
+
+
+def daily_trend_features_series(closes: list[float]) -> list[dict[str, float]]:
+    """Per-index higher-timeframe (daily) trend features.
+
+    Element ``i`` is the trend context derived from ``closes[:i+1]`` — i.e.
+    using only data up to and including bar ``i``. Equivalent to calling
+    :func:`compute_daily_trend_features` on each prefix, but runs the EMA
+    passes once (the intraday retrain precomputes per (symbol, date) this
+    way to avoid O(n^2) cost). Because ``_ema_series`` seeds from the first
+    ``period`` values and is purely recursive, the EMA at index ``i`` is
+    identical whether computed over the full series or the prefix — so the
+    one-pass precompute matches the per-prefix inference call exactly.
+
+    Both features are price-invariant ratios (transfer across the universe)
+    and default to 0.0 (neutral) when the series is too short.
+    """
+    n = len(closes)
+    out = [
+        {"daily_ema9_vs_ema21_pct": 0.0, "daily_close_vs_ema50_pct": 0.0}
+        for _ in range(n)
+    ]
+    e9 = _ema_series(closes, 9)
+    e21 = _ema_series(closes, 21)
+    e50 = _ema_series(closes, 50)
+    for i in range(n):
+        if e9 is not None and e21 is not None and i >= 20:
+            b = e21[i - 20]
+            if b > 0:
+                out[i]["daily_ema9_vs_ema21_pct"] = (e9[i - 8] - b) / b
+        if e50 is not None and i >= 49:
+            c = e50[i - 49]
+            if c > 0:
+                out[i]["daily_close_vs_ema50_pct"] = (closes[i] - c) / c
+    return out
+
+
+def compute_daily_trend_features(closes: list[float]) -> dict[str, float]:
+    """Daily trend context for the most recent close in ``closes``.
+
+    Used at inference (intraday path) on the prior-session daily window so
+    the intraday model can condition entries on the higher-timeframe trend
+    rather than 5-min noise alone. Symmetric with the retrain precompute
+    via :func:`daily_trend_features_series`.
+    """
+    if not closes:
+        return {k: 0.0 for k in DAILY_TREND_FEATURE_KEYS}
+    return daily_trend_features_series(closes)[-1]
+
+
+SESSION_FEATURE_KEYS: tuple[str, ...] = (
+    "session_vwap_dist_pct",
+    "session_orb_pos",
+)
+
+# Decision bars forming the opening range (3 × 5-min ≈ first 15 minutes).
+_ORB_BARS = 3
+
+
+def compute_session_features(bars: list[OHLCVBar]) -> dict[str, float]:
+    """Intraday session-relative features for the LAST bar in ``bars``.
+
+    Two price-invariant signals the rolling multi-day technicals miss
+    because they average across sessions:
+
+    - ``session_vwap_dist_pct``: distance of the latest close from today's
+      running session VWAP (the canonical intraday reference price).
+    - ``session_orb_pos``: position of the latest close within the opening
+      range, normalised by the range width — >0.5 broke above the open
+      range, <-0.5 broke below.
+
+    Computed only from bars sharing the last bar's IST calendar date (the
+    current session), so it's identical in training and inference given the
+    same 5-min window. Neutral 0.0 when the session is too short. (Intraday
+    sessions never cross an IST/UTC date boundary, so the grouping is robust
+    to whichever tz the bars carry.)
+    """
+    out = {k: 0.0 for k in SESSION_FEATURE_KEYS}
+    if not bars:
+        return out
+
+    def _session_date(b: OHLCVBar):
+        ts = b.timestamp
+        return (ts.astimezone(IST) if ts.tzinfo is not None else ts).date()
+
+    last = bars[-1]
+    last_date = _session_date(last)
+    session = [b for b in bars if _session_date(b) == last_date]
+    try:
+        close = float(last.close)
+    except (TypeError, ValueError):
+        return out
+    if not session or close <= 0:
+        return out
+
+    pv = vol = 0.0
+    for b in session:
+        v = float(b.volume or 0.0)
+        tp = (float(b.high) + float(b.low) + float(b.close)) / 3.0
+        pv += tp * v
+        vol += v
+    if vol > 0 and pv > 0:
+        vwap = pv / vol
+        if vwap > 0:
+            out["session_vwap_dist_pct"] = (close - vwap) / vwap
+
+    if len(session) >= _ORB_BARS:
+        opening = session[:_ORB_BARS]
+        or_high = max(float(b.high) for b in opening)
+        or_low = min(float(b.low) for b in opening)
+        rng = or_high - or_low
+        if rng > 0:
+            or_mid = (or_high + or_low) / 2.0
+            out["session_orb_pos"] = (close - or_mid) / rng
+    return out
 
 
 def _minutes_since_open(ts: str | None) -> int | None:

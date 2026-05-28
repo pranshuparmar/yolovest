@@ -1067,6 +1067,60 @@ class XGBoostSignalModel(MLBase):
                     _gc.collect()
                     _ho_probas = [[float(p) for p in row] for row in _ho_proba]
                     _ho_preds = [int(row.argmax()) for row in _ho_proba]
+                    # Discrimination diagnostics on the strict-future
+                    # holdout. The tuning model trained only on
+                    # X_arr[:_purge_cut] and scored X_arr[_cut:], so this is
+                    # a clean out-of-sample read of whether the model can
+                    # RANK winners above losers at all — independent of any
+                    # threshold. AUC≈0.50 = no edge (no cutoff/label tweak
+                    # fixes that); >0.55 = a real signal worth tuning.
+                    # BUY-separation is mean P(BUY) on true-BUY rows minus
+                    # the rest: a prior-predictor leaves it ~0. Logged only;
+                    # never gates deploy.
+                    try:
+                        from sklearn.metrics import (
+                            log_loss as _log_loss,
+                            roc_auc_score as _roc_auc,
+                        )
+                        _y_ho = y_arr[_cut:]
+                        _p_buy = _ho_proba[:, _LABEL_BUY]
+                        _p_sell = _ho_proba[:, _LABEL_SELL]
+
+                        def _ovr_auc(pos: int, score: Any) -> float:
+                            _yb = (_y_ho == pos).astype(int)
+                            if _yb.min() == _yb.max():
+                                return float("nan")
+                            return float(_roc_auc(_yb, score))
+
+                        _auc_buy = _ovr_auc(_LABEL_BUY, _p_buy)
+                        _auc_sell = _ovr_auc(_LABEL_SELL, _p_sell)
+                        try:
+                            _ll = float(
+                                _log_loss(_y_ho, _ho_proba, labels=[0, 1, 2])
+                            )
+                        except Exception:
+                            _ll = float("nan")
+                        _m_buy = _y_ho == _LABEL_BUY
+                        _sep = (
+                            float(_p_buy[_m_buy].mean() - _p_buy[~_m_buy].mean())
+                            if _m_buy.any() and (~_m_buy).any()
+                            else float("nan")
+                        )
+                        _q = np.percentile(_p_buy, [50, 90, 99])
+                        logger.info(
+                            "Discrimination %s (holdout n=%d): AUC_buy=%.3f "
+                            "AUC_sell=%.3f logloss=%.3f | P(BUY) mean=%.3f "
+                            "std=%.3f p50=%.3f p90=%.3f p99=%.3f max=%.3f | "
+                            "BUY-separation=%.3f",
+                            model_type, len(_y_ho), _auc_buy, _auc_sell, _ll,
+                            float(_p_buy.mean()), float(_p_buy.std()),
+                            float(_q[0]), float(_q[1]), float(_q[2]),
+                            float(_p_buy.max()), _sep,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "discrimination diagnostics failed", exc_info=True,
+                        )
                     _ho_meta = [
                         BarMeta(
                             symbol=str(m.get("symbol", "")),

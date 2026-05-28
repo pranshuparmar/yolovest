@@ -25,7 +25,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, time
 from typing import TYPE_CHECKING, Any, Literal
 
-from yolovest.data.features import IndicatorConfig, compute_features
+from yolovest.data.features import (
+    IndicatorConfig,
+    compute_features,
+    compute_session_features,
+)
 from yolovest.strategy.holding_period import (
     adjust_sell_for_holdings,
     apply_session_caps,
@@ -428,6 +432,7 @@ async def evaluate_symbol_signal(
                 window = intraday_bars[-(_INTRADAY_WINDOW_SIZE + 1):]
                 tech = compute_features(window, _intraday_indicator_cfg(ctx))
                 if tech:
+                    tech.update(compute_session_features(window))
                     intraday_features = {**features, **tech}
         except Exception:
             logger.debug(
