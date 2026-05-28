@@ -26,6 +26,7 @@ from yolovest.data.features import (
     MODEL_FEATURE_EXCLUSIONS,
     IndicatorConfig,
     compute_features,
+    compute_session_features,
     daily_trend_features_series,
     merge_feedback_features,
 )
@@ -1694,6 +1695,10 @@ class ModelRetrainSkill(SkillBase):
                 features = compute_features(window, indicator_cfg)
                 if not features:
                     continue
+                # Session-relative intraday features (VWAP distance, opening-
+                # range position) from the same 5-min window — identical helper
+                # at inference, so no train/serve skew.
+                features.update(compute_session_features(window))
 
                 if feedback_data:
                     merge_feedback_features(features, sym, feedback_data)
