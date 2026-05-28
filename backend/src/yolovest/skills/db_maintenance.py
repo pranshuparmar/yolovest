@@ -140,6 +140,25 @@ class DatabaseMaintenanceSkill(SkillBase):
         except Exception as e:
             logger.warning("Retired model cleanup failed: %s", e)
 
+        # --- Step 5: Integrity check ---
+        # Moved off the startup path: PRAGMA quick_check scans the whole DB
+        # from disk (minutes on a multi-GB file) and was advisory-only, so it
+        # was pure boot tax. Running it here keeps corruption detection during
+        # a nightly, post-market, low-activity window.
+        try:
+            integrity = await self.ctx.db.check_integrity()
+            results["integrity"] = integrity
+            if integrity != "ok":
+                with contextlib.suppress(Exception):
+                    await self.ctx.notify.send(
+                        f"DB INTEGRITY CHECK FAILED: {integrity} — data may be "
+                        f"corrupted. Restore from the latest backup.",
+                        alert_type="errors",
+                    )
+        except Exception as e:
+            results["integrity"] = f"error: {e}"
+            logger.warning("Integrity check step failed: %s", e)
+
         # --- Audit log ---
         with contextlib.suppress(Exception):
             await self.ctx.db.log_audit(

@@ -7,6 +7,7 @@ Schema versioned via numbered SQL migration files in migrations/ directory.
 import contextlib
 import json
 import logging
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
 UTC = timezone.utc
@@ -24,6 +25,15 @@ logger = logging.getLogger(__name__)
 
 # Default migrations directory (relative to project root)
 _DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
+
+# When True for the current async context, read queries are routed to a
+# dedicated dashboard read connection instead of the shared engine read
+# connection. The dashboard's HTTP middleware sets this per-request so the
+# UI's (trivial) reads never queue behind a heartbeat skill that is draining
+# hundreds of serialized OHLCV reads through the engine connection.
+DASHBOARD_READ_CONN: ContextVar[bool] = ContextVar(
+    "yolovest_dashboard_read_conn", default=False,
+)
 
 
 def _normalize_iso_date(raw: Any) -> str | None:
@@ -122,6 +132,9 @@ class Database:
         self._migrations_dir = migrations_dir or _DEFAULT_MIGRATIONS_DIR
         self._conn: aiosqlite.Connection | None = None
         self._read_conn: aiosqlite.Connection | None = None
+        # Dedicated read connection for the dashboard, so UI reads don't
+        # queue behind the engine's heartbeat reads on _read_conn.
+        self._dashboard_read_conn: aiosqlite.Connection | None = None
         # Cached storage_stats result. Each COUNT(*)+MIN/MAX over the
         # large tables (ohlcv, audit_log, predictions) is a full scan;
         # the page was waiting on 7 of them serially. Stats shift
@@ -148,8 +161,11 @@ class Database:
         # Wait up to 5s for locks instead of failing immediately with SQLITE_BUSY
         await self._conn.execute("PRAGMA busy_timeout=5000")
 
-        # -- Integrity check on startup (fast check, not full page scan) --
-        await self._check_integrity()
+        # NOTE: the integrity check is intentionally NOT run here. On a
+        # multi-GB DB, PRAGMA quick_check scans the whole file from disk
+        # (minutes) and the result was advisory only — it never aborted
+        # startup — so it was pure boot tax. It now runs off the boot path,
+        # nightly inside the database-maintenance CRON (see check_integrity).
 
         # Read connection — separate, for concurrent reads during writes.
         # Opens in read-only mode so it can't accidentally mutate data.
@@ -163,20 +179,47 @@ class Database:
             logger.warning("Read-only connection failed (%s), using single connection", e)
             self._read_conn = None
 
+        # Dashboard read connection — a second read-only connection reserved
+        # for the HTTP dashboard. aiosqlite serializes every query on a
+        # connection through one worker thread, so a heartbeat skill draining
+        # hundreds of OHLCV reads on _read_conn would otherwise head-of-line
+        # block the UI's trivial reads. WAL allows any number of concurrent
+        # readers, so a dedicated connection keeps the dashboard responsive.
+        if self._read_conn is not None:
+            try:
+                self._dashboard_read_conn = await aiosqlite.connect(
+                    f"file:{self._db_path}?mode=ro", uri=True,
+                )
+                self._dashboard_read_conn.row_factory = aiosqlite.Row
+                await self._dashboard_read_conn.execute("PRAGMA busy_timeout=5000")
+            except Exception as e:
+                logger.warning(
+                    "Dashboard read connection failed (%s), sharing engine read connection", e,
+                )
+                self._dashboard_read_conn = None
+
         await self._run_migrations()
-        logger.info("Database initialized at %s (read_conn=%s)", self._db_path,
-                     "enabled" if self._read_conn else "disabled")
+        logger.info(
+            "Database initialized at %s (read_conn=%s, dashboard_read_conn=%s)",
+            self._db_path,
+            "enabled" if self._read_conn else "disabled",
+            "enabled" if self._dashboard_read_conn else "disabled",
+        )
 
-    async def _check_integrity(self) -> None:
-        """Run a quick integrity check on startup.
+    async def check_integrity(self) -> str:
+        """Run `PRAGMA quick_check` and return its result ("ok" or the first
+        corruption message, "unknown" if no row, "error: ..." if it raised).
 
-        Uses `PRAGMA quick_check` (checks B-tree structure without scanning
-        every page) which is much faster than `PRAGMA integrity_check`.
-        Logs a critical warning if corruption is detected but does NOT
-        abort — allows the app to start so backups can be taken.
+        Uses quick_check (B-tree structure, no per-page cross-checks) rather
+        than integrity_check, but on a multi-GB DB it still scans the whole
+        file from disk — so this is NOT run on the startup path. The
+        database-maintenance CRON calls it nightly (off-hours), where a
+        minutes-long full read is acceptable. Runs on the read connection so
+        it never holds the write connection. Logs critical on failure; the
+        caller is responsible for alerting.
         """
         try:
-            cursor = await self._conn.execute("PRAGMA quick_check")
+            cursor = await self.read_conn.execute("PRAGMA quick_check")
             row = await cursor.fetchone()
             result = row[0] if row else "unknown"
             if result != "ok":
@@ -186,12 +229,17 @@ class Database:
                     result,
                 )
             else:
-                logger.debug("Database integrity check passed")
+                logger.info("Database integrity check passed")
+            return result
         except Exception as e:
             logger.warning("Database integrity check could not run: %s", e)
+            return f"error: {e}"
 
     async def close(self) -> None:
         """Close all database connections."""
+        if self._dashboard_read_conn:
+            await self._dashboard_read_conn.close()
+            self._dashboard_read_conn = None
         if self._read_conn:
             await self._read_conn.close()
             self._read_conn = None
@@ -210,9 +258,15 @@ class Database:
     def read_conn(self) -> aiosqlite.Connection:
         """Read connection — use for SELECT queries.
 
-        Falls back to write connection if read connection is not available
+        When the current async context is a dashboard HTTP request
+        (DASHBOARD_READ_CONN set by the dashboard middleware), routes to the
+        dedicated dashboard read connection so the UI never queues behind the
+        engine's heartbeat reads. Falls back to the engine read connection,
+        and finally to the write connection if no read connection is available
         (e.g., in-memory databases or older SQLite without URI support).
         """
+        if DASHBOARD_READ_CONN.get() and self._dashboard_read_conn is not None:
+            return self._dashboard_read_conn
         if self._read_conn is not None:
             return self._read_conn
         return self.conn
@@ -515,11 +569,23 @@ class Database:
 
         end_dt = end or now_utc()
         cutoff = (end_dt - timedelta(days=days)).isoformat()
-        query = (
-            "SELECT timestamp, open, high, low, close, volume FROM ohlcv "
-            "WHERE symbol = ? AND interval = ? AND timestamp >= ? "
-        )
-        params: list[Any] = [symbol, interval, cutoff]
+        # For daily bars, inline the interval as a literal rather than a bound
+        # parameter. SQLite only uses a `WHERE interval='daily'` partial index
+        # when it can prove the predicate at compile time, which a bound `?`
+        # defeats. The literal lets the covering index idx_ohlcv_daily_covering
+        # serve the query without per-row heap fetches for OHLCV columns.
+        if interval == "daily":
+            query = (
+                "SELECT timestamp, open, high, low, close, volume FROM ohlcv "
+                "WHERE symbol = ? AND interval = 'daily' AND timestamp >= ? "
+            )
+            params: list[Any] = [symbol, cutoff]
+        else:
+            query = (
+                "SELECT timestamp, open, high, low, close, volume FROM ohlcv "
+                "WHERE symbol = ? AND interval = ? AND timestamp >= ? "
+            )
+            params = [symbol, interval, cutoff]
         if end is not None:
             query += "AND timestamp <= ? "
             params.append(end_dt.isoformat())
