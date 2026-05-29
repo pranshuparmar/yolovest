@@ -1151,6 +1151,14 @@ class XGBoostSignalModel(MLBase):
                 # reported metric corrects for selection across the 81-cell
                 # search, which the per-cell bootstrap lower bound can't.
                 _dsr: float | None = None
+                # Out-of-sample discrimination diagnostics — the cleanest
+                # threshold/cost-independent read of whether the model has
+                # ANY edge (AUC≈0.50 / separation≈0 = none). Hoisted so they
+                # persist into `metrics` instead of living only in the log.
+                _oos_auc_buy: float | None = None
+                _oos_auc_sell: float | None = None
+                _oos_logloss: float | None = None
+                _oos_buy_sep: float | None = None
                 if use_final_holdout:
                     # Final-scale holdout. Train a tuning model on the
                     # chronological early data only, score the strict-
@@ -1220,6 +1228,16 @@ class XGBoostSignalModel(MLBase):
                             else float("nan")
                         )
                         _q = np.percentile(_p_buy, [50, 90, 99])
+
+                        def _finite(x: float) -> float | None:
+                            # NaN (absent class) → None so metrics stay
+                            # JSON-serializable for the dashboard.
+                            return None if x != x else round(float(x), 4)
+
+                        _oos_auc_buy = _finite(_auc_buy)
+                        _oos_auc_sell = _finite(_auc_sell)
+                        _oos_logloss = _finite(_ll)
+                        _oos_buy_sep = _finite(_sep)
                         logger.info(
                             "Discrimination %s (holdout n=%d): AUC_buy=%.3f "
                             "AUC_sell=%.3f logloss=%.3f | P(BUY) mean=%.3f "
@@ -1377,6 +1395,14 @@ class XGBoostSignalModel(MLBase):
                     # the number of grid trials + return skew/kurtosis).
                     # None when there weren't enough trials to estimate it.
                     "deflated_sharpe": _dsr,
+                    # Threshold/cost-independent discrimination on the
+                    # strict-future holdout — AUC≈0.50 / separation≈0 means
+                    # the model has no edge no matter how thresholds are
+                    # tuned. None on the small-corpus (non-holdout) path.
+                    "oos_auc_buy": _oos_auc_buy,
+                    "oos_auc_sell": _oos_auc_sell,
+                    "oos_logloss": _oos_logloss,
+                    "oos_buy_separation": _oos_buy_sep,
                 }
                 if _dsr is not None and _dsr < 0.95:
                     logger.warning(
@@ -1464,22 +1490,37 @@ class XGBoostSignalModel(MLBase):
             elif model_type == "swing":
                 self._swing_features = feature_names
 
-        # Persist tuned thresholds when the sweep produced them and the
-        # tuned variant actually beat the argmax baseline (use_tuned in
-        # the train block already gated this — non-improving sweeps just
-        # don't write tuned_*_threshold to metrics).
+        # DEPLOY tuned thresholds only when the tuned variant actually beat
+        # the argmax baseline on the holdout (signalled by backtest_source
+        # == "walk_forward_threshold_tuned" — set iff use_tuned). When
+        # argmax won, the headline metrics describe argmax, so the deployed
+        # model must run argmax too: applying cutoffs the backtest judged
+        # WORSE both underperforms and makes the saved Sharpe misrepresent
+        # live behaviour. The swept values stay in `metrics` for visibility
+        # regardless; this only gates what the live model actually uses.
         tuned_buy = metrics.get("tuned_buy_threshold")
         tuned_sell = metrics.get("tuned_sell_threshold")
-        if tuned_buy is not None and tuned_sell is not None:
+        tuning_won = metrics.get("backtest_source") == "walk_forward_threshold_tuned"
+        if tuning_won and tuned_buy is not None and tuned_sell is not None:
             self._set_thresholds(
                 model_type, {"buy": float(tuned_buy), "sell": float(tuned_sell)},
             )
             logger.info(
-                "Tuned %s thresholds: buy=%.2f sell=%.2f (argmax_sharpe=%.4f, "
-                "tuned_sharpe=%.4f)",
+                "Tuned %s thresholds DEPLOYED: buy=%.2f sell=%.2f "
+                "(tuned_sharpe=%.4f > argmax_sharpe=%.4f)",
                 model_type, tuned_buy, tuned_sell,
-                metrics.get("argmax_sharpe", 0.0),
                 metrics.get("tuned_sharpe", 0.0),
+                metrics.get("argmax_sharpe", 0.0),
+            )
+        else:
+            # Argmax won (or no sweep) → deploy argmax, clearing any cutoffs.
+            self._set_thresholds(model_type, None)
+            logger.info(
+                "%s deploying ARGMAX (tuned sweep did not beat argmax: "
+                "argmax_sharpe=%.4f >= tuned_sharpe=%.4f); swept cutoffs "
+                "%s/%s kept in metrics for reference only",
+                model_type, metrics.get("argmax_sharpe", 0.0),
+                metrics.get("tuned_sharpe", 0.0), tuned_buy, tuned_sell,
             )
 
         # Version stamp in IST so it matches log timestamps the user

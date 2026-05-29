@@ -90,9 +90,20 @@ class TestPipelineSmoke:
         assert metrics["deflated_sharpe"] is None or (
             0.0 <= metrics["deflated_sharpe"] <= 1.0
         )
+        # Discrimination diagnostics are persisted (not just logged) so model
+        # edge is legible from the stored record.
+        for k in ("oos_auc_buy", "oos_auc_sell", "oos_logloss",
+                  "oos_buy_separation"):
+            assert k in metrics
         assert 0.0 <= metrics["tuned_buy_threshold"] <= 1.0
         # Early stopping kept the deployed tree count within the ceiling.
         assert skill.ctx.ml._swing_model.n_estimators <= 120
+        # Tuned cutoffs are DEPLOYED iff the tuned variant beat argmax;
+        # otherwise the model runs argmax (no cutoffs), so the saved headline
+        # Sharpe matches live behaviour.
+        deployed_thresholds = skill.ctx.ml._get_thresholds("swing") is not None
+        tuning_won = metrics["backtest_source"] == "walk_forward_threshold_tuned"
+        assert deployed_thresholds == tuning_won
 
         # 4) Production-path inference runs on real feature vectors.
         labels = skill.ctx.ml.predict_labels_batch(probe, "swing")
