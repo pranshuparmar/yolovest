@@ -1036,6 +1036,8 @@ class ModelRetrainSkill(SkillBase):
             obv=self.ctx.config.strategy.indicators.obv,
             supertrend=self.ctx.config.strategy.indicators.supertrend,
             ema_periods=self.ctx.config.strategy.ema_periods,
+            # Daily/swing path → extended momentum on (config-toggled).
+            extended_momentum=self.ctx.config.strategy.indicators.extended_momentum,
         )
 
         # Minimum window size for feature computation. Must match the
@@ -1487,6 +1489,9 @@ class ModelRetrainSkill(SkillBase):
             obv=self.ctx.config.strategy.indicators.obv,
             supertrend=self.ctx.config.strategy.indicators.supertrend,
             ema_periods=self.ctx.config.strategy.ema_periods,
+            # Intraday 5-min bars → daily-horizon momentum is meaningless,
+            # so the extended-momentum block stays OFF here.
+            extended_momentum=False,
         )
         window_size = 200
 

@@ -175,6 +175,12 @@ class IndicatorsConfig(BaseModel):
     volume_profile: bool = True
     obv: bool = True
     supertrend: bool = True
+    # Multi-horizon momentum + volatility-regime + fractional-difference
+    # features for the SWING/daily model (3-9mo momentum is the strongest
+    # Indian-equity anomaly). Daily-only — meaningless on 5-min intraday
+    # bars, so the intraday feature set is unchanged. Default on; flip off
+    # to A/B against a price-snapshot-only swing model.
+    extended_momentum: bool = True
 
 
 class ATRMultipliers(BaseModel):

@@ -1965,6 +1965,7 @@ def create_app(ctx: AppContext) -> FastAPI:
             rsi=ind.rsi, macd=ind.macd, bollinger_bands=ind.bollinger_bands,
             vwap=ind.vwap, atr=ind.atr, volume_profile=ind.volume_profile,
             obv=ind.obv, supertrend=ind.supertrend,
+            extended_momentum=ind.extended_momentum,
         )
         recommendations = []
 
@@ -4691,6 +4692,8 @@ def create_app(ctx: AppContext) -> FastAPI:
             volume_profile=cfg.strategy.indicators.volume_profile,
             obv=cfg.strategy.indicators.obv,
             supertrend=cfg.strategy.indicators.supertrend,
+            # Dry-run must mirror the live swing engine's feature set.
+            extended_momentum=cfg.strategy.indicators.extended_momentum,
         )
 
         # Feature parity with the live heartbeat: the model trains on news,
