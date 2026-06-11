@@ -166,3 +166,29 @@ class TestBusinessLogic:
         assert resp.status_code == 200
         # No state changes
         dashboard_ctx.broker.cancel_order.assert_not_awaited()
+
+
+class TestPostbackHardening:
+    def test_disabled_without_api_secret(self, sample_config, dashboard_ctx):
+        """No broker secret configured → endpoint is disabled (403), not
+        open to forged order updates."""
+        from pydantic import SecretStr
+        from fastapi.testclient import TestClient
+        from yolovest.dashboard.app import create_app
+
+        dashboard_ctx.config.broker.api_secret = SecretStr("")
+        client = TestClient(create_app(dashboard_ctx))
+        resp = client.post("/api/auth/zerodha/postback", json={
+            "order_id": "ORD-1",
+            "order_timestamp": "2026-05-13 10:00:00",
+            "status": "COMPLETE",
+        })
+        assert resp.status_code == 403
+
+    def test_missing_order_id_no_longer_bypasses_checksum(self, client):
+        """A body without order_id used to skip verification entirely."""
+        resp = client.post("/api/auth/zerodha/postback", json={
+            "status": "COMPLETE",
+            "checksum": "whatever",
+        })
+        assert resp.status_code == 400

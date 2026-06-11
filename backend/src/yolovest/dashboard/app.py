@@ -92,6 +92,75 @@ def _verify_token(token: str) -> str:
     return data.get("user", "anonymous")
 
 
+class _LoginThrottle:
+    """In-memory brute-force throttle for password attempts.
+
+    Covers both /api/auth/login and the Basic-auth fallback (without the
+    latter, an attacker could brute-force the password against any
+    protected endpoint and never touch the login route). Per-source
+    exponential lockout after PER_IP_THRESHOLD consecutive failures,
+    plus a global damper so X-Forwarded-For spoofing can't sidestep the
+    per-IP key. State is per-process; a restart clears it — fine, the
+    lockout only needs to make online guessing impractical.
+    """
+
+    BASE_LOCK_SEC = 30.0
+    MAX_LOCK_SEC = 900.0
+    PER_IP_THRESHOLD = 5
+    GLOBAL_THRESHOLD = 20
+    MAX_TRACKED_IPS = 1000
+
+    def __init__(self) -> None:
+        self._by_ip: dict[str, tuple[int, float]] = {}
+        self._global_failures = 0
+        self._global_locked_until = 0.0
+
+    def locked_for(self, ip: str) -> float:
+        """Seconds the source must still wait, 0.0 when free to try."""
+        now = time.monotonic()
+        remaining = max(0.0, self._global_locked_until - now)
+        _, until = self._by_ip.get(ip, (0, 0.0))
+        return max(remaining, until - now)
+
+    def record_failure(self, ip: str) -> None:
+        now = time.monotonic()
+        fails, _ = self._by_ip.get(ip, (0, 0.0))
+        fails += 1
+        lock = 0.0
+        if fails >= self.PER_IP_THRESHOLD:
+            lock = min(
+                self.BASE_LOCK_SEC * 2 ** (fails - self.PER_IP_THRESHOLD),
+                self.MAX_LOCK_SEC,
+            )
+        if len(self._by_ip) >= self.MAX_TRACKED_IPS and ip not in self._by_ip:
+            # Bound memory under spoofed-source floods: drop the entry
+            # closest to expiry. The global damper still applies.
+            oldest = min(self._by_ip, key=lambda k: self._by_ip[k][1])
+            self._by_ip.pop(oldest, None)
+        self._by_ip[ip] = (fails, now + lock)
+        self._global_failures += 1
+        if self._global_failures >= self.GLOBAL_THRESHOLD:
+            self._global_locked_until = now + self.BASE_LOCK_SEC
+
+    def record_success(self, ip: str) -> None:
+        self._by_ip.pop(ip, None)
+        self._global_failures = 0
+        self._global_locked_until = 0.0
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client identity behind the nginx-proxy → frontend-nginx
+    chain. Leftmost X-Forwarded-For entry is the real client (both
+    proxies append); X-Real-IP and the socket peer are fallbacks."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    xri = request.headers.get("x-real-ip", "")
+    if xri:
+        return xri
+    return request.client.host if request.client else "unknown"
+
+
 def _extract_broker_capital(margins: dict[str, Any]) -> float:
     """Extract free cash + utilised margin from Kite margins response.
 
@@ -815,6 +884,9 @@ def create_app(ctx: AppContext) -> FastAPI:
     # Check DB for a persisted password override (set via /api/change-password)
     _password = {"current": dash_password}
 
+    # Brute-force throttle shared by /api/auth/login and Basic auth.
+    _throttle = _LoginThrottle()
+
     @app.on_event("startup")
     async def _load_persisted_password() -> None:
         try:
@@ -840,11 +912,23 @@ def create_app(ctx: AppContext) -> FastAPI:
             token = auth_header[7:]
             return _verify_token(token)
 
-        # Fall back to Basic auth
+        # Fall back to Basic auth. Password attempts count toward the
+        # same brute-force throttle as the login endpoint — otherwise
+        # Basic auth on any protected route is an unthrottled oracle.
         if credentials is not None:
+            ip = _client_ip(request)
+            wait = _throttle.locked_for(ip)
+            if wait > 0:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many failed attempts. Try again later.",
+                    headers={"Retry-After": str(int(wait) + 1)},
+                )
             correct = secrets.compare_digest(credentials.password, _password["current"])
             if correct:
+                _throttle.record_success(ip)
                 return credentials.username
+            _throttle.record_failure(ip)
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -883,11 +967,21 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     # Login endpoint — issues session token + CSRF token
     @app.post("/api/auth/login")
-    async def login(body: dict[str, Any]) -> dict[str, Any]:
+    async def login(request: Request, body: dict[str, Any]) -> dict[str, Any]:
         """Authenticate with password and receive a session token."""
+        ip = _client_ip(request)
+        wait = _throttle.locked_for(ip)
+        if wait > 0:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed attempts. Try again later.",
+                headers={"Retry-After": str(int(wait) + 1)},
+            )
         pw = body.get("password", "")
         if not secrets.compare_digest(pw, _password["current"]):
+            _throttle.record_failure(ip)
             raise HTTPException(status_code=401, detail="Invalid password")
+        _throttle.record_success(ip)
         username = body.get("username", "admin")
         token = _sign_token(username)
         return {
@@ -2982,22 +3076,31 @@ def create_app(ctx: AppContext) -> FastAPI:
 
         api_secret_val = ctx.config.broker.api_secret.get_secret_value() \
             if ctx.config.broker.api_secret else ""
-        if api_secret_val and order_id and order_timestamp:
-            expected = hashlib.sha256(
-                f"{order_id}{order_timestamp}{api_secret_val}".encode(),
-            ).hexdigest()
-            if not secrets.compare_digest(expected, str(received_checksum)):
-                logger.warning(
-                    "Zerodha postback: checksum mismatch for order=%s "
-                    "(possibly spoofed) — rejecting", order_id,
-                )
-                raise HTTPException(status_code=401, detail="invalid checksum")
-        else:
-            # Mode where checksum can't be computed (paper / dev). Log
-            # but accept so local testing isn't blocked.
-            logger.debug(
-                "Zerodha postback: skipping checksum (api_secret/order_id/timestamp missing)",
+        if not api_secret_val:
+            # No broker secret configured (paper-only install): there is
+            # nothing to verify a checksum against, so the endpoint is
+            # disabled rather than left open to forged order updates that
+            # would mutate trade rows via _apply_order_postback.
+            raise HTTPException(
+                status_code=403,
+                detail="postback disabled (broker api_secret not configured)",
             )
+        if not (order_id and order_timestamp):
+            # Without these fields the checksum can't be recomputed —
+            # previously this skipped verification entirely, which let a
+            # crafted body bypass the signature check.
+            raise HTTPException(
+                status_code=400, detail="missing order_id/order_timestamp",
+            )
+        expected = hashlib.sha256(
+            f"{order_id}{order_timestamp}{api_secret_val}".encode(),
+        ).hexdigest()
+        if not secrets.compare_digest(expected, str(received_checksum)):
+            logger.warning(
+                "Zerodha postback: checksum mismatch for order=%s "
+                "(possibly spoofed) — rejecting", order_id,
+            )
+            raise HTTPException(status_code=401, detail="invalid checksum")
 
         status_str = (body.get("status") or "").upper()
         logger.info("Zerodha postback: order=%s status=%s", order_id, status_str)
