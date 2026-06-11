@@ -11,8 +11,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
-
 from yolovest.scoring import path_aware_score
 from yolovest.timezone import IST, now_ist
 
@@ -313,7 +311,7 @@ class DryRunMixin:
         """
         deleted: dict[str, int] = {}
 
-        async def _delete(table: str, where: str = "", params: tuple = ()) -> int:
+        async def _delete(table: str, where: str = "", params: tuple[Any, ...] = ()) -> int:
             try:
                 if where:
                     cursor = await self.conn.execute(
@@ -428,8 +426,9 @@ class DryRunMixin:
         timestamp_part = stem.replace("yolovest_", "")
         models_backup_dir = Path(backup_dir) / f"models_{timestamp_part}"
 
-        # Close current connection before overwriting
-        await self.conn.close()
+        # Close every connection before overwriting — the read
+        # connections would otherwise keep serving the replaced inode.
+        await self.close()
 
         # Restore database
         db_path = Path(self._db_path)
@@ -456,11 +455,10 @@ class DryRunMixin:
                     logger.warning("Failed to restore model %s: %s", pkl_file.name, e)
             result["models_restored"] = models_restored
 
-        # Reopen connection
-        self.conn = await aiosqlite.connect(self._db_path)
-        self.conn.row_factory = aiosqlite.Row
-        await self.conn.execute("PRAGMA journal_mode=WAL")
-        await self.conn.execute("PRAGMA foreign_keys=ON")
+        # Reopen all connections and run any migrations the restored
+        # snapshot is missing. (The old code assigned to the read-only
+        # `conn` property — an AttributeError on every restore.)
+        await self.initialize()
 
         return result
 
