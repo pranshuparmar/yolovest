@@ -1,7 +1,7 @@
 """Tests for `intraday_triple_barrier_label` — the 1-minute-path-resolved
 triple-barrier label for the intraday model.
 
-The point of this label vs. the 5-min-only `intraday_path_aware_label` is
+The point of this label vs. a 5-min-only path walk is
 that it resolves the intra-5-min-bar ambiguity (did the high/target or the
 low/SL print first?) using real 1-min data instead of collapsing to HOLD.
 """

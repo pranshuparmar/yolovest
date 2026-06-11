@@ -74,6 +74,19 @@ def _intraday_indicator_cfg(ctx: AppContext) -> IndicatorConfig:
 logger = logging.getLogger(__name__)
 
 
+def _capped_days_range(
+    days_range: tuple[int, int] | None, cap: int,
+) -> tuple[int, int] | None:
+    """Clamp a (lo, hi) holding-days range to the swing horizon cap
+    (`strategy.swing_horizon_cap_days`). The swing model's label measures
+    a ~10-bar window; horizons far beyond it ride an edge the label never
+    measured. cap <= 0 disables."""
+    if not days_range or cap <= 0:
+        return days_range
+    lo, hi = days_range
+    return (min(lo, cap), min(hi, cap))
+
+
 OutcomeT = Literal[
     "passed",                    # signal cleared all checks
     "hold_signal",               # model said HOLD
@@ -161,7 +174,10 @@ async def _predict_with_chooser(
                 _, product, expected_days = decide_holding_period(
                     features, ["short_term", "long_term"],
                     ctx.config.strategy.volatility, now_time,
-                    mode_days_range=(max(1, mode_days[0]), mode_days[1]),
+                    mode_days_range=_capped_days_range(
+                        (max(1, mode_days[0]), mode_days[1]),
+                        ctx.config.strategy.swing_horizon_cap_days,
+                    ),
                 )
                 label = (
                     "swing" if expected_days <= 5
@@ -207,7 +223,10 @@ async def _predict_with_chooser(
         _, product, expected_days = decide_holding_period(
             features, ["short_term", "long_term"],
             ctx.config.strategy.volatility, now_time,
-            mode_days_range=(max(1, mode_days[0]), mode_days[1]),
+            mode_days_range=_capped_days_range(
+                (max(1, mode_days[0]), mode_days[1]),
+                ctx.config.strategy.swing_horizon_cap_days,
+            ),
         )
         label = (
             "swing" if expected_days <= 5
@@ -380,6 +399,9 @@ async def evaluate_symbol_signal(
     if mode_days_range is None:
         from yolovest.config import _MODE_HOLDING_DAYS
         mode_days_range = _MODE_HOLDING_DAYS.get(effective_mode)
+    mode_days_range = _capped_days_range(
+        mode_days_range, cfg.strategy.swing_horizon_cap_days,
+    )
 
     # Step 1: decide holding period from features + mode
     bear_max = None

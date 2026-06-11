@@ -138,98 +138,6 @@ def passes_edge_gate(
     return True, f"argmax Sharpe {argmax:.2f} >= {min_argmax_sharpe:.2f}"
 
 
-def intraday_path_aware_label(
-    *,
-    bars: list["OHLCVBar"],
-    start_idx: int,
-    lookahead: int,
-    entry: float,
-    target_pct: float,
-    sl_pct: float,
-) -> int:
-    """Path-aware label for an intraday (same-session) trade.
-
-    Same target-before-SL geometry as the daily ``_path_aware_label`` but
-    with a HARD same-day close-out: the forward walk stops at the session
-    boundary — the first bar whose calendar date differs from the entry
-    bar's. There is no overnight carry for MIS, so a move that only
-    materialises in a later session must not count toward the label
-    (the contamination the daily labels suffer). A trade that hits
-    neither barrier within ``lookahead`` bars OR before the session ends
-    is a no-trade → HOLD.
-
-    `entry` is the fill price (the caller passes ``bars[start_idx+1].open``
-    — the next-bar open, the earliest an intraday signal computed at
-    ``bars[start_idx].close`` can actually fill). Barriers are checked
-    from the entry bar onward.
-
-    Returns: 2 BUY, 0 SELL, 1 HOLD.
-    """
-    if start_idx + 1 >= len(bars):
-        return 1
-    session_date = bars[start_idx + 1].timestamp.date()
-
-    buy_target = entry * (1 + target_pct)
-    buy_sl = entry * (1 - sl_pct)
-    sell_target = entry * (1 - target_pct)
-    sell_sl = entry * (1 + sl_pct)
-
-    buy_outcome: str | None = None
-    sell_outcome: str | None = None
-    buy_win_bar: int | None = None
-    sell_win_bar: int | None = None
-
-    end_idx = min(start_idx + lookahead, len(bars) - 1)
-    for k in range(start_idx + 1, end_idx + 1):
-        bar = bars[k]
-        # Hard same-session close-out — never look across the day boundary.
-        if bar.timestamp.date() != session_date:
-            break
-        hi, lo = bar.high, bar.low
-
-        if buy_outcome is None:
-            target_now = hi >= buy_target
-            sl_now = lo <= buy_sl
-            if target_now and sl_now:
-                buy_outcome = "ambiguous"
-            elif target_now:
-                buy_outcome = "win"
-                buy_win_bar = k
-            elif sl_now:
-                buy_outcome = "loss"
-
-        if sell_outcome is None:
-            target_now = lo <= sell_target
-            sl_now = hi >= sell_sl
-            if target_now and sl_now:
-                sell_outcome = "ambiguous"
-            elif target_now:
-                sell_outcome = "win"
-                sell_win_bar = k
-            elif sl_now:
-                sell_outcome = "loss"
-
-        if buy_outcome is not None and sell_outcome is not None:
-            break
-
-    buy_won = buy_outcome == "win"
-    sell_won = sell_outcome == "win"
-
-    if buy_won and sell_won:
-        # First-winner disambiguation; same-bar cross-direction → HOLD.
-        if buy_win_bar is not None and sell_win_bar is not None:
-            if buy_win_bar < sell_win_bar:
-                return 2
-            if sell_win_bar < buy_win_bar:
-                return 0
-        return 1
-    if buy_won:
-        return 2
-    if sell_won:
-        return 0
-    return 1
-
-
 def intraday_triple_barrier_label(
     *,
     entry: float,
@@ -249,7 +157,7 @@ def intraday_triple_barrier_label(
     walked bar-by-bar on the 1-min series, so the intra-5-min ambiguity
     ("did the high or the low print first inside the bar?") is decided by
     real finer-grained data instead of collapsing to HOLD the way a
-    5-min-only walk must (see ``intraday_path_aware_label``).
+    5-min-only walk must (high and low inside one 5-min bar are unordered).
 
     Discipline carried over:
       - **Hard same-session close-out**: the walk stops at the first 1-min
@@ -816,6 +724,15 @@ class ModelRetrainSkill(SkillBase):
                 # metrics_json.
                 metrics["label_counts"] = label_counts
                 metrics["label_pct"] = label_pct
+                # Honest-data caveat, stamped into the artifact metrics:
+                # the corpus is whatever history this install accumulated
+                # for CURRENT constituents — names that exited the index
+                # or delisted before ingestion are absent, so the
+                # cross-sectional features and the backtest Sharpe skew
+                # optimistic (survivorship). No point-in-time constituent
+                # source is wired; treat absolute backtest numbers
+                # accordingly.
+                metrics["data_caveats"] = ["survivor_universe"]
                 if class_weights:
                     metrics["class_weights"] = {
                         "BUY": round(class_weights.get(2, 0.0), 4),

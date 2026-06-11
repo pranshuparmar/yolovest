@@ -576,6 +576,15 @@ class StrategyConfig(BaseModel):
     mode: Literal["intraday", "short_term", "balanced", "long_term", "swing"] = "balanced"
     allowed_holding_periods: list[str] | None = None
     holding_periods: HoldingPeriodConfig = Field(default_factory=HoldingPeriodConfig)
+    # Horizon-consistency cap on ML swing trades. The swing model's
+    # path-aware label measures a 10-bar (~2-week) window — execution
+    # horizons far beyond that ride an edge the label never measured
+    # (the trade is held on a model that was only ever asked "does the
+    # target hit within ~2 weeks?"). Caps the upper bound of the
+    # holding-day range the chooser may assign (long_term/swing modes'
+    # 66-day tails clamp to this; balanced's 0-15 is already inside).
+    # Raise or set 0 to disable if you knowingly want longer rides.
+    swing_horizon_cap_days: int = Field(default=15, ge=0, le=66)
     # Hard sanity ceiling on ATR% (= ATR / entry). A daily ATR above this
     # fraction of price is implausible for an NSE equity (real ATRs run
     # ~1-8%) and almost always means corrupt OHLCV — so the signal is

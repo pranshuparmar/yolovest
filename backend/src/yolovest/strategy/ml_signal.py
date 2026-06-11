@@ -151,6 +151,103 @@ _LABEL_BUY = 2
 _MIN_TRAINING_SAMPLES_DEFAULT = 200
 
 
+def _choose_calibrated(
+    raw: list[float], cal: list[float] | None,
+) -> list[float]:
+    """Calibration-adoption policy — the SINGLE definition shared by every
+    inference path (production `_predict`, shadow `_predict_shadow`, the
+    post-train guard's `predict_labels_batch`, and the threshold-tuning
+    holdout in `train`): adopt the calibrated vector ONLY when it agrees
+    with the raw argmax AND is more confident there. Disagreement keeps
+    raw — sigmoid calibration on a HOLD-heavy prior systematically pulls
+    directional argmaxes back toward HOLD. Because adoption requires
+    argmax agreement, argmax(chosen) == argmax(raw) always; only the
+    probability magnitudes the threshold gate reads can change."""
+    if cal is None or len(cal) != len(raw) or not raw:
+        return raw
+    raw_label = max(range(len(raw)), key=raw.__getitem__)
+    cal_label = max(range(len(cal)), key=cal.__getitem__)
+    if cal_label == raw_label and cal[cal_label] > raw[raw_label]:
+        return cal
+    return raw
+
+
+def _threshold_label(
+    probas: list[float], thresholds: dict[str, float] | None,
+) -> int:
+    """Tuned-threshold gate — the single definition shared by every
+    inference path: BUY iff P(BUY) >= buy_thresh and >= P(SELL); SELL iff
+    P(SELL) >= sell_thresh and > P(BUY); else HOLD. Plain argmax when no
+    thresholds are set (legacy artifacts / argmax-deployed models)."""
+    if not probas:
+        return _LABEL_HOLD
+    if thresholds and len(probas) >= 3:
+        buy_p = float(probas[_LABEL_BUY])
+        sell_p = float(probas[_LABEL_SELL])
+        if buy_p >= thresholds["buy"] and buy_p >= sell_p:
+            return _LABEL_BUY
+        if sell_p >= thresholds["sell"] and sell_p > buy_p:
+            return _LABEL_SELL
+        return _LABEL_HOLD
+    return max(range(len(probas)), key=probas.__getitem__)
+
+
+def _snap_to_date_boundary(metas: list[Any], idx: int) -> int:
+    """Advance `idx` to the next entry_date boundary so same-day
+    cross-sectional rows never straddle a tune/report split — same-day
+    correlation otherwise leaks the threshold choice into the reported
+    half. Returns `idx` unchanged when out of range or when snapping
+    would consume the entire tail."""
+    n = len(metas)
+    if idx <= 0 or idx >= n:
+        return idx
+
+    def _d(j: int) -> str:
+        return str(getattr(metas[j], "entry_date", "") or "")[:10]
+
+    j = idx
+    while j < n and _d(j) and _d(j) == _d(j - 1):
+        j += 1
+    return j if j < n else idx
+
+
+def _purged_time_series_splits(
+    n_samples: int,
+    n_splits: int,
+    sample_dates: list[Any],
+    purge_days: int,
+) -> list[tuple[Any, Any]]:
+    """Pre-materialised TimeSeriesSplit folds whose TRAIN tail is purged
+    of rows within `purge_days` calendar days of the fold's test start —
+    the same label-overlap + embargo discipline the walk-forward CV and
+    the holdout already apply, extended to the calibrator's folds (a
+    multi-bar label straddling a calibration fold boundary leaks into
+    the per-fold calibrators). `sample_dates` is column-parallel
+    (datetime.date or None); None dates are never purged."""
+    from datetime import timedelta as _td
+
+    import numpy as np
+    from sklearn.model_selection import TimeSeriesSplit
+
+    splits: list[tuple[Any, Any]] = []
+    for tr, te in TimeSeriesSplit(n_splits=n_splits).split(np.arange(n_samples)):
+        if purge_days > 0 and len(te):
+            test_start = next(
+                (sample_dates[int(i)] for i in te if sample_dates[int(i)]),
+                None,
+            )
+            if test_start is not None:
+                cutoff = test_start - _td(days=purge_days)
+                kept = [
+                    i for i in tr
+                    if sample_dates[int(i)] is None or sample_dates[int(i)] < cutoff
+                ]
+                if kept:
+                    tr = np.asarray(kept, dtype=tr.dtype)
+        splits.append((tr, te))
+    return splits
+
+
 class XGBoostSignalModel(MLBase):
     """XGBoost/LightGBM signal model with probability calibration.
 
@@ -210,6 +307,12 @@ class XGBoostSignalModel(MLBase):
         self._shadow_swing_version: str | None = None
         self._shadow_intraday_features: list[str] | None = None
         self._shadow_swing_features: list[str] | None = None
+        # Shadow tuned thresholds — restored from the artifact so the
+        # shadow's scored predictions reflect the SAME decision policy
+        # (calibration agreement + threshold gate) the model would run
+        # if promoted. Without them the A/B compared different policies.
+        self._shadow_intraday_thresholds: dict[str, float] | None = None
+        self._shadow_swing_thresholds: dict[str, float] | None = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -304,7 +407,31 @@ class XGBoostSignalModel(MLBase):
         can use the same numbers for its margin-above-threshold
         comparison.
         """
-        thresholds = self._get_thresholds(model_type)
+        return self._apply_threshold_policy(
+            self._get_thresholds(model_type), model_type,
+        )
+
+    def _get_effective_shadow_thresholds(
+        self, model_type: str,
+    ) -> dict[str, float] | None:
+        """Shadow-slot mirror of `_get_effective_thresholds` — the same
+        config overrides + caps, so the shadow's scored predictions
+        reflect exactly the policy this artifact would run in production
+        after promotion."""
+        if model_type == "intraday":
+            thresholds = self._shadow_intraday_thresholds
+        elif model_type == "swing":
+            thresholds = self._shadow_swing_thresholds
+        else:
+            thresholds = None
+        return self._apply_threshold_policy(thresholds, f"shadow-{model_type}")
+
+    def _apply_threshold_policy(
+        self, thresholds: dict[str, float] | None, model_type: str,
+    ) -> dict[str, float] | None:
+        """Config overrides + symmetry/ceiling caps over a raw tuned
+        (buy, sell) pair — see `_get_effective_thresholds` for the
+        resolution order. `model_type` is a log label only."""
         if not thresholds:
             return None
         try:
@@ -446,11 +573,13 @@ class XGBoostSignalModel(MLBase):
             self._shadow_intraday_calibrator = None
             self._shadow_intraday_version = None
             self._shadow_intraday_features = None
+            self._shadow_intraday_thresholds = None
         elif model_type == "swing":
             self._shadow_swing_model = None
             self._shadow_swing_calibrator = None
             self._shadow_swing_version = None
             self._shadow_swing_features = None
+            self._shadow_swing_thresholds = None
 
     async def load_shadow_model(
         self, model_type: str, version: str | None = None,
@@ -475,16 +604,28 @@ class XGBoostSignalModel(MLBase):
         artifact = await asyncio.to_thread(_load)
         _warn_on_lib_skew(artifact, f"load_shadow_model[{model_type}]")
 
+        # Restore the artifact's tuned thresholds so the shadow runs the
+        # SAME decision policy it would run in production after promotion.
+        _tuned = artifact.get("tuned_thresholds")
+        _shadow_thresholds: dict[str, float] | None = None
+        if _tuned and isinstance(_tuned, dict):
+            _shadow_thresholds = {
+                "buy": float(_tuned.get("buy", 0.5)),
+                "sell": float(_tuned.get("sell", 0.5)),
+            }
+
         if model_type == "intraday":
             self._shadow_intraday_model = artifact["model"]
             self._shadow_intraday_calibrator = artifact.get("calibrator")
             self._shadow_intraday_version = artifact.get("version", "unknown")
             self._shadow_intraday_features = artifact.get("feature_names")
+            self._shadow_intraday_thresholds = _shadow_thresholds
         elif model_type == "swing":
             self._shadow_swing_model = artifact["model"]
             self._shadow_swing_calibrator = artifact.get("calibrator")
             self._shadow_swing_version = artifact.get("version", "unknown")
             self._shadow_swing_features = artifact.get("feature_names")
+            self._shadow_swing_thresholds = _shadow_thresholds
 
         logger.info("Loaded shadow %s model version %s",
                      model_type, artifact.get("version", "unknown"))
@@ -535,23 +676,28 @@ class XGBoostSignalModel(MLBase):
             confidence = float(probas[pred_label])
             return pred_label, confidence, [float(p) for p in probas]
 
-        pred_label, raw_confidence, probas_list = await asyncio.to_thread(_run_inference)
-        confidence = raw_confidence
-        chosen_probas = probas_list
+        _raw_label, _raw_confidence, probas_list = await asyncio.to_thread(_run_inference)
 
+        cal_probas: list[float] | None = None
         if calibrator is not None:
-            def _calibrate() -> tuple[int, float, list[float]]:
+            def _calibrate() -> list[float]:
                 import numpy as np
                 X = np.array(feature_vector)
-                cal_label = int(calibrator.predict(X)[0])
-                cal_probas = calibrator.predict_proba(X)[0]
-                return cal_label, float(cal_probas[cal_label]), [float(p) for p in cal_probas]
+                return [float(p) for p in calibrator.predict_proba(X)[0]]
 
-            cal_label, cal_confidence, cal_probas = await asyncio.to_thread(_calibrate)
-            if cal_confidence > raw_confidence:
-                pred_label = cal_label
-                confidence = cal_confidence
-                chosen_probas = cal_probas
+            cal_probas = await asyncio.to_thread(_calibrate)
+
+        # FULL production decision policy: agreement-gated calibration
+        # adoption + this artifact's tuned thresholds under the same
+        # config caps production runs with. The shadow's scored
+        # predictions feed the promotion live-accuracy gate — scoring a
+        # different policy than the one that would deploy (the old
+        # behaviour: plain higher-confidence calibration adoption, no
+        # thresholds) made that A/B apples-to-oranges.
+        chosen_probas = _choose_calibrated(probas_list, cal_probas)
+        thresholds = self._get_effective_shadow_thresholds(model_type)
+        pred_label = _threshold_label(chosen_probas, thresholds)
+        confidence = float(chosen_probas[pred_label])
 
         signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
         entry_price = current_price or features.get("close") or 0.0
@@ -647,29 +793,19 @@ class XGBoostSignalModel(MLBase):
 
             cal_label, cal_confidence, cal_probas = await asyncio.to_thread(_calibrate)
 
-            # Only adopt calibrated probabilities when the calibrator
-            # AGREES with the raw model on the argmax class. The
-            # CalibratedClassifierCV uses sigmoid Platt scaling that,
-            # on a HOLD-dominated label distribution (e.g. the swing
-            # model's ~73% HOLD), systematically compresses directional
-            # predictions back toward the HOLD prior — even when the
-            # class-weighted XGBoost has clear conviction. When raw
-            # says BUY/SELL but calibrator pulls it to HOLD, that's
-            # the over-correction kicking in; trust the trained model.
-            # When they agree on direction, use the higher-confidence
-            # version (calibration is doing its job refining the
-            # probability magnitude). The old "always use higher
-            # confidence" rule silently flipped most swing
-            # directional argmaxes into HOLD.
-            if cal_label == pred_label:
-                if cal_confidence > raw_confidence:
-                    confidence = cal_confidence
-                    chosen_probas = cal_probas
-                else:
-                    logger.debug(
-                        "Calibration compressed %s confidence from %.4f to %.4f, using raw",
-                        symbol, raw_confidence, cal_confidence,
-                    )
+            # Agreement-gated adoption — see _choose_calibrated for the
+            # policy and its rationale (sigmoid calibration on a HOLD-
+            # heavy prior compresses directional argmaxes back to HOLD;
+            # the old "always use higher confidence" rule silently
+            # flipped most swing directional argmaxes into HOLD).
+            chosen_probas = _choose_calibrated(probas_list, cal_probas)
+            if chosen_probas is cal_probas:
+                confidence = cal_confidence
+            elif cal_label == pred_label:
+                logger.debug(
+                    "Calibration compressed %s confidence from %.4f to %.4f, using raw",
+                    symbol, raw_confidence, cal_confidence,
+                )
             else:
                 logger.debug(
                     "Calibrator disagrees with raw on %s: raw=%s@%.3f cal=%s@%.3f, keeping raw probas",
@@ -678,26 +814,14 @@ class XGBoostSignalModel(MLBase):
                     _LABEL_MAP.get(cal_label, "?"), cal_confidence,
                 )
 
-        # Apply tuned class thresholds when the model was trained with the
-        # PnL-tuned threshold sweep. Replaces argmax with: BUY if
-        # P(BUY) >= buy_thresh AND >= P(SELL); SELL if P(SELL) >=
-        # sell_thresh AND > P(BUY); else HOLD. Legacy models without
-        # tuned thresholds keep their argmax label.
-        # `_get_effective_thresholds` applies the configured
-        # tuned_threshold_max_diff cap so a wildly asymmetric (buy,
-        # sell) pair from the threshold sweep can't class-collapse
-        # the model in production.
+        # Tuned-threshold gate (see _threshold_label): replaces argmax
+        # when the artifact shipped tuned thresholds; legacy models keep
+        # argmax. `_get_effective_thresholds` applies the configured
+        # override / max-diff / ceiling caps so a wildly asymmetric or
+        # unreachable saved pair can't class-collapse the live model.
         thresholds = self._get_effective_thresholds(model_type)
-        if thresholds and len(chosen_probas) >= 3:
-            buy_prob = chosen_probas[_LABEL_BUY]
-            sell_prob = chosen_probas[_LABEL_SELL]
-            if buy_prob >= thresholds["buy"] and buy_prob >= sell_prob:
-                pred_label = _LABEL_BUY
-            elif sell_prob >= thresholds["sell"] and sell_prob > buy_prob:
-                pred_label = _LABEL_SELL
-            else:
-                pred_label = _LABEL_HOLD
-            confidence = chosen_probas[pred_label]
+        pred_label = _threshold_label(chosen_probas, thresholds)
+        confidence = float(chosen_probas[pred_label])
 
         signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
 
@@ -784,25 +908,10 @@ class XGBoostSignalModel(MLBase):
         thresholds = self._get_effective_thresholds(model_type)
         labels: list[int] = []
         for i in range(len(raw)):
-            rp = raw[i]
-            raw_label = int(np.argmax(rp))
-            chosen = rp
-            if cal is not None:
-                cp = cal[i]
-                cal_label = int(np.argmax(cp))
-                if cal_label == raw_label and float(cp[cal_label]) > float(rp[raw_label]):
-                    chosen = cp
-            if thresholds and len(chosen) >= 3:
-                buy_p = float(chosen[_LABEL_BUY])
-                sell_p = float(chosen[_LABEL_SELL])
-                if buy_p >= thresholds["buy"] and buy_p >= sell_p:
-                    labels.append(_LABEL_BUY)
-                elif sell_p >= thresholds["sell"] and sell_p > buy_p:
-                    labels.append(_LABEL_SELL)
-                else:
-                    labels.append(_LABEL_HOLD)
-            else:
-                labels.append(int(np.argmax(chosen)))
+            rp = [float(p) for p in raw[i]]
+            cp = [float(p) for p in cal[i]] if cal is not None else None
+            chosen = _choose_calibrated(rp, cp)
+            labels.append(_threshold_label(chosen, thresholds))
         return labels
 
     @staticmethod
@@ -1095,6 +1204,28 @@ class XGBoostSignalModel(MLBase):
                 if _first_d and _last_d and _last_d > _first_d:
                     _embargo_days = int((_last_d - _first_d).days * _embargo_frac)
 
+            # Column-parallel sample dates, parsed once — feed the purged
+            # calibration folds below and any other date-keyed split.
+            _sample_dates: list[Any] | None = None
+            if bars_meta_raw is not None:
+                from datetime import date as _pdate
+
+                def _parse_d(m: dict[str, Any]) -> "_pdate | None":
+                    try:
+                        return _pdate.fromisoformat(
+                            str(m.get("entry_date", ""))[:10]
+                        )
+                    except (ValueError, TypeError, AttributeError):
+                        return None
+
+                _sample_dates = [_parse_d(m) for m in bars_meta_raw]
+            # Label-overlap + embargo window in calendar days — the same
+            # discipline the fold CV / holdout purge uses.
+            _label_purge_days = (
+                (int(lookahead_bars * 7 / 5) + 2 if lookahead_bars > 0 else 0)
+                + _embargo_days
+            )
+
             for train_idx, test_idx in tscv.split(X_arr):
                 if use_final_holdout:
                     break
@@ -1254,11 +1385,22 @@ class XGBoostSignalModel(MLBase):
             # systematically compresses directional probabilities back
             # toward HOLD, which is what forced the agreement-rule
             # patch in _predict.
-            calibration_n_splits = min(3, len(y_arr) // 50 or 2)
+            # Folds are purged by the label window + embargo when sample
+            # dates are available — a multi-bar label straddling a fold
+            # boundary otherwise leaks into the per-fold calibrators.
+            calibration_n_splits = max(2, min(3, len(y_arr) // 50 or 2))
+            _cal_cv: Any
+            if _sample_dates is not None and _label_purge_days > 0:
+                _cal_cv = _purged_time_series_splits(
+                    len(y_arr), calibration_n_splits,
+                    _sample_dates, _label_purge_days,
+                )
+            else:
+                _cal_cv = TimeSeriesSplit(n_splits=calibration_n_splits)
             calibrator = CalibratedClassifierCV(
                 model,
                 method="sigmoid",
-                cv=TimeSeriesSplit(n_splits=max(2, calibration_n_splits)),
+                cv=_cal_cv,
             )
             calibrator.fit(X_arr, y_arr, sample_weight=weights_arr)
 
@@ -1325,15 +1467,60 @@ class XGBoostSignalModel(MLBase):
                         embargo_days=_embargo_days,
                     )
                     _tw = weights_arr[:_purge_cut] if weights_arr is not None else None
-                    _tuning_model = xgb.XGBClassifier(**xgb_params)
+                    # Tuning model at the DEPLOYED tree count (n_est_final,
+                    # not the n_estimators ceiling) — tree count shifts the
+                    # probability scale, and the whole point of the final-
+                    # scale holdout is that the swept cutoffs transfer to
+                    # the model that actually trades.
+                    _tuning_model = xgb.XGBClassifier(
+                        **{**xgb_params, "n_estimators": n_est_final},
+                    )
                     _tuning_model.fit(
                         X_arr[:_purge_cut], y_arr[:_purge_cut],
                         sample_weight=_tw, verbose=False,
                     )
                     _ho_proba = _tuning_model.predict_proba(X_arr[_cut:])
+                    # Tuning-side calibrator: the live gate reads the
+                    # CHOSEN stream (agreement-gated calibration adoption,
+                    # see _choose_calibrated), so the sweep must run on the
+                    # same stream. Fit ONLY on the tuning slice — the
+                    # production calibrator saw the holdout. Fail-open to
+                    # raw probas (argmax is unaffected either way).
+                    _ho_cal = None
+                    try:
+                        _tcal_splits = max(2, min(3, _purge_cut // 50 or 2))
+                        if _sample_dates is not None and _label_purge_days > 0:
+                            _tcal_cv: Any = _purged_time_series_splits(
+                                _purge_cut, _tcal_splits,
+                                _sample_dates[:_purge_cut], _label_purge_days,
+                            )
+                        else:
+                            _tcal_cv = TimeSeriesSplit(n_splits=_tcal_splits)
+                        _tuning_cal = CalibratedClassifierCV(
+                            _tuning_model, method="sigmoid", cv=_tcal_cv,
+                        )
+                        _tuning_cal.fit(
+                            X_arr[:_purge_cut], y_arr[:_purge_cut],
+                            sample_weight=_tw,
+                        )
+                        _ho_cal = _tuning_cal.predict_proba(X_arr[_cut:])
+                        del _tuning_cal
+                    except Exception:
+                        logger.debug(
+                            "tuning-side calibrator failed; sweeping on raw "
+                            "probabilities", exc_info=True,
+                        )
                     del _tuning_model
                     _gc.collect()
-                    _ho_probas = [[float(p) for p in row] for row in _ho_proba]
+                    _ho_probas = [
+                        _choose_calibrated(
+                            [float(p) for p in _ho_proba[i]],
+                            [float(p) for p in _ho_cal[i]]
+                            if _ho_cal is not None else None,
+                        )
+                        for i in range(len(_ho_proba))
+                    ]
+                    # argmax(chosen) == argmax(raw) by the adoption rule.
                     _ho_preds = [int(row.argmax()) for row in _ho_proba]
                     # Discrimination diagnostics on the strict-future
                     # holdout. The tuning model trained only on
@@ -1417,7 +1604,9 @@ class XGBoostSignalModel(MLBase):
                         )
                         for m in bars_meta_raw[_cut:]
                     ]
-                    _sub = len(_ho_probas) // 2
+                    # Snap the tune/report split to a date boundary so
+                    # same-day cross-sectional rows can't straddle it.
+                    _sub = _snap_to_date_boundary(_ho_meta, len(_ho_probas) // 2)
                     tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
                         probas=_ho_probas[:_sub],
                         bars_meta=_ho_meta[:_sub],
@@ -1447,7 +1636,10 @@ class XGBoostSignalModel(MLBase):
                     # chronological first slice, report on the strict-
                     # future slice; if too small to split, tune in-sample
                     # (flagged via threshold_holdout_used).
-                    _split = int(len(collected_preds) * (1.0 - _holdout_frac))
+                    _split = _snap_to_date_boundary(
+                        collected_meta,
+                        int(len(collected_preds) * (1.0 - _holdout_frac)),
+                    )
                     _can_split = (
                         _split >= _min_each_side
                         and (len(collected_preds) - _split) >= _min_each_side

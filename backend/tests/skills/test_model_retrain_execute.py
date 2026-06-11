@@ -106,6 +106,12 @@ class TestPostTrainGuardIntegration:
         assert sum(container["post_train_pred_dist"].values()) > 0
         assert "post_train_signal_rate" in container
 
+    async def test_survivorship_caveat_stamped(self, retrain_ctx):
+        ctx, _ = retrain_ctx
+        result = await ModelRetrainSkill(ctx).execute()
+        metrics = result.data["models"]["swing"]["metrics"]
+        assert "survivor_universe" in metrics.get("data_caveats", [])
+
 
 class TestRegistryHonouringDeployment:
     async def test_first_train_bootstraps_candidate_to_production(self, retrain_ctx):

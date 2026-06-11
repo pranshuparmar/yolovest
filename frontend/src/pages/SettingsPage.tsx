@@ -610,6 +610,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "scanning.rotation_no_signal_threshold": "How many consecutive heartbeats a symbol can go without producing a signal before being placed on cooldown.",
   "scanning.rotation_cooldown_hours": "How long an evicted symbol stays out of the watchlist before market-scan can re-add it.",
   "strategy.mode": "Controls which holding periods are allowed and how stocks are selected.",
+  "strategy.swing_horizon_cap_days": "Cap on the holding days the chooser may assign to ML swing trades. The swing model's label only measures a ~10-bar (2-week) window — horizons far beyond it ride an edge the model never measured. Default 15; long_term/swing modes' 66-day tails clamp to this. Raise or set 0 to disable knowingly.",
   "strategy.min_training_samples": "Minimum data points required to train an ML model.",
   "strategy.ema_periods": "Exponential moving average periods used in technical analysis.",
   "strategy.allowed_holding_periods": "Which holding periods the strategy is allowed to use.",
