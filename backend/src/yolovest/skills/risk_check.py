@@ -72,7 +72,7 @@ class RiskCheckSkill(SkillBase):
         try:
             self._regime = await self.ctx.db.compute_live_regime()
         except Exception:
-            logger.debug("compute_live_regime failed", exc_info=True)
+            logger.warning("regime gate degraded (fail-open): compute_live_regime failed", exc_info=True)
             self._regime = {"breadth": 0.5, "avg_return": 0.0, "sample_size": 0}
         self._regime_at = now
         return self._regime
@@ -88,7 +88,7 @@ class RiskCheckSkill(SkillBase):
         try:
             self._market_trend = await self.ctx.db.compute_market_trend(ma_window)
         except Exception:
-            logger.debug("compute_market_trend failed", exc_info=True)
+            logger.warning("market-trend filter degraded (fail-open): compute_market_trend failed", exc_info=True)
             self._market_trend = {
                 "in_uptrend": True, "index_level": 1.0, "ma": 1.0,
                 "sample_size": 0, "ma_window": ma_window,
@@ -109,7 +109,7 @@ class RiskCheckSkill(SkillBase):
         try:
             beta = await self.ctx.db.compute_symbol_beta(symbol)
         except Exception:
-            logger.debug("compute_symbol_beta failed for %s", symbol, exc_info=True)
+            logger.warning("portfolio-beta gate degraded (fail-open): compute_symbol_beta failed for %s", symbol, exc_info=True)
             beta = None
         self._beta_cache[symbol] = beta
         return beta
@@ -159,7 +159,7 @@ class RiskCheckSkill(SkillBase):
             try:
                 pending = await self.ctx.db.get_pending_trades()
             except Exception:
-                logger.debug("Failed to load pending trades", exc_info=True)
+                logger.warning("pending trades unavailable — exposure/position caps may undercount this cycle", exc_info=True)
         pending_count = len(pending)
 
         # Max trades per day — count executed today PLUS pending awaiting
@@ -283,8 +283,8 @@ class RiskCheckSkill(SkillBase):
                     days=cfg.earnings_blackout_days,
                 )
             except Exception:
-                logger.debug(
-                    "risk-check: earnings event lookup failed",
+                logger.warning(
+                    "earnings-blackout gate degraded (fail-open): event lookup failed",
                     exc_info=True,
                 )
                 events = []
@@ -488,7 +488,7 @@ class RiskCheckSkill(SkillBase):
                     if est and est.get("total", 0) > 0:
                         margin_required = float(est["total"])
                 except Exception:
-                    logger.debug("estimate_margin failed; falling back to notional", exc_info=True)
+                    logger.info("estimate_margin failed; falling back to notional sizing (conservative)", exc_info=True)
 
             if margin_required is None:
                 # Notional fallback (also used when margin_usage_enabled is False)
@@ -728,7 +728,7 @@ class RiskCheckSkill(SkillBase):
             penalty = min(excess * 10, 0.30)
             return penalty
         except Exception:
-            logger.debug("Slippage penalty calc failed for %s", symbol, exc_info=True)
+            logger.info("slippage penalty skipped for %s (calc failed)", symbol, exc_info=True)
             return 0.0
 
     def _reject(self, signal: dict[str, Any], reason: str) -> SkillResult:
@@ -817,7 +817,7 @@ class RiskCheckSkill(SkillBase):
                 symbol, lookback_days=cfg.bulk_deal_lookback_days,
             )
         except Exception:
-            logger.debug("count_recent_bulk_deals failed for %s", symbol, exc_info=True)
+            logger.warning("institutional-flow gate degraded (neutral): count_recent_bulk_deals failed for %s", symbol, exc_info=True)
             counts = {"buy_count": 0, "sell_count": 0}
         net = counts["buy_count"] - counts["sell_count"]
         if signal_type == "BUY":
@@ -835,7 +835,7 @@ class RiskCheckSkill(SkillBase):
         try:
             fii = await self.ctx.db.get_latest_fii_dii()
         except Exception:
-            logger.debug("get_latest_fii_dii failed", exc_info=True)
+            logger.warning("institutional-flow gate degraded (neutral): get_latest_fii_dii failed", exc_info=True)
             fii = None
         if fii:
             fii_net = fii.get("fii_net", 0.0)
@@ -897,8 +897,8 @@ class RiskCheckSkill(SkillBase):
         try:
             quote = await self.ctx.market_data.get_quote(signal["symbol"])
         except Exception:
-            logger.debug(
-                "risk-check: liquidity-gate quote fetch failed for %s",
+            logger.warning(
+                "liquidity gate degraded (fail-open): quote fetch failed for %s",
                 signal["symbol"], exc_info=True,
             )
             return None
@@ -936,8 +936,8 @@ class RiskCheckSkill(SkillBase):
         try:
             quote = await self.ctx.market_data.get_quote(signal["symbol"])
         except Exception:
-            logger.debug(
-                "risk-check: depth-gate quote fetch failed for %s",
+            logger.warning(
+                "depth gate degraded (full size): quote fetch failed for %s",
                 signal["symbol"], exc_info=True,
             )
             return 1.0
