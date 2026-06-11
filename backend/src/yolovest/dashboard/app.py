@@ -5973,7 +5973,21 @@ def create_app(ctx: AppContext) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
-        """WebSocket for real-time trade and position updates."""
+        """WebSocket for real-time trade and position updates.
+
+        Requires the session token as a `?token=` query param — the
+        browser WebSocket API can't set an Authorization header. An
+        invalid/missing token closes the handshake with 1008 (policy
+        violation); the client re-logs-in and reconnects with a fresh
+        token (tokens are per-process, so a backend restart invalidates
+        them by design).
+        """
+        token = websocket.query_params.get("token", "")
+        try:
+            _verify_token(token)
+        except HTTPException:
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         _ws_clients.add(websocket)
         try:
