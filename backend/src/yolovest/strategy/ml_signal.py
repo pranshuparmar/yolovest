@@ -30,6 +30,32 @@ def _lib_version(module: str) -> str:
         return "unknown"
 
 
+def _warn_on_lib_skew(artifact: dict[str, Any], label: str) -> None:
+    """Loud (fail-open) warning when a model artifact was trained under a
+    different xgboost/sklearn than the running image.
+
+    Pickled estimators usually survive minor version bumps, but sklearn
+    explicitly does not guarantee it — and a silently-shifted calibrator
+    changes the probabilities every signal gate reads. The cross-machine
+    import endpoint hard-gates on these stamps; startup loads stay
+    fail-open (the model still loads) but tell the user to retrain so the
+    artifact re-pins to the running versions. Pre-stamp artifacts (no
+    version fields) are skipped.
+    """
+    for lib, key in (("xgboost", "xgboost_version"), ("scikit-learn", "sklearn_version")):
+        stamped = artifact.get(key)
+        if not stamped or stamped == "unknown":
+            continue
+        running = _lib_version(lib)
+        if running != "unknown" and running != stamped:
+            logger.warning(
+                "%s: model %s was trained under %s %s but this image runs %s — "
+                "calibrated probabilities may shift. Run the model-retrain "
+                "skill to re-pin the artifact to the current libraries.",
+                label, artifact.get("version", "?"), lib, stamped, running,
+            )
+
+
 def _purge_boundary(
     bars_meta_raw: list[dict[str, Any]],
     cut: int,
@@ -367,6 +393,7 @@ class XGBoostSignalModel(MLBase):
             return dict[str, Any](joblib.load(filepath))
 
         artifact = await asyncio.to_thread(_load)
+        _warn_on_lib_skew(artifact, f"load_shadow_model[{model_type}]")
 
         if model_type == "intraday":
             self._shadow_intraday_model = artifact["model"]
@@ -1612,6 +1639,7 @@ class XGBoostSignalModel(MLBase):
             return dict[str, Any](joblib.load(filepath))
 
         artifact = await asyncio.to_thread(_load)
+        _warn_on_lib_skew(artifact, f"load_model[{model_type}]")
 
         self._set_model(model_type, artifact["model"])
         self._set_calibrator(model_type, artifact.get("calibrator"))
