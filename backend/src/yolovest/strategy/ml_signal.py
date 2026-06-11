@@ -360,6 +360,14 @@ class XGBoostSignalModel(MLBase):
             return self._shadow_swing_model is not None
         return False
 
+    def get_shadow_version(self, model_type: str) -> str | None:
+        """Version string of the model currently in the shadow slot."""
+        if model_type == "intraday":
+            return self._shadow_intraday_version
+        if model_type == "swing":
+            return self._shadow_swing_version
+        return None
+
     def clear_shadow(self, model_type: str) -> None:
         """Unload shadow model after promotion or retirement."""
         if model_type == "intraday":
@@ -474,7 +482,14 @@ class XGBoostSignalModel(MLBase):
                 chosen_probas = cal_probas
 
         signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
-        entry_price = current_price or features.get("close", 100.0)
+        entry_price = current_price or features.get("close") or 0.0
+        if entry_price <= 0:
+            # No LTP and no bar close — fabricating a price here would
+            # produce tradeable-looking nonsense geometry downstream.
+            raise ValueError(
+                f"No usable price for {symbol}: current_price and "
+                f"features['close'] are both missing or non-positive"
+            )
         atr = features.get("atr_14", entry_price * 0.02)
 
         if signal_type_str == "BUY":
@@ -614,8 +629,15 @@ class XGBoostSignalModel(MLBase):
 
         signal_type_str = _LABEL_MAP.get(pred_label, "HOLD")
 
-        # Use fresh LTP for entry/target/SL when available, fall back to features
-        entry_price = current_price or features.get("close", 100.0)
+        # Use fresh LTP for entry/target/SL when available, fall back to
+        # the bar close. Neither available → refuse: a fabricated price
+        # would flow into tradeable target/SL geometry.
+        entry_price = current_price or features.get("close") or 0.0
+        if entry_price <= 0:
+            raise ValueError(
+                f"No usable price for {symbol}: current_price and "
+                f"features['close'] are both missing or non-positive"
+            )
         atr = features.get("atr_14", entry_price * 0.02)
 
         if signal_type_str == "BUY":
@@ -682,6 +704,8 @@ class XGBoostSignalModel(MLBase):
         if model is None:
             return []
         Xa = np.asarray(X)
+        if Xa.size == 0:
+            return []
         raw = model.predict_proba(Xa)
         calibrator = self._get_calibrator(model_type)
         cal = calibrator.predict_proba(Xa) if calibrator is not None else None
@@ -1133,13 +1157,19 @@ class XGBoostSignalModel(MLBase):
             # StratifiedKFold, which shuffles. Shuffled CV leaks future
             # data into past calibration on time-series, silently
             # corrupting every downstream probability the system reads.
+            # Fit with the SAME sample weights the model trained on
+            # (class-balance × feedback × time-decay) — an unweighted
+            # calibrator re-learns the raw HOLD-heavy prior and
+            # systematically compresses directional probabilities back
+            # toward HOLD, which is what forced the agreement-rule
+            # patch in _predict.
             calibration_n_splits = min(3, len(y_arr) // 50 or 2)
             calibrator = CalibratedClassifierCV(
                 model,
                 method="sigmoid",
                 cv=TimeSeriesSplit(n_splits=max(2, calibration_n_splits)),
             )
-            calibrator.fit(X_arr, y_arr)
+            calibrator.fit(X_arr, y_arr, sample_weight=weights_arr)
 
             if bars_meta_raw is not None and (use_final_holdout or collected_preds):
                 # Real-PnL backtest path

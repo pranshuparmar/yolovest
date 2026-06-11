@@ -942,6 +942,15 @@ async def _load_ml_models_background(ctx: AppContext) -> None:
     the event loop. Loading is sequential to avoid memory spikes from
     multiple XGBoost models being unpickled in parallel.
 
+    The production slot loads the REGISTRY's production version — the
+    model_versions row promotion (shadow gate or manual) marked
+    `status='production'`. The registry is binding: every retrain saves
+    its candidate as a newer artifact with `status='shadow'`, so
+    "newest file on disk" would put an un-vetted candidate on the live
+    account at every restart. The latest artifact is only a bootstrap
+    fallback when the registry has no production row (fresh install) or
+    the production artifact is missing from disk (keep trading, loudly).
+
     Models that aren't loaded yet when generate-signals runs will
     cause the skill to fall back to "no model available"; the
     orchestrator's first heartbeat is gated by a 2-second sleep so
@@ -951,9 +960,43 @@ async def _load_ml_models_background(ctx: AppContext) -> None:
     if ctx.ml is None:
         return
     for model_type in ("intraday", "swing"):
+        prod_version: str | None = None
+        try:
+            prod = await ctx.db.get_production_model(model_type)
+            if prod and prod.get("version"):
+                prod_version = str(prod["version"])
+        except Exception:
+            logger.warning(
+                "Registry lookup failed for %s; falling back to the "
+                "latest artifact on disk",
+                model_type, exc_info=True,
+            )
+        try:
+            await ctx.ml.load_model(model_type, prod_version)
+            logger.info(
+                "Loaded %s model at startup: %s", model_type,
+                prod_version or "latest artifact (no production row in registry)",
+            )
+            continue
+        except FileNotFoundError:
+            if prod_version is None:
+                logger.info(
+                    "No saved %s model found, will be available after model-retrain",
+                    model_type,
+                )
+                continue
+            logger.warning(
+                "Registry production %s model %s has no artifact on disk — "
+                "falling back to the latest artifact so trading continues. "
+                "Re-promote a model (or retrain) to restore registry state.",
+                model_type, prod_version,
+            )
+        except Exception as e:
+            logger.warning("Failed to load %s model at startup: %s", model_type, e)
+            continue
+        # Fallback: registry pointed at a missing artifact.
         try:
             await ctx.ml.load_model(model_type)
-            logger.info("Loaded production %s model at startup", model_type)
         except FileNotFoundError:
             logger.info(
                 "No saved %s model found, will be available after model-retrain",

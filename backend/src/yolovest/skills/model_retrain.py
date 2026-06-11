@@ -794,6 +794,18 @@ class ModelRetrainSkill(SkillBase):
                 train_params["backtest_max_positions"] = (
                     self.ctx.config.risk.max_open_positions
                 )
+                # train() consumes X in place (it frees the list once the
+                # numpy matrix is built, to bound peak memory) — capture
+                # the post-train guard's evaluation slice BEFORE training.
+                # The slice shares row objects with X, so it survives the
+                # outer list being cleared. Without this the guard scored
+                # an empty matrix and its crash was swallowed: the
+                # silent-model check never actually ran.
+                guard_x: list[list[float]] = (
+                    X[-1000:]
+                    if self.ctx.config.strategy.post_train_class_check_enabled
+                    else []
+                )
                 metrics = await self.ctx.ml.train(
                     model_type, X, y, train_params, feature_names=feat_names,
                 )
@@ -820,12 +832,12 @@ class ModelRetrainSkill(SkillBase):
                 # calibration). This catches that end-to-end.
                 if self.ctx.config.strategy.post_train_class_check_enabled:
                     try:
-                        # Sample the freshest N rows — what the production
-                        # model sees first in live use.
-                        n_check = min(1000, len(X))
-                        X_check = X[-n_check:]
+                        # The freshest N rows — what the production model
+                        # sees first in live use. Captured before train()
+                        # (which consumes X) — see guard_x above.
+                        n_check = len(guard_x)
                         prod_labels = self.ctx.ml.predict_labels_batch(
-                            X_check, model_type,
+                            guard_x, model_type,
                         )
                         pred_counts = {0: 0, 1: 0, 2: 0}
                         for p in prod_labels:
@@ -880,12 +892,30 @@ class ModelRetrainSkill(SkillBase):
                             }
                             continue
                     except Exception:
-                        # Inference inside the guard shouldn't crash
-                        # the retrain — fall through and save the model.
-                        logger.debug(
-                            "Post-train signal-rate check failed; saving anyway",
-                            exc_info=True,
+                        # Inference inside the guard shouldn't crash the
+                        # retrain — fall through and save the model. But
+                        # a guard that can't run is a real degradation
+                        # (the silent-model check is the last gate before
+                        # an unvetted artifact ships), so say it loudly.
+                        logger.warning(
+                            "Post-train signal-rate check CRASHED for %s — "
+                            "saving the model without the silent-model "
+                            "guard. Investigate before trusting this "
+                            "artifact.",
+                            model_type, exc_info=True,
                         )
+                        try:
+                            await self.ctx.notify.send(
+                                f"Model retrain: post-train guard crashed "
+                                f"for {model_type}; model saved WITHOUT the "
+                                f"silent-model check.",
+                                alert_type="errors",
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to notify on guard crash",
+                                exc_info=True,
+                            )
 
                 version = await self.ctx.ml.save_model(model_type, metrics=metrics)
                 await self.broadcast("retrain_progress", {
@@ -909,14 +939,91 @@ class ModelRetrainSkill(SkillBase):
                 if improved:
                     shadow_deployed.append(model_type)
 
+                # Step 6: registry-honouring deployment. train() leaves
+                # the candidate in the live production slots (save_model
+                # and the post-train guard need it there), but the
+                # REGISTRY decides what trades: the candidate's row is
+                # 'shadow' until the promotion gates pass. Restore the
+                # incumbent to the production slots and start the
+                # candidate's A/B trial in the shadow slot immediately
+                # (no restart needed). First-ever train (no production
+                # row) bootstraps: promote the candidate directly — a
+                # system with no model can't shadow-test.
+                deployed_as = "shadow"
+                if current is None:
+                    try:
+                        await self.ctx.db.promote_model(model_type, version)
+                        deployed_as = "production (bootstrap)"
+                        logger.info(
+                            "No production %s model in the registry — "
+                            "promoted %s directly (bootstrap).",
+                            model_type, version,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Bootstrap promotion failed for %s/%s",
+                            model_type, version, exc_info=True,
+                        )
+                else:
+                    try:
+                        await self.ctx.ml.load_shadow_model(model_type, version)
+                    except Exception:
+                        logger.warning(
+                            "Failed to load candidate %s/%s into the shadow "
+                            "slot — its A/B trial starts at next restart.",
+                            model_type, version, exc_info=True,
+                        )
+                    try:
+                        await self.ctx.ml.load_model(
+                            model_type, str(current["version"]),
+                        )
+                        logger.info(
+                            "Restored production %s model %s to the live "
+                            "slots; candidate %s runs as shadow.",
+                            model_type, current["version"], version,
+                        )
+                    except Exception:
+                        deployed_as = "production (incumbent restore failed)"
+                        logger.warning(
+                            "Could not restore production %s model %s — the "
+                            "fresh candidate %s stays in the live slots so "
+                            "trading continues. Re-promote or retrain to "
+                            "restore registry state.",
+                            model_type, current.get("version"), version,
+                            exc_info=True,
+                        )
+                        try:
+                            await self.ctx.notify.send(
+                                f"Model retrain: failed to restore production "
+                                f"{model_type} model "
+                                f"{current.get('version')}; unvetted candidate "
+                                f"{version} is live until fixed.",
+                                alert_type="errors",
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to notify on restore failure",
+                                exc_info=True,
+                            )
+
                 results[model_type] = {
                     "version": version,
                     "metrics": metrics,
                     "improved": improved,
+                    "deployed_as": deployed_as,
                 }
             except Exception as e:
                 logger.warning("Retrain failed for %s: %s", model_type, e)
                 results[model_type] = {"error": str(e)}
+                try:
+                    await self.ctx.notify.send(
+                        f"Model retrain FAILED for {model_type}: {e}",
+                        alert_type="errors",
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to notify on retrain failure", exc_info=True,
+                    )
             # Free per-model scratch (feature matrix + bars_meta) before
             # the next model's _prepare_training_data allocates its
             # own copy. Without this the intraday and swing matrices
@@ -972,6 +1079,34 @@ class ModelRetrainSkill(SkillBase):
                     await self.ctx.db.store_failure_analysis(failure_analysis)
                 except Exception as e:
                     logger.warning("Failure analysis failed: %s", e)
+
+        # A run where NO model shipped is a failed retrain — the stale
+        # incumbent keeps trading (deliberately: keep trading, alert),
+        # but the audit log must say the retrain produced nothing.
+        # Partial success (e.g. intraday lane short on 1-min data while
+        # swing trained fine) stays a success.
+        if not any_success:
+            error_summary = "; ".join(
+                f"{mt}: {r.get('error', 'unknown')}"
+                for mt, r in results.items()
+                if isinstance(r, dict)
+            ) or "no models attempted"
+            logger.warning(
+                "model-retrain produced no new model (%s) — the existing "
+                "production model keeps trading.",
+                error_summary,
+            )
+            return SkillResult(
+                success=False,
+                skill_name=self.name,
+                error=error_summary,
+                data={
+                    "models": results,
+                    "shadow_deployed": shadow_deployed,
+                    "promotions": promotions,
+                    "failure_analysis_generated": failure_analysis is not None,
+                },
+            )
 
         return SkillResult(
             success=True,
@@ -2197,6 +2332,28 @@ class ModelRetrainSkill(SkillBase):
             return 0
         return 1
 
+    def _clear_shadow_slot_if_holds(self, model_type: str, version: str) -> None:
+        """Unload the in-memory shadow slot when it hosts `version`.
+
+        After a promotion the version lives in the production slot
+        (keeping it in the shadow slot would double-log its shadow
+        predictions); after a retirement it must stop emitting shadow
+        predictions entirely. The slot may instead hold a NEWER
+        candidate loaded by this run's deployment step — leave that
+        one alone.
+        """
+        ml = self.ctx.ml
+        if ml is None:
+            return
+        try:
+            if ml.get_shadow_version(model_type) == version:
+                ml.clear_shadow(model_type)
+        except Exception:
+            logger.debug(
+                "shadow-slot hygiene failed for %s/%s",
+                model_type, version, exc_info=True,
+            )
+
     async def _check_shadow_promotions(self) -> list[dict[str, Any]]:
         """Check if shadow models have completed trial period.
 
@@ -2303,6 +2460,7 @@ class ModelRetrainSkill(SkillBase):
                             "Failed to load promoted model %s/%s: %s",
                             model_type, shadow["version"], e,
                         )
+                    self._clear_shadow_slot_if_holds(model_type, shadow["version"])
                 promotions.append({
                     "model_type": model_type,
                     "version": shadow["version"],
@@ -2327,6 +2485,8 @@ class ModelRetrainSkill(SkillBase):
             else:
                 # Retire underperforming shadow
                 await self.ctx.db.retire_model(model_type, shadow["version"])
+                if self.ctx.ml:
+                    self._clear_shadow_slot_if_holds(model_type, shadow["version"])
                 fail_reason_parts = []
                 if not backtest_pass:
                     fail_reason_parts.append(

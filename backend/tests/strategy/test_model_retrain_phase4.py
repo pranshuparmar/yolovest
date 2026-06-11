@@ -267,5 +267,8 @@ class TestFullRetrain:
 
         result = await retrain_skill.execute()
 
-        assert result.success
+        # Both lanes are short on data here, so no model ships and the
+        # run reports failure — but the prediction-failure analysis must
+        # still run on the accumulated outcomes.
+        assert result.success is False
         retrain_skill.ctx.llm.analyze_prediction_failures.assert_awaited_once()
