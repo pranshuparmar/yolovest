@@ -8,7 +8,6 @@ import {
 import React from "react";
 
 interface AuthContextType {
-  password: string | null;
   login: (password: string) => Promise<boolean>;
   logout: () => void;
   isAuthenticated: boolean;
@@ -17,7 +16,6 @@ interface AuthContextType {
 }
 
 export const AuthContext = createContext<AuthContextType>({
-  password: null,
   login: async () => false,
   logout: () => {},
   isAuthenticated: false,
@@ -31,10 +29,10 @@ export function useAuth() {
 
 // localStorage so a fresh tab inherits the auth from existing ones.
 // `storage` events fired by the browser keep state in sync across tabs.
+// Only the signed session token is persisted — never the password.
+// Tokens are invalidated on backend restart (per-process signing key),
+// which simply forces a re-login.
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [password, setPassword] = useState<string | null>(() =>
-    localStorage.getItem("yv_password")
-  );
   const [token, setToken] = useState<string | null>(() =>
     localStorage.getItem("yv_token")
   );
@@ -59,23 +57,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const data = await res.json();
       localStorage.setItem("yv_token", data.token);
       localStorage.setItem("yv_csrf", data.csrf_token);
-      localStorage.setItem("yv_password", pw);
+      // One-time cleanup: older builds persisted the raw password.
+      localStorage.removeItem("yv_password");
       setToken(data.token);
       setCsrfToken(data.csrf_token);
-      setPassword(pw);
       return true;
     }
     if (res.status === 401) {
       return false;
     }
-    // Older server build that doesn't have /api/auth/login at all
-    // (404). Fall back to HTTP Basic — the next protected fetch will
-    // reject if the password is actually wrong, but at least the
-    // app boots against legacy backends.
-    if (res.status === 404) {
-      localStorage.setItem("yv_password", pw);
-      setPassword(pw);
-      return true;
+    if (res.status === 429) {
+      throw new Error("Too many failed attempts — wait a moment and retry");
     }
     throw new Error(`Login failed (${res.status})`);
   }, []);
@@ -84,7 +76,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem("yv_password");
     localStorage.removeItem("yv_token");
     localStorage.removeItem("yv_csrf");
-    setPassword(null);
     setToken(null);
     setCsrfToken(null);
   }, []);
@@ -94,29 +85,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === "yv_token") setToken(e.newValue);
-      else if (e.key === "yv_password") setPassword(e.newValue);
       else if (e.key === "yv_csrf") setCsrfToken(e.newValue);
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  const authHeader = useMemo(() => {
-    if (token) return "Bearer " + token;
-    if (password) return "Basic " + btoa(":" + password);
-    return null;
-  }, [token, password]);
+  const authHeader = useMemo(
+    () => (token ? "Bearer " + token : null),
+    [token]
+  );
 
   const value = useMemo(
     () => ({
-      password,
       login,
       logout,
-      isAuthenticated: !!(token || password),
+      isAuthenticated: !!token,
       authHeader,
       csrfToken,
     }),
-    [password, token, login, logout, authHeader, csrfToken]
+    [token, login, logout, authHeader, csrfToken]
   );
 
   return React.createElement(AuthContext.Provider, { value }, children);
