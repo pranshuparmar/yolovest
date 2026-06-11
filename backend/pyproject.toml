@@ -16,7 +16,9 @@ dependencies = [
     "python-telegram-bot>=21.0,<22",
     "jugaad-data>=0.3,<1",
     "yfinance>=0.2,<1",
-    "tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git",
+    # Pinned to a commit SHA: an unpinned git ref is both unreproducible and
+    # a supply-chain hole (upstream force-push runs arbitrary code here).
+    "tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git@e6f6aaa7de439ac6e454d9b26d2760ded8dc4923",
     "pandas>=2.0,<3",
     "ta>=0.11,<1",
     "kiteconnect>=5.0,<6",
