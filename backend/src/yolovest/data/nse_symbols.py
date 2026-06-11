@@ -81,7 +81,7 @@ NIFTY_500_SUBSET = _deduped
 
 
 def get_universe_symbols(
-    universe: Literal["nifty50", "nifty100", "nifty200", "nifty500", "all"] = "nifty500",
+    universe: str = "nifty500",
 ) -> list[str]:
     """Return the bundled (static) symbol list for the requested universe.
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -46,8 +46,8 @@ class KiteTickerClient:
         api_key: str,
         access_token: str,
         kite_data_provider: Any,
-        order_update_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
-        tick_broadcast_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        order_update_callback: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None = None,
+        tick_broadcast_callback: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None = None,
         tick_broadcast_throttle_sec: float = 1.0,
     ) -> None:
         self._api_key = api_key

@@ -8,6 +8,7 @@ the heartbeat orchestrator.
 import asyncio
 import logging
 from datetime import datetime
+from typing import Any
 
 from croniter import croniter
 
@@ -124,7 +125,7 @@ class CronScheduler:
         return result
 
     @staticmethod
-    def _now():
+    def _now() -> Any:
         """Return the current time in IST. Extracted for easy patching in tests."""
         return now_ist()
 

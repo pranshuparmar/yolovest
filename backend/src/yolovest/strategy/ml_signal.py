@@ -685,7 +685,7 @@ class XGBoostSignalModel(MLBase):
     @staticmethod
     def _compute_attribution(
         model: Any,
-        feature_vector: list[float],
+        feature_vector: list[Any],
         feature_names: list[str] | None,
         pred_label: int,
         top_n: int = 5,
@@ -991,7 +991,7 @@ class XGBoostSignalModel(MLBase):
                         cutoff = test_min - _td(days=purge_calendar_days)
                         kept = [
                             i for i in train_idx
-                            if (_meta_date(i) is None or _meta_date(i) < cutoff)
+                            if (_meta_date(i) is None or _meta_date(i) < cutoff)  # type: ignore[operator]  # None short-circuits
                         ]
                         purged = len(train_idx) - len(kept)
                         if kept and purged > 0:
@@ -1365,7 +1365,7 @@ class XGBoostSignalModel(MLBase):
                     _boot_series, annualization=_boot_annual,
                     n_iter=200, percentile=25.0,
                 ) if _boot_series else headline.sharpe
-                metrics = {
+                metrics: dict[str, Any] = {
                     "sharpe": headline.sharpe,
                     "sharpe_lower": sharpe_lower,
                     "max_drawdown_pct": headline.max_drawdown_pct,

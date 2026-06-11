@@ -1128,7 +1128,7 @@ class ModelsTrainingMixin:
                 (cutoff,),
             )
             rows = await cursor.fetchall()
-            sym_preds: dict[str, list[dict]] = {}
+            sym_preds: dict[str, list[dict[str, Any]]] = {}
             for r in rows:
                 sym = r[0]
                 if not sym:
@@ -1156,7 +1156,7 @@ class ModelsTrainingMixin:
                 (cutoff,),
             )
             rows = await cursor.fetchall()
-            sym_dr: dict[str, list[dict]] = {}
+            sym_dr: dict[str, list[dict[str, Any]]] = {}
             for r in rows:
                 sym = r[0]
                 if not sym:
@@ -1183,7 +1183,7 @@ class ModelsTrainingMixin:
                 (cutoff,),
             )
             rows = await cursor.fetchall()
-            sym_trades: dict[str, list[dict]] = {}
+            sym_trades: dict[str, list[dict[str, Any]]] = {}
             for r in rows:
                 sym = r[0]
                 if not sym:

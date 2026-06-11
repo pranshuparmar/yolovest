@@ -33,6 +33,9 @@ async def _apply_order_postback(
 
     symbol = trade.get("symbol")
     trade_id = trade.get("trade_id")
+    if trade_id is None:
+        logger.warning("Postback %s: trade row has no trade_id — skipping", symbol)
+        return
     log_prefix = f"Postback {symbol} {trade_id} {leg}={order_id}"
 
     if leg == "entry":
@@ -152,6 +155,8 @@ async def _close_on_exit_fill(
     postback via both HTTP + WebSocket channels), this returns early.
     """
     trade_id = trade.get("trade_id")
+    if trade_id is None:
+        return
     if (trade.get("status") or "").lower() == "closed":
         return
 

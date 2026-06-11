@@ -11,6 +11,7 @@ from yolovest.skills.backfill_intraday import (
     BackfillIntraday1mSkill,
     BackfillIntradaySkill,
 )
+from yolovest.skills.base import SkillBase
 from yolovest.skills.cdsl_auth_check import CdslAuthCheckSkill
 from yolovest.skills.db_maintenance import DatabaseMaintenanceSkill
 from yolovest.skills.drift_watch import DriftWatchSkill
@@ -37,7 +38,7 @@ from yolovest.skills.risk_check import RiskCheckSkill
 from yolovest.skills.square_off import SquareOffSkill
 from yolovest.skills.trade_execute import TradeExecuteSkill
 
-SKILL_REGISTRY: dict[str, type] = {
+SKILL_REGISTRY: dict[str, type[SkillBase]] = {
     "auth-broker": AuthBrokerSkill,
     "backfill-data": BackfillDataSkill,
     "backfill-intraday": BackfillIntradaySkill,

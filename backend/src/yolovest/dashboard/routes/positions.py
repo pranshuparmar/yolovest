@@ -86,7 +86,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                 status_code=400,
                 detail=f"qty={qty} exceeds current position size {full_qty}",
             )
-        exit_qty = int(qty) if is_partial else full_qty
+        exit_qty = int(qty or 0) if is_partial else full_qty
         remaining_qty = full_qty - exit_qty
         exit_side = "SELL" if trade["signal_type"] == "BUY" else "BUY"
         product = trade.get("product", "MIS")

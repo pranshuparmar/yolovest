@@ -7,12 +7,15 @@ Uses Protocol types so concrete implementations can be swapped.
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from yolovest.config import AppConfig
 from yolovest.events import EventBus
 from yolovest.models.schemas import MLPrediction, OHLCVBar
+
+if TYPE_CHECKING:
+    from yolovest.data.db import Database
 
 # ---------------------------------------------------------------------------
 # Protocol types for pluggable backends
@@ -32,6 +35,7 @@ class BrokerProtocol(Protocol):
         product: str,
         price: float | None = None,
         trigger_price: float | None = None,
+        tag: str | None = None,
     ) -> str: ...
 
     async def cancel_order(self, order_id: str) -> bool: ...
@@ -63,6 +67,25 @@ class BrokerProtocol(Protocol):
     async def initiate_holdings_auth(
         self, holdings: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None: ...
+
+    async def get_holdings(self) -> list[dict[str, Any]]: ...
+
+    def get_login_url(self) -> str: ...
+
+    async def logout(self) -> None: ...
+
+    async def get_order_history(self, order_id: str) -> list[dict[str, Any]]: ...
+
+    async def get_order_trades(self, order_id: str) -> list[dict[str, Any]]: ...
+
+    async def convert_position(
+        self,
+        symbol: str,
+        quantity: int,
+        from_product: str,
+        to_product: str,
+        side: str = "BUY",
+    ) -> bool: ...
 
 
 @runtime_checkable
@@ -137,6 +160,10 @@ class MLProtocol(Protocol):
         self, model_type: str, version: str | None = None
     ) -> None: ...
 
+    def get_effective_thresholds(
+        self, model_type: str,
+    ) -> dict[str, float] | None: ...
+
     async def get_production_metrics(self, model_type: str) -> dict[str, Any]: ...
 
     async def deploy_shadow(
@@ -146,7 +173,9 @@ class MLProtocol(Protocol):
 
 @runtime_checkable
 class NotifierProtocol(Protocol):
-    async def send(self, message: str) -> bool | None: ...
+    async def send(
+        self, message: str, *, alert_type: str | None = None,
+    ) -> bool | None: ...
 
     async def send_trade_alert(self, trade: dict[str, Any]) -> None: ...
 
@@ -650,7 +679,10 @@ class AppContext:
     """
 
     config: AppConfig
-    db: DatabaseProtocol
+    # Concrete on purpose: there is exactly one Database implementation
+    # (193 methods); a hand-maintained Protocol mirror drifted constantly.
+    # Broker / LLM / market-data stay Protocols — those are real plug points.
+    db: "Database"
     broker: BrokerProtocol
     llm: LLMProtocol
     market_data: MarketDataProtocol

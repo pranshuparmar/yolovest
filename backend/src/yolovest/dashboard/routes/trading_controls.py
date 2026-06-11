@@ -182,7 +182,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                     "beta_weighted": round(contribution, 0),
                     "estimated": beta is None,
                 })
-        beta = {
+        beta_panel: dict[str, Any] = {
             "enabled": cfg.max_portfolio_beta > 0,
             "cap_multiple": cfg.max_portfolio_beta,
             "cap_value": round(beta_cap_value, 0),
@@ -233,7 +233,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             "blocked_symbols": blackout_symbols,
         }
 
-        return {"drift": drift, "beta": beta, "earnings": earnings}
+        return {"drift": drift, "beta": beta_panel, "earnings": earnings}
 
     @app.post("/api/pending-trades/{trade_id}/approve")
     async def approve_pending_trade(

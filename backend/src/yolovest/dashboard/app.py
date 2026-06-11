@@ -141,7 +141,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     }
 
     @app.middleware("http")
-    async def csrf_middleware(request: Request, call_next):
+    async def csrf_middleware(request: Request, call_next: Any) -> Any:
         if request.method in ("POST", "PUT", "DELETE"):
             if request.url.path not in _CSRF_EXEMPT_PATHS:
                 csrf_header = request.headers.get("X-CSRF-Token", "")

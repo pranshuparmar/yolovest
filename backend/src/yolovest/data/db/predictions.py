@@ -519,7 +519,7 @@ class PredictionsMixin:
         await self.conn.commit()
 
     async def set_trade_target_order_id(
-        self, trade_id: str, target_order_id: str | None,
+        self, trade_id: int | str, target_order_id: str | None,
     ) -> None:
         """Attach (or clear) the broker target-LIMIT order id on a MIS trade.
 
@@ -534,7 +534,7 @@ class PredictionsMixin:
         await self.conn.commit()
 
     async def set_trade_sl_order_id(
-        self, trade_id: str, sl_order_id: str | None,
+        self, trade_id: int | str, sl_order_id: str | None,
     ) -> None:
         """Update the SL order id on a trade — used when position-monitor
         cancels and re-places SL (e.g. trailing) or clears it after the

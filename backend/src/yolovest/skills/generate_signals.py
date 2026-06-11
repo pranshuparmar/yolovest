@@ -122,7 +122,7 @@ class GenerateSignalsSkill(SkillBase):
                 seen.add(sym)
                 filtered.append(w)
             watchlist = filtered
-        signals_generated = []
+        signals_generated: list[dict[str, Any]] = []
         risk_cfg = self.ctx.config.risk
         min_confidence_buy = risk_cfg.min_confidence_buy
         min_confidence_sell = risk_cfg.min_confidence_sell

@@ -78,7 +78,11 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         telegram_cfg = ctx.config.notifications.telegram if hasattr(ctx.config, "notifications") else None
         telegram_enabled = bool(telegram_cfg and getattr(telegram_cfg, "enabled", False))
         _bot_token_raw = getattr(telegram_cfg, "bot_token", None) if telegram_cfg else None
-        bot_token = _bot_token_raw.get_secret_value() if hasattr(_bot_token_raw, "get_secret_value") else str(_bot_token_raw or "")
+        bot_token = (
+            _bot_token_raw.get_secret_value()
+            if _bot_token_raw is not None and hasattr(_bot_token_raw, "get_secret_value")
+            else str(_bot_token_raw or "")
+        )
         chat_id = getattr(telegram_cfg, "chat_id", "") if telegram_cfg else ""
         telegram_configured = bool(telegram_cfg and bot_token and chat_id)
 
@@ -137,7 +141,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                 await ticker.stop()
             except Exception:
                 logger.debug("Ticker stop on logout failed", exc_info=True)
-            ctx.ticker = None  # type: ignore[assignment]
+            ctx.ticker = None
         return {"success": True}
 
     @app.post("/api/integrations/zerodha/authenticate")

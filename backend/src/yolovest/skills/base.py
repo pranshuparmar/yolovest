@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +49,11 @@ class SkillBase(ABC):
     - Has access to shared context (config, db, broker, llm)
     """
 
-    name: str
-    description: str
-    trigger: SkillTrigger
+    name: ClassVar[str]
+    description: ClassVar[str]
+    trigger: ClassVar[SkillTrigger]
+    # Plain (not ClassVar): square-off mutates self.schedule at runtime
+    # when the early-close calendar shifts the square-off time.
     schedule: str | None = None  # cron expression if trigger is CRON
 
     def __init__(self, context: Any) -> None:

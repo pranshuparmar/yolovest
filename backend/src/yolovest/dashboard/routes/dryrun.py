@@ -417,7 +417,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                 # without these as risk-check needs the raw figures).
                 est_costs = compute_transaction_costs(
                     evaluation.entry_price, evaluation.target_price,
-                    evaluation.prediction.position_size,
+                    evaluation.prediction.position_size,  # type: ignore[union-attr]  # passed => prediction set
                     product=evaluation.product,
                     cost_config=cfg.transaction_costs,
                 )
@@ -436,7 +436,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                     "target_price": evaluation.target_price,
                     "stop_loss_price": evaluation.stop_loss_price,
                     "confidence_score": evaluation.confidence,
-                    "position_size": evaluation.prediction.position_size,
+                    "position_size": evaluation.prediction.position_size,  # type: ignore[union-attr]  # passed => prediction set
                     "model_version": evaluation.model_version,
                     "holding_period": evaluation.holding_period,
                     "expected_holding_days": evaluation.expected_days,
@@ -472,7 +472,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             eff_thr = run_ctx.ml.get_effective_thresholds(_mt) if run_ctx.ml else None
         except Exception:
             eff_thr = None
-        conviction = {
+        conviction: dict[str, Any] = {
             "max_buy": round(max(conviction_buy), 4) if conviction_buy else 0.0,
             "max_sell": round(max(conviction_sell), 4) if conviction_sell else 0.0,
             "buy_ge_0.45": round(_pct_ge(conviction_buy, 0.45), 4),

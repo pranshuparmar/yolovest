@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 class MaintenanceMixin:
+    # Declared to match DatabaseCore.__init__ — the mixin invalidates
+    # the storage-stats cache after destructive operations.
+    _storage_stats_cache: dict[str, Any] | None
+    _storage_stats_cache_at: float
     # Backup & Retention
     # ------------------------------------------------------------------
 

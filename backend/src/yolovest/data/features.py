@@ -7,6 +7,7 @@ No DB or network calls — easy to test.
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 from yolovest.models.schemas import OHLCVBar
 from yolovest.timezone import IST
@@ -786,7 +787,7 @@ def compute_session_features(bars: list[OHLCVBar]) -> dict[str, float]:
     if not bars:
         return out
 
-    def _session_date(b: OHLCVBar):
+    def _session_date(b: OHLCVBar) -> Any:
         ts = b.timestamp
         return (ts.astimezone(IST) if ts.tzinfo is not None else ts).date()
 
@@ -822,7 +823,7 @@ def compute_session_features(bars: list[OHLCVBar]) -> dict[str, float]:
     return out
 
 
-def _minutes_since_open(ts: str | None) -> int | None:
+def _minutes_since_open(ts: Any) -> int | None:
     """Minutes elapsed since 09:15 IST market open for the given timestamp.
 
     Returns None for daily bars or unparseable timestamps. Negative

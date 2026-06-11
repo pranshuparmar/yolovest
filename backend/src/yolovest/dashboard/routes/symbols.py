@@ -318,11 +318,11 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                 pass
             # 3) Stale last-known close from local OHLCV.
             try:
-                row = await ctx.db.read_conn.execute_fetchall(
+                row = list(await ctx.db.read_conn.execute_fetchall(
                     "SELECT close FROM ohlcv WHERE symbol = ? "
                     "ORDER BY timestamp DESC LIMIT 1",
                     (sym,),
-                )
+                ))
                 if row and row[0][0] is not None:
                     return sym, float(row[0][0])
             except Exception:

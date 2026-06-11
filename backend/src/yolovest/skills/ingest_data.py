@@ -277,7 +277,10 @@ class IngestDataSkill(SkillBase):
         )
 
         for sr in symbol_results:
-            if isinstance(sr, Exception):
+            if isinstance(sr, BaseException):
+                # gather(return_exceptions=True) can also hand back
+                # CancelledError (BaseException) during shutdown — treat
+                # anything non-dict as a failed symbol.
                 results["errors"].append(str(sr))
                 continue
             if sr.get("ok"):

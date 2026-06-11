@@ -326,8 +326,8 @@ def _build_market_data(
     if not daily_providers:
         return _StubMarketData()
 
-    intraday = None
-    intraday_fallback = None
+    intraday: MarketDataBase | None = None
+    intraday_fallback: MarketDataBase | None = None
     # Kite handles intraday too — use it as primary with tvDatafeed as fallback
     if config.market_data.kite_data_enabled and daily_providers:
         from yolovest.data.kite_data import KiteDataProvider
@@ -399,7 +399,6 @@ def build_context(config: AppConfig, db: Any = None) -> AppContext:
 
     from yolovest.context import (
         BrokerProtocol,
-        DatabaseProtocol,
         LLMProtocol,
         MarketDataProtocol,
         NotifierProtocol,
@@ -419,7 +418,7 @@ def build_context(config: AppConfig, db: Any = None) -> AppContext:
         broker._market_data = market_data
     return AppContext(
         config=config,
-        db=cast(DatabaseProtocol, db),
+        db=db,
         broker=cast(BrokerProtocol, broker),
         llm=cast(LLMProtocol, _build_llm(config)),
         market_data=cast(MarketDataProtocol, market_data),
@@ -562,7 +561,7 @@ def _resolve_ticker_provider(ctx: AppContext) -> Any:
         # Share the broker's access token so the standalone provider can
         # call /instruments without a separate login. _sync_kite_data_token
         # only walks the ingester chain, so we set this directly.
-        provider.set_access_token(ctx.broker._access_token)
+        provider.set_access_token(getattr(ctx.broker, "_access_token", ""))
         logger.info(
             "Built standalone KiteDataProvider for ticker (kite_data_enabled=False)",
         )
@@ -583,12 +582,13 @@ async def _maybe_start_kite_ticker(ctx: AppContext) -> None:
     """
     if not (
         ctx.config.market_data.kite_websocket_enabled
-        and ctx.broker._access_token
+        and getattr(ctx.broker, "_access_token", None)
     ):
         return
     try:
         from yolovest.broker.kite_ticker import KiteTickerClient
-        from yolovest.dashboard.app import _apply_order_postback, broadcast_ws
+        from yolovest.dashboard.postback import _apply_order_postback
+        from yolovest.dashboard.ws import broadcast_ws
 
         kite_provider = _resolve_ticker_provider(ctx)
         if kite_provider is None:
@@ -597,7 +597,7 @@ async def _maybe_start_kite_ticker(ctx: AppContext) -> None:
             )
             return
 
-        async def _ticker_order_update(order: dict) -> None:
+        async def _ticker_order_update(order: dict[str, Any]) -> None:
             order_id = str(order.get("order_id") or "")
             status = (order.get("status") or "").upper()
             if not order_id or status not in ("COMPLETE", "CANCELLED", "REJECTED"):
@@ -609,7 +609,7 @@ async def _maybe_start_kite_ticker(ctx: AppContext) -> None:
                     "ticker order_update handler failed for %s", order_id,
                 )
 
-        async def _ticker_tick_broadcast(tick: dict) -> None:
+        async def _ticker_tick_broadcast(tick: dict[str, Any]) -> None:
             # Throttled in KiteTickerClient itself — this is already at
             # most one call per symbol per second.
             try:
@@ -619,7 +619,7 @@ async def _maybe_start_kite_ticker(ctx: AppContext) -> None:
 
         ticker = KiteTickerClient(
             api_key=ctx.config.broker.api_key.get_secret_value(),
-            access_token=ctx.broker._access_token,
+            access_token=getattr(ctx.broker, "_access_token", ""),
             kite_data_provider=kite_provider,
             order_update_callback=_ticker_order_update,
             tick_broadcast_callback=_ticker_tick_broadcast,
@@ -668,7 +668,7 @@ async def _restore_broker_session(ctx: AppContext) -> None:
         try:
             margins = await ctx.broker.get_margins()
             if margins:
-                from yolovest.dashboard.app import _extract_broker_capital
+                from yolovest.dashboard.helpers import _extract_broker_capital
                 broker_capital = _extract_broker_capital(margins)
                 if broker_capital > 0:
                     await ctx.db.set_system_state("initial_capital", str(broker_capital))
@@ -695,7 +695,7 @@ async def _seed_initial_capital_fallback(ctx: AppContext) -> None:
 def _wire_event_bridge(orchestrator: HeartbeatOrchestrator, ctx: AppContext) -> None:
     """Bridge skill completions + bus events to dashboard WebSocket clients."""
     try:
-        from yolovest.dashboard.app import broadcast_ws
+        from yolovest.dashboard.ws import broadcast_ws
         from yolovest.events import Event
 
         orchestrator._on_skill_complete = broadcast_ws

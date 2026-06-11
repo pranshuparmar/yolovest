@@ -751,8 +751,8 @@ class TelegramBot:
                 body_lines.append(f"    {ctx_line}")
             if reason:
                 body_lines.append(f"    {reason}")
-            row = header + "\n" + "\n".join(body_lines) + target_line
-            lines.append(row)
+            row_text = header + "\n" + "\n".join(body_lines) + target_line
+            lines.append(row_text)
 
         msg = "<b>Symbol Review</b>\n\n" + "\n\n".join(lines)
         await update.message.reply_html(msg)
@@ -974,7 +974,7 @@ class TelegramBot:
             except Exception:
                 logger.debug("Failed to mark signal executed", exc_info=True)
             try:
-                from yolovest.dashboard.app import broadcast_ws
+                from yolovest.dashboard.ws import broadcast_ws
                 await broadcast_ws("pending_approved", {
                     "trade_id": trade_id, "symbol": signal.get("symbol"),
                 })
@@ -1030,7 +1030,7 @@ class TelegramBot:
 
         await self._ctx.db.decide_pending_trade(trade["id"], "rejected", "telegram")
         try:
-            from yolovest.dashboard.app import broadcast_ws
+            from yolovest.dashboard.ws import broadcast_ws
             await broadcast_ws("pending_rejected", {
                 "trade_id": trade["id"], "symbol": symbol,
             })
