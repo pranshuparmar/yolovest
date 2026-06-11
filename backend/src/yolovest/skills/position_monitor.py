@@ -143,7 +143,7 @@ class PositionMonitorSkill(SkillBase):
 
         if discrepancies:
             await self.ctx.notify.send(
-                f"Position discrepancy detected:\n"
+                "Position discrepancy detected:\n"
                 + "\n".join(discrepancies)
                 + (f"\nAuto-recovered: {', '.join(recovered)}" if recovered else ""),
                 alert_type="errors",
@@ -1263,6 +1263,7 @@ class PositionMonitorSkill(SkillBase):
         )
         if profit < trigger_profit:
             return
+        profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0.0
 
         # Mirror the client-side trailing-SL tightening near target.
         step_pct = cfg.trailing_sl_step_pct
@@ -1539,7 +1540,9 @@ class PositionMonitorSkill(SkillBase):
             and pos.get("expected_holding_period") == "intraday"
         ):
             from datetime import datetime as _dt
-            from yolovest.timezone import IST as _IST, now_ist as _now_ist
+
+            from yolovest.timezone import IST as _IST
+            from yolovest.timezone import now_ist as _now_ist
             created_at_str = pos.get("created_at") or ""
             try:
                 created_at = _dt.fromisoformat(str(created_at_str))
