@@ -199,7 +199,7 @@ Applied to all three trailing-SL paths (client-side + GTT + MIS OCO), default-on
 
 ### Margin Enforcement
 
-`risk.margin_usage_enabled` defaults `True`. Before placing, risk-check calls `kite.order_margins` per signal so insufficient-funds / special-margin rejections are caught at signal time rather than at place-order time. When the broker says no, the position is sized down proportionally to whatever fits.
+`risk.margin_usage_enabled` defaults `False` (notional-only sizing, no leverage). When enabled, risk-check calls `kite.order_margins` per signal so insufficient-funds / special-margin rejections are caught at signal time rather than at place-order time. When the broker says no, the position is sized down proportionally to whatever fits.
 
 ### AppContext
 
@@ -321,7 +321,7 @@ Secrets, filesystem paths, and server binding:
 | `mode` | `"paper"` or `"live"` |
 | `strategy.mode` | `"balanced"` / `"intraday"` / `"short_term"` / `"long_term"` |
 | `strategy.holding_periods.{intraday,short_swing,week,long}.{target,stop_loss}` | ATR multipliers per holding bucket |
-| `risk` | `max_risk_per_trade_pct`, `risk_uplift_cap` (default 1.5 — ceiling on the stacked conviction/regime/flow multipliers), `max_open_positions`, `max_single_stock_pct`, `max_portfolio_exposure_pct` (counts pending notional), `max_trades_per_day` + per-product `max_mis_trades_per_day` / `max_cnc_trades_per_day` (optional), `daily_loss_limit_pct`, `weekly_loss_limit_pct`, `max_same_sector_positions`, `target_early_exit_pct` (default 0.0015), `loss_cooldown_minutes` (portfolio + per-symbol), `max_risk_rejected_retries_per_day` (default 5), `margin_usage_enabled` (default `true`), `earnings_blackout_days` (default 0), `max_portfolio_beta` (default 0), `drift_auto_suspend_enabled` (default false) |
+| `risk` | `max_risk_per_trade_pct`, `risk_uplift_cap` (default 1.5 — ceiling on the stacked conviction/regime/flow multipliers), `max_open_positions`, `max_single_stock_pct`, `max_portfolio_exposure_pct` (counts pending notional), `max_trades_per_day` + per-product `max_mis_trades_per_day` / `max_cnc_trades_per_day` (optional), `daily_loss_limit_pct`, `weekly_loss_limit_pct`, `max_same_sector_positions`, `target_early_exit_pct` (default 0.0015), `loss_cooldown_minutes` (portfolio + per-symbol), `max_risk_rejected_retries_per_day` (default 5), `margin_usage_enabled` (default `false`), `earnings_blackout_days` (default 0), `max_portfolio_beta` (default 0), `drift_auto_suspend_enabled` (default false) |
 | `risk.regime_gate` / `risk.liquidity_gate` / `risk.depth_gate` / `risk.institutional_flow` | All default-disabled. See `### Optional Risk Gates`. depth_gate is a size-multiplier, not a block. |
 | `risk.reentry` | Smart re-entry after cooldown. `require_higher_confidence` now uses `confidence_tolerance` (0.85) × original AND a `min_reentry_confidence` floor (0.55) instead of strict `>` — ML confidence decays as a trend matures, so strict-greater rejected most valid re-entries. |
 | `risk.exit_tweaks` | Time-stop / volume-exhaustion (default off), trailing-SL tighten step-up curve (default on). |

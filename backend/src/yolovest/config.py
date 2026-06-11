@@ -791,10 +791,11 @@ class RiskConfig(BaseModel):
     symbol_repeat_min_confidence: float = Field(default=0.80, ge=0, le=1)
     # When True, ask the broker for the real margin requirement via
     # kite.order_margins per signal — catches insufficient-funds /
-    # special-margin failures that notional-only sizing misses. Default
-    # True for live autonomous safety; flip off if the broker calls
-    # are too slow or the test stack doesn't support estimate_margin.
-    margin_usage_enabled: bool = True
+    # special-margin failures that notional-only sizing misses, and
+    # gives MIS its real ~5x leverage. Default False: notional-only
+    # sizing is the conservative choice (no leverage unless the user
+    # explicitly opts in from Settings).
+    margin_usage_enabled: bool = False
     weekly_reset_day: str = "monday"  # day when weekly circuit breaker resets
     # Cap how far apart the model's PnL-tuned BUY and SELL probability
     # thresholds may be at inference time. The walk-forward sweep that
