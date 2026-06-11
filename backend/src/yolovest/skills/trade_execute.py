@@ -354,7 +354,7 @@ class TradeExecuteSkill(SkillBase):
                     success=True,
                     skill_name=self.name,
                     data={"skipped": True, "reason": "duplicate_signal", "dedup_key": dedup_key},
-                )
+                ), 0.0
             # Mark as in-flight BEFORE placing the order
             await self.ctx.memory.set("trade_dedup", dedup_key, "in_flight", ttl_hours=24)
 
@@ -376,7 +376,7 @@ class TradeExecuteSkill(SkillBase):
                         "signal_price": signal["entry_price"],
                         "current_price": order_price,
                     },
-                )
+                ), order_price
         except Exception:
             logger.debug("LTP unavailable for live trade %s, using signal price", signal["symbol"])
             order_price = signal["entry_price"]
