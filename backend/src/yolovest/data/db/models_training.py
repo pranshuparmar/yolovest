@@ -150,10 +150,10 @@ class ModelsTrainingMixin:
         as an optional per-bar column; falls back to None for older
         rows imported before migration 038.
 
-        `max_days` caps history to fit RAM-constrained hosts. On a 2 GB
-        instance the full ohlcv table (~5 years × universe) OOM-kills
-        the feature-matrix builder; the default in
-        retraining.max_training_days (730) keeps peak under 1 GB.
+        `max_days` caps history so the feature-matrix builder's peak
+        memory stays bounded — it scales with days × symbols. The
+        default in retraining.max_training_days (730) is the starting
+        point; raise it on hosts with memory to spare.
         """
         if max_days is not None and max_days > 0:
             cursor = await self.conn.execute(
@@ -324,10 +324,10 @@ class ModelsTrainingMixin:
         """Distinct symbols that have bars at ``interval`` within ``max_days``.
 
         Cheap symbol-list lookup used to chunk the intraday training fetch:
-        loading 1-min bars for the whole universe at once would OOM a small
-        host, so model-retrain walks symbol chunks, and this is the index it
-        chunks over. ``max_days`` mirrors get_intraday_training_dataset's
-        lexical ISO date compare.
+        loading 1-min bars for the whole universe at once can exhaust
+        available memory, so model-retrain walks symbol chunks, and this
+        is the index it chunks over. ``max_days`` mirrors
+        get_intraday_training_dataset's lexical ISO date compare.
         """
         q = "SELECT DISTINCT symbol FROM ohlcv WHERE interval = ?"
         params: list[Any] = [interval]

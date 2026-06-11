@@ -813,7 +813,7 @@ async def async_main(args: argparse.Namespace) -> None:
     # ML model loading happens in a background task started AFTER the
     # dashboard is up — see `_load_ml_models_background`. Loading pickled
     # XGBoost models can take 30-60s when shadow models have accumulated,
-    # and on a memory-pressured small host the deserialization stalls long
+    # and under memory pressure the deserialization stalls long
     # enough that the docker healthcheck times out before /api/health
     # binds. The orchestrator's first heartbeat is gated by a 2s sleep so
     # models almost always finish loading before the first inference.

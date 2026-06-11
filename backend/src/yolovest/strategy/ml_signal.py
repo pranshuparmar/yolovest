@@ -888,9 +888,9 @@ class XGBoostSignalModel(MLBase):
                 # asyncio.to_thread, and signal generation predicts
                 # across hundreds of symbols concurrently — letting
                 # XGBoost default to "all cores per call" oversubscribes
-                # the box (8 cores × 8 concurrent predicts = 64 OS
-                # threads thrashing each other). Override via params
-                # if you're training offline and want full parallelism.
+                # the host (cores × concurrent predicts OS threads
+                # thrashing each other). Override via params if you're
+                # training offline and want full parallelism.
                 "n_jobs": params.get("n_jobs", 1),
             }
             # Early-stopping knobs (read here so the final-fit block can use
@@ -1078,8 +1078,7 @@ class XGBoostSignalModel(MLBase):
             # Free per-fold scratch before the final fit allocates its
             # own DMatrix copy — XGBoost's hist tree-method copies the
             # data into its own bin-quantized representation, briefly
-            # doubling memory. On a 2 GB host this can OOM without the
-            # collect.
+            # doubling memory; collect first to keep the peak bounded.
             _gc.collect()
             # Early stopping: a fixed n_estimators either over-fits (too
             # many trees on noise) or under-fits. Probe the right tree count

@@ -1034,15 +1034,12 @@ class RetrainingConfig(BaseModel):
     shadow_mode_days: int = 7
     shadow_min_predictions: int = 10
     retired_model_cleanup_days: int = 30
-    # Cap training history to fit in available RAM. On a 2 GB instance,
-    # 5 years × ~500 symbols ≈ 911K bars OOM-kills the process during
-    # feature-matrix construction. 730 days × 500 symbols ≈ 365K bars
-    # fits comfortably under 2 GB. Raise on hosts with more memory if
-    # you want the model to see deeper history — the ceiling is 12000
-    # (~33yr), comfortably covering the full available history (daily data
-    # starts ~1996). WARNING: memory scales with days × symbols; budget
-    # for it (the offline-training box) before going past ~10yr on the
-    # full universe.
+    # Cap training history loaded for the feature matrix. Peak training
+    # memory scales with days × symbols, so this is the primary knob for
+    # sizing a retrain to whatever host it runs on. Raise it if you want
+    # the model to see deeper history — the ceiling is 12000 (~33yr),
+    # comfortably covering the full available history (daily data starts
+    # ~1996).
     max_training_days: int = Field(default=730, ge=90, le=12000)
     # Honest-edge promotion gate. A model may only be promoted to
     # production when its *argmax* walk-forward Sharpe (the edge of its

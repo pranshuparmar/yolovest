@@ -73,13 +73,14 @@ services:
       # before the FastAPI server binds. ML model deserialization
       # (production + any accumulated shadow models) used to be in
       # this critical path too but now runs in a background task. The
-      # generous start_period covers swap-fault-in on memory-pressured
-      # small hosts without slowing failure detection once the app is up.
+      # generous start_period covers slow cold starts (e.g. swap
+      # fault-in under memory pressure) without slowing failure
+      # detection once the app is up.
       start_period: 180s
-    deploy:
-      resources:
-        limits:
-          memory: 1536M
+    # No baked-in resource limits — the app sizes its training workload via
+    # config (retraining.max_training_days etc.), not container caps. To cap
+    # memory/CPU for a specific deployment, add deploy.resources.limits in a
+    # docker-compose.override.yml.
     logging:
       driver: json-file
       options:
@@ -107,10 +108,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    deploy:
-      resources:
-        limits:
-          memory: 128M
     logging:
       driver: json-file
       options:

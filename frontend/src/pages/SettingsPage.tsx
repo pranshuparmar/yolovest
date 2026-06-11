@@ -804,7 +804,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "retraining.shadow_mode_days": "Run new model in shadow alongside production for this many days.",
   "retraining.shadow_min_predictions": "Minimum scored predictions before promotion decision.",
   "retraining.retired_model_cleanup_days": "Auto-delete retired model files after this many days.",
-  "retraining.max_training_days": "Cap how far back daily bars are loaded for training. Default 730 (2 years) — fits a 2 GB host with ~500 symbols. Raise on larger hosts; the full ohlcv table (5 years × 500 symbols) can OOM the feature-matrix builder.",
+  "retraining.max_training_days": "Cap how far back daily bars are loaded for training. Default 730 (2 years). Training memory scales with days × symbols — raise this if the training host has memory to spare and you want the model to see deeper history.",
   "dashboard.show_degraded_banner": "Show warning banner when LLM or services are unavailable.",
   "news_digest.enabled": "Send daily news headlines summary to Telegram.",
   "news_digest.max_headlines": "Number of headlines to include in the daily digest.",

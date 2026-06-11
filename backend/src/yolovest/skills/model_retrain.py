@@ -350,8 +350,8 @@ def _time_decay_multipliers(n: int, last_weight: float) -> list[float]:
 # intraday_triple_barrier_label the binding stop = "to session close".
 _INTRADAY_TO_CLOSE_HORIZON_MIN = 375
 
-# 1-min bars for the whole intraday universe at once would OOM a small host,
-# so the intraday matrix is built in symbol chunks of this size.
+# 1-min bars for the whole intraday universe at once can exhaust available
+# memory, so the intraday matrix is built in symbol chunks of this size.
 _INTRADAY_SYMBOL_CHUNK = 15
 
 # Sample a 5-min decision bar every 15 minutes (every 3rd bar), matching the
@@ -386,8 +386,8 @@ class ModelRetrainSkill(SkillBase):
         min_samples = self.ctx.config.strategy.min_training_samples
 
         # Step 1-2: Load training data and feedback. max_training_days
-        # caps history so the feature matrix fits in RAM on small
-        # hosts (a 2 GB EC2 instance OOMs on 5 years × ~500 symbols).
+        # caps history so the feature matrix fits in available RAM —
+        # peak memory scales with days × symbols.
         training_data = await self.ctx.db.get_training_dataset(
             max_days=cfg.max_training_days,
         )
@@ -920,7 +920,7 @@ class ModelRetrainSkill(SkillBase):
             # Free per-model scratch (feature matrix + bars_meta) before
             # the next model's _prepare_training_data allocates its
             # own copy. Without this the intraday and swing matrices
-            # would briefly coexist and OOM the process on a 2 GB host.
+            # would briefly coexist and double peak memory.
             X = y = feat_names = sample_weights = bars_meta = None  # type: ignore[assignment]
             _gc.collect()
 
@@ -1898,8 +1898,8 @@ class ModelRetrainSkill(SkillBase):
     ]:
         """Memory-safe builder for the 5-min intraday training matrix.
 
-        1-min path bars for the whole intraday universe at once would OOM a
-        small host, so we walk the symbol set in chunks: fetch each chunk's
+        1-min path bars for the whole intraday universe at once can exhaust
+        available memory, so we walk the symbol set in chunks: fetch each chunk's
         5-min + 1-min bars, run ``_prepare_intraday_training_data`` on it, and
         concatenate. Per-chunk ``feature_names`` are realigned to a canonical
         column order (a feature absent from a chunk → 0.0) before concat, and
