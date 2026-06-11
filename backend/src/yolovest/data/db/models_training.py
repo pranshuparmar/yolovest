@@ -412,6 +412,59 @@ class ModelsTrainingMixin:
             out.append((date_str, float(close)))
         return out
 
+    # ------------------------------------------------------------------
+    # Feature-drift snapshots
+    # ------------------------------------------------------------------
+
+    async def upsert_feature_snapshot(
+        self, day: str, symbol: str, mode: str, features: dict[str, Any],
+    ) -> None:
+        """Persist one symbol's UNCONDITIONED inference feature vector for
+        the day (pre-gate — written for every evaluated symbol, not just
+        passed signals). Later heartbeats the same day overwrite, so the
+        table holds at most one row per (day, symbol, mode)."""
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO feature_snapshots "
+            "(day, symbol, mode, features_json) VALUES (?, ?, ?, ?)",
+            (day, symbol, mode, json.dumps(
+                {k: v for k, v in features.items()
+                 if isinstance(v, (int, float))},
+            )),
+        )
+        await self.conn.commit()
+
+    async def get_feature_snapshots(
+        self, days: int, mode: str,
+    ) -> list[dict[str, float]]:
+        """Parsed feature dicts from the trailing `days` calendar days.
+        drift-watch bins these against the production model's training
+        deciles (PSI)."""
+        date_from = (now_ist() - timedelta(days=days)).strftime("%Y-%m-%d")
+        rows = await self.read_conn.execute_fetchall(
+            "SELECT features_json FROM feature_snapshots "
+            "WHERE day >= ? AND mode = ?",
+            (date_from, mode),
+        )
+        out: list[dict[str, float]] = []
+        for r in rows:
+            try:
+                parsed = json.loads(r[0])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                out.append(parsed)
+        return out
+
+    async def prune_feature_snapshots(self, keep_days: int = 30) -> int:
+        """Trim snapshots older than `keep_days`. Called by drift-watch
+        after each read so the table is self-maintaining."""
+        cutoff = (now_ist() - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+        cursor = await self.conn.execute(
+            "DELETE FROM feature_snapshots WHERE day < ?", (cutoff,),
+        )
+        await self.conn.commit()
+        return int(cursor.rowcount or 0)
+
     async def get_prediction_outcomes(self) -> list[dict[str, Any]]:
         """Load predictions with actual outcomes for retraining analysis."""
         cursor = await self.conn.execute(
@@ -907,15 +960,24 @@ class ModelsTrainingMixin:
                     out[sym] = sector
         return out
 
-    async def compute_live_regime(self) -> dict[str, float]:
+    async def compute_live_regime(
+        self, exclude_date: str | None = None,
+    ) -> dict[str, float]:
         """Cross-sectional regime stats over the latest two daily closes
         of every tracked symbol. Cheap proxy for "is the broad market
         trending or chopping right now". Heartbeats during market
         hours have today's developing daily bar (Kite returns close =
-        current LTP), so the comparison is "today vs yesterday".
+        current LTP), so by default the comparison is "today-so-far vs
+        yesterday" — the live intent the regime risk-gate wants.
+
+        ``exclude_date`` (YYYY-MM-DD) drops that date's bars before
+        ranking. The MODEL-feature path passes today's date so
+        universe_breadth/avg_return are "last completed session vs the
+        one before" — matching training, which only ever sees completed
+        sessions (a partial-day breadth is a different distribution).
 
         Returns: {"breadth": 0..1, "avg_return": float, "sample_size": int}.
-        breadth = fraction of symbols up vs yesterday. avg_return =
+        breadth = fraction of symbols up vs prior close. avg_return =
         mean per-symbol % change. sample_size = number of symbols
         that had two consecutive daily bars available.
 
@@ -931,6 +993,7 @@ class ModelsTrainingMixin:
                 FROM ohlcv
                 WHERE interval = 'daily'
                   AND timestamp >= date('now', '-10 day')
+                  AND (? IS NULL OR substr(timestamp, 1, 10) <> ?)
             )
             SELECT
                 MAX(CASE WHEN rn = 1 THEN close END) AS latest,
@@ -939,7 +1002,8 @@ class ModelsTrainingMixin:
             WHERE rn <= 2
             GROUP BY symbol
             HAVING latest > 0 AND prev > 0
-            """
+            """,
+            (exclude_date, exclude_date),
         )
         rows = await cursor.fetchall()
         if not rows:
@@ -953,13 +1017,15 @@ class ModelsTrainingMixin:
         }
 
     async def compute_live_sector_regime(
-        self,
+        self, exclude_date: str | None = None,
     ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
         """Live per-sector breadth/avg-return plus per-symbol daily return,
         for the inference-time `sector_breadth` / `sector_avg_return` /
         `relative_momentum` features (training computes the same via
         `_compute_sector_index`). Uses the latest two daily closes of every
         tracked symbol, grouped by sector via the symbol_sectors map.
+        ``exclude_date`` drops that date's (developing) bars first — see
+        compute_live_regime.
 
         Returns (sector_stats, symbol_returns) where sector_stats[sector] =
         {"breadth", "avg_return", "n"} and symbol_returns[symbol] = pct
@@ -976,6 +1042,7 @@ class ModelsTrainingMixin:
                 FROM ohlcv
                 WHERE interval = 'daily'
                   AND timestamp >= date('now', '-10 day')
+                  AND (? IS NULL OR substr(timestamp, 1, 10) <> ?)
             )
             SELECT symbol,
                    MAX(CASE WHEN rn = 1 THEN close END) AS latest,
@@ -984,7 +1051,8 @@ class ModelsTrainingMixin:
             WHERE rn <= 2
             GROUP BY symbol
             HAVING latest > 0 AND prev > 0
-            """
+            """,
+            (exclude_date, exclude_date),
         )
         rows = await cursor.fetchall()
         symbol_returns: dict[str, float] = {}

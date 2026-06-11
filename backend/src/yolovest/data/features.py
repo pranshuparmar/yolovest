@@ -34,7 +34,14 @@ from yolovest.timezone import IST
 #       IndicatorConfig.extended_momentum — emitted on the daily path only
 #       (meaningless on 5-min intraday bars), so the intraday vocabulary is
 #       unchanged but the swing vocabulary grows.
-MODEL_SCHEMA_VERSION = 3
+#   4 — daily/swing EOD-published broadcast features re-anchored to the
+#       PRIOR session (VIX, F&O, bulk deals, delivery % — matching what a
+#       mid-session heartbeat can actually have), news window extended to
+#       the entry bar, and inference's daily window/regime now exclude the
+#       developing (partial) bar. Feature VALUES shift even though the
+#       vocabulary is unchanged, so pre-4 artifacts see a distribution
+#       their training never did.
+MODEL_SCHEMA_VERSION = 4
 
 # Feature keys that compute_features emits but the ML model should NOT
 # see. These are raw absolute prices, raw cumulative levels, or raw

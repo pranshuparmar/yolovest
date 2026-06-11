@@ -56,6 +56,48 @@ def _warn_on_lib_skew(artifact: dict[str, Any], label: str) -> None:
             )
 
 
+def _checksum_sidecar(path: Path) -> Path:
+    """`<artifact>.pkl.sha256` — written next to every saved artifact."""
+    return path.with_name(path.name + ".sha256")
+
+
+def _sha256_of_file(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verify_artifact_checksum(path: Path) -> None:
+    """Raise when an artifact doesn't match its recorded sha256.
+
+    Catches torn writes and bit-rot before a half-written pickle is
+    deserialized into the live inference slots. Sidecar-less artifacts
+    (legacy saves, cross-machine uploads via the dashboard) load without
+    verification — the schema/lib-version stamps still apply to those.
+    """
+    sidecar = _checksum_sidecar(path)
+    if not sidecar.exists():
+        return
+    try:
+        expected = sidecar.read_text().strip().split()[0]
+    except Exception:
+        return  # unreadable sidecar → treat as absent (fail-open)
+    if not expected:
+        return
+    actual = _sha256_of_file(path)
+    if actual != expected:
+        raise ValueError(
+            f"Model artifact {path.name} failed its sha256 integrity check "
+            f"(expected {expected[:12]}…, got {actual[:12]}…). The file is "
+            f"corrupt or was modified after save — delete it and its "
+            f".sha256 sidecar (or restore from backup), then re-promote."
+        )
+
+
 def _purge_boundary(
     bars_meta_raw: list[dict[str, Any]],
     cut: int,
@@ -144,6 +186,13 @@ class XGBoostSignalModel(MLBase):
         # Feature names used during training (for consistent inference)
         self._intraday_features: list[str] | None = None
         self._swing_features: list[str] | None = None
+
+        # Per-feature training distribution (mean / std / decile edges),
+        # column-parallel to the feature names. Stamped into the artifact
+        # so drift-watch can compare the LIVE feature distribution
+        # against what the model trained on (PSI).
+        self._intraday_feature_stats: dict[str, Any] | None = None
+        self._swing_feature_stats: dict[str, Any] | None = None
 
         # PnL-tuned class thresholds from the post-CV sweep. When set,
         # _predict applies them on the calibrated probability vector
@@ -332,6 +381,28 @@ class XGBoostSignalModel(MLBase):
         elif model_type == "swing":
             self._swing_thresholds = thresholds
 
+    def _get_feature_stats_slot(self, model_type: str) -> dict[str, Any] | None:
+        if model_type == "intraday":
+            return self._intraday_feature_stats
+        if model_type == "swing":
+            return self._swing_feature_stats
+        return None
+
+    def _set_feature_stats_slot(
+        self, model_type: str, stats: dict[str, Any] | None,
+    ) -> None:
+        if model_type == "intraday":
+            self._intraday_feature_stats = stats
+        elif model_type == "swing":
+            self._swing_feature_stats = stats
+
+    def get_feature_stats(self, model_type: str) -> dict[str, Any] | None:
+        """Training-time per-feature distribution for the loaded model:
+        ``{"feature_names": [...], "mean": [...], "std": [...],
+        "deciles": [[11 edges] per feature]}``. None for artifacts saved
+        before stats were stamped. Consumed by drift-watch's PSI check."""
+        return self._get_feature_stats_slot(model_type)
+
     # ------------------------------------------------------------------
     # Prediction
     # ------------------------------------------------------------------
@@ -398,6 +469,7 @@ class XGBoostSignalModel(MLBase):
                         f"No saved {model_type} model found in {self.model_dir}"
                     )
                 filepath = matches[-1]
+            _verify_artifact_checksum(filepath)
             return dict[str, Any](joblib.load(filepath))
 
         artifact = await asyncio.to_thread(_load)
@@ -836,7 +908,7 @@ class XGBoostSignalModel(MLBase):
                 f"(minimum {min_samples} required)"
             )
 
-        def _train_blocking() -> tuple[Any, Any, dict[str, Any]]:
+        def _train_blocking() -> tuple[Any, Any, dict[str, Any], dict[str, Any] | None]:
             import numpy as np
 
             try:
@@ -868,6 +940,25 @@ class XGBoostSignalModel(MLBase):
             import gc as _gc
             _gc.collect()
             y_arr = np.asarray(y)
+
+            # Per-feature training distribution, stamped into the saved
+            # artifact so drift-watch can PSI-compare the live feature
+            # distribution against what this model actually trained on.
+            # Decile edges (11 per feature) define the PSI bins: by
+            # construction each bin holds 10% of training rows.
+            feature_stats: dict[str, Any] | None = None
+            try:
+                _dec = np.percentile(X_arr, [i * 10 for i in range(11)], axis=0)
+                feature_stats = {
+                    "mean": [float(v) for v in X_arr.mean(axis=0)],
+                    "std": [float(v) for v in X_arr.std(axis=0)],
+                    "deciles": [
+                        [float(_dec[j, k]) for j in range(11)]
+                        for k in range(X_arr.shape[1])
+                    ],
+                }
+            except Exception:
+                logger.debug("feature-stats computation failed", exc_info=True)
 
             # Walk-forward split via TimeSeriesSplit
             tscv = TimeSeriesSplit(n_splits=min(5, len(y_arr) // 50 or 2))
@@ -1534,12 +1625,19 @@ class XGBoostSignalModel(MLBase):
                     "backtest_source": "synthetic_legacy",
                 }
 
-            return model, calibrator, metrics
+            return model, calibrator, metrics, feature_stats
 
-        model, calibrator, metrics = await asyncio.to_thread(_train_blocking)
+        model, calibrator, metrics, feature_stats = await asyncio.to_thread(
+            _train_blocking,
+        )
 
         self._set_model(model_type, model)
         self._set_calibrator(model_type, calibrator)
+        # Make the stats self-describing (column-parallel names) before
+        # they're stamped into the artifact / read by drift-watch.
+        if feature_stats is not None and feature_names:
+            feature_stats = {"feature_names": list(feature_names), **feature_stats}
+        self._set_feature_stats_slot(model_type, feature_stats)
 
         # Store feature names for consistent inference
         if feature_names:
@@ -1615,6 +1713,8 @@ class XGBoostSignalModel(MLBase):
         filepath = self.model_dir / filename
 
         def _save() -> None:
+            import os
+
             import joblib
 
             from yolovest.data.features import MODEL_SCHEMA_VERSION
@@ -1628,6 +1728,9 @@ class XGBoostSignalModel(MLBase):
                 "metrics": metrics,
                 "feature_names": feature_names,
                 "tuned_thresholds": self._get_thresholds(model_type),
+                # Per-feature training distribution (mean/std/deciles) —
+                # drift-watch compares live feature snapshots against it.
+                "feature_stats": self._get_feature_stats_slot(model_type),
                 "saved_at": datetime.now(UTC).isoformat(),
                 # Compatibility stamps — checked on cross-machine import so
                 # a model trained against different code fails loudly.
@@ -1635,7 +1738,18 @@ class XGBoostSignalModel(MLBase):
                 "xgboost_version": _lib_version("xgboost"),
                 "sklearn_version": _lib_version("scikit-learn"),
             }
-            joblib.dump(artifact, filepath)
+            # Atomic write: dump to a temp name, fsync, rename into place,
+            # then record the sha256 sidecar. A crash mid-dump can no
+            # longer leave a truncated .pkl as the newest artifact (.tmp
+            # never matches the *_v*.pkl glob), and a torn/corrupted file
+            # fails its checksum at load instead of deserializing garbage.
+            tmp = filepath.with_name(filepath.name + ".tmp")
+            joblib.dump(artifact, tmp)
+            with open(tmp, "rb") as f:
+                os.fsync(f.fileno())
+            digest = _sha256_of_file(tmp)
+            os.replace(tmp, filepath)
+            _checksum_sidecar(filepath).write_text(f"{digest}  {filepath.name}\n")
 
         await asyncio.to_thread(_save)
         self._set_version(model_type, version_str)
@@ -1665,6 +1779,7 @@ class XGBoostSignalModel(MLBase):
                     )
                 filepath = matches[-1]
 
+            _verify_artifact_checksum(filepath)
             return dict[str, Any](joblib.load(filepath))
 
         artifact = await asyncio.to_thread(_load)
@@ -1673,6 +1788,7 @@ class XGBoostSignalModel(MLBase):
         self._set_model(model_type, artifact["model"])
         self._set_calibrator(model_type, artifact.get("calibrator"))
         self._set_version(model_type, artifact.get("version", "unknown"))
+        self._set_feature_stats_slot(model_type, artifact.get("feature_stats"))
 
         # Restore feature names for consistent inference
         feature_names = artifact.get("feature_names")

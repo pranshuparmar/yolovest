@@ -453,6 +453,18 @@ async def _evaluate_shortlist(
             bars = await ctx.db.get_ohlcv(
                 symbol, "daily", days=365, end=as_of_dt,
             )
+            # Drop the reference date's developing/own bar — mirrors the
+            # heartbeat's filter in generate_signals so a dry-run "as of
+            # day D" sees exactly the window the live engine saw on D
+            # (features as-of the last COMPLETED session).
+            _ref_date = _ref_dt.date()
+            bars = [
+                b for b in bars
+                if (
+                    b.timestamp.astimezone(IST) if b.timestamp.tzinfo
+                    else b.timestamp
+                ).date() < _ref_date
+            ]
             if len(bars) < 50:
                 filter_counts["insufficient_bars"] += 1
                 rejection_details.append({

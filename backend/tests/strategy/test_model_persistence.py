@@ -68,3 +68,46 @@ class TestLibSkewWarning:
             _warn_on_lib_skew({"version": "old"}, "load_model[swing]")
             _warn_on_lib_skew({"sklearn_version": "unknown"}, "load_model[swing]")
         assert not caplog.records
+
+
+class TestArtifactIntegrity:
+    """save_model writes atomically (tmp + rename) and records a sha256
+    sidecar; load refuses a corrupted artifact instead of deserializing
+    garbage into the live inference slots. Sidecar-less artifacts
+    (legacy saves, dashboard uploads) still load."""
+
+    async def _save_one(self, tmp_path) -> tuple[XGBoostSignalModel, str]:
+        model = XGBoostSignalModel(model_dir=str(tmp_path))
+        model._set_model("swing", {"dummy": True})
+        model._swing_features = ["f0"]
+        version = await model.save_model("swing", {"sharpe_ratio": 1.0})
+        return model, version
+
+    async def test_save_writes_sidecar_and_no_tmp_left(self, tmp_path):
+        _, version = await self._save_one(tmp_path)
+        assert (tmp_path / f"{version}.pkl").exists()
+        assert (tmp_path / f"{version}.pkl.sha256").exists()
+        assert not list(tmp_path.glob("*.tmp"))
+
+    async def test_roundtrip_with_checksum_ok(self, tmp_path):
+        _, version = await self._save_one(tmp_path)
+        fresh = XGBoostSignalModel(model_dir=str(tmp_path))
+        await fresh.load_model("swing", version)
+        assert fresh._swing_version == version
+
+    async def test_corrupted_artifact_refused(self, tmp_path):
+        import pytest
+
+        _, version = await self._save_one(tmp_path)
+        pkl = tmp_path / f"{version}.pkl"
+        pkl.write_bytes(pkl.read_bytes()[:-7] + b"GARBAGE")
+        fresh = XGBoostSignalModel(model_dir=str(tmp_path))
+        with pytest.raises(ValueError, match="integrity check"):
+            await fresh.load_model("swing", version)
+
+    async def test_sidecarless_legacy_artifact_loads(self, tmp_path):
+        _, version = await self._save_one(tmp_path)
+        (tmp_path / f"{version}.pkl.sha256").unlink()
+        fresh = XGBoostSignalModel(model_dir=str(tmp_path))
+        await fresh.load_model("swing", version)
+        assert fresh._swing_version == version

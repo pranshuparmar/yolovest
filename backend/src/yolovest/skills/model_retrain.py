@@ -1342,21 +1342,29 @@ class ModelRetrainSkill(SkillBase):
                     features["sector_avg_return"] = 0.0
                     features["relative_momentum"] = 0.0
 
-                # Institutional flow features: bulk-deal net count and
-                # average delivery % over the prior 5 bars. Both default
-                # to 0 when no data is available (older training rows
-                # predate the data sources). Compounds with the
-                # institutional_flow risk-check multiplier so the model
-                # learns to score these signals natively at inference.
+                # EOD-PUBLISHED broadcast data (bulk deals, delivery %,
+                # VIX, F&O) is merged AS-OF THE PRIOR SESSION (bars[i-1])
+                # — the daily-lane mirror of the intraday lane's
+                # _merge_daily_broadcast. The heartbeat runs mid-session,
+                # BEFORE the day's EOD publications and ingests land
+                # (bulk deals + delivery % publish after close,
+                # ingest-vix runs 16:00, ingest-fno 18:30), so the
+                # freshest value live inference can ever see is the
+                # prior session's. Training on same-day EOD values
+                # taught a lag-0 relationship that serving could only
+                # feed at lag-1 — a systematic train/serve skew.
                 # bars[i].timestamp is a datetime; the bulk_deals table
                 # stores deal_date as YYYY-MM-DD strings, so format
-                # consistently before the lookup.
+                # consistently before the lookup. i >= window_size=200,
+                # so bars[i-1] / bars[i-2] always exist.
                 _sample_date = bars[i].timestamp.strftime("%Y-%m-%d")
+                _prior_date = bars[i - 1].timestamp.strftime("%Y-%m-%d")
+                # Bulk deals: 5 sessions ending at the PRIOR session.
                 _bulk_window_start = bars[max(0, i - 5)].timestamp.strftime("%Y-%m-%d")
                 _bd_dates = bulk_dates_by_sym.get(sym, [])
                 _bd_buy = _bd_sell = 0
                 for d in _bd_dates:
-                    if d > _sample_date:
+                    if d > _prior_date:
                         break
                     if d >= _bulk_window_start:
                         counts = bulk_deal_lookup.get((sym, d), {})
@@ -1366,11 +1374,12 @@ class ModelRetrainSkill(SkillBase):
                 features["bulk_deal_sell_5d"] = float(_bd_sell)
                 features["bulk_deal_net_5d"] = float(_bd_buy - _bd_sell)
 
-                # delivery_pct rolling-5 average. bars[i] is the current
-                # sample's bar; look back 5 bars including it. Rows
-                # ingested before migration 038 have NULL → treated as 0.
+                # delivery_pct rolling-5 average over the 5 sessions
+                # ENDING AT bars[i-1] — today's delivery % isn't
+                # published until after the close. Rows ingested before
+                # migration 038 have NULL → treated as missing.
                 _delivery_values: list[float] = []
-                for k in range(max(0, i - 4), i + 1):
+                for k in range(max(0, i - 5), i):
                     dp = getattr(bars[k], "delivery_pct", None)
                     if dp is None and isinstance(rows[k], dict):
                         dp = rows[k].get("delivery_pct")
@@ -1386,45 +1395,49 @@ class ModelRetrainSkill(SkillBase):
                 else:
                     features["delivery_pct_avg_5d"] = 0.0
 
-                # News-sentiment features. Slice the symbol's pre-parsed
-                # headline timeline to entries published before this bar's
-                # timestamp; compute_news_features handles the 24h / 7d
-                # window aggregation. Bar timestamps in training_data are
-                # naive; coerce to IST to match the parsed published_at
-                # tz so the window-cutoff comparisons stay correct.
-                _bar_ts = bars[i].timestamp
-                if _bar_ts.tzinfo is None:
-                    _bar_ts = _bar_ts.replace(tzinfo=IST)
+                # News-sentiment features, windowed to the ENTRY bar's
+                # timestamp (midnight opening the entry day): live
+                # inference reads news up to the moment of entry, so
+                # cutting training at bars[i]'s own midnight (the old
+                # behaviour) excluded the decision day's headlines the
+                # live model does see — day-i news is public well before
+                # the day-i+1 open, so this is lag-aligned and leak-free.
+                # Bar timestamps in training_data are naive; coerce to
+                # IST to match the parsed published_at tz.
+                _news_cutoff = bars[i + 1].timestamp
+                if _news_cutoff.tzinfo is None:
+                    _news_cutoff = _news_cutoff.replace(tzinfo=IST)
                 _sym_news = news_parsed_by_sym.get(sym)
                 if _sym_news:
-                    news_feats = compute_news_features(_sym_news, _bar_ts)
+                    news_feats = compute_news_features(_sym_news, _news_cutoff)
                 else:
                     news_feats = {k: 0.0 for k in NEWS_FEATURE_KEYS}
                 features.update(news_feats)
 
-                # India VIX regime features. Single broadcast series — every
-                # symbol on the same _sample_date sees identical VIX values.
-                # compute_vix_features handles the trailing-window slicing.
+                # India VIX regime features as-of the PRIOR session —
+                # the day-i VIX close lands in the DB at 16:00, after
+                # any heartbeat that could trade on it. Single broadcast
+                # series; compute_vix_features slices the trailing window.
                 if vix_timeline:
-                    vix_feats = compute_vix_features(vix_timeline, _sample_date)
+                    vix_feats = compute_vix_features(vix_timeline, _prior_date)
                 else:
                     vix_feats = {k: 0.0 for k in VIX_FEATURE_KEYS}
                 features.update(vix_feats)
 
-                # F&O derivatives features. Only F&O-eligible symbols have
-                # rows in the timeline; misses return is_fno_stock=0 and
-                # the model learns to weight these features only when
-                # present. Pass equity closes from the OHLCV window so the
-                # oi_buildup classification uses the canonical underlying
-                # price change instead of the futures close (which can
-                # diverge near expiry).
+                # F&O derivatives features as-of the PRIOR session
+                # (ingest-fno runs 18:30). The oi_buildup price pair is
+                # the prior session's move — (close[i-2], close[i-1]) —
+                # matching what inference derives from a daily window
+                # ending at the last completed session. Only
+                # F&O-eligible symbols have rows; misses return
+                # is_fno_stock=0 and the model learns to weight these
+                # features only when present.
                 _sym_fno = (fno_lookup or {}).get(sym)
                 if _sym_fno:
-                    _prior_close = bars[i - 1].close if i >= 1 else None
                     fno_feats = compute_fno_features(
-                        _sym_fno, _sample_date,
-                        prior_stock_close=_prior_close,
-                        current_stock_close=bars[i].close,
+                        _sym_fno, _prior_date,
+                        prior_stock_close=bars[i - 2].close,
+                        current_stock_close=bars[i - 1].close,
                     )
                 else:
                     fno_feats = {k: 0.0 for k in FNO_FEATURE_KEYS}

@@ -22,6 +22,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from yolovest.data.features import merge_feedback_features
+from yolovest.timezone import now_ist
 
 if TYPE_CHECKING:
     from yolovest.context import AppContext
@@ -39,12 +40,21 @@ async def load_inference_feature_context(ctx: AppContext) -> dict[str, Any]:
     sector_map: dict[str, str] = {}
     feedback_data: dict[str, dict[str, float]] = {}
 
+    # Exclude today's developing daily bar so the model features are
+    # "last completed session vs the one before" — the training
+    # convention (training only ever sees completed sessions; a
+    # partial-day breadth is a different distribution). The regime
+    # RISK-GATE deliberately keeps the default (today-so-far) read —
+    # it wants live market state, not training parity.
+    _today = now_ist().strftime("%Y-%m-%d")
     try:
-        regime = await ctx.db.compute_live_regime()
+        regime = await ctx.db.compute_live_regime(exclude_date=_today)
     except Exception:
         logger.debug("inference: compute_live_regime failed", exc_info=True)
     try:
-        sector_stats, symbol_returns = await ctx.db.compute_live_sector_regime()
+        sector_stats, symbol_returns = await ctx.db.compute_live_sector_regime(
+            exclude_date=_today,
+        )
     except Exception:
         logger.debug("inference: compute_live_sector_regime failed", exc_info=True)
     try:

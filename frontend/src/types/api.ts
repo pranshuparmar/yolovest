@@ -65,6 +65,10 @@ export interface Trade {
   // Total PnL surfaced to the user is realized_partial_pnl + (pnl ?? 0).
   // Null/undefined on rows from before migration 043.
   realized_partial_pnl?: number | null;
+  // Producing model's version, stamped at execution (migration 050);
+  // read paths COALESCE with the signal's version for legacy rows.
+  // Null for adopted/manual trades — no model produced them.
+  model_version?: string | null;
   created_at: string;
   closed_at: string | null;
 }

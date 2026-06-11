@@ -283,6 +283,12 @@ export function TradeDetailPage() {
               <div><p className="text-xs text-gray-500">Product</p><p>{data.product}</p></div>
               <div><p className="text-xs text-gray-500">Status</p><p>{data.status}</p></div>
               <div>
+                <p className="text-xs text-gray-500">Model</p>
+                <p className="truncate" title={data.model_version ?? undefined}>
+                  {data.model_version ?? "—"}
+                </p>
+              </div>
+              <div>
                 <p className="text-xs text-gray-500">Gross PnL</p>
                 <p className={clsx(pnlClass(grossPnl))}>
                   {grossPnl != null ? `₹${fmt(grossPnl)}` : "—"}
