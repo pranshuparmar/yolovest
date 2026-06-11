@@ -120,11 +120,11 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                             "source": "partial-close",
                         },
                     )
-                    raise HTTPException(status_code=412, detail=cdsl)
+                    raise HTTPException(status_code=412, detail=cdsl) from e
                 raise HTTPException(
                     status_code=502,
                     detail=f"Broker rejected partial-exit order: {e}",
-                )
+                ) from e
 
             # Wait briefly for fill
             exit_price = None
@@ -328,8 +328,8 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                         "source": "close-position",
                     },
                 )
-                raise HTTPException(status_code=412, detail=cdsl)
-            raise HTTPException(status_code=502, detail=f"Broker rejected exit order: {e}")
+                raise HTTPException(status_code=412, detail=cdsl) from e
+            raise HTTPException(status_code=502, detail=f"Broker rejected exit order: {e}") from e
 
         # Wait briefly for fill, fall back to LTP-based estimate
         exit_price = None

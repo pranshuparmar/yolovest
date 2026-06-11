@@ -181,7 +181,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             raise HTTPException(
                 status_code=422,
                 detail=f"Validation failed: {e}",
-            )
+            ) from e
 
         # Capture old values BEFORE persisting so the diff log shows
         # what each key actually changed from. `db_values` was loaded

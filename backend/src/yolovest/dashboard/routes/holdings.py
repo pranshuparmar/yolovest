@@ -97,7 +97,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             raise HTTPException(
                 status_code=502,
                 detail=f"Broker error: {e}. Token may be expired — re-authenticate via Settings.",
-            )
+            ) from e
 
     @app.post("/api/review")
     async def review_symbols(

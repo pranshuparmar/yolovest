@@ -55,7 +55,8 @@ def _verify_token(token: str) -> str:
     try:
         payload = base64.urlsafe_b64decode(payload_b64)
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token encoding")
+        # Original parse error is noise to the client; a clean 401 suffices.
+        raise HTTPException(status_code=401, detail="Invalid token encoding") from None
 
     expected_sig = hmac.new(_TOKEN_SECRET, payload, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(sig, expected_sig):
@@ -64,7 +65,7 @@ def _verify_token(token: str) -> str:
     try:
         data = json.loads(payload)
     except json.JSONDecodeError:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
+        raise HTTPException(status_code=401, detail="Invalid token payload") from None
 
     if data.get("exp", 0) < time.time():
         raise HTTPException(status_code=401, detail="Token expired")

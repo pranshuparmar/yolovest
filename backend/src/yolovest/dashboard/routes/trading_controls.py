@@ -375,4 +375,4 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             return result
         except Exception as e:
             logger.error("Config reload via API failed: %s", e)
-            raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Reload failed: {e}") from e

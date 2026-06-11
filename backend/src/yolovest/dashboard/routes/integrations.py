@@ -225,7 +225,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             body = _json.loads(raw or b"{}")
         except (ValueError, TypeError):
             logger.warning("Zerodha postback: invalid JSON body")
-            raise HTTPException(status_code=400, detail="invalid body")
+            raise HTTPException(status_code=400, detail="invalid body") from None
 
         order_id = str(body.get("order_id") or "")
         order_timestamp = str(body.get("order_timestamp") or "")

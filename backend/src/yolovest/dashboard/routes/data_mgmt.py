@@ -91,13 +91,13 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         try:
             result = await ctx.db.delete_backup(backup_dir, filename)
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
         except PermissionError as e:
             # Locked backup — refuse with 409 Conflict so the UI can
             # prompt the user to unlock first.
-            raise HTTPException(status_code=409, detail=str(e))
+            raise HTTPException(status_code=409, detail=str(e)) from e
         logger.info("Deleted backup %s (%d bytes)", filename, result["size_bytes"])
         return {"success": True, **result}
 
@@ -173,9 +173,9 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         try:
             result = await ctx.db.set_backup_lock(backup_dir, filename, locked=True)
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
         logger.info("Locked backup %s", filename)
         return {"success": True, **result}
 
@@ -190,9 +190,9 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         try:
             result = await ctx.db.set_backup_lock(backup_dir, filename, locked=False)
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
         logger.info("Unlocked backup %s", filename)
         return {"success": True, **result}
 
@@ -205,7 +205,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         try:
             deleted = await ctx.db.bulk_delete(group)
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         ctx.db.invalidate_storage_stats_cache()
         total = sum(deleted.values())
         logger.info("Bulk delete [%s]: %d rows", group, total)
