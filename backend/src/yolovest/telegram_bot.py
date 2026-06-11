@@ -141,15 +141,15 @@ class TelegramBot:
             # by the time stop() is called, so these are just cleanup.
             try:
                 await asyncio.wait_for(self._app.updater.stop(), timeout=1.5)
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 logger.warning("Telegram updater stop timed out")
             try:
                 await asyncio.wait_for(self._app.stop(), timeout=1.0)
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 logger.warning("Telegram app stop timed out")
             try:
                 await asyncio.wait_for(self._app.shutdown(), timeout=1.0)
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 logger.warning("Telegram app shutdown timed out")
 
     async def _authorize_update(self, update: Any, context: Any) -> None:

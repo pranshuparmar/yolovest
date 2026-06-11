@@ -17,10 +17,10 @@ Flow:
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
-from datetime import datetime, timedelta
-
+from yolovest.costs import round_trip_cost_floor_pct
 from yolovest.data.features import (
     DAILY_TREND_FEATURE_KEYS,
     MODEL_FEATURE_EXCLUSIONS,
@@ -30,7 +30,6 @@ from yolovest.data.features import (
     daily_trend_features_series,
     merge_feedback_features,
 )
-from yolovest.costs import round_trip_cost_floor_pct
 from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
@@ -1107,7 +1106,7 @@ class ModelRetrainSkill(SkillBase):
         bulk_deal_lookup = bulk_deal_lookup or {}
         # Per-symbol sorted deal-date list for fast 5-day window lookups.
         bulk_dates_by_sym: dict[str, list[str]] = {}
-        for (sym_key, date_key) in bulk_deal_lookup.keys():
+        for sym_key, date_key in bulk_deal_lookup:
             bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
         for v in bulk_dates_by_sym.values():
             v.sort()
@@ -1569,7 +1568,7 @@ class ModelRetrainSkill(SkillBase):
 
         # Bulk-deal date index + parsed news timeline (mirror daily path).
         bulk_dates_by_sym: dict[str, list[str]] = {}
-        for (sym_key, date_key) in bulk_deal_lookup.keys():
+        for sym_key, date_key in bulk_deal_lookup:
             bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
         for v in bulk_dates_by_sym.values():
             v.sort()

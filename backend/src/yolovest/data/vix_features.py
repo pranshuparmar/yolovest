@@ -19,8 +19,8 @@ Neutral defaults (0.0) when the timeline is empty or too short.
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections.abc import Sequence
 from statistics import mean, pstdev
-from typing import Sequence
 
 VIX_FEATURE_KEYS: tuple[str, ...] = (
     "vix_level",

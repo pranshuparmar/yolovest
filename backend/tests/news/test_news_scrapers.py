@@ -7,8 +7,6 @@ import time
 from datetime import datetime
 from unittest.mock import patch
 
-import pytest
-
 from yolovest.models.schemas import NewsArticle
 from yolovest.news.aggregator import NewsAggregator
 from yolovest.news.base import NewsSource

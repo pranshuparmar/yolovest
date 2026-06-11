@@ -507,7 +507,7 @@ class XGBoostSignalModel(MLBase):
         def _run_inference() -> tuple[int, float, list[float]]:
             import numpy as np
 
-            X = np.array(feature_vector)  # noqa: N806
+            X = np.array(feature_vector)
             pred_label = int(model.predict(X)[0])
             # Get probability for the predicted class + full distribution
             probas = model.predict_proba(X)[0]
@@ -525,7 +525,7 @@ class XGBoostSignalModel(MLBase):
             def _calibrate() -> tuple[int, float, list[float]]:
                 import numpy as np
 
-                X = np.array(feature_vector)  # noqa: N806
+                X = np.array(feature_vector)
                 cal_label = int(calibrator.predict(X)[0])
                 cal_probas = calibrator.predict_proba(X)[0]
                 cal_confidence = float(cal_probas[cal_label])
@@ -812,7 +812,7 @@ class XGBoostSignalModel(MLBase):
             # GC drop the Python list-of-lists as soon as the array is
             # built — list-of-lists has higher per-cell overhead than
             # the ndarray on top of the data it holds.
-            X_arr = np.asarray(X, dtype=np.float32)  # noqa: N806
+            X_arr = np.asarray(X, dtype=np.float32)
             X.clear()
             import gc as _gc
             _gc.collect()
@@ -1002,7 +1002,7 @@ class XGBoostSignalModel(MLBase):
                                 purged, purge_calendar_days, test_min,
                             )
 
-                X_train, X_test = X_arr[train_idx], X_arr[test_idx]  # noqa: N806
+                X_train, X_test = X_arr[train_idx], X_arr[test_idx]
                 y_train, y_test = y_arr[train_idx], y_arr[test_idx]
                 w_train = weights_arr[train_idx] if weights_arr is not None else None
 
@@ -1201,6 +1201,8 @@ class XGBoostSignalModel(MLBase):
                     try:
                         from sklearn.metrics import (
                             log_loss as _log_loss,
+                        )
+                        from sklearn.metrics import (
                             roc_auc_score as _roc_auc,
                         )
                         _y_ho = y_arr[_cut:]

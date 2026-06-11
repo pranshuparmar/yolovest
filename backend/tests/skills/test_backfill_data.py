@@ -210,6 +210,7 @@ class TestBackfillIntradaySkill:
 
     async def test_defaults_to_5minute_interval(self, app_context, fake_bars):
         import json
+
         from yolovest.skills.backfill_intraday import BackfillIntradaySkill
 
         skill = BackfillIntradaySkill(app_context)
@@ -244,6 +245,7 @@ class TestBackfillIntraday1mSkill:
 
     async def test_defaults_to_nifty100_and_1m_interval(self, app_context, fake_bars):
         import json
+
         from yolovest.skills.backfill_intraday import BackfillIntraday1mSkill
 
         skill = BackfillIntraday1mSkill(app_context)

@@ -14,12 +14,11 @@ import asyncio
 import logging
 import time
 from datetime import date, datetime, timedelta
-
-from yolovest.timezone import now_ist
 from typing import Any
 
 from yolovest.data.base import MarketDataBase
 from yolovest.models.schemas import OHLCVBar, is_valid_ohlc
+from yolovest.timezone import now_ist
 
 logger = logging.getLogger(__name__)
 

@@ -49,6 +49,7 @@ class TestKitePagination:
     async def test_chunks_have_no_overlap_or_gap(self):
         """Adjacent chunks should be back-to-back: no overlapping or skipped days."""
         from datetime import date as _date
+
         from yolovest.data.kite_data import KiteDataProvider
 
         prov = KiteDataProvider(api_key="x", access_token="y")
@@ -98,6 +99,7 @@ class TestKiteThrottling:
         """Two consecutive historical calls must be spaced by at least
         _historical_min_interval_sec."""
         import time as _time
+
         from yolovest.data.kite_data import KiteDataProvider
 
         prov = KiteDataProvider(api_key="x", access_token="y")
@@ -142,7 +144,8 @@ class TestInstrumentCachePrewarming:
     once per symbol — that's an N+1 that exhausts the rate-limit budget."""
 
     async def test_prewarm_fetches_instruments_only_once(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
+
         from yolovest.data.kite_data import KiteDataProvider
 
         prov = KiteDataProvider(api_key="x", access_token="y")

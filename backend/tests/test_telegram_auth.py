@@ -92,7 +92,7 @@ class TestAuthorizeUpdate:
 
         with patch.object(ptb_ext, "ApplicationBuilder", _Builder2):
             fake_app.initialize = _raise_async  # type: ignore[attr-defined]
-            with pytest.raises(_StopStart):
+            with pytest.raises(_StopStartError):
                 await bot.start()
 
         guards = captured.get(-1, [])
@@ -101,9 +101,9 @@ class TestAuthorizeUpdate:
         assert captured.get(0), "command handlers registered in group 0"
 
 
-class _StopStart(Exception):
+class _StopStartError(Exception):
     pass
 
 
 async def _raise_async() -> None:
-    raise _StopStart
+    raise _StopStartError

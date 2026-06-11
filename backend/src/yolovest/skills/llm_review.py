@@ -21,9 +21,12 @@ Flow:
 """
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+
+if TYPE_CHECKING:
+    from yolovest.models.schemas import TradeContext
 
 logger = logging.getLogger(__name__)
 

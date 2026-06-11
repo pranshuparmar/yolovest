@@ -16,8 +16,8 @@ Five features are emitted:
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timedelta
-from typing import Iterable
 
 NEWS_FEATURE_KEYS: tuple[str, ...] = (
     "news_count_24h",

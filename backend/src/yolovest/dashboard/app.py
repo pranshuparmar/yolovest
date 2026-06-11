@@ -22,8 +22,16 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import (
-    Depends, FastAPI, File, Header, HTTPException, Query, Request,
-    UploadFile, WebSocket, WebSocketDisconnect, status,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -4169,6 +4177,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         are normalised so older frontend builds still work.
         """
         from datetime import timedelta
+
         from yolovest.timezone import now_ist
         iv = interval.lower()
         if iv in ("1d", "1day", "day"):
@@ -4605,6 +4614,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         from yolovest.costs import compute_transaction_costs
         from yolovest.data.features import IndicatorConfig, compute_features
         from yolovest.skills.generate_signals import _format_class_probs
+
         # holding-period decision and target/SL geometry now live inside
         # the shared signal_evaluator — no direct imports needed here.
         from yolovest.timezone import IST
@@ -5766,7 +5776,7 @@ def create_app(ctx: AppContext) -> FastAPI:
         _user: str = Depends(verify_credentials),
     ) -> dict[str, Any]:
         """Return all DB-editable config values grouped by section."""
-        from yolovest.config import config_to_ui_sections, FILE_ONLY_KEYS
+        from yolovest.config import config_to_ui_sections
         sections = config_to_ui_sections(ctx.config)
         return {"sections": sections}
 
@@ -5801,7 +5811,9 @@ def create_app(ctx: AppContext) -> FastAPI:
         every key through the same Pydantic validation + apply path as
         manual Settings edits. File-only keys in the upload are ignored."""
         from yolovest.config import (
-            FILE_ONLY_KEYS, apply_db_config, config_to_ui_sections,
+            FILE_ONLY_KEYS,
+            apply_db_config,
+            config_to_ui_sections,
         )
 
         raw = await file.read()
@@ -5870,7 +5882,6 @@ def create_app(ctx: AppContext) -> FastAPI:
             FILE_ONLY_KEYS,
             apply_db_config,
             config_to_ui_sections,
-            _flatten_model,
         )
 
         body = await request.json()

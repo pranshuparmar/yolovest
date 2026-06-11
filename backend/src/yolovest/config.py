@@ -1244,7 +1244,7 @@ def _flatten_model(
     import json as _json
 
     result: dict[str, str] = {}
-    for field_name, field_info in model.model_fields.items():
+    for field_name, _field_info in model.model_fields.items():
         key = f"{prefix}{field_name}" if prefix else field_name
         value = getattr(model, field_name)
 

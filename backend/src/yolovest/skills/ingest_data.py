@@ -313,7 +313,6 @@ class IngestDataSkill(SkillBase):
         # --- Expensive fetches: news, scrapers, sentiment ---
         # Run concurrently with per-source timeouts and an overall budget
         # to prevent slow external APIs from blocking the heartbeat pipeline.
-        deduped: list[Any] = []
         news_enabled = self.ctx.config.market_data.news_enabled
         scrapers_enabled = self.ctx.config.market_data.scrapers_enabled
 
@@ -321,7 +320,6 @@ class IngestDataSkill(SkillBase):
             budget_results = await self._run_expensive_fetches(
                 symbols, active_symbols, news_enabled, scrapers_enabled, results,
             )
-            deduped = budget_results.get("deduped", [])
             results["news_articles"] = budget_results.get("news_count", 0)
             results["budget_elapsed_sec"] = budget_results.get("elapsed_sec", 0)
             sources_completed = budget_results.get("sources_completed", 0)
@@ -582,7 +580,7 @@ class IngestDataSkill(SkillBase):
             try:
                 result = await asyncio.wait_for(coro, timeout=_PER_SOURCE_TIMEOUT_SEC)
                 return (name, result)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("ingest-data: %s timed out after %ds", name, _PER_SOURCE_TIMEOUT_SEC)
                 return (name, None)
             except Exception as e:
@@ -608,7 +606,7 @@ class IngestDataSkill(SkillBase):
                     asyncio.gather(*tasks, return_exceptions=True),
                     timeout=_EXPENSIVE_BUDGET_SEC,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "ingest-data: overall budget of %ds exceeded, skipping remaining sources",
                     _EXPENSIVE_BUDGET_SEC,
@@ -699,7 +697,7 @@ class IngestDataSkill(SkillBase):
                             timeout=_PER_SOURCE_TIMEOUT_SEC,
                         )
                         await self.ctx.db.upsert_sentiment(symbol, sentiment)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.warning("Sentiment analysis timed out for %s", symbol)
                     except Exception as e:
                         logger.warning("Sentiment analysis failed for %s: %s", symbol, e)

@@ -529,7 +529,7 @@ class HeartbeatOrchestrator:
             result = await asyncio.wait_for(
                 skill.safe_execute(**kwargs), timeout=_SKILL_TIMEOUT_SEC,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(
                 "Skill '%s' TIMED OUT after %ds — force-skipping",
                 name, _SKILL_TIMEOUT_SEC,
@@ -620,7 +620,7 @@ class HeartbeatOrchestrator:
                     await asyncio.wait_for(
                         self._stop_event.wait(), timeout=open_in + 2,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
 
         while self._running:
@@ -703,7 +703,7 @@ class HeartbeatOrchestrator:
                 # Use event wait instead of sleep so stop() can interrupt immediately
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=sleep_time)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass  # Normal: timeout means interval elapsed, continue loop
 
     def stop(self) -> None:

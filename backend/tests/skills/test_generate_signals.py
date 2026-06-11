@@ -7,7 +7,7 @@ import pytest
 
 from yolovest.models.schemas import MLPrediction, OHLCVBar
 from yolovest.skills.generate_signals import GenerateSignalsSkill
-from yolovest.timezone import IST, now_ist
+from yolovest.timezone import now_ist
 
 
 def _make_bars(n: int) -> list[OHLCVBar]:
@@ -171,6 +171,7 @@ class TestGenerateSignalsDiagnostics:
     async def test_repeat_requires_higher_confidence(self, signal_skill):
         """Symbols traded within lookback but past cooldown need elevated confidence."""
         from datetime import timedelta
+
         from yolovest.timezone import now_ist
         signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
             {"symbol": "BPCL"},
@@ -198,6 +199,7 @@ class TestGenerateSignalsDiagnostics:
     async def test_repeat_passes_with_high_confidence(self, signal_skill):
         """Repeat symbols pass if confidence exceeds the elevated threshold."""
         from datetime import timedelta
+
         from yolovest.timezone import now_ist
         signal_skill.ctx.db.get_combined_watchlist = AsyncMock(return_value=[
             {"symbol": "BPCL"},

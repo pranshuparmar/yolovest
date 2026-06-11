@@ -55,6 +55,32 @@ line-length = 99
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+# Ignores below codify existing conventions rather than gut the gate:
+# correctness families (F, E9, most of B/UP/RUF) stay fully enforced.
+ignore = [
+    "E501",   # line length — long log/SQL strings are pervasive house style
+    "E402",   # deliberate lazy imports (startup cost / optional deps)
+    "E741",   # short var names in tight math contexts
+    "N806",   # X / y uppercase locals are ML convention
+    "B008",   # FastAPI Depends()/Query() in defaults — framework pattern
+    "B904",   # raise-without-from — worthwhile, deferred cleanup
+    "B027",   # empty non-abstract hook methods on base classes
+    "B905",   # zip(strict=) — call sites predate it
+    "SIM102", # collapsible-if — nested ifs kept for comment clarity
+    "SIM105", # try/except/pass vs contextlib.suppress — stylistic
+    "SIM108", # ternary vs if/else — stylistic
+    "SIM117", # nested with — kept for readability of response handling
+    "UP031",  # printf-style formatting in a few log paths
+    "RUF001", "RUF002", "RUF003",  # ₹ / — / × in strings and comments
+    "RUF005", # list concat style
+    "RUF012", # mutable class attrs — constants by convention here
+    "RUF046", # int() cast style
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests routinely bind `result = await skill.execute(...)` purely to
+# assert side effects, and loop over fixtures without using the index.
+"tests/**" = ["F841", "B007", "RUF007", "RUF059"]
 
 [tool.mypy]
 python_version = "3.11"

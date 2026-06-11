@@ -218,8 +218,9 @@ class TestIntradayTrainingMatrix:
         # ('+05:30') — which doubles a session and (without normalisation)
         # crashes the naive-1m bisect. The builder must collapse the aware
         # copy onto the naive instant: same sample count as the clean set.
-        import yolovest.skills.model_retrain as mr
         from datetime import timezone
+
+        import yolovest.skills.model_retrain as mr
 
         skill.ctx.config.market_hours.intraday_cutoff = "15:30"
         first = datetime(2026, 5, 18)
@@ -338,8 +339,9 @@ class TestBuildIntradayMatrix:
     async def test_drops_5m_symbols_without_1m_path(self, skill):
         # AAA has both 5m + 1m; CCC has only 5m. Only AAA is trainable —
         # CCC would emit nothing but all-HOLD, zero-return samples.
-        import yolovest.skills.model_retrain as mr
         from unittest.mock import AsyncMock
+
+        import yolovest.skills.model_retrain as mr
 
         first = datetime(2026, 5, 18)
         span = sorted({b["timestamp"][:10] for b in _five_min_bars(5, first)})

@@ -9,7 +9,7 @@ import asyncio
 import logging
 import signal
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from yolovest.broker.zerodha import ZerodhaBroker
 from yolovest.config import AppConfig, apply_db_config, get_db_editable_defaults, load_config
@@ -24,6 +24,9 @@ from yolovest.events import EventBus
 from yolovest.llm.gemini import GeminiLLM
 from yolovest.notify import Notifier
 from yolovest.orchestrator import HeartbeatOrchestrator
+
+if TYPE_CHECKING:
+    from yolovest.watchdog import HeartbeatWatchdog
 
 logger = logging.getLogger("yolovest")
 
@@ -56,8 +59,9 @@ def setup_logging(config: "AppConfig | None" = None) -> None:
     Called twice: once at startup with defaults (before config loads),
     then again after config loads to apply configured levels.
     """
-    from pathlib import Path
     from logging.handlers import RotatingFileHandler
+    from pathlib import Path
+
     from yolovest.config import LoggingConfig
 
     cfg = config.log if config else LoggingConfig()
@@ -570,7 +574,7 @@ async def async_main(args: argparse.Namespace) -> None:
         if (
             restored
             and ctx.config.market_data.kite_websocket_enabled
-            and ctx.broker._access_token  # noqa: SLF001 — needed to start ticker
+            and ctx.broker._access_token
         ):
             try:
                 from yolovest.broker.kite_ticker import KiteTickerClient
@@ -607,7 +611,7 @@ async def async_main(args: argparse.Namespace) -> None:
                         # login. _sync_kite_data_token only walks the
                         # ingester chain, so we set this directly.
                         kite_provider.set_access_token(
-                            ctx.broker._access_token,  # noqa: SLF001
+                            ctx.broker._access_token,
                         )
                         logger.info(
                             "Built standalone KiteDataProvider for ticker "
@@ -659,7 +663,7 @@ async def async_main(args: argparse.Namespace) -> None:
 
                     ticker = KiteTickerClient(
                         api_key=ctx.config.broker.api_key.get_secret_value(),
-                        access_token=ctx.broker._access_token,  # noqa: SLF001
+                        access_token=ctx.broker._access_token,
                         kite_data_provider=kite_provider,
                         order_update_callback=_ticker_order_update,
                         tick_broadcast_callback=_ticker_tick_broadcast,
@@ -837,6 +841,9 @@ async def async_main(args: argparse.Namespace) -> None:
     # without waiting for pickle deserialization (see note ~120 lines
     # above). Models are loaded sequentially inside the task so they
     # don't compete for memory on small hosts.
+    # Keep a reference so the loader task isn't garbage-collected
+    # mid-run (asyncio only holds weak refs to tasks); cancelled
+    # explicitly on shutdown below.
     ml_load_task: asyncio.Task[None] | None = None
     if ctx.ml is not None:
         ml_load_task = asyncio.create_task(_load_ml_models_background(ctx))
@@ -870,6 +877,8 @@ async def async_main(args: argparse.Namespace) -> None:
         cron_task.cancel()
         watchdog.stop()
         watchdog_task.cancel()
+        if ml_load_task is not None:
+            ml_load_task.cancel()
         if ctx.ticker is not None:
             try:
                 await ctx.ticker.stop()
@@ -887,7 +896,7 @@ async def async_main(args: argparse.Namespace) -> None:
         if telegram_bot:
             try:
                 await asyncio.wait_for(telegram_bot.stop(), timeout=3.0)
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 logger.warning("Telegram bot stop timed out, forcing shutdown")
 
         # 3. Cancel dashboard

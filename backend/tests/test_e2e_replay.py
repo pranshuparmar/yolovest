@@ -13,7 +13,6 @@ Verifies the full chain:
 This test takes ~2-3 seconds (no external APIs, no sleeps).
 """
 
-import math
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,7 +27,6 @@ from yolovest.events import EventBus
 from yolovest.models.schemas import MLPrediction, OHLCVBar
 from yolovest.notify import Notifier
 from yolovest.orchestrator import HeartbeatOrchestrator
-
 
 # ---------------------------------------------------------------------------
 # Realistic OHLCV data generator

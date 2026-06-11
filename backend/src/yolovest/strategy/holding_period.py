@@ -10,7 +10,6 @@ existing portfolio positions are already long-dated.
 """
 
 import logging
-import math
 from datetime import time
 from typing import Any
 

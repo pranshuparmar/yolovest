@@ -15,8 +15,9 @@ Flow:
 
 import asyncio
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from typing import Any
+
 from yolovest.data.features import (
     IndicatorConfig,
     compute_daily_trend_features,
@@ -127,7 +128,6 @@ class GenerateSignalsSkill(SkillBase):
         min_confidence_sell = risk_cfg.min_confidence_sell
         # Legacy threshold kept for diagnostics
         min_confidence = min(min_confidence_buy, min_confidence_sell)
-        skip_sell_on_holdings = risk_cfg.skip_sell_on_holdings
         rotation_cfg = self.ctx.config.scanning
         # Tracks per-symbol signal productivity for watchlist rotation
         outcome_tracker: dict[str, bool] = {}
@@ -164,7 +164,6 @@ class GenerateSignalsSkill(SkillBase):
                 },
             )
 
-        strategy_cfg = self.ctx.config.strategy
         indicator_cfg = IndicatorConfig(
             ema_periods=self.ctx.config.strategy.ema_periods,
             rsi=self.ctx.config.strategy.indicators.rsi,

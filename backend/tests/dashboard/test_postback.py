@@ -172,8 +172,9 @@ class TestPostbackHardening:
     def test_disabled_without_api_secret(self, sample_config, dashboard_ctx):
         """No broker secret configured → endpoint is disabled (403), not
         open to forged order updates."""
-        from pydantic import SecretStr
         from fastapi.testclient import TestClient
+        from pydantic import SecretStr
+
         from yolovest.dashboard.app import create_app
 
         dashboard_ctx.config.broker.api_secret = SecretStr("")

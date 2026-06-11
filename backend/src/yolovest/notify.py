@@ -6,9 +6,8 @@ Respects enabled/disabled toggle and per-alert-type config from config.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
-
 from collections import deque
+from typing import Any
 
 from yolovest.config import AppConfig
 

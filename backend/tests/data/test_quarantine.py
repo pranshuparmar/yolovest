@@ -1,7 +1,6 @@
 """Tests for symbol quarantine (auto-block after repeated fetch failures)."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 

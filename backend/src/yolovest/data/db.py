@@ -8,16 +8,15 @@ import contextlib
 import json
 import logging
 from contextvars import ContextVar
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-UTC = timezone.utc
+UTC = UTC
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
-from typing import Any
-
-from yolovest.models.schemas import EconomicEvent, NewsArticle, OHLCVBar, SentimentResult
+from yolovest.models.schemas import NewsArticle, OHLCVBar, SentimentResult
 from yolovest.scoring import path_aware_score
 from yolovest.timezone import IST, UTC, now_ist, now_utc
 
@@ -2878,8 +2877,6 @@ class Database:
             if sector:
                 sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
-        total_position_value = system_position_value + adopted_position_value
-
         # total_capital = initial + all realized PnL
         cursor = await self.conn.execute(
             f"SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE pnl IS NOT NULL{mode_clause}",
@@ -3413,7 +3410,8 @@ class Database:
         Mode-scoped when supplied; paper / live snapshots are stored
         independently so flipping modes doesn't corrupt either history.
         """
-        from datetime import date as _date, timedelta as _td
+        from datetime import date as _date
+        from datetime import timedelta as _td
         since = (_date.today() - _td(days=days)).isoformat()
         query = (
             "SELECT id, snapshot_date, captured_at, mode, available_cash, "
@@ -3473,7 +3471,6 @@ class Database:
         Note: PnL is stored as NULL while position is open; this updates
         a computed field or can be used for tracking in audit_log.
         """
-        ts_now = now_utc().isoformat()
         # Log unrealized PnL as audit entry for tracking
         await self.log_audit(
             action_type="unrealized_pnl_update",
@@ -3640,15 +3637,6 @@ class Database:
 
         Returns {shadow: {metrics}, production: {metrics}, agreement_rate}.
         """
-        # Get the production and shadow model versions for this type
-        prod = await self.get_production_model(model_type)
-        prod_version = prod["version"] if prod else None
-
-        shadow_models = await self.get_all_shadow_models()
-        shadow_versions = [
-            s["version"] for s in shadow_models if s["model_type"] == model_type
-        ]
-
         result: dict[str, Any] = {"shadow": {}, "production": {}, "agreement_rate": None}
 
         # Fetch scored predictions grouped by is_shadow
@@ -5025,14 +5013,14 @@ class Database:
         for table, meta in tables.items():
             ts_col = meta["ts_col"]
             try:
-                cursor = await self.conn.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+                cursor = await self.conn.execute(f"SELECT COUNT(*) FROM {table}")
                 row = await cursor.fetchone()
                 count = row[0] if row else 0
 
                 oldest = newest = None
                 if count > 0:
                     cursor = await self.conn.execute(
-                        f"SELECT MIN({ts_col}), MAX({ts_col}) FROM {table}"  # noqa: S608
+                        f"SELECT MIN({ts_col}), MAX({ts_col}) FROM {table}"
                     )
                     row = await cursor.fetchone()
                     if row:
@@ -5089,7 +5077,7 @@ class Database:
 
         cutoff = (now_utc() - timedelta(days=older_than_days)).isoformat()
         cursor = await self.conn.execute(
-            f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,)  # noqa: S608
+            f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,)
         )
         await self.conn.commit()
         deleted = cursor.rowcount
@@ -5156,9 +5144,6 @@ class Database:
         threshold = 3
         if existing:
             new_count = existing[0] + 1
-            quarantined_at = (
-                "datetime('now')" if new_count >= threshold else None
-            )
             if new_count >= threshold:
                 await self.conn.execute(
                     "UPDATE quarantined_symbols SET "
@@ -5594,10 +5579,10 @@ class Database:
             try:
                 if where:
                     cursor = await self.conn.execute(
-                        f"DELETE FROM {table} WHERE {where}", params,  # noqa: S608
+                        f"DELETE FROM {table} WHERE {where}", params,
                     )
                 else:
-                    cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
+                    cursor = await self.conn.execute(f"DELETE FROM {table}")
                 return cursor.rowcount
             except Exception:
                 logger.warning(
@@ -5675,7 +5660,7 @@ class Database:
         deleted: dict[str, int] = {}
         for table in tables:
             try:
-                cursor = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608
+                cursor = await self.conn.execute(f"DELETE FROM {table}")
                 deleted[table] = cursor.rowcount
             except Exception:
                 logger.debug("Could not reset table %s (may not exist)", table)

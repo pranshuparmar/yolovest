@@ -255,6 +255,7 @@ class TestScoreDryRunTargetDate:
 class TestAutoScoreSkill:
     async def test_scores_pending_dry_runs(self, db):
         from types import SimpleNamespace
+
         from yolovest.skills.auto_score import AutoScoreSkill
 
         await db.upsert_ohlcv("AAA", "daily", _dated_bars("2024-03-15", [100, 102, 105, 110]), "test")
@@ -277,6 +278,7 @@ class TestAutoScoreSkill:
 
     async def test_disabled_via_config(self, db):
         from types import SimpleNamespace
+
         from yolovest.skills.auto_score import AutoScoreSkill
         ctx = SimpleNamespace(db=db, config=SimpleNamespace(
             scoring=SimpleNamespace(auto_score_enabled=False, auto_score_cron="45 16 * * 1-5"),

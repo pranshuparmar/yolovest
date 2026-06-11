@@ -209,7 +209,7 @@ class TestTrainingGuard:
 
     async def test_insufficient_samples_raises(self, tmp_path):
         sm = XGBoostSignalModel(model_dir=str(tmp_path))
-        X = [[1, 2, 3]] * 50  # only 50 samples  # noqa: N806
+        X = [[1, 2, 3]] * 50  # only 50 samples
         y = [0] * 50
 
         with pytest.raises(ValueError, match="Insufficient training data"):
@@ -217,7 +217,7 @@ class TestTrainingGuard:
 
     async def test_custom_min_samples(self, tmp_path):
         sm = XGBoostSignalModel(model_dir=str(tmp_path))
-        X = [[1, 2, 3]] * 90  # noqa: N806
+        X = [[1, 2, 3]] * 90
         y = [0] * 90
 
         with pytest.raises(ValueError, match="Insufficient training data: 90"):
@@ -227,7 +227,7 @@ class TestTrainingGuard:
         """200 samples exactly should not raise (trains with xgboost)."""
         # This test would need real xgboost, so we just verify the guard
         sm = XGBoostSignalModel(model_dir=str(tmp_path))
-        X = [[1, 2, 3]] * 199  # noqa: N806
+        X = [[1, 2, 3]] * 199
         y = [0] * 199
 
         with pytest.raises(ValueError, match="Insufficient training data: 199"):
@@ -245,7 +245,7 @@ class TestFinalScaleHoldout:
         from datetime import date, timedelta
         random.seed(7)
         base = date(2022, 1, 1)
-        X, y, meta = [], [], []  # noqa: N806
+        X, y, meta = [], [], []
         for i in range(n):
             feats = [random.gauss(0, 1) for _ in range(n_feat)]
             s = feats[0]
@@ -275,7 +275,7 @@ class TestFinalScaleHoldout:
             sell_threshold_override=None,
         ))
         sm = XGBoostSignalModel(model_dir=str(tmp_path), config=cfg)
-        X, y, meta = self._dataset()  # noqa: N806
+        X, y, meta = self._dataset()
         metrics = await sm.train("intraday", X, y, {
             "n_estimators": 25, "max_depth": 3,
             "bars_meta": meta, "lookahead_bars": 1,
