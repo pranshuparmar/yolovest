@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, lazy, Suspense } from "react";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import { ThemeProvider } from "./hooks/useTheme";
@@ -51,6 +51,18 @@ const queryClient = new QueryClient({
       refetchOnWindowFocus: false,
     },
   },
+  // Surface every mutation failure that the call site didn't handle
+  // itself — silent failures on a trading app mean the user only finds
+  // out from stale UI. NotificationCenter listens for this event.
+  mutationCache: new MutationCache({
+    onError: (error, _variables, _context, mutation) => {
+      if (mutation.options.onError) return; // call site shows its own UI
+      const message = error instanceof Error ? error.message : String(error);
+      window.dispatchEvent(
+        new CustomEvent("yolovest-mutation-error", { detail: { message } })
+      );
+    },
+  }),
 });
 
 function AuthSync() {

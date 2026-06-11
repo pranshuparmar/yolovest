@@ -11,9 +11,19 @@ import { api } from "../api/endpoints";
 const store: Map<string, number> = new Map();
 const subscribers: Set<() => void> = new Set();
 
+// Bound the map so a long-lived tab cycling through many symbols
+// (watchlist rotation, symbol pages) can't grow it without limit.
+const MAX_TRACKED_SYMBOLS = 300;
+
 export function feedTick(symbol: string, ltp: number): void {
   if (!symbol || !Number.isFinite(ltp) || ltp <= 0) return;
+  // Delete-then-set refreshes insertion order, making eviction ~LRU.
+  store.delete(symbol);
   store.set(symbol, ltp);
+  if (store.size > MAX_TRACKED_SYMBOLS) {
+    const oldest = store.keys().next().value;
+    if (oldest !== undefined) store.delete(oldest);
+  }
   for (const cb of subscribers) cb();
 }
 

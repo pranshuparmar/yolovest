@@ -33,6 +33,16 @@ export function useNotifications() {
     []
   );
 
+  // Mutation failures dispatched by the global MutationCache (App.tsx).
+  useEffect(() => {
+    const onMutationError = (e: Event) => {
+      const detail = (e as CustomEvent<{ message?: string }>).detail;
+      addNotification("alert", `Action failed: ${detail?.message ?? "unknown error"}`);
+    };
+    window.addEventListener("yolovest-mutation-error", onMutationError);
+    return () => window.removeEventListener("yolovest-mutation-error", onMutationError);
+  }, [addNotification]);
+
   useEffect(() => {
     let disposed = false;
     function connect() {
