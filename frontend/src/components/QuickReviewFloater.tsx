@@ -7,6 +7,7 @@ import {
   useSymbolQuickContext,
   useUniverseSymbols,
 } from "../hooks/queries";
+import { fmt, fmtCompact } from "../utils/format";
 
 const RECENT_KEY = "quickReview.recent";
 const MAX_RECENT = 5;
@@ -27,22 +28,6 @@ function pushRecent(sym: string): string[] {
   const next = [sym, ...cur].slice(0, MAX_RECENT);
   localStorage.setItem(RECENT_KEY, JSON.stringify(next));
   return next;
-}
-
-function fmt(n: number | null | undefined, d = 2): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return n.toLocaleString("en-IN", {
-    minimumFractionDigits: d,
-    maximumFractionDigits: d,
-  });
-}
-
-function fmtCompact(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  if (n >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
-  if (n >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-  return n.toFixed(0);
 }
 
 export function QuickReviewFloater() {

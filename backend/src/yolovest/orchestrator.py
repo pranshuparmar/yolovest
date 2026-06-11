@@ -8,7 +8,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable, Coroutine
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from yolovest.context import AppContext
 from yolovest.skills import SKILL_REGISTRY
@@ -260,7 +260,9 @@ class HeartbeatOrchestrator:
     @staticmethod
     def _today_start() -> str:
         """Return today's start time in UTC ISO format for signal cleanup."""
-        from yolovest.timezone import UTC, now_ist
+        from datetime import UTC
+
+        from yolovest.timezone import now_ist
         return now_ist().replace(
             hour=0, minute=0, second=0, microsecond=0,
         ).astimezone(UTC).isoformat()
@@ -413,6 +415,9 @@ class HeartbeatOrchestrator:
                     )
                     return results
 
+            # Signals are plain dicts end-to-end in practice (the
+            # evaluator emits dicts); narrow for the queue insert.
+            signal = cast("dict[str, Any]", signal)
             signal.setdefault("mode", self._ctx.config.mode)
             pending_id = await self._ctx.db.insert_pending_trade(signal)
             await self._set_disposition(
@@ -529,7 +534,7 @@ class HeartbeatOrchestrator:
             result = await asyncio.wait_for(
                 skill.safe_execute(**kwargs), timeout=_SKILL_TIMEOUT_SEC,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(
                 "Skill '%s' TIMED OUT after %ds — force-skipping",
                 name, _SKILL_TIMEOUT_SEC,
@@ -620,7 +625,7 @@ class HeartbeatOrchestrator:
                     await asyncio.wait_for(
                         self._stop_event.wait(), timeout=open_in + 2,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
 
         while self._running:
@@ -657,6 +662,7 @@ class HeartbeatOrchestrator:
             # every signal with "Outside order window" before then — a
             # cycle that fires at 09:15 when order_start=09:20 wastes
             # 5 minutes of compute on signals that all get deferred.
+            interval: float
             if self._ctx.market_hours.is_market_hours():
                 interval = self._ctx.config.heartbeat.market_hours_interval_min * 60
                 # Edge case: server was started (or the previous
@@ -703,7 +709,7 @@ class HeartbeatOrchestrator:
                 # Use event wait instead of sleep so stop() can interrupt immediately
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=sleep_time)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass  # Normal: timeout means interval elapsed, continue loop
 
     def stop(self) -> None:

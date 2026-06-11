@@ -33,10 +33,29 @@ export function useNotifications() {
     []
   );
 
+  // Mutation failures dispatched by the global MutationCache (App.tsx).
   useEffect(() => {
+    const onMutationError = (e: Event) => {
+      const detail = (e as CustomEvent<{ message?: string }>).detail;
+      addNotification("alert", `Action failed: ${detail?.message ?? "unknown error"}`);
+    };
+    window.addEventListener("yolovest-mutation-error", onMutationError);
+    return () => window.removeEventListener("yolovest-mutation-error", onMutationError);
+  }, [addNotification]);
+
+  useEffect(() => {
+    let disposed = false;
     function connect() {
+      if (disposed) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      // The browser WebSocket API can't set an Authorization header, so
+      // the session token rides as a query param. Read it at connect
+      // time (not mount time) so a reconnect after re-login picks up
+      // the fresh token.
+      const token = localStorage.getItem("yv_token") ?? "";
+      const ws = new WebSocket(
+        `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+      );
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -192,6 +211,7 @@ export function useNotifications() {
       };
 
       ws.onclose = () => {
+        if (disposed) return;
         const delay = Math.min(1000 * 2 ** retryRef.current, 30000);
         retryRef.current++;
         setTimeout(connect, delay);
@@ -201,7 +221,10 @@ export function useNotifications() {
     }
 
     connect();
-    return () => wsRef.current?.close();
+    return () => {
+      disposed = true;
+      wsRef.current?.close();
+    };
   }, [queryClient, addNotification]);
 
   return { notifications, clearAll, dismiss };

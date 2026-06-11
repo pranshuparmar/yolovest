@@ -5,13 +5,7 @@ import { parseUTC, getTimezone } from "../utils/datetime";
 import { useLtpStream, useLtpBatch } from "../hooks/useLtpStream";
 import { useMemo } from "react";
 import { SymbolLink } from "./SymbolLink";
-
-function fmt(n: number, d = 2) {
-  return n.toLocaleString("en-IN", {
-    minimumFractionDigits: d,
-    maximumFractionDigits: d,
-  });
-}
+import { fmt } from "../utils/format";
 
 export function TradesTable({
   trades,

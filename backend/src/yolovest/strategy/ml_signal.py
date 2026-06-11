@@ -30,6 +30,32 @@ def _lib_version(module: str) -> str:
         return "unknown"
 
 
+def _warn_on_lib_skew(artifact: dict[str, Any], label: str) -> None:
+    """Loud (fail-open) warning when a model artifact was trained under a
+    different xgboost/sklearn than the running image.
+
+    Pickled estimators usually survive minor version bumps, but sklearn
+    explicitly does not guarantee it — and a silently-shifted calibrator
+    changes the probabilities every signal gate reads. The cross-machine
+    import endpoint hard-gates on these stamps; startup loads stay
+    fail-open (the model still loads) but tell the user to retrain so the
+    artifact re-pins to the running versions. Pre-stamp artifacts (no
+    version fields) are skipped.
+    """
+    for lib, key in (("xgboost", "xgboost_version"), ("scikit-learn", "sklearn_version")):
+        stamped = artifact.get(key)
+        if not stamped or stamped == "unknown":
+            continue
+        running = _lib_version(lib)
+        if running != "unknown" and running != stamped:
+            logger.warning(
+                "%s: model %s was trained under %s %s but this image runs %s — "
+                "calibrated probabilities may shift. Run the model-retrain "
+                "skill to re-pin the artifact to the current libraries.",
+                label, artifact.get("version", "?"), lib, stamped, running,
+            )
+
+
 def _purge_boundary(
     bars_meta_raw: list[dict[str, Any]],
     cut: int,
@@ -367,6 +393,7 @@ class XGBoostSignalModel(MLBase):
             return dict[str, Any](joblib.load(filepath))
 
         artifact = await asyncio.to_thread(_load)
+        _warn_on_lib_skew(artifact, f"load_shadow_model[{model_type}]")
 
         if model_type == "intraday":
             self._shadow_intraday_model = artifact["model"]
@@ -507,7 +534,7 @@ class XGBoostSignalModel(MLBase):
         def _run_inference() -> tuple[int, float, list[float]]:
             import numpy as np
 
-            X = np.array(feature_vector)  # noqa: N806
+            X = np.array(feature_vector)
             pred_label = int(model.predict(X)[0])
             # Get probability for the predicted class + full distribution
             probas = model.predict_proba(X)[0]
@@ -525,7 +552,7 @@ class XGBoostSignalModel(MLBase):
             def _calibrate() -> tuple[int, float, list[float]]:
                 import numpy as np
 
-                X = np.array(feature_vector)  # noqa: N806
+                X = np.array(feature_vector)
                 cal_label = int(calibrator.predict(X)[0])
                 cal_probas = calibrator.predict_proba(X)[0]
                 cal_confidence = float(cal_probas[cal_label])
@@ -685,7 +712,7 @@ class XGBoostSignalModel(MLBase):
     @staticmethod
     def _compute_attribution(
         model: Any,
-        feature_vector: list[float],
+        feature_vector: list[Any],
         feature_names: list[str] | None,
         pred_label: int,
         top_n: int = 5,
@@ -812,7 +839,7 @@ class XGBoostSignalModel(MLBase):
             # GC drop the Python list-of-lists as soon as the array is
             # built — list-of-lists has higher per-cell overhead than
             # the ndarray on top of the data it holds.
-            X_arr = np.asarray(X, dtype=np.float32)  # noqa: N806
+            X_arr = np.asarray(X, dtype=np.float32)
             X.clear()
             import gc as _gc
             _gc.collect()
@@ -991,7 +1018,7 @@ class XGBoostSignalModel(MLBase):
                         cutoff = test_min - _td(days=purge_calendar_days)
                         kept = [
                             i for i in train_idx
-                            if (_meta_date(i) is None or _meta_date(i) < cutoff)
+                            if (_meta_date(i) is None or _meta_date(i) < cutoff)  # type: ignore[operator]  # None short-circuits
                         ]
                         purged = len(train_idx) - len(kept)
                         if kept and purged > 0:
@@ -1002,7 +1029,7 @@ class XGBoostSignalModel(MLBase):
                                 purged, purge_calendar_days, test_min,
                             )
 
-                X_train, X_test = X_arr[train_idx], X_arr[test_idx]  # noqa: N806
+                X_train, X_test = X_arr[train_idx], X_arr[test_idx]
                 y_train, y_test = y_arr[train_idx], y_arr[test_idx]
                 w_train = weights_arr[train_idx] if weights_arr is not None else None
 
@@ -1201,6 +1228,8 @@ class XGBoostSignalModel(MLBase):
                     try:
                         from sklearn.metrics import (
                             log_loss as _log_loss,
+                        )
+                        from sklearn.metrics import (
                             roc_auc_score as _roc_auc,
                         )
                         _y_ho = y_arr[_cut:]
@@ -1363,7 +1392,7 @@ class XGBoostSignalModel(MLBase):
                     _boot_series, annualization=_boot_annual,
                     n_iter=200, percentile=25.0,
                 ) if _boot_series else headline.sharpe
-                metrics = {
+                metrics: dict[str, Any] = {
                     "sharpe": headline.sharpe,
                     "sharpe_lower": sharpe_lower,
                     "max_drawdown_pct": headline.max_drawdown_pct,
@@ -1610,6 +1639,7 @@ class XGBoostSignalModel(MLBase):
             return dict[str, Any](joblib.load(filepath))
 
         artifact = await asyncio.to_thread(_load)
+        _warn_on_lib_skew(artifact, f"load_model[{model_type}]")
 
         self._set_model(model_type, artifact["model"])
         self._set_calibrator(model_type, artifact.get("calibrator"))

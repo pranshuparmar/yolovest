@@ -525,6 +525,7 @@ class TestBulkDelete:
         """
         import asyncio
         from datetime import datetime
+
         from yolovest.models.schemas import OHLCVBar
 
         bars = [

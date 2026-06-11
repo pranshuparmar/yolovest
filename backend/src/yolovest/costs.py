@@ -12,7 +12,6 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from yolovest.broker.base import BrokerBase
     from yolovest.config import TransactionCostConfig
 
 logger = logging.getLogger(__name__)
@@ -156,7 +155,7 @@ def compute_transaction_cost_breakdown(
     quantity: int,
     product: str = "MIS",
     cost_config: TransactionCostConfig | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     """Compute itemized transaction cost breakdown for an equity trade.
 
     Returns dict with brokerage, stt, other_charges, and total.
@@ -193,7 +192,7 @@ def compute_transaction_cost_breakdown(
 
 
 async def resolve_round_trip_costs(
-    broker: BrokerBase | None,
+    broker: Any,
     *,
     symbol: str,
     signal_type: str,
@@ -203,7 +202,7 @@ async def resolve_round_trip_costs(
     product: str,
     exchange: str = "NSE",
     cost_config: TransactionCostConfig | None = None,
-) -> tuple[float, str, dict[str, float]]:
+) -> tuple[float, str, dict[str, Any]]:
     """Return (total_costs, source, breakdown) for a round-trip trade.
 
     `source` is "broker" (from contract-note API) or "estimate" (config-based).

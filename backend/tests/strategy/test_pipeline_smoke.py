@@ -37,8 +37,9 @@ def _walk_bars(symbol: str, n: int, drift: float, seed: int) -> list[dict]:
 @pytest.fixture
 def skill(app_context):
     # Attach a real XGBoost model wired to the real (post-change) config.
-    from yolovest.strategy.ml_signal import XGBoostSignalModel
     import tempfile
+
+    from yolovest.strategy.ml_signal import XGBoostSignalModel
     app_context.ml = XGBoostSignalModel(
         model_dir=tempfile.mkdtemp(), config=app_context.config,
     )

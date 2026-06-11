@@ -1,6 +1,6 @@
 """Tests for quarantine triggering on provider-level errors."""
 
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -46,6 +46,7 @@ class TestQuarantineOnProviderErrors:
     async def test_quarantine_on_provider_errors_with_stale_data(self, ingest_skill):
         """Provider errors + stale-ish data → should count as failure."""
         from datetime import datetime, timedelta
+
         from yolovest.models.schemas import OHLCVBar
 
         # Return data that's 2 days old (within 5-day threshold)
@@ -82,6 +83,7 @@ class TestQuarantineOnProviderErrors:
     async def test_no_quarantine_when_all_providers_healthy(self, ingest_skill):
         """Fresh data, no provider errors → should call record_fetch_success."""
         from datetime import datetime
+
         from yolovest.models.schemas import OHLCVBar
 
         fresh_bar = OHLCVBar(
@@ -132,6 +134,7 @@ class TestQuarantineOnProviderErrors:
         )
 
         from datetime import datetime
+
         from yolovest.models.schemas import OHLCVBar
         fresh_bar = OHLCVBar(
             timestamp=datetime.now(),

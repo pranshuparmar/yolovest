@@ -68,9 +68,11 @@ class TelegramBot:
             return
 
         try:
+            from telegram import Update
             from telegram.ext import (
                 ApplicationBuilder,
                 CommandHandler,
+                TypeHandler,
             )
         except ImportError:
             logger.warning("python-telegram-bot not installed, Telegram bot disabled")
@@ -81,6 +83,12 @@ class TelegramBot:
             .token(self._cfg.bot_token.get_secret_value())
             .build()
         )
+
+        # Authorization gate — group -1 runs before every command handler.
+        # The bot token only authenticates US to Telegram; anyone who finds
+        # the bot's username can message it. Without this, a stranger could
+        # issue /kill, /trade, /auth or /mode live.
+        self._app.add_handler(TypeHandler(Update, self._authorize_update), group=-1)
 
         # Register command handlers
         self._app.add_handler(CommandHandler("start", self._cmd_start))
@@ -133,16 +141,44 @@ class TelegramBot:
             # by the time stop() is called, so these are just cleanup.
             try:
                 await asyncio.wait_for(self._app.updater.stop(), timeout=1.5)
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 logger.warning("Telegram updater stop timed out")
             try:
                 await asyncio.wait_for(self._app.stop(), timeout=1.0)
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 logger.warning("Telegram app stop timed out")
             try:
                 await asyncio.wait_for(self._app.shutdown(), timeout=1.0)
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 logger.warning("Telegram app shutdown timed out")
+
+    async def _authorize_update(self, update: Any, context: Any) -> None:
+        """Drop any update that isn't from the configured chat_id.
+
+        Fails closed: when chat_id is unset, every command is blocked
+        rather than open to the world. Unauthorized senders get no reply
+        (replying would confirm the bot is alive to whoever is probing);
+        the attempt is logged at WARNING instead.
+        """
+        from telegram.ext import ApplicationHandlerStop
+
+        allowed = str(self._cfg.chat_id or "").strip()
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        sender_ids = {
+            str(getattr(chat, "id", "") or ""),
+            str(getattr(user, "id", "") or ""),
+        } - {""}
+        if allowed and allowed in sender_ids:
+            return  # authorized — command handlers may run
+        logger.warning(
+            "Telegram: dropped update from unauthorized sender %s (%s)",
+            sorted(sender_ids) if sender_ids else "<unknown>",
+            "chat_id not configured — all commands blocked"
+            if not allowed
+            else "chat_id mismatch",
+        )
+        raise ApplicationHandlerStop
 
     async def send_message(self, text: str) -> bool:
         """Send a message to the configured chat_id."""
@@ -715,8 +751,8 @@ class TelegramBot:
                 body_lines.append(f"    {ctx_line}")
             if reason:
                 body_lines.append(f"    {reason}")
-            row = header + "\n" + "\n".join(body_lines) + target_line
-            lines.append(row)
+            row_text = header + "\n" + "\n".join(body_lines) + target_line
+            lines.append(row_text)
 
         msg = "<b>Symbol Review</b>\n\n" + "\n\n".join(lines)
         await update.message.reply_html(msg)
@@ -938,7 +974,7 @@ class TelegramBot:
             except Exception:
                 logger.debug("Failed to mark signal executed", exc_info=True)
             try:
-                from yolovest.dashboard.app import broadcast_ws
+                from yolovest.dashboard.ws import broadcast_ws
                 await broadcast_ws("pending_approved", {
                     "trade_id": trade_id, "symbol": signal.get("symbol"),
                 })
@@ -994,7 +1030,7 @@ class TelegramBot:
 
         await self._ctx.db.decide_pending_trade(trade["id"], "rejected", "telegram")
         try:
-            from yolovest.dashboard.app import broadcast_ws
+            from yolovest.dashboard.ws import broadcast_ws
             await broadcast_ws("pending_rejected", {
                 "trade_id": trade["id"], "symbol": symbol,
             })

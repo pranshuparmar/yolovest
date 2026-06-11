@@ -20,7 +20,7 @@ features only when the eligibility flag is set.
 from __future__ import annotations
 
 from bisect import bisect_right
-from typing import Sequence
+from collections.abc import Sequence
 
 FNO_FEATURE_KEYS: tuple[str, ...] = (
     "pcr_oi",

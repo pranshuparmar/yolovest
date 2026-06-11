@@ -130,3 +130,56 @@ class TestShouldRun:
         trade_skill.ctx.config.mode = "live"
         trade_skill.ctx.broker.is_authenticated = AsyncMock(return_value=True)
         assert trade_skill.should_run()
+
+
+class TestLivePreconditions:
+    """The dedup and price-drift early exits must return (SkillResult,
+    order_price) tuples — a bare SkillResult would crash the caller's
+    unpack the moment either path fires (regression: caught by mypy
+    during the _execute_live decomposition)."""
+
+    async def test_duplicate_signal_skips_with_tuple_return(
+        self, app_context, sample_config,
+    ):
+        from unittest.mock import AsyncMock
+
+        app_context.config.mode = "live"
+        app_context.broker._mode = "live"
+        memory = AsyncMock()
+        memory.get = AsyncMock(return_value="in_flight")
+        app_context.memory = memory
+
+        skill = TradeExecuteSkill(app_context)
+        signal = {
+            "symbol": "RELIANCE", "signal_type": "BUY", "entry_price": 2500.0,
+            "stop_loss_price": 2450.0, "target_price": 2600.0,
+            "position_size": 10, "product": "MIS",
+        }
+        result = await skill._execute_live(signal)
+        assert result.success
+        assert result.data["skipped"] is True
+        assert result.data["reason"] == "duplicate_signal"
+        app_context.broker.place_order.assert_not_called()
+
+    async def test_price_drift_rejects_with_tuple_return(
+        self, app_context,
+    ):
+        from unittest.mock import AsyncMock
+
+        app_context.config.mode = "live"
+        app_context.broker._mode = "live"
+        app_context.memory = None
+        # LTP 5% away from the signal entry — beyond price_drift_max_pct.
+        app_context.market_data.get_ltp = AsyncMock(return_value=2625.0)
+
+        skill = TradeExecuteSkill(app_context)
+        signal = {
+            "symbol": "RELIANCE", "signal_type": "BUY", "entry_price": 2500.0,
+            "stop_loss_price": 2450.0, "target_price": 2600.0,
+            "position_size": 10, "product": "MIS",
+        }
+        result = await skill._execute_live(signal)
+        assert result.success
+        assert result.data["rejected"] is True
+        assert result.data["reason"].startswith("price_drift")
+        app_context.broker.place_order.assert_not_called()

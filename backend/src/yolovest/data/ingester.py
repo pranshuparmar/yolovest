@@ -12,10 +12,9 @@ import statistics
 from datetime import timedelta
 from typing import Any
 
-from yolovest.timezone import IST, now_ist
-
 from yolovest.data.base import MarketDataBase
 from yolovest.models.schemas import OHLCVBar
+from yolovest.timezone import IST, now_ist
 
 logger = logging.getLogger(__name__)
 

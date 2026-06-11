@@ -8,13 +8,13 @@ the heartbeat orchestrator.
 import asyncio
 import logging
 from datetime import datetime
+from typing import Any
 
 from croniter import croniter
 
-from yolovest.timezone import now_ist
-
 from yolovest.context import AppContext
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
+from yolovest.timezone import now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ class CronScheduler:
         return result
 
     @staticmethod
-    def _now():
+    def _now() -> Any:
         """Return the current time in IST. Extracted for easy patching in tests."""
         return now_ist()
 

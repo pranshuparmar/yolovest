@@ -226,9 +226,9 @@ class RepricePendingSkill(SkillBase):
                     lines.append(
                         f"⏱ {len(expired)} pending trade(s) expired (price drift):"
                     )
-                    for e in expired:
+                    for exp in expired:
                         lines.append(
-                            f"  • {e['signal_type']} {e['symbol']}: {e['reason']}"
+                            f"  • {exp['signal_type']} {exp['symbol']}: {exp['reason']}"
                         )
                 if adjusted:
                     if lines:

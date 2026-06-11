@@ -36,6 +36,8 @@ from typing import TYPE_CHECKING
 from yolovest.costs import compute_transaction_costs
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from yolovest.config import TransactionCostConfig
 
 logger = logging.getLogger(__name__)
@@ -106,7 +108,7 @@ class BacktestConfig:
     entry_slippage_pct: float = 0.0005  # each side
     product: str = "MIS"
     annualization_factor: int = 252
-    cost_config: "TransactionCostConfig | None" = None
+    cost_config: TransactionCostConfig | None = None
     # Implicit per-trade stop loss used for position sizing only. We
     # don't actually exit at SL in v1 — exit is always the lookahead-
     # bar close. This is the sizing denominator (risk amount / risk per
@@ -264,7 +266,8 @@ def run_walk_forward_backtest(
             "must be the same length"
         )
 
-    from datetime import date as _date, timedelta as _td
+    from datetime import date as _date
+    from datetime import timedelta as _td
 
     def _parse_iso_date(s: str) -> _date | None:
         try:
@@ -472,7 +475,7 @@ def backtest_by_period(
     bars_meta: list[BarMeta],
     cfg: BacktestConfig,
     *,
-    key: "Callable[[BarMeta], str]" = lambda m: (m.entry_date or "")[:4],
+    key: Callable[[BarMeta], str] = lambda m: (m.entry_date or "")[:4],
 ) -> dict[str, BacktestResult]:
     """Run the walk-forward backtest separately per period (default: the
     calendar year of ``entry_date``) so the edge can be inspected over time.

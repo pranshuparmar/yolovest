@@ -8,11 +8,11 @@ All methods return empty results on failure — never crash the pipeline.
 import asyncio
 import logging
 import re
-from yolovest.timezone import now_ist
 from typing import Any
 
 from yolovest.http_utils import scraper_headers
 from yolovest.models.schemas import NewsArticle
+from yolovest.timezone import now_ist
 
 logger = logging.getLogger(__name__)
 

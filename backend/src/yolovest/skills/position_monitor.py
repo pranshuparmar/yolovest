@@ -38,8 +38,6 @@ class PositionMonitorSkill(SkillBase):
         return bool(self.ctx.market_hours.is_market_hours())
 
     async def execute(self, **kwargs: Any) -> SkillResult:
-        from yolovest.timezone import now_ist
-
         cfg = self.ctx.config.risk
         # Scope to the current mode so paper rows never run through
         # live-broker code paths (and vice versa). Without this filter
@@ -50,15 +48,111 @@ class PositionMonitorSkill(SkillBase):
         )
         broker_positions = await self.ctx.broker.get_positions()
 
-        # KiteTicker subscription set: open positions + holdings +
-        # watchlist + user_watchlist. The ticker broadcasts throttled
-        # tick_update events for every subscribed symbol, which the
-        # dashboard's useLtpStream hook consumes to render live LTP +
-        # move% on Positions / Holdings / Watchlist / Trades / Symbol
-        # pages. Subscription is idempotent (already-subscribed tokens
-        # are skipped inside the ticker) so re-running every heartbeat
-        # is cheap. Cap watchlist at 50 so we don't subscribe to the
-        # full 500-stock scan universe.
+        await self._subscribe_ticker_symbols(local_positions, broker_positions)
+
+        # Reconcile gtt_id / gtt_status against the broker's GTT list.
+        # Cleared GTTs (user-cancelled on Kite web, rejected at trigger
+        # time, expired, etc.) get their gtt_id wiped from the local row
+        # so the downstream loop falls back to client-side detection
+        # rather than assuming the broker is still protecting the
+        # position. Mutates local_positions in place.
+        await self._reconcile_gtts(local_positions)
+
+        # Heal orphan broker-side exits. Positions whose DB row has no
+        # gtt_id / target_order_id / sl_order_id but whose symbol has an
+        # active GTT or open SL/LIMIT exit at the broker would otherwise
+        # cascade through client-side detection and double-place an
+        # exit, leaving the broker's resting order to fire afterwards
+        # for a duplicate transaction. Pull the broker state once, then
+        # either heal the DB row when the orphan can be safely matched
+        # back, or flag the position as "broker-partial-protected" so
+        # client-side stays quiet until the user investigates.
+        await self._reconcile_orphan_broker_exits(local_positions)
+
+        discrepancies = self._reconcile(local_positions, broker_positions)
+
+        # Recover ghost positions: local DB says open, broker says closed.
+        # This happens when broker-side SL triggers or manual broker actions.
+        recovered = await self._recover_ghost_positions(
+            local_positions, broker_positions,
+        )
+
+        if discrepancies:
+            await self.ctx.notify.send(
+                "Position discrepancy detected:\n"
+                + "\n".join(discrepancies)
+                + (f"\nAuto-recovered: {', '.join(recovered)}" if recovered else ""),
+                alert_type="errors",
+            )
+
+        trails_modified = 0
+        targets_hit: list[dict[str, Any]] = []
+        stops_hit: list[dict[str, Any]] = []
+        expiry_actions: list[dict[str, Any]] = []
+        ltp_failures: list[str] = []
+
+        # Skip positions that were just recovered (already closed in DB)
+        recovered_set = set(recovered)
+
+        # Load locked symbols — these should not be auto-sold (target/SL/trail)
+        locked_symbols = await self.ctx.db.get_locked_symbols()
+
+
+        for pos in local_positions:
+            trails_modified += await self._monitor_position(
+                pos, cfg,
+                recovered_set=recovered_set,
+                locked_symbols=locked_symbols,
+                targets_hit=targets_hit,
+                stops_hit=stops_hit,
+                expiry_actions=expiry_actions,
+                ltp_failures=ltp_failures,
+            )
+
+        await self._broadcast_cycle_results(
+            local_positions, trails_modified,
+            targets_hit=targets_hit, stops_hit=stops_hit,
+            expiry_actions=expiry_actions, ltp_failures=ltp_failures,
+        )
+
+        target_syms = [h["symbol"] for h in targets_hit]
+        stop_syms = [h["symbol"] for h in stops_hit]
+        expiry_syms = [ea["symbol"] for ea in expiry_actions]
+        logger.info(
+            "position-monitor: %d positions — targets_hit=%s, stops_hit=%s, "
+            "expiry_actions=%s, trails_modified=%d, discrepancies=%d, "
+            "ltp_failures=%d, recovered=%d",
+            len(local_positions), target_syms or "none", stop_syms or "none",
+            expiry_syms or "none", trails_modified,
+            len(discrepancies) if discrepancies else 0,
+            len(ltp_failures), len(recovered),
+        )
+
+        return SkillResult(
+            success=len(ltp_failures) == 0,
+            skill_name=self.name,
+            error=f"LTP fetch failed for: {', '.join(ltp_failures)}" if ltp_failures else None,
+            data={
+                "positions_monitored": len(local_positions),
+                "trails_modified": trails_modified,
+                "targets_hit": target_syms,
+                "stops_hit": stop_syms,
+                "expiry_actions": expiry_syms,
+                "discrepancies": len(discrepancies) if discrepancies else 0,
+                "ltp_failures": ltp_failures,
+                "ghost_recovered": recovered,
+            },
+        )
+
+    async def _subscribe_ticker_symbols(
+        self,
+        local_positions: list[dict[str, Any]],
+        broker_positions: list[dict[str, Any]],
+    ) -> None:
+        """Subscribe the KiteTicker to every symbol the dashboard renders
+        live: open positions + holdings + watchlists + today's signals +
+        pending trades. Idempotent — already-subscribed tokens are skipped
+        inside the ticker, so re-running every heartbeat is cheap."""
         ticker = getattr(self.ctx, "ticker", None)
         if ticker is not None:
             symbols_to_subscribe: set[str] = set()
@@ -114,318 +208,305 @@ class PositionMonitorSkill(SkillBase):
                 except Exception:
                     logger.debug("ticker subscribe failed", exc_info=True)
 
-        # Reconcile gtt_id / gtt_status against the broker's GTT list.
-        # Cleared GTTs (user-cancelled on Kite web, rejected at trigger
-        # time, expired, etc.) get their gtt_id wiped from the local row
-        # so the downstream loop falls back to client-side detection
-        # rather than assuming the broker is still protecting the
-        # position. Mutates local_positions in place.
-        await self._reconcile_gtts(local_positions)
+    async def _monitor_position(
+        self,
+        pos: dict[str, Any],
+        cfg: Any,
+        *,
+        recovered_set: set[str],
+        locked_symbols: set[str],
+        targets_hit: list[dict[str, Any]],
+        stops_hit: list[dict[str, Any]],
+        expiry_actions: list[dict[str, Any]],
+        ltp_failures: list[str],
+    ) -> int:
+        """Run one heartbeat's checks for a single open position, in the
+        original order: LTP fetch -> locked skip -> partial booking ->
+        broker-managed paths (GTT / MIS OCO / partial-protected) ->
+        auxiliary exits -> target -> SL -> trailing -> holding expiry ->
+        unrealized PnL. Appends outcomes to the shared accumulators and
+        returns the number of trailing-SL modifications (0 or 1)."""
+        from yolovest.timezone import now_ist
 
-        # Heal orphan broker-side exits. Positions whose DB row has no
-        # gtt_id / target_order_id / sl_order_id but whose symbol has an
-        # active GTT or open SL/LIMIT exit at the broker would otherwise
-        # cascade through client-side detection and double-place an
-        # exit, leaving the broker's resting order to fire afterwards
-        # for a duplicate transaction. Pull the broker state once, then
-        # either heal the DB row when the orphan can be safely matched
-        # back, or flag the position as "broker-partial-protected" so
-        # client-side stays quiet until the user investigates.
-        await self._reconcile_orphan_broker_exits(local_positions)
+        trails = 0
+        symbol = pos["symbol"]
+        if symbol in recovered_set:
+            return trails
 
-        discrepancies = self._reconcile(local_positions, broker_positions)
+        # Fetch LTP with retry (positions must not go unmonitored)
+        current_price = await self._get_ltp_with_retry(symbol)
+        if current_price is None:
+            ltp_failures.append(symbol)
+            logger.error(
+                "position-monitor: LTP fetch failed for %s after retries — "
+                "position UNMONITORED this cycle",
+                symbol,
+            )
+            return trails
 
-        # Recover ghost positions: local DB says open, broker says closed.
-        # This happens when broker-side SL triggers or manual broker actions.
-        recovered = await self._recover_ghost_positions(
-            local_positions, broker_positions,
+        # PnL math uses the actual broker fill price, not the signal's
+        # entry_price — otherwise recorded slippage gets silently erased.
+        entry = float(pos.get("fill_price") or pos["entry_price"])
+        sl = pos["stop_loss_price"]
+        target = pos["target_price"]
+        risk_per_share = abs(entry - sl)
+
+        # Locked holdings: track PnL but never auto-close
+        if symbol in locked_symbols:
+            await self.ctx.db.update_unrealized_pnl(
+                pos["trade_id"], current_price,
+            )
+            return trails
+
+        # Partial profit booking (before target/SL checks)
+        partial_booked = await self._check_partial_profit_booking(
+            pos, current_price,
         )
+        if partial_booked:
+            # Update unrealized PnL for remaining position and move on;
+            # skip target/SL checks this cycle to let the partial order settle
+            await self.ctx.db.update_unrealized_pnl(
+                pos["trade_id"], current_price,
+            )
+            return trails
 
-        if discrepancies:
-            await self.ctx.notify.send(
-                f"Position discrepancy detected:\n"
-                + "\n".join(discrepancies)
-                + (f"\nAuto-recovered: {', '.join(recovered)}" if recovered else ""),
-                alert_type="errors",
+        # If a broker-side GTT is attached, exit enforcement is at the
+        # broker. Skip client-side target/SL detection so we don't
+        # double-place an exit order. We still trail the SL by
+        # modifying the GTT itself when the trailing condition fires,
+        # so winning positions ratchet up their breakeven floor.
+        # The ghost-position reconciler catches the case where the
+        # GTT fires and the broker position vanishes.
+        if pos.get("gtt_id"):
+            if cfg.trailing_sl_enabled and risk_per_share > 0:
+                await self._maybe_trail_gtt_sl(
+                    pos, entry, sl, current_price, risk_per_share,
+                )
+            await self.ctx.db.update_unrealized_pnl(
+                pos["trade_id"], current_price,
+            )
+            return trails
+
+        # For MIS trades with broker-side OCO orders (resting target
+        # LIMIT + SL), broker is in charge of the exit. We just keep
+        # OCO honest — cancel the surviving leg when one fills — and
+        # skip client-side target/SL detection. Client-side only fires
+        # for trades where the broker LIMIT never got placed (e.g.
+        # historical rows, or LIMIT placement failed at entry time).
+        #
+        # Trailing still applies — we lift the broker-side SL order
+        # in place via modify_sl_order so the position locks in
+        # gains as price moves toward target.
+        if pos.get("target_order_id") and pos.get("sl_order_id"):
+            await self._enforce_mis_oco(pos)
+            if cfg.trailing_sl_enabled and risk_per_share > 0:
+                await self._maybe_trail_mis_sl(
+                    pos, entry, sl, current_price, risk_per_share, target,
+                )
+            await self.ctx.db.update_unrealized_pnl(
+                pos["trade_id"], current_price,
+            )
+            return trails
+
+        # Broker has a resting exit we couldn't safely pair up
+        # (e.g. an MIS SL exists but the matching target LIMIT was
+        # never placed, or the row is missing both order_ids).
+        # _reconcile_orphan_broker_exits set this transient marker
+        # — defer to the broker so a client-side exit can't
+        # double-place, but keep the warning visible in the audit
+        # log so the user notices.
+        if pos.get("_broker_partial_protected"):
+            await self.ctx.db.update_unrealized_pnl(
+                pos["trade_id"], current_price,
+            )
+            return trails
+
+        # Auxiliary exits — time-stop / volume-exhaustion. Only fire
+        # for client-side managed positions (no broker GTT, no MIS
+        # OCO pair). Broker-managed exits keep their own lifecycle;
+        # extending these conditions there would need cancel + market
+        # exit and is left for later.
+        aux_exit = await self._check_auxiliary_exits(
+            pos, current_price, entry, target,
+        )
+        if aux_exit:
+            qty = pos.get("quantity", 0)
+            product = pos.get("product", "MIS")
+            if pos["signal_type"] == "BUY":
+                gross_pnl = (current_price - entry) * qty
+            else:
+                gross_pnl = (entry - current_price) * qty
+            costs, _src, breakdown = await resolve_round_trip_costs(
+                self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                entry_price=entry, exit_price=current_price, quantity=qty,
+                product=product, cost_config=self.ctx.config.transaction_costs,
+            )
+            pnl = round(gross_pnl - costs, 2)
+            if self.ctx.config.execution.transaction_mode == "manual":
+                await self._queue_exit_for_approval(
+                    pos, current_price, pnl, aux_exit,
+                )
+            else:
+                await self.ctx.db.close_position(
+                    pos["trade_id"], current_price, pnl,
+                    realized_costs=breakdown,
+                )
+            expiry_actions.append({
+                "action": "closed", "symbol": symbol, "reason": aux_exit,
+                "days_held": 0, "expected_days": 0, "pnl": pnl,
+            })
+            logger.info(
+                "position-monitor: AUX EXIT %s [%s] — exit=%.2f pnl=₹%.2f",
+                symbol, aux_exit, current_price, pnl,
+            )
+            return trails
+
+        # Target hit (with early-exit buffer). Heartbeats are 15 min
+        # apart; a price that's within `target_early_exit_pct` of target
+        # but never quite touches it would otherwise wait a full cycle
+        # and risk reversing.
+        buf = self.ctx.config.risk.target_early_exit_pct
+        buy_trigger = target * (1 - buf)
+        sell_trigger = target * (1 + buf)
+        if (pos["signal_type"] == "BUY" and current_price >= buy_trigger) or (
+            pos["signal_type"] == "SELL" and current_price <= sell_trigger
+        ):
+            qty = pos.get("quantity", 0)
+            if pos["signal_type"] == "BUY":
+                gross_pnl = (current_price - entry) * qty
+            else:
+                gross_pnl = (entry - current_price) * qty
+            product = pos.get("product", "MIS")
+            costs, src, breakdown = await resolve_round_trip_costs(
+                self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                entry_price=entry, exit_price=current_price, quantity=qty,
+                product=product, cost_config=self.ctx.config.transaction_costs,
+            )
+            pnl = round(gross_pnl - costs, 2)
+
+            if self.ctx.config.execution.transaction_mode == "manual":
+                await self._queue_exit_for_approval(
+                    pos, current_price, pnl, "target_hit",
+                )
+            else:
+                await self.ctx.db.close_position(
+                    pos["trade_id"], current_price, pnl, realized_costs=breakdown,
+                )
+            targets_hit.append({"symbol": symbol, "pnl": pnl})
+            logger.info(
+                "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f src=%s)",
+                symbol, current_price, pnl, costs, src,
+            )
+            return trails
+
+        # SL hit?
+        if (pos["signal_type"] == "BUY" and current_price <= sl) or (
+            pos["signal_type"] == "SELL" and current_price >= sl
+        ):
+            qty = pos.get("quantity", 0)
+            if pos["signal_type"] == "BUY":
+                gross_pnl = (current_price - entry) * qty
+            else:
+                gross_pnl = (entry - current_price) * qty
+            product = pos.get("product", "MIS")
+            costs, src, breakdown = await resolve_round_trip_costs(
+                self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
+                entry_price=entry, exit_price=current_price, quantity=qty,
+                product=product, cost_config=self.ctx.config.transaction_costs,
+            )
+            pnl = round(gross_pnl - costs, 2)
+
+            if self.ctx.config.execution.transaction_mode == "manual":
+                await self._queue_exit_for_approval(
+                    pos, current_price, pnl, "stop_loss_hit",
+                )
+            else:
+                await self.ctx.db.close_position(
+                    pos["trade_id"], current_price, pnl, realized_costs=breakdown,
+                )
+            stops_hit.append({"symbol": symbol, "pnl": pnl})
+            logger.info(
+                "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f src=%s)",
+                symbol, current_price, pnl, costs, src,
+            )
+            return trails
+
+        # Trailing SL — requires a broker-side SL order to modify.
+        # Positions without sl_order_id (adopted, old rows where
+        # the SL placement failed, paper-mode shortcuts) skip
+        # trailing entirely; their SL is conceptual and updated
+        # via update_position_sl only when the client-side
+        # detection path closes the trade.
+        if (
+            cfg.trailing_sl_enabled
+            and risk_per_share > 0
+            and pos.get("sl_order_id")
+        ):
+            if pos["signal_type"] == "BUY":
+                profit = current_price - entry
+            else:
+                profit = entry - current_price
+            # Threshold is per-bucket target-progress %; resolver
+            # converts back to a rupees-of-profit value the
+            # comparison can use directly.
+            target_distance = abs(target - entry) if target > 0 else 0.0
+            trigger_profit = cfg.resolve_trailing_trigger(
+                holding_period=pos.get("expected_holding_period", "")
+                or pos.get("holding_period", ""),
+                risk_per_share=risk_per_share,
+                target_distance=target_distance,
             )
 
-        trails_modified = 0
-        targets_hit: list[dict[str, Any]] = []
-        stops_hit: list[dict[str, Any]] = []
-        expiry_actions: list[dict[str, Any]] = []
-        ltp_failures: list[str] = []
-
-        # Skip positions that were just recovered (already closed in DB)
-        recovered_set = set(recovered)
-
-        # Load locked symbols — these should not be auto-sold (target/SL/trail)
-        locked_symbols = await self.ctx.db.get_locked_symbols()
-
-        for pos in local_positions:
-            symbol = pos["symbol"]
-            if symbol in recovered_set:
-                continue
-
-            # Fetch LTP with retry (positions must not go unmonitored)
-            current_price = await self._get_ltp_with_retry(symbol)
-            if current_price is None:
-                ltp_failures.append(symbol)
-                logger.error(
-                    "position-monitor: LTP fetch failed for %s after retries — "
-                    "position UNMONITORED this cycle",
-                    symbol,
-                )
-                continue
-
-            # PnL math uses the actual broker fill price, not the signal's
-            # entry_price — otherwise recorded slippage gets silently erased.
-            entry = float(pos.get("fill_price") or pos["entry_price"])
-            sl = pos["stop_loss_price"]
-            target = pos["target_price"]
-            risk_per_share = abs(entry - sl)
-
-            # Locked holdings: track PnL but never auto-close
-            if symbol in locked_symbols:
-                await self.ctx.db.update_unrealized_pnl(
-                    pos["trade_id"], current_price,
-                )
-                continue
-
-            # Partial profit booking (before target/SL checks)
-            partial_booked = await self._check_partial_profit_booking(
-                pos, current_price,
-            )
-            if partial_booked:
-                # Update unrealized PnL for remaining position and move on;
-                # skip target/SL checks this cycle to let the partial order settle
-                await self.ctx.db.update_unrealized_pnl(
-                    pos["trade_id"], current_price,
-                )
-                continue
-
-            # If a broker-side GTT is attached, exit enforcement is at the
-            # broker. Skip client-side target/SL detection so we don't
-            # double-place an exit order. We still trail the SL by
-            # modifying the GTT itself when the trailing condition fires,
-            # so winning positions ratchet up their breakeven floor.
-            # The ghost-position reconciler catches the case where the
-            # GTT fires and the broker position vanishes.
-            if pos.get("gtt_id"):
-                if cfg.trailing_sl_enabled and risk_per_share > 0:
-                    await self._maybe_trail_gtt_sl(
-                        pos, entry, sl, current_price, risk_per_share,
+            if profit >= trigger_profit:
+                # Calculate new trailing SL. Tighten the step when
+                # we're already close to target so a final pullback
+                # can't surrender the gain.
+                step_pct = cfg.trailing_sl_step_pct
+                tweaks = cfg.exit_tweaks
+                if tweaks.tighten_trailing_enabled:
+                    target_progress = self._target_progress_pct(
+                        pos["signal_type"], entry, target, current_price,
                     )
-                await self.ctx.db.update_unrealized_pnl(
-                    pos["trade_id"], current_price,
-                )
-                continue
-
-            # For MIS trades with broker-side OCO orders (resting target
-            # LIMIT + SL), broker is in charge of the exit. We just keep
-            # OCO honest — cancel the surviving leg when one fills — and
-            # skip client-side target/SL detection. Client-side only fires
-            # for trades where the broker LIMIT never got placed (e.g.
-            # historical rows, or LIMIT placement failed at entry time).
-            #
-            # Trailing still applies — we lift the broker-side SL order
-            # in place via modify_sl_order so the position locks in
-            # gains as price moves toward target.
-            if pos.get("target_order_id") and pos.get("sl_order_id"):
-                await self._enforce_mis_oco(pos)
-                if cfg.trailing_sl_enabled and risk_per_share > 0:
-                    await self._maybe_trail_mis_sl(
-                        pos, entry, sl, current_price, risk_per_share, target,
+                    step_pct *= self._trailing_step_multiplier(
+                        target_progress, tweaks,
                     )
-                await self.ctx.db.update_unrealized_pnl(
-                    pos["trade_id"], current_price,
-                )
-                continue
-
-            # Broker has a resting exit we couldn't safely pair up
-            # (e.g. an MIS SL exists but the matching target LIMIT was
-            # never placed, or the row is missing both order_ids).
-            # _reconcile_orphan_broker_exits set this transient marker
-            # — defer to the broker so a client-side exit can't
-            # double-place, but keep the warning visible in the audit
-            # log so the user notices.
-            if pos.get("_broker_partial_protected"):
-                await self.ctx.db.update_unrealized_pnl(
-                    pos["trade_id"], current_price,
-                )
-                continue
-
-            # Auxiliary exits — time-stop / volume-exhaustion. Only fire
-            # for client-side managed positions (no broker GTT, no MIS
-            # OCO pair). Broker-managed exits keep their own lifecycle;
-            # extending these conditions there would need cancel + market
-            # exit and is left for later.
-            aux_exit = await self._check_auxiliary_exits(
-                pos, current_price, entry, target,
-            )
-            if aux_exit:
-                qty = pos.get("quantity", 0)
-                product = pos.get("product", "MIS")
+                step = current_price * step_pct
                 if pos["signal_type"] == "BUY":
-                    gross_pnl = (current_price - entry) * qty
+                    new_sl = max(entry, current_price - step)  # at least breakeven
                 else:
-                    gross_pnl = (entry - current_price) * qty
-                costs, _src, breakdown = await resolve_round_trip_costs(
-                    self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
-                    entry_price=entry, exit_price=current_price, quantity=qty,
-                    product=product, cost_config=self.ctx.config.transaction_costs,
-                )
-                pnl = round(gross_pnl - costs, 2)
-                if self.ctx.config.execution.transaction_mode == "manual":
-                    await self._queue_exit_for_approval(
-                        pos, current_price, pnl, aux_exit,
-                    )
-                else:
-                    await self.ctx.db.close_position(
-                        pos["trade_id"], current_price, pnl,
-                        realized_costs=breakdown,
-                    )
-                expiry_actions.append({
-                    "action": "closed", "symbol": symbol, "reason": aux_exit,
-                    "days_held": 0, "expected_days": 0, "pnl": pnl,
-                })
-                logger.info(
-                    "position-monitor: AUX EXIT %s [%s] — exit=%.2f pnl=₹%.2f",
-                    symbol, aux_exit, current_price, pnl,
-                )
-                continue
+                    new_sl = min(entry, current_price + step)
 
-            # Target hit (with early-exit buffer). Heartbeats are 15 min
-            # apart; a price that's within `target_early_exit_pct` of target
-            # but never quite touches it would otherwise wait a full cycle
-            # and risk reversing.
-            buf = self.ctx.config.risk.target_early_exit_pct
-            buy_trigger = target * (1 - buf)
-            sell_trigger = target * (1 + buf)
-            if (pos["signal_type"] == "BUY" and current_price >= buy_trigger) or (
-                pos["signal_type"] == "SELL" and current_price <= sell_trigger
-            ):
-                qty = pos.get("quantity", 0)
-                if pos["signal_type"] == "BUY":
-                    gross_pnl = (current_price - entry) * qty
-                else:
-                    gross_pnl = (entry - current_price) * qty
-                product = pos.get("product", "MIS")
-                costs, src, breakdown = await resolve_round_trip_costs(
-                    self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
-                    entry_price=entry, exit_price=current_price, quantity=qty,
-                    product=product, cost_config=self.ctx.config.transaction_costs,
-                )
-                pnl = round(gross_pnl - costs, 2)
+                if self._is_better_sl(pos["signal_type"], new_sl, sl):
+                    await self.ctx.broker.modify_sl_order(pos["sl_order_id"], new_sl)
+                    await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
+                    trails += 1
 
-                if self.ctx.config.execution.transaction_mode == "manual":
-                    await self._queue_exit_for_approval(
-                        pos, current_price, pnl, "target_hit",
-                    )
-                else:
-                    await self.ctx.db.close_position(
-                        pos["trade_id"], current_price, pnl, realized_costs=breakdown,
-                    )
-                targets_hit.append({"symbol": symbol, "pnl": pnl})
-                logger.info(
-                    "position-monitor: TARGET HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f src=%s)",
-                    symbol, current_price, pnl, costs, src,
-                )
-                continue
+        # Holding period expiry check
+        expiry_result = await self._check_holding_expiry(
+            pos, current_price, entry, now_ist(),
+        )
+        if expiry_result:
+            expiry_actions.append(expiry_result)
+            if expiry_result["action"] == "closed":
+                return trails  # position already closed, skip PnL update
 
-            # SL hit?
-            if (pos["signal_type"] == "BUY" and current_price <= sl) or (
-                pos["signal_type"] == "SELL" and current_price >= sl
-            ):
-                qty = pos.get("quantity", 0)
-                if pos["signal_type"] == "BUY":
-                    gross_pnl = (current_price - entry) * qty
-                else:
-                    gross_pnl = (entry - current_price) * qty
-                product = pos.get("product", "MIS")
-                costs, src, breakdown = await resolve_round_trip_costs(
-                    self.ctx.broker, symbol=symbol, signal_type=pos["signal_type"],
-                    entry_price=entry, exit_price=current_price, quantity=qty,
-                    product=product, cost_config=self.ctx.config.transaction_costs,
-                )
-                pnl = round(gross_pnl - costs, 2)
+        # Update unrealized PnL
+        await self.ctx.db.update_unrealized_pnl(pos["trade_id"], current_price)
 
-                if self.ctx.config.execution.transaction_mode == "manual":
-                    await self._queue_exit_for_approval(
-                        pos, current_price, pnl, "stop_loss_hit",
-                    )
-                else:
-                    await self.ctx.db.close_position(
-                        pos["trade_id"], current_price, pnl, realized_costs=breakdown,
-                    )
-                stops_hit.append({"symbol": symbol, "pnl": pnl})
-                logger.info(
-                    "position-monitor: STOP LOSS HIT %s — exit=%.2f pnl=₹%.2f (costs=₹%.2f src=%s)",
-                    symbol, current_price, pnl, costs, src,
-                )
-                continue
+        return trails
 
-            # Trailing SL — requires a broker-side SL order to modify.
-            # Positions without sl_order_id (adopted, old rows where
-            # the SL placement failed, paper-mode shortcuts) skip
-            # trailing entirely; their SL is conceptual and updated
-            # via update_position_sl only when the client-side
-            # detection path closes the trade.
-            if (
-                cfg.trailing_sl_enabled
-                and risk_per_share > 0
-                and pos.get("sl_order_id")
-            ):
-                if pos["signal_type"] == "BUY":
-                    profit = current_price - entry
-                else:
-                    profit = entry - current_price
-                # Threshold is per-bucket target-progress %; resolver
-                # converts back to a rupees-of-profit value the
-                # comparison can use directly.
-                target_distance = abs(target - entry) if target > 0 else 0.0
-                trigger_profit = cfg.resolve_trailing_trigger(
-                    holding_period=pos.get("expected_holding_period", "")
-                    or pos.get("holding_period", ""),
-                    risk_per_share=risk_per_share,
-                    target_distance=target_distance,
-                )
-
-                if profit >= trigger_profit:
-                    # Calculate new trailing SL. Tighten the step when
-                    # we're already close to target so a final pullback
-                    # can't surrender the gain.
-                    step_pct = cfg.trailing_sl_step_pct
-                    tweaks = cfg.exit_tweaks
-                    if tweaks.tighten_trailing_enabled:
-                        target_progress = self._target_progress_pct(
-                            pos["signal_type"], entry, target, current_price,
-                        )
-                        step_pct *= self._trailing_step_multiplier(
-                            target_progress, tweaks,
-                        )
-                    step = current_price * step_pct
-                    if pos["signal_type"] == "BUY":
-                        new_sl = max(entry, current_price - step)  # at least breakeven
-                    else:
-                        new_sl = min(entry, current_price + step)
-
-                    if self._is_better_sl(pos["signal_type"], new_sl, sl):
-                        await self.ctx.broker.modify_sl_order(pos["sl_order_id"], new_sl)
-                        await self.ctx.db.update_position_sl(pos["trade_id"], new_sl)
-                        trails_modified += 1
-
-            # Holding period expiry check
-            expiry_result = await self._check_holding_expiry(
-                pos, current_price, entry, now_ist(),
-            )
-            if expiry_result:
-                expiry_actions.append(expiry_result)
-                if expiry_result["action"] == "closed":
-                    continue  # position already closed, skip PnL update
-
-            # Update unrealized PnL
-            await self.ctx.db.update_unrealized_pnl(pos["trade_id"], current_price)
-
+    async def _broadcast_cycle_results(
+        self,
+        local_positions: list[dict[str, Any]],
+        trails_modified: int,
+        *,
+        targets_hit: list[dict[str, Any]],
+        stops_hit: list[dict[str, Any]],
+        expiry_actions: list[dict[str, Any]],
+        ltp_failures: list[str],
+    ) -> None:
+        """Telegram + WebSocket fan-out for the cycle's exits and the
+        unmonitored-position warning."""
         # Notify holding period expiry actions
         for ea in expiry_actions:
             if ea["action"] == "closed":
@@ -479,34 +560,6 @@ class PositionMonitorSkill(SkillBase):
                 alert_type="errors",
             )
 
-        target_syms = [h["symbol"] for h in targets_hit]
-        stop_syms = [h["symbol"] for h in stops_hit]
-        expiry_syms = [ea["symbol"] for ea in expiry_actions]
-        logger.info(
-            "position-monitor: %d positions — targets_hit=%s, stops_hit=%s, "
-            "expiry_actions=%s, trails_modified=%d, discrepancies=%d, "
-            "ltp_failures=%d, recovered=%d",
-            len(local_positions), target_syms or "none", stop_syms or "none",
-            expiry_syms or "none", trails_modified,
-            len(discrepancies) if discrepancies else 0,
-            len(ltp_failures), len(recovered),
-        )
-
-        return SkillResult(
-            success=len(ltp_failures) == 0,
-            skill_name=self.name,
-            error=f"LTP fetch failed for: {', '.join(ltp_failures)}" if ltp_failures else None,
-            data={
-                "positions_monitored": len(local_positions),
-                "trails_modified": trails_modified,
-                "targets_hit": target_syms,
-                "stops_hit": stop_syms,
-                "expiry_actions": expiry_syms,
-                "discrepancies": len(discrepancies) if discrepancies else 0,
-                "ltp_failures": ltp_failures,
-                "ghost_recovered": recovered,
-            },
-        )
 
     async def _get_ltp_with_retry(
         self, symbol: str, max_retries: int = 3, base_delay: float = 1.0,
@@ -1263,6 +1316,7 @@ class PositionMonitorSkill(SkillBase):
         )
         if profit < trigger_profit:
             return
+        profit_multiple = profit / risk_per_share if risk_per_share > 0 else 0.0
 
         # Mirror the client-side trailing-SL tightening near target.
         step_pct = cfg.trailing_sl_step_pct
@@ -1539,7 +1593,9 @@ class PositionMonitorSkill(SkillBase):
             and pos.get("expected_holding_period") == "intraday"
         ):
             from datetime import datetime as _dt
-            from yolovest.timezone import IST as _IST, now_ist as _now_ist
+
+            from yolovest.timezone import IST as _IST
+            from yolovest.timezone import now_ist as _now_ist
             created_at_str = pos.get("created_at") or ""
             try:
                 created_at = _dt.fromisoformat(str(created_at_str))

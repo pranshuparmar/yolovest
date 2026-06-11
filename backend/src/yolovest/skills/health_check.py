@@ -59,7 +59,7 @@ class HealthCheckSkill(SkillBase):
             # Push to dashboard WS so any open tab gets a banner
             # immediately rather than waiting for the next REST poll.
             try:
-                from yolovest.dashboard.app import broadcast_ws
+                from yolovest.dashboard.ws import broadcast_ws
                 await broadcast_ws("broker_auth_lost", {})
             except Exception:
                 logger.debug("broker_auth_lost broadcast failed", exc_info=True)
@@ -78,7 +78,9 @@ class HealthCheckSkill(SkillBase):
             if last_llm_check:
                 from datetime import datetime, timedelta
                 last_ts = datetime.fromisoformat(last_llm_check)
-                from yolovest.timezone import UTC, now_utc
+                from datetime import UTC
+
+                from yolovest.timezone import now_utc
                 if last_ts.tzinfo is None:
                     last_ts = last_ts.replace(tzinfo=UTC)
                 if (now_utc() - last_ts) < timedelta(hours=1):

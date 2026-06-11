@@ -152,7 +152,7 @@ class IngestUniverseSkill(SkillBase):
                 except Exception as e:
                     logger.warning("Sector upsert failed for %s: %s", universe, e)
             else:
-                raw = get_universe_symbols(universe)  # type: ignore[arg-type]
+                raw = get_universe_symbols(universe)
                 logger.warning(
                     "Live fetch failed for %s; using bundled list (%d symbols)",
                     universe, len(raw),

@@ -9,7 +9,6 @@ Verifies the full flow: health-check → ingest → scan → signals →
 risk-check → llm-review → trade-execute → predict-track → position-monitor
 """
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -110,8 +109,9 @@ def mock_market_data():
 
     # Return realistic OHLCV bars ending today so the ingest
     # staleness gate (5d) doesn't quarantine the symbol mid-test.
-    from yolovest.models.schemas import OHLCVBar
     from datetime import datetime, timedelta
+
+    from yolovest.models.schemas import OHLCVBar
     bars = []
     today = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
     for i in range(30):

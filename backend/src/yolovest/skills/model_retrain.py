@@ -17,10 +17,10 @@ Flow:
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
-from datetime import datetime, timedelta
-
+from yolovest.costs import round_trip_cost_floor_pct
 from yolovest.data.features import (
     DAILY_TREND_FEATURE_KEYS,
     MODEL_FEATURE_EXCLUSIONS,
@@ -30,7 +30,6 @@ from yolovest.data.features import (
     daily_trend_features_series,
     merge_feedback_features,
 )
-from yolovest.costs import round_trip_cost_floor_pct
 from yolovest.data.fno_features import FNO_FEATURE_KEYS, compute_fno_features
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 from yolovest.data.vix_features import VIX_FEATURE_KEYS, compute_vix_features
@@ -731,8 +730,8 @@ class ModelRetrainSkill(SkillBase):
                 # Map: label int → BUY/HOLD/SELL key for count lookup.
                 key_for = {0: "SELL", 1: "HOLD", 2: "BUY"}
                 K = sum(1 for k in key_for.values() if label_counts.get(k, 0) > 0)
-                for lbl, key in key_for.items():
-                    c = label_counts.get(key, 0)
+                for lbl, lbl_key in key_for.items():
+                    c = label_counts.get(lbl_key, 0)
                     class_weights[lbl] = (total / (K * c)) if c > 0 else 0.0
 
                 if not sample_weights:
@@ -929,7 +928,7 @@ class ModelRetrainSkill(SkillBase):
         # need it and it's the largest single resident structure
         # (~365K rows × 8 fields at the default 730-day cap, much more
         # if the user raised retraining.max_training_days).
-        training_data = None  # type: ignore[assignment]
+        training_data = None
         _gc.collect()
 
         # Step 7: Check shadow promotions
@@ -1107,7 +1106,7 @@ class ModelRetrainSkill(SkillBase):
         bulk_deal_lookup = bulk_deal_lookup or {}
         # Per-symbol sorted deal-date list for fast 5-day window lookups.
         bulk_dates_by_sym: dict[str, list[str]] = {}
-        for (sym_key, date_key) in bulk_deal_lookup.keys():
+        for sym_key, date_key in bulk_deal_lookup:
             bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
         for v in bulk_dates_by_sym.values():
             v.sort()
@@ -1345,10 +1344,10 @@ class ModelRetrainSkill(SkillBase):
                 # across stocks at different price levels — they stay in
                 # the features dict for the inference layer's entry-price
                 # lookups but the trained model never sees them.
-                for k in features:
-                    if k in excluded_keys:
+                for feat_key in features:
+                    if feat_key in excluded_keys:
                         continue
-                    if k not in feature_names_set:
+                    if feat_key not in feature_names_set:
                         # With window_size = 200 every iteration should
                         # see the full feature set on entry — late-
                         # appearing keys would mean a new optional feature
@@ -1361,10 +1360,10 @@ class ModelRetrainSkill(SkillBase):
                                 "%d for %s — backfilling 0.0 into %d prior "
                                 "rows. Add a 0-default fallback at feature "
                                 "production to avoid this.",
-                                k, len(X), sym, len(X),
+                                feat_key, len(X), sym, len(X),
                             )
-                        feature_names.append(k)
-                        feature_names_set.add(k)
+                        feature_names.append(feat_key)
+                        feature_names_set.add(feat_key)
                         for existing in X:
                             existing.append(0.0)
                 # Per-bar feedback weight. Apply weight_boost only to
@@ -1449,7 +1448,7 @@ class ModelRetrainSkill(SkillBase):
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
         news_lookup: dict[str, list[tuple[str, str]]] | None = None,
         vix_timeline: list[tuple[str, float]] | None = None,
-        fno_lookup: dict[str, list[dict[str, Any]]] | None = None,
+        fno_lookup: dict[str, list[tuple[str, dict[str, float]]]] | None = None,
     ) -> tuple[
         list[list[float]], list[int], list[str], list[float], list[dict[str, Any]]
     ]:
@@ -1569,7 +1568,7 @@ class ModelRetrainSkill(SkillBase):
 
         # Bulk-deal date index + parsed news timeline (mirror daily path).
         bulk_dates_by_sym: dict[str, list[str]] = {}
-        for (sym_key, date_key) in bulk_deal_lookup.keys():
+        for sym_key, date_key in bulk_deal_lookup:
             bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
         for v in bulk_dates_by_sym.values():
             v.sort()
@@ -2276,8 +2275,8 @@ class ModelRetrainSkill(SkillBase):
                         f"(need {min_shadow_scored}+)"
                     )
                 else:
-                    shadow_acc = _as_float(shadow_live.get("direction_accuracy"))
-                    current_acc = _as_float(current_live.get("direction_accuracy"))
+                    shadow_acc = _as_float((shadow_live or {}).get("direction_accuracy"))
+                    current_acc = _as_float((current_live or {}).get("direction_accuracy"))
                     diff = shadow_acc - current_acc
                     live_pass = diff >= -tolerance
                     live_reason = (

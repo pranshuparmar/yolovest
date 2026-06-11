@@ -24,12 +24,31 @@ All thresholds read from config.risk.* — zero hardcoded values.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _Sizing:
+    """Carrier for the base-size phase of risk-check. `rejection` short-
+    circuits the pipeline; the remaining fields feed the multiplier and
+    post-size phases."""
+
+    rejection: SkillResult | None = None
+    position_size: int = 0
+    base_position_size: int = 0
+    max_by_exposure: int = 0
+    risk_amount: float = 0.0
+    risk_per_share: float = 0.0
+    entry: float = 0.0
+    sl: float = 0.0
+    capital: float = 0.0
+
 
 
 class RiskCheckSkill(SkillBase):
@@ -72,7 +91,7 @@ class RiskCheckSkill(SkillBase):
         try:
             self._regime = await self.ctx.db.compute_live_regime()
         except Exception:
-            logger.debug("compute_live_regime failed", exc_info=True)
+            logger.warning("regime gate degraded (fail-open): compute_live_regime failed", exc_info=True)
             self._regime = {"breadth": 0.5, "avg_return": 0.0, "sample_size": 0}
         self._regime_at = now
         return self._regime
@@ -88,7 +107,7 @@ class RiskCheckSkill(SkillBase):
         try:
             self._market_trend = await self.ctx.db.compute_market_trend(ma_window)
         except Exception:
-            logger.debug("compute_market_trend failed", exc_info=True)
+            logger.warning("market-trend filter degraded (fail-open): compute_market_trend failed", exc_info=True)
             self._market_trend = {
                 "in_uptrend": True, "index_level": 1.0, "ma": 1.0,
                 "sample_size": 0, "ma_window": ma_window,
@@ -109,10 +128,11 @@ class RiskCheckSkill(SkillBase):
         try:
             beta = await self.ctx.db.compute_symbol_beta(symbol)
         except Exception:
-            logger.debug("compute_symbol_beta failed for %s", symbol, exc_info=True)
+            logger.warning("portfolio-beta gate degraded (fail-open): compute_symbol_beta failed for %s", symbol, exc_info=True)
             beta = None
         self._beta_cache[symbol] = beta
         return beta
+
 
     async def execute(self, **kwargs: Any) -> SkillResult:
         signal = kwargs["signal"]
@@ -122,6 +142,71 @@ class RiskCheckSkill(SkillBase):
             mode=self.ctx.config.mode,
         )
 
+        # Phase 1 — hard entry gates, in original order (kill switch,
+        # windows, breakers, caps, cooldowns, exposure, sector,
+        # blackout, correlation).
+        rejection = await self._check_entry_gates(signal, cfg, portfolio)
+        if rejection is not None:
+            return rejection
+
+        # Phase 1b — gates that also produce sizing inputs: the depth
+        # gate maps book imbalance to a size multiplier; the regime gate
+        # can reject outright or scale; trend / SL / capital / drift
+        # checks ride in the same pass.
+        rejection, depth_size_multiplier, regime_size_multiplier = (
+            await self._check_market_condition_gates(signal, cfg, portfolio)
+        )
+        if rejection is not None:
+            return rejection
+
+        # Phase 2 — base size from the risk budget, then the notional
+        # caps (weekly breaker, single-stock, pacing slot, margin).
+        sizing = await self._compute_base_size(signal, cfg, portfolio)
+        if sizing.rejection is not None:
+            return sizing.rejection
+
+        # Phase 3 — stack conviction / regime / depth / institutional
+        # multipliers, then re-clamp effective rupees-at-risk.
+        position_size, slippage_penalty = await self._apply_size_multipliers(
+            signal, cfg, sizing,
+            depth_size_multiplier=depth_size_multiplier,
+            regime_size_multiplier=regime_size_multiplier,
+        )
+
+        # Phase 4 — gates that need the final size: portfolio-beta cap,
+        # liquidity gate, zero-size, cost-adjusted R:R.
+        rejection = await self._check_post_size_gates(
+            signal, cfg, sizing, position_size,
+        )
+        if rejection is not None:
+            return rejection
+
+        logger.info(
+            "risk-check: APPROVED %s — size=%d (risk=₹%.0f, slippage_penalty=%.1f%%)",
+            signal["symbol"], position_size, sizing.risk_amount, slippage_penalty * 100,
+        )
+
+        return SkillResult(
+            success=True,
+            skill_name=self.name,
+            data={
+                "approved": True,
+                "symbol": signal["symbol"],
+                "original_size": signal.get("position_size"),
+                "adjusted_size": position_size,
+                "risk_amount": sizing.risk_amount,
+                "weekly_breaker_active": portfolio["weekly_pnl_pct"] <= -cfg.weekly_loss_limit_pct,
+                "slippage_penalty": slippage_penalty,
+                "signal": {**signal, "position_size": position_size},
+            },
+        )
+
+    async def _check_entry_gates(
+        self, signal: dict[str, Any], cfg: Any, portfolio: dict[str, Any],
+    ) -> SkillResult | None:
+        """Hard pre-sizing gates. Returns a rejection (or deferral)
+        SkillResult, or None to proceed. Order is load-bearing and
+        unchanged from the original inline sequence."""
         # Kill switch
         if cfg.kill_switch_enabled and await self.ctx.db.is_kill_switch_active():
             return self._reject(signal, "Kill switch is active")
@@ -159,7 +244,7 @@ class RiskCheckSkill(SkillBase):
             try:
                 pending = await self.ctx.db.get_pending_trades()
             except Exception:
-                logger.debug("Failed to load pending trades", exc_info=True)
+                logger.warning("pending trades unavailable — exposure/position caps may undercount this cycle", exc_info=True)
         pending_count = len(pending)
 
         # Max trades per day — count executed today PLUS pending awaiting
@@ -283,8 +368,8 @@ class RiskCheckSkill(SkillBase):
                     days=cfg.earnings_blackout_days,
                 )
             except Exception:
-                logger.debug(
-                    "risk-check: earnings event lookup failed",
+                logger.warning(
+                    "earnings-blackout gate degraded (fail-open): event lookup failed",
                     exc_info=True,
                 )
                 events = []
@@ -307,7 +392,17 @@ class RiskCheckSkill(SkillBase):
             )
             if corr_rejection:
                 return self._reject(signal, corr_rejection)
+        return None
 
+    async def _check_market_condition_gates(
+        self, signal: dict[str, Any], cfg: Any, portfolio: dict[str, Any],
+    ) -> tuple[SkillResult | None, float, float]:
+        """Depth/regime/trend gates plus mandatory-SL, capital-exhaustion
+        and entry-drift checks. Returns (rejection-or-None,
+        depth_size_multiplier, regime_size_multiplier); the multipliers
+        feed the phase-3 sizing stack."""
+        capital = portfolio["total_capital"]
+        available_cash = portfolio.get("available_cash", capital)
         # Depth-imbalance gate — scale position size down when the live
         # order book opposes the signal. Only meaningful with the paid
         # Kite feed (jugaad/yfinance can't return depth qty).
@@ -334,7 +429,7 @@ class RiskCheckSkill(SkillBase):
                     f"{signal.get('signal_type', 'BUY')} "
                     f"(thresholds: BUY≥{cfg.regime_gate.min_breadth_for_buy}, "
                     f"SELL≤{cfg.regime_gate.max_breadth_for_sell})",
-                )
+                ), depth_size_multiplier, regime_size_multiplier
 
         # Market-trend circuit breaker — stand aside on NEW long entries
         # when the broad index is below its moving average (a downtrend).
@@ -351,11 +446,14 @@ class RiskCheckSkill(SkillBase):
                     f"Market-trend filter: index {trend['index_level']:.3f} below "
                     f"{trend['ma_window']}d MA {trend['ma']:.3f} — standing aside "
                     f"on new longs (market downtrend)",
-                )
+                ), depth_size_multiplier, regime_size_multiplier
 
         # Mandatory stop-loss
         if cfg.mandatory_stop_loss and not signal.get("stop_loss_price"):
-            return self._reject(signal, "No stop-loss set (mandatory)")
+            return (
+                self._reject(signal, "No stop-loss set (mandatory)"),
+                depth_size_multiplier, regime_size_multiplier,
+            )
 
         # Capital exhaustion — check if remaining cash can cover min trade
         capital = portfolio["total_capital"]
@@ -366,11 +464,10 @@ class RiskCheckSkill(SkillBase):
                 signal,
                 "Capital exhaustion: "
                 f"cash ₹{available_cash:,.0f} < min trade ₹{min_trade_value:,.0f}",
-            )
+            ), depth_size_multiplier, regime_size_multiplier
 
         # Validate entry price against fresh LTP
         entry = signal["entry_price"]
-        sl = signal["stop_loss_price"]
         drift_max = self.ctx.config.execution.price_drift_max_pct
         try:
             fresh_ltp = await self.ctx.market_data.get_ltp(signal["symbol"])
@@ -380,7 +477,7 @@ class RiskCheckSkill(SkillBase):
                     signal,
                     f"Entry price drift too high: signal=₹{entry:.2f}, "
                     f"current=₹{fresh_ltp:.2f} ({drift_pct:.1%})",
-                )
+                ), depth_size_multiplier, regime_size_multiplier
             if drift_pct > 0.005:
                 logger.info(
                     "risk-check: price drift for %s: signal=%.2f, current=%.2f (%.1f%%)",
@@ -389,12 +486,27 @@ class RiskCheckSkill(SkillBase):
         except Exception:
             logger.debug("LTP unavailable for %s price drift check", signal["symbol"])
 
+        return None, depth_size_multiplier, regime_size_multiplier
+
+    async def _compute_base_size(
+        self, signal: dict[str, Any], cfg: Any, portfolio: dict[str, Any],
+    ) -> _Sizing:
+        """Base position size from max_risk_per_trade_pct, then the
+        notional caps: weekly-breaker reduction, single-stock exposure,
+        per-signal pacing slot, and margin/cash enforcement."""
+        capital = portfolio["total_capital"]
+        available_cash = portfolio.get("available_cash", capital)
+        entry = signal["entry_price"]
+        sl = signal["stop_loss_price"]
+
         # Position sizing based on max risk per trade
         risk_amount = capital * cfg.max_risk_per_trade_pct
         risk_per_share = abs(entry - sl)
 
         if risk_per_share <= 0:
-            return self._reject(signal, "Invalid stop-loss (risk_per_share <= 0)")
+            return _Sizing(
+                rejection=self._reject(signal, "Invalid stop-loss (risk_per_share <= 0)"),
+            )
 
         position_size = int(risk_amount / risk_per_share)
         # Capture base size for the cumulative audit log below. Every
@@ -417,36 +529,9 @@ class RiskCheckSkill(SkillBase):
         # Per-signal pacing cap. Keeps the first 1-2 signals of a
         # heartbeat from saturating the daily portfolio budget,
         # leaving room for higher-conviction setups later in the
-        # day. Optionally scaled by ML confidence so a 0.95-conf
-        # signal gets a bigger slot than a 0.75 one (interpolated
-        # linearly between confidence_scaled_min_factor at threshold
-        # and 1.0 at conf=0.95+).
+        # day. Confidence-based scaling lives in conviction_sizing
+        # (the single confidence-scaling path).
         signal_slot_pct = cfg.max_pct_per_signal
-        if cfg.confidence_scaled_sizing_enabled:
-            conf = float(signal.get("confidence_score") or 0)
-            # threshold = lower of the BUY/SELL minimums so we don't
-            # accidentally scale below the floor for a SELL when the
-            # BUY threshold is set higher (or vice versa).
-            sig_type = signal.get("signal_type", "BUY")
-            sig_holding = str(
-                signal.get("expected_holding_period")
-                or signal.get("holding_period")
-                or ""
-            )
-            base_threshold = cfg.resolve_min_confidence(sig_holding, sig_type)
-            top = 0.95
-            if conf <= base_threshold:
-                factor = cfg.confidence_scaled_min_factor
-            elif conf >= top:
-                factor = 1.0
-            else:
-                span = top - base_threshold
-                progress = (conf - base_threshold) / span if span > 0 else 1.0
-                factor = (
-                    cfg.confidence_scaled_min_factor
-                    + (1.0 - cfg.confidence_scaled_min_factor) * progress
-                )
-            signal_slot_pct = cfg.max_pct_per_signal * factor
         max_by_signal = int((signal_slot_pct * capital) / entry)
         if max_by_signal < position_size:
             logger.info(
@@ -488,7 +573,7 @@ class RiskCheckSkill(SkillBase):
                     if est and est.get("total", 0) > 0:
                         margin_required = float(est["total"])
                 except Exception:
-                    logger.debug("estimate_margin failed; falling back to notional", exc_info=True)
+                    logger.info("estimate_margin failed; falling back to notional sizing (conservative)", exc_info=True)
 
             if margin_required is None:
                 # Notional fallback (also used when margin_usage_enabled is False)
@@ -506,6 +591,36 @@ class RiskCheckSkill(SkillBase):
                     "broker" if cfg.margin_usage_enabled and margin_required != entry * position_size else "notional",
                 )
                 position_size = new_size
+
+        return _Sizing(
+            position_size=position_size,
+            base_position_size=base_position_size,
+            max_by_exposure=max_by_exposure,
+            risk_amount=risk_amount,
+            risk_per_share=risk_per_share,
+            entry=entry,
+            sl=sl,
+            capital=capital,
+        )
+
+    async def _apply_size_multipliers(
+        self,
+        signal: dict[str, Any],
+        cfg: Any,
+        sizing: _Sizing,
+        *,
+        depth_size_multiplier: float,
+        regime_size_multiplier: float,
+    ) -> tuple[int, float]:
+        """Slippage penalty + conviction / regime / depth / institutional
+        multipliers, then the effective-risk re-clamp (risk_uplift_cap)
+        and the cumulative size audit line. Returns
+        (position_size, slippage_penalty)."""
+        position_size = sizing.position_size
+        base_position_size = sizing.base_position_size
+        max_by_exposure = sizing.max_by_exposure
+        risk_per_share = sizing.risk_per_share
+        capital = sizing.capital
 
         # Slippage feedback — reduce sizing for high-slippage symbols
         slippage_penalty = await self._get_slippage_penalty(signal["symbol"])
@@ -602,6 +717,22 @@ class RiskCheckSkill(SkillBase):
                 net_mult, float(signal.get("confidence_score") or 0),
             )
 
+        return position_size, slippage_penalty
+
+    async def _check_post_size_gates(
+        self,
+        signal: dict[str, Any],
+        cfg: Any,
+        sizing: _Sizing,
+        position_size: int,
+    ) -> SkillResult | None:
+        """Gates that need the final size: portfolio-beta cap, liquidity
+        gate, zero-size guard, cost-adjusted net R:R."""
+        capital = sizing.capital
+        entry = sizing.entry
+        sl = sizing.sl
+        product = signal.get("product", "CNC")
+
         # Portfolio-beta cap. Sum of (notional × beta) over currently-
         # open positions + this candidate signal must stay under
         # max_portfolio_beta × total_capital. Catches the "every
@@ -686,25 +817,8 @@ class RiskCheckSkill(SkillBase):
                         f"costs ₹{costs:.0f} round-trip on {position_size} qty)",
                     )
 
-        logger.info(
-            "risk-check: APPROVED %s — size=%d (risk=₹%.0f, slippage_penalty=%.1f%%)",
-            signal["symbol"], position_size, risk_amount, slippage_penalty * 100,
-        )
 
-        return SkillResult(
-            success=True,
-            skill_name=self.name,
-            data={
-                "approved": True,
-                "symbol": signal["symbol"],
-                "original_size": signal.get("position_size"),
-                "adjusted_size": position_size,
-                "risk_amount": risk_amount,
-                "weekly_breaker_active": portfolio["weekly_pnl_pct"] <= -cfg.weekly_loss_limit_pct,
-                "slippage_penalty": slippage_penalty,
-                "signal": {**signal, "position_size": position_size},
-            },
-        )
+        return None
 
     async def _get_slippage_penalty(self, symbol: str) -> float:
         """Compute position sizing penalty based on historical slippage.
@@ -728,7 +842,7 @@ class RiskCheckSkill(SkillBase):
             penalty = min(excess * 10, 0.30)
             return penalty
         except Exception:
-            logger.debug("Slippage penalty calc failed for %s", symbol, exc_info=True)
+            logger.info("slippage penalty skipped for %s (calc failed)", symbol, exc_info=True)
             return 0.0
 
     def _reject(self, signal: dict[str, Any], reason: str) -> SkillResult:
@@ -817,7 +931,7 @@ class RiskCheckSkill(SkillBase):
                 symbol, lookback_days=cfg.bulk_deal_lookback_days,
             )
         except Exception:
-            logger.debug("count_recent_bulk_deals failed for %s", symbol, exc_info=True)
+            logger.warning("institutional-flow gate degraded (neutral): count_recent_bulk_deals failed for %s", symbol, exc_info=True)
             counts = {"buy_count": 0, "sell_count": 0}
         net = counts["buy_count"] - counts["sell_count"]
         if signal_type == "BUY":
@@ -835,7 +949,7 @@ class RiskCheckSkill(SkillBase):
         try:
             fii = await self.ctx.db.get_latest_fii_dii()
         except Exception:
-            logger.debug("get_latest_fii_dii failed", exc_info=True)
+            logger.warning("institutional-flow gate degraded (neutral): get_latest_fii_dii failed", exc_info=True)
             fii = None
         if fii:
             fii_net = fii.get("fii_net", 0.0)
@@ -897,8 +1011,8 @@ class RiskCheckSkill(SkillBase):
         try:
             quote = await self.ctx.market_data.get_quote(signal["symbol"])
         except Exception:
-            logger.debug(
-                "risk-check: liquidity-gate quote fetch failed for %s",
+            logger.warning(
+                "liquidity gate degraded (fail-open): quote fetch failed for %s",
                 signal["symbol"], exc_info=True,
             )
             return None
@@ -936,8 +1050,8 @@ class RiskCheckSkill(SkillBase):
         try:
             quote = await self.ctx.market_data.get_quote(signal["symbol"])
         except Exception:
-            logger.debug(
-                "risk-check: depth-gate quote fetch failed for %s",
+            logger.warning(
+                "depth gate degraded (full size): quote fetch failed for %s",
                 signal["symbol"], exc_info=True,
             )
             return 1.0

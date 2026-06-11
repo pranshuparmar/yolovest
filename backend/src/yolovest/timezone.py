@@ -9,11 +9,11 @@ Usage:
     from yolovest.timezone import IST, UTC, now_utc, now_ist
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
-UTC = timezone.utc
+UTC = UTC
 
 
 def now_utc() -> datetime:

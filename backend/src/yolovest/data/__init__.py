@@ -7,11 +7,11 @@ from yolovest.data.ingester import MarketDataIngester
 from yolovest.data.news_features import NEWS_FEATURE_KEYS, compute_news_features
 
 __all__ = [
-    "MarketDataBase",
+    "NEWS_FEATURE_KEYS",
     "Database",
-    "MarketDataIngester",
     "IndicatorConfig",
+    "MarketDataBase",
+    "MarketDataIngester",
     "compute_features",
     "compute_news_features",
-    "NEWS_FEATURE_KEYS",
 ]

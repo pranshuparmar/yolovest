@@ -7,17 +7,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies first (cached layer)
-COPY pyproject.toml ./
+# Install Python dependencies from the lockfile (exact pins exported
+# from uv.lock) so a rebuild NEVER re-resolves to newer libraries.
+# Model artifacts in the models volume persist across image rebuilds;
+# a drifting sklearn/xgboost would unpickle them under a different
+# version than they were trained with. Regenerate after editing
+# pyproject deps:  uv lock && uv export --frozen --no-dev --no-hashes \
+#   --no-emit-project -o requirements.lock.txt
+COPY pyproject.toml requirements.lock.txt ./
 RUN mkdir -p src/yolovest && \
     touch src/yolovest/__init__.py && \
     pip install --no-cache-dir pip --upgrade && \
-    pip install --no-cache-dir .
+    pip install --no-cache-dir -r requirements.lock.txt && \
+    pip install --no-cache-dir --no-deps .
 
 # Copy source and reinstall (now with actual code)
 COPY src/ src/
 COPY migrations/ migrations/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --no-deps .
 
 # --- Production stage ---
 FROM python:3.11-slim

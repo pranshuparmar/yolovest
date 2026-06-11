@@ -19,11 +19,12 @@ Scoring (HEARTBEAT trigger):
 """
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
+
 from yolovest.scoring import path_aware_score
 from yolovest.skills.base import SkillBase, SkillResult, SkillTrigger
-from yolovest.timezone import IST, UTC
+from yolovest.timezone import IST
 
 logger = logging.getLogger(__name__)
 

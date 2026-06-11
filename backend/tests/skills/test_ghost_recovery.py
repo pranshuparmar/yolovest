@@ -1,6 +1,6 @@
 """Tests for ghost position recovery in position-monitor."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 

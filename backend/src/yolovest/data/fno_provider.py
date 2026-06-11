@@ -99,7 +99,7 @@ async def fetch_fno_aggregates(kite: Any) -> dict[str, dict[str, float]]:
     # Returns (name, [(tradingsymbol, instrument_type), ...]) tuples.
     chain_specs: list[tuple[str, list[tuple[str, str]]]] = []
     for name, contracts in by_name.items():
-        expiries = list({c.get("expiry") for c in contracts if c.get("expiry")})
+        expiries = [e for e in {c.get("expiry") for c in contracts} if e is not None]
         if not expiries:
             continue
         nearest = _nearest_expiry(expiries)

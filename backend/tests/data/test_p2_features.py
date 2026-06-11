@@ -9,8 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from yolovest.config import AppConfig
-from yolovest.context import AppContext, MarketHoursChecker
-from yolovest.events import EventBus
+from yolovest.context import MarketHoursChecker
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -254,7 +253,6 @@ class TestAgentMemory:
 
     async def test_get_returns_none_for_expired(self, mock_db):
         from yolovest.memory import AgentMemory
-
         from yolovest.timezone import now_ist
         past = (now_ist() - timedelta(hours=1)).isoformat()
         mock_db.get_memory.return_value = {

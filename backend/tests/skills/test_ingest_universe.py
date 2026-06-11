@@ -211,8 +211,9 @@ class TestFailureTracking:
 
     async def test_records_success_clears_failures(self, skill):
         """A clean fetch must reset the counter via record_fetch_success."""
-        from yolovest.models.schemas import OHLCVBar
         from datetime import datetime
+
+        from yolovest.models.schemas import OHLCVBar
 
         bars = [OHLCVBar(timestamp=datetime(2026, 5, 1), open=1, high=2, low=1, close=1.5, volume=100)]
         skill.ctx.config.market_data.backfill_days = 365

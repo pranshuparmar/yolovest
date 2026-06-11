@@ -4,10 +4,7 @@ import { useLtpStream } from "../hooks/useLtpStream";
 import clsx from "clsx";
 import { SymbolLink } from "./SymbolLink";
 import { formatPriceMovePct, priceMovePct } from "../utils/priceMove";
-
-function fmt(n: number, d = 2) {
-  return n.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
-}
+import { fmt } from "../utils/format";
 
 // Approximate exit-by date for the pending banner: add `days` trading days
 // (skipping weekends) to today. Calendar-only — the engine counts real

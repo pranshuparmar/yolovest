@@ -463,6 +463,7 @@ class TestExportImport:
         to cwd — pair with monkeypatch.chdir). schema_version=None omits the
         key (simulates a pre-versioning legacy artifact)."""
         import os
+
         import joblib
         os.makedirs(model_dir, exist_ok=True)
         artifact = {"model": {}, "metrics": {"sharpe_ratio": 1.0},
@@ -525,6 +526,7 @@ class TestExportImport:
         # the reject-tests never reach. _model_dir() falls back to
         # "./models", so chdir into tmp keeps the write out of the repo.
         import io
+
         import joblib
         monkeypatch.chdir(tmp_path)
         buf = io.BytesIO()

@@ -11,8 +11,6 @@ Covers:
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from yolovest.strategy.ml_signal import XGBoostSignalModel
 
 

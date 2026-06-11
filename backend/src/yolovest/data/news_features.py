@@ -16,8 +16,9 @@ Five features are emitted:
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timedelta
-from typing import Iterable
+from typing import Any
 
 NEWS_FEATURE_KEYS: tuple[str, ...] = (
     "news_count_24h",
@@ -35,7 +36,7 @@ def _neutral() -> dict[str, float]:
 _analyzer = None
 
 
-def _get_analyzer() -> object | None:
+def _get_analyzer() -> Any:
     global _analyzer
     if _analyzer is not None:
         return _analyzer

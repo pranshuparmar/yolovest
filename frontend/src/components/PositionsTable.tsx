@@ -4,13 +4,7 @@ import type { Trade } from "../types/api";
 import { useClosePosition } from "../hooks/queries";
 import { useLtpStream } from "../hooks/useLtpStream";
 import { formatPriceMovePct, priceMovePct } from "../utils/priceMove";
-
-function fmt(n: number, d = 2) {
-  return n.toLocaleString("en-IN", {
-    minimumFractionDigits: d,
-    maximumFractionDigits: d,
-  });
-}
+import { fmt } from "../utils/format";
 
 export function PositionsTable({ positions }: { positions: Trade[] }) {
   const close = useClosePosition();
