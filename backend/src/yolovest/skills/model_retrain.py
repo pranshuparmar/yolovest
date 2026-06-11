@@ -241,6 +241,43 @@ def intraday_triple_barrier_label(
     return 1
 
 
+def _index_bulk_deal_dates(
+    bulk_deal_lookup: dict[tuple[str, str], dict[str, int]],
+) -> dict[str, list[str]]:
+    """Per-symbol sorted deal-date list for fast trailing-window lookups
+    over the (symbol, deal_date) -> counts map. Shared by the daily and
+    intraday matrix builders."""
+    out: dict[str, list[str]] = {}
+    for sym_key, date_key in bulk_deal_lookup:
+        out.setdefault(sym_key, []).append(date_key)
+    for v in out.values():
+        v.sort()
+    return out
+
+
+def _parse_news_timelines(
+    news_lookup: dict[str, list[tuple[str, str]]],
+) -> dict[str, list[tuple[str, "datetime"]]]:
+    """Parse each headline's published_at once (ISO -> aware-IST datetime)
+    so the per-sample loops can window-slice the symbol's timeline without
+    re-parsing. Unparseable rows are dropped. Shared by the daily and
+    intraday matrix builders."""
+    out: dict[str, list[tuple[str, datetime]]] = {}
+    for sym_key, entries in news_lookup.items():
+        parsed: list[tuple[str, datetime]] = []
+        for headline, published_at in entries:
+            try:
+                dt = datetime.fromisoformat(published_at)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=IST)
+                parsed.append((headline, dt))
+            except (ValueError, TypeError):
+                continue
+        if parsed:
+            out[sym_key] = parsed
+    return out
+
+
 def _time_decay_multipliers(n: int, last_weight: float) -> list[float]:
     """Linear time-decay multipliers for `n` chronologically-ordered
     samples: index 0 (oldest) → `last_weight`, index n-1 (newest) → 1.0.
@@ -1156,29 +1193,9 @@ class ModelRetrainSkill(SkillBase):
         # Pre-built in execute() (async) and passed in via bulk_deal_lookup
         # so we only need one DB scan instead of one query per sample.
         bulk_deal_lookup = bulk_deal_lookup or {}
-        # Per-symbol sorted deal-date list for fast 5-day window lookups.
-        bulk_dates_by_sym: dict[str, list[str]] = {}
-        for sym_key, date_key in bulk_deal_lookup:
-            bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
-        for v in bulk_dates_by_sym.values():
-            v.sort()
-
-        # News-sentiment lookup: parse published_at once per article so the
-        # per-sample loop can binary-slice the symbol's headline timeline.
+        bulk_dates_by_sym = _index_bulk_deal_dates(bulk_deal_lookup)
         news_lookup = news_lookup or {}
-        news_parsed_by_sym: dict[str, list[tuple[str, datetime]]] = {}
-        for sym_key, entries in news_lookup.items():
-            parsed: list[tuple[str, datetime]] = []
-            for headline, published_at in entries:
-                try:
-                    dt = datetime.fromisoformat(published_at)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=IST)
-                    parsed.append((headline, dt))
-                except (ValueError, TypeError):
-                    continue
-            if parsed:
-                news_parsed_by_sym[sym_key] = parsed
+        news_parsed_by_sym = _parse_news_timelines(news_lookup)
 
         for sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
@@ -1631,25 +1648,9 @@ class ModelRetrainSkill(SkillBase):
             hi = bisect.bisect_right(daily_dates_sorted, end_date)
             return daily_dates_sorted[max(0, hi - n):hi]
 
-        # Bulk-deal date index + parsed news timeline (mirror daily path).
-        bulk_dates_by_sym: dict[str, list[str]] = {}
-        for sym_key, date_key in bulk_deal_lookup:
-            bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
-        for v in bulk_dates_by_sym.values():
-            v.sort()
-        news_parsed_by_sym: dict[str, list[tuple[str, datetime]]] = {}
-        for sym_key, entries in news_lookup.items():
-            parsed: list[tuple[str, datetime]] = []
-            for headline, published_at in entries:
-                try:
-                    dt = datetime.fromisoformat(published_at)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=IST)
-                    parsed.append((headline, dt))
-                except (ValueError, TypeError):
-                    continue
-            if parsed:
-                news_parsed_by_sym[sym_key] = parsed
+        # Bulk-deal date index + parsed news timeline (shared helpers).
+        bulk_dates_by_sym = _index_bulk_deal_dates(bulk_deal_lookup)
+        news_parsed_by_sym = _parse_news_timelines(news_lookup)
 
         def _merge_daily_broadcast(features: dict[str, Any], sym: str, bar_ts: datetime) -> None:
             """Merge prior-session daily features into `features` in place."""

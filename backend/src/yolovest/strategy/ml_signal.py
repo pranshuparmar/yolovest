@@ -98,6 +98,75 @@ def _verify_artifact_checksum(path: Path) -> None:
         )
 
 
+def _compute_feature_stats(x_arr: Any) -> dict[str, Any] | None:
+    """Per-feature training distribution (mean / std / 11 decile edges),
+    stamped into the saved artifact so drift-watch can PSI-compare the
+    live feature distribution against what the model actually trained
+    on. Decile edges define the PSI bins: by construction each bin holds
+    10% of training rows. None on failure — stats are observability,
+    never a reason to fail a train."""
+    import numpy as np
+
+    try:
+        dec = np.percentile(x_arr, [i * 10 for i in range(11)], axis=0)
+        return {
+            "mean": [float(v) for v in x_arr.mean(axis=0)],
+            "std": [float(v) for v in x_arr.std(axis=0)],
+            "deciles": [
+                [float(dec[j, k]) for j in range(11)]
+                for k in range(x_arr.shape[1])
+            ],
+        }
+    except Exception:
+        logger.debug("feature-stats computation failed", exc_info=True)
+        return None
+
+
+def _parse_sample_dates(
+    bars_meta_raw: list[dict[str, Any]] | None,
+) -> list[Any] | None:
+    """Column-parallel entry dates (datetime.date or None), parsed once —
+    feeds the purged calibration folds and any other date-keyed split."""
+    if bars_meta_raw is None:
+        return None
+    from datetime import date as _pdate
+
+    def _parse_d(m: dict[str, Any]) -> "_pdate | None":
+        try:
+            return _pdate.fromisoformat(str(m.get("entry_date", ""))[:10])
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    return [_parse_d(m) for m in bars_meta_raw]
+
+
+def _compute_embargo_days(
+    bars_meta_raw: list[dict[str, Any]] | None, embargo_frac: float,
+) -> int:
+    """Embargo (López de Prado): an extra purge buffer beyond label
+    overlap, absorbing serial-correlation / delayed-reaction leakage
+    between the train tail and the test/holdout head. Sized as a
+    fraction of the data's calendar span; bars_meta_raw is
+    chronologically sorted so index 0/-1 are the span ends."""
+    if embargo_frac <= 0 or not bars_meta_raw:
+        return 0
+    from datetime import date as _edate
+
+    def _span_date(i: int) -> "_edate | None":
+        try:
+            return _edate.fromisoformat(
+                str(bars_meta_raw[i].get("entry_date", ""))[:10]
+            )
+        except (ValueError, TypeError, IndexError, AttributeError):
+            return None
+
+    first_d = _span_date(0)
+    last_d = _span_date(len(bars_meta_raw) - 1)
+    if first_d and last_d and last_d > first_d:
+        return int((last_d - first_d).days * embargo_frac)
+    return 0
+
+
 def _purge_boundary(
     bars_meta_raw: list[dict[str, Any]],
     cut: int,
@@ -209,6 +278,106 @@ def _snap_to_date_boundary(metas: list[Any], idx: int) -> int:
     while j < n and _d(j) and _d(j) == _d(j - 1):
         j += 1
     return j if j < n else idx
+
+
+def _synthetic_metrics(
+    synthetic_returns: list[float],
+    synthetic_wins: int,
+    synthetic_losses: int,
+    synthetic_gross_profit: float,
+    synthetic_gross_loss: float,
+    total_samples: int,
+) -> dict[str, Any]:
+    """Legacy +1%/-0.5% synthetic-payoff metrics — kept for callers that
+    don't thread bars_meta (older tests). `backtest_source` marks the
+    numbers as synthetic so they're never compared against real-PnL
+    runs."""
+    import numpy as np
+
+    returns_arr = np.array(synthetic_returns)
+    if len(returns_arr) > 0 and returns_arr.std() > 0:
+        sharpe = float(
+            (returns_arr.mean() / returns_arr.std()) * np.sqrt(252)
+        )
+    else:
+        sharpe = 0.0
+    equity = np.cumsum(returns_arr) + 1.0
+    peak = np.maximum.accumulate(equity)
+    drawdowns = (peak - equity) / np.where(peak > 0, peak, 1.0)
+    max_dd = float(drawdowns.max()) if len(drawdowns) > 0 else 0.0
+    total_trades = synthetic_wins + synthetic_losses
+    win_rate = (
+        synthetic_wins / total_trades if total_trades > 0 else 0.0
+    )
+    profit_factor = (
+        synthetic_gross_profit / synthetic_gross_loss
+        if synthetic_gross_loss > 0 else float("inf")
+    )
+    metrics = {
+        "sharpe": round(sharpe, 4),
+        # No bootstrap on the synthetic legacy path — mirror
+        # the point Sharpe so the decision metric is always
+        # present for downstream comparisons.
+        "sharpe_lower": round(sharpe, 4),
+        "max_drawdown_pct": round(max_dd, 4),
+        "win_rate": round(win_rate, 4),
+        "profit_factor": round(profit_factor, 4),
+        "total_trades": total_trades,
+        "total_samples": total_samples,
+        "backtest_source": "synthetic_legacy",
+    }
+    return metrics
+
+
+def _purge_fold_train_idx(
+    train_idx: Any,
+    test_idx: Any,
+    bars_meta_raw: list[dict[str, Any]] | None,
+    lookahead_bars: int,
+    embargo_days: int,
+) -> Any:
+    """Purge: drop train samples whose label window overlaps the test
+    fold. A train sample at date d has a label computed from bars up to
+    ~d + lookahead trading days; if that reaches the test fold's date
+    range the label peeked at test-period data → leakage. Samples are a
+    cross-sectional panel (many symbols per day) so a fixed sample-count
+    gap can't express a day-gap — purge by date explicitly, over-purging
+    slightly (calendar-day conversion of trading days) rather than risk
+    leaving any overlap."""
+    if lookahead_bars <= 0 or bars_meta_raw is None or not len(test_idx):
+        return train_idx
+    from datetime import date as _date
+    from datetime import timedelta as _td
+
+    import numpy as np
+
+    def _meta_date(i: int) -> "_date | None":
+        raw = bars_meta_raw[int(i)].get("entry_date", "")
+        try:
+            return _date.fromisoformat(str(raw)[:10])
+        except (ValueError, TypeError):
+            return None
+
+    test_dates = [d for d in (_meta_date(i) for i in test_idx) if d]
+    if not test_dates:
+        return train_idx
+    test_min = min(test_dates)
+    # trading days → calendar days (×7/5) + slack + embargo
+    purge_calendar_days = int(lookahead_bars * 7 / 5) + 2 + embargo_days
+    cutoff = test_min - _td(days=purge_calendar_days)
+    kept = [
+        i for i in train_idx
+        if (_meta_date(i) is None or _meta_date(i) < cutoff)  # type: ignore[operator]  # None short-circuits
+    ]
+    purged = len(train_idx) - len(kept)
+    if kept and purged > 0:
+        logger.debug(
+            "CV purge: dropped %d train samples within %dd of test fold "
+            "start %s",
+            purged, purge_calendar_days, test_min,
+        )
+        return np.asarray(kept, dtype=train_idx.dtype)
+    return train_idx
 
 
 def _purged_time_series_splits(
@@ -970,6 +1139,625 @@ class XGBoostSignalModel(MLBase):
     # Training
     # ------------------------------------------------------------------
 
+    def _evaluate_real_pnl(
+        self,
+        *,
+        model_type: str,
+        x_arr: Any,
+        y_arr: Any,
+        weights_arr: Any,
+        bars_meta_raw: list[dict[str, Any]],
+        sample_dates: list[Any] | None,
+        label_purge_days: int,
+        embargo_days: int,
+        lookahead_bars: int,
+        use_final_holdout: bool,
+        holdout_frac: float,
+        min_each_side: int,
+        xgb_params: dict[str, Any],
+        n_est_final: int,
+        collected_preds: list[int],
+        collected_probas: list[list[float]],
+        collected_meta: list[Any],
+        backtest_product: str,
+        backtest_max_positions: int,
+    ) -> dict[str, Any]:
+        """Real-PnL evaluation + threshold tuning — the headline metrics.
+
+        Final-holdout path (large corpora): a tuning model trained only on
+        the chronological early data — at the deployed tree count — scores
+        a strict-future holdout; the sweep runs on the CHOSEN stream (the
+        probability stream the live gate reads), thresholds are tuned on
+        the first half and metrics reported on the second (date-snapped).
+        Small corpora fall back to the per-fold OOF stream. Returns the
+        metrics dict (`backtest_source` records which path/variant won).
+        """
+        import gc as _gc
+
+        import numpy as np
+        import xgboost as xgb
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.model_selection import TimeSeriesSplit
+
+        from yolovest.strategy.walk_forward_backtest import (
+            BacktestConfig,
+            BarMeta,
+            _bootstrap_sharpe_lower_bound,
+            backtest_by_period,
+            run_walk_forward_backtest,
+            sweep_thresholds,
+        )
+        from yolovest.strategy.walk_forward_backtest import (
+            apply_thresholds as _apply_thresholds,
+        )
+
+        n_samples = len(x_arr)
+        bt_cfg = BacktestConfig(
+            product=backtest_product,
+            max_concurrent_positions=backtest_max_positions,
+        )
+
+        # Bound the sweep to the range production can actually
+        # trade. The inference layer (_get_effective_thresholds)
+        # clamps tuned thresholds to risk.tuned_threshold_max_value
+        # / _max_diff; without mirroring those caps here the sweep
+        # can pick a cell (e.g. 0.75/0.80) the live model clamps to
+        # 0.60/0.60, so the reported Sharpe/win-rate describe a
+        # model that never trades. Caps None when config is absent
+        # (tests) → unbounded, preserving prior behaviour.
+        _risk_cfg = getattr(self._config, "risk", None) if self._config else None
+        _sweep_max_value = (
+            float(getattr(_risk_cfg, "tuned_threshold_max_value", 0.60))
+            if _risk_cfg is not None else None
+        )
+        _sweep_max_diff = (
+            float(getattr(_risk_cfg, "tuned_threshold_max_diff", 0.05))
+            if _risk_cfg is not None else None
+        )
+        # Signal-rate floor so the sweep can't pick an unreachable
+        # ceiling cell that fires ~never live (the silent-model bug).
+        _sweep_min_signal_rate = (
+            float(getattr(_risk_cfg, "tuned_min_signal_rate", 0.0))
+            if _risk_cfg is not None else 0.0
+        )
+
+        # Deflated Sharpe of the chosen cell — captured from the
+        # sweep (which holds the full grid of trial Sharpes) so the
+        # reported metric corrects for selection across the 81-cell
+        # search, which the per-cell bootstrap lower bound can't.
+        _dsr: float | None = None
+        # Out-of-sample discrimination diagnostics — the cleanest
+        # threshold/cost-independent read of whether the model has
+        # ANY edge (AUC≈0.50 / separation≈0 = none). Hoisted so they
+        # persist into `metrics` instead of living only in the log.
+        _oos_auc_buy: float | None = None
+        _oos_auc_sell: float | None = None
+        _oos_logloss: float | None = None
+        _oos_buy_sep: float | None = None
+        if use_final_holdout:
+            # Final-scale holdout. Train a tuning model on the
+            # chronological early data only, score the strict-
+            # future holdout with it (out-of-sample, at ~the
+            # deployed full-data model's probability scale), then
+            # tune thresholds on the FIRST half of that holdout
+            # and report metrics on the SECOND half (keeps the
+            # threshold choice out of the reported slice). A purge
+            # gap before the holdout stops the tuning model's
+            # labels peeking into it. This is what makes the tuned
+            # thresholds reachable at inference — the per-fold OOF
+            # probabilities are from over-confident sub-models and
+            # don't transfer to the deployed model.
+            _cut = int(n_samples * (1.0 - holdout_frac))
+            _purge_cut = _purge_boundary(
+                bars_meta_raw, _cut, lookahead_bars, min_each_side,
+                embargo_days=embargo_days,
+            )
+            _tw = weights_arr[:_purge_cut] if weights_arr is not None else None
+            # Tuning model at the DEPLOYED tree count (n_est_final,
+            # not the n_estimators ceiling) — tree count shifts the
+            # probability scale, and the whole point of the final-
+            # scale holdout is that the swept cutoffs transfer to
+            # the model that actually trades.
+            _tuning_model = xgb.XGBClassifier(
+                **{**xgb_params, "n_estimators": n_est_final},
+            )
+            _tuning_model.fit(
+                x_arr[:_purge_cut], y_arr[:_purge_cut],
+                sample_weight=_tw, verbose=False,
+            )
+            _ho_proba = _tuning_model.predict_proba(x_arr[_cut:])
+            # Tuning-side calibrator: the live gate reads the
+            # CHOSEN stream (agreement-gated calibration adoption,
+            # see _choose_calibrated), so the sweep must run on the
+            # same stream. Fit ONLY on the tuning slice — the
+            # production calibrator saw the holdout. Fail-open to
+            # raw probas (argmax is unaffected either way).
+            _ho_cal = None
+            try:
+                _tcal_splits = max(2, min(3, _purge_cut // 50 or 2))
+                if sample_dates is not None and label_purge_days > 0:
+                    _tcal_cv: Any = _purged_time_series_splits(
+                        _purge_cut, _tcal_splits,
+                        sample_dates[:_purge_cut], label_purge_days,
+                    )
+                else:
+                    _tcal_cv = TimeSeriesSplit(n_splits=_tcal_splits)
+                _tuning_cal = CalibratedClassifierCV(
+                    _tuning_model, method="sigmoid", cv=_tcal_cv,
+                )
+                _tuning_cal.fit(
+                    x_arr[:_purge_cut], y_arr[:_purge_cut],
+                    sample_weight=_tw,
+                )
+                _ho_cal = _tuning_cal.predict_proba(x_arr[_cut:])
+                del _tuning_cal
+            except Exception:
+                logger.debug(
+                    "tuning-side calibrator failed; sweeping on raw "
+                    "probabilities", exc_info=True,
+                )
+            del _tuning_model
+            _gc.collect()
+            _ho_probas = [
+                _choose_calibrated(
+                    [float(p) for p in _ho_proba[i]],
+                    [float(p) for p in _ho_cal[i]]
+                    if _ho_cal is not None else None,
+                )
+                for i in range(len(_ho_proba))
+            ]
+            # argmax(chosen) == argmax(raw) by the adoption rule.
+            _ho_preds = [int(row.argmax()) for row in _ho_proba]
+            # Discrimination diagnostics on the strict-future
+            # holdout. The tuning model trained only on
+            # x_arr[:_purge_cut] and scored x_arr[_cut:], so this is
+            # a clean out-of-sample read of whether the model can
+            # RANK winners above losers at all — independent of any
+            # threshold. AUC≈0.50 = no edge (no cutoff/label tweak
+            # fixes that); >0.55 = a real signal worth tuning.
+            # BUY-separation is mean P(BUY) on true-BUY rows minus
+            # the rest: a prior-predictor leaves it ~0. Logged only;
+            # never gates deploy.
+            try:
+                from sklearn.metrics import (
+                    log_loss as _log_loss,
+                )
+                from sklearn.metrics import (
+                    roc_auc_score as _roc_auc,
+                )
+                _y_ho = y_arr[_cut:]
+                _p_buy = _ho_proba[:, _LABEL_BUY]
+                _p_sell = _ho_proba[:, _LABEL_SELL]
+
+                def _ovr_auc(pos: int, score: Any) -> float:
+                    _yb = (_y_ho == pos).astype(int)
+                    if _yb.min() == _yb.max():
+                        return float("nan")
+                    return float(_roc_auc(_yb, score))
+
+                _auc_buy = _ovr_auc(_LABEL_BUY, _p_buy)
+                _auc_sell = _ovr_auc(_LABEL_SELL, _p_sell)
+                try:
+                    _ll = float(
+                        _log_loss(_y_ho, _ho_proba, labels=[0, 1, 2])
+                    )
+                except Exception:
+                    _ll = float("nan")
+                _m_buy = _y_ho == _LABEL_BUY
+                _sep = (
+                    float(_p_buy[_m_buy].mean() - _p_buy[~_m_buy].mean())
+                    if _m_buy.any() and (~_m_buy).any()
+                    else float("nan")
+                )
+                _q = np.percentile(_p_buy, [50, 90, 99])
+
+                def _finite(x: float) -> float | None:
+                    # NaN (absent class) → None so metrics stay
+                    # JSON-serializable for the dashboard.
+                    return None if x != x else round(float(x), 4)
+
+                _oos_auc_buy = _finite(_auc_buy)
+                _oos_auc_sell = _finite(_auc_sell)
+                _oos_logloss = _finite(_ll)
+                _oos_buy_sep = _finite(_sep)
+                logger.info(
+                    "Discrimination %s (holdout n=%d): AUC_buy=%.3f "
+                    "AUC_sell=%.3f logloss=%.3f | P(BUY) mean=%.3f "
+                    "std=%.3f p50=%.3f p90=%.3f p99=%.3f max=%.3f | "
+                    "BUY-separation=%.3f",
+                    model_type, len(_y_ho), _auc_buy, _auc_sell, _ll,
+                    float(_p_buy.mean()), float(_p_buy.std()),
+                    float(_q[0]), float(_q[1]), float(_q[2]),
+                    float(_p_buy.max()), _sep,
+                )
+            except Exception:
+                logger.debug(
+                    "discrimination diagnostics failed", exc_info=True,
+                )
+            _ho_meta = [
+                BarMeta(
+                    symbol=str(m.get("symbol", "")),
+                    entry_close=float(m.get("entry_close") or 0.0),
+                    exit_close=float(m.get("exit_close") or 0.0),
+                    path_highs=list(m.get("path_highs") or []),
+                    path_lows=list(m.get("path_lows") or []),
+                    target_pct=float(m.get("target_pct") or 0.0),
+                    sl_pct=float(m.get("sl_pct") or 0.0),
+                    entry_date=str(m.get("entry_date") or ""),
+                    buy_exit=m.get("buy_exit"),
+                    sell_exit=m.get("sell_exit"),
+                    hold_days=m.get("hold_days"),
+                )
+                for m in bars_meta_raw[_cut:]
+            ]
+            # Snap the tune/report split to a date boundary so
+            # same-day cross-sectional rows can't straddle it.
+            _sub = _snap_to_date_boundary(_ho_meta, len(_ho_probas) // 2)
+            tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
+                probas=_ho_probas[:_sub],
+                bars_meta=_ho_meta[:_sub],
+                config=bt_cfg,
+                max_threshold=_sweep_max_value,
+                max_diff=_sweep_max_diff,
+                min_signal_rate=_sweep_min_signal_rate,
+            )
+            _dsr = _tune_bt.deflated_sharpe
+            _ht_preds = _apply_thresholds(
+                _ho_probas[_sub:], tuned_buy, tuned_sell,
+            )
+            tuned_bt = run_walk_forward_backtest(
+                preds=_ht_preds,
+                bars_meta=_ho_meta[_sub:],
+                config=bt_cfg,
+            )
+            bt = run_walk_forward_backtest(
+                preds=_ho_preds[_sub:],
+                bars_meta=_ho_meta[_sub:],
+                config=bt_cfg,
+            )
+            _holdout_used = True
+        else:
+            # Small bars_meta corpus (not enough for the holdout):
+            # fall back to the K-fold OOF collection. Tune on the
+            # chronological first slice, report on the strict-
+            # future slice; if too small to split, tune in-sample
+            # (flagged via threshold_holdout_used).
+            _split = _snap_to_date_boundary(
+                collected_meta,
+                int(len(collected_preds) * (1.0 - holdout_frac)),
+            )
+            _can_split = (
+                _split >= min_each_side
+                and (len(collected_preds) - _split) >= min_each_side
+            )
+            if _can_split:
+                tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
+                    probas=collected_probas[:_split],
+                    bars_meta=collected_meta[:_split],
+                    config=bt_cfg,
+                    max_threshold=_sweep_max_value,
+                    max_diff=_sweep_max_diff,
+                    min_signal_rate=_sweep_min_signal_rate,
+                )
+                _dsr = _tune_bt.deflated_sharpe
+                _holdout_tuned_preds = _apply_thresholds(
+                    collected_probas[_split:], tuned_buy, tuned_sell,
+                )
+                tuned_bt = run_walk_forward_backtest(
+                    preds=_holdout_tuned_preds,
+                    bars_meta=collected_meta[_split:],
+                    config=bt_cfg,
+                )
+                bt = run_walk_forward_backtest(
+                    preds=collected_preds[_split:],
+                    bars_meta=collected_meta[_split:],
+                    config=bt_cfg,
+                )
+                _holdout_used = True
+            else:
+                bt = run_walk_forward_backtest(
+                    preds=collected_preds,
+                    bars_meta=collected_meta,
+                    config=bt_cfg,
+                )
+                tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
+                    probas=collected_probas,
+                    bars_meta=collected_meta,
+                    config=bt_cfg,
+                    max_threshold=_sweep_max_value,
+                    max_diff=_sweep_max_diff,
+                    min_signal_rate=_sweep_min_signal_rate,
+                )
+                _dsr = tuned_bt.deflated_sharpe
+                _holdout_used = False
+        # When tuned thresholds beat the argmax baseline, report
+        # the tuned metrics as the headline numbers — that's what
+        # live trading will actually see. Keep the argmax sharpe
+        # accessible for comparison.
+        use_tuned = tuned_bt.sharpe > bt.sharpe
+        headline = tuned_bt if use_tuned else bt
+        # Robust decision Sharpe: bootstrap the SAME daily-return
+        # series the headline point Sharpe is computed from, and
+        # take its p25 lower bound. The headline is a point
+        # estimate on a single contiguous holdout slice — high
+        # variance and regime-dependent — so deploy/promote
+        # decisions compare on this lower bound instead (a Sharpe
+        # propped up by a couple of lucky days collapses here,
+        # while a consistent edge survives).
+        _boot_series = headline.daily_returns or headline.returns
+        _boot_annual = 252 if headline.daily_returns else bt_cfg.annualization_factor
+        sharpe_lower = _bootstrap_sharpe_lower_bound(
+            _boot_series, annualization=_boot_annual,
+            n_iter=200, percentile=25.0,
+        ) if _boot_series else headline.sharpe
+        metrics: dict[str, Any] = {
+            "sharpe": headline.sharpe,
+            "sharpe_lower": sharpe_lower,
+            "max_drawdown_pct": headline.max_drawdown_pct,
+            "win_rate": headline.win_rate,
+            "profit_factor": (
+                headline.profit_factor if headline.profit_factor != float("inf")
+                else 999.0
+            ),
+            "total_trades": headline.total_trades,
+            "total_samples": len(y_arr),
+            # Extra real-PnL fields not produced by the legacy
+            # synthetic path — useful on the ML Models dashboard.
+            "net_pnl": headline.net_pnl,
+            "final_capital": headline.final_capital,
+            "backtest_source": (
+                "walk_forward_threshold_tuned" if use_tuned
+                else "walk_forward_real_pnl"
+            ),
+            "signals_skipped_at_cap": headline.signals_skipped_at_cap,
+            "backtest_max_positions": backtest_max_positions,
+            # Tuned thresholds: applied at inference when present.
+            "tuned_buy_threshold": tuned_buy,
+            "tuned_sell_threshold": tuned_sell,
+            "argmax_sharpe": bt.sharpe,
+            "tuned_sharpe": tuned_bt.sharpe,
+            "threshold_holdout_used": _holdout_used,
+            # Selection-bias-adjusted confidence the chosen cell's
+            # edge is real (P(true Sharpe > 0) after correcting for
+            # the number of grid trials + return skew/kurtosis).
+            # None when there weren't enough trials to estimate it.
+            "deflated_sharpe": _dsr,
+            # Threshold/cost-independent discrimination on the
+            # strict-future holdout — AUC≈0.50 / separation≈0 means
+            # the model has no edge no matter how thresholds are
+            # tuned. None on the small-corpus (non-holdout) path.
+            "oos_auc_buy": _oos_auc_buy,
+            "oos_auc_sell": _oos_auc_sell,
+            "oos_logloss": _oos_logloss,
+            "oos_buy_separation": _oos_buy_sep,
+        }
+        if _dsr is not None and _dsr < 0.95:
+            logger.warning(
+                "%s: deflated Sharpe %.3f < 0.95 — the tuned edge may "
+                "be a selection-bias artifact of the threshold sweep, "
+                "not a real signal.",
+                model_type, _dsr,
+            )
+        # Per-calendar-year OOS edge profile at the DEPLOYED
+        # thresholds — diagnoses regime shift vs edge decay. We
+        # apply the single chosen (buy, sell) cutoff across the
+        # whole holdout and bucket realized trades by entry year,
+        # so a Sharpe that's positive in older years and negative
+        # only recently reads as regime/decay rather than "never
+        # worked". Diagnostic only (logged + stashed in metrics);
+        # never feeds the deploy/promote decision.
+        try:
+            _bp_probas = _ho_probas if use_final_holdout else collected_probas
+            _bp_meta = _ho_meta if use_final_holdout else collected_meta
+            _bp_preds = _apply_thresholds(_bp_probas, tuned_buy, tuned_sell)
+            _by_year: dict[str, Any] = {}
+            for _yr, _res in backtest_by_period(
+                _bp_preds, _bp_meta, bt_cfg,
+            ).items():
+                _by_year[_yr] = {
+                    "sharpe": round(_res.sharpe, 3),
+                    "win_rate": round(_res.win_rate, 3),
+                    "trades": _res.total_trades,
+                    "net_pnl": round(_res.net_pnl, 1),
+                }
+                logger.info(
+                    "  [%s] %s OOS @ tuned: sharpe=%.2f win=%.2f trades=%d net=%.0f",
+                    model_type, _yr, _res.sharpe, _res.win_rate,
+                    _res.total_trades, _res.net_pnl,
+                )
+            metrics["per_year_oos"] = _by_year
+        except Exception:
+            logger.debug("per-year OOS breakdown failed", exc_info=True)
+        return metrics
+
+    def _run_purged_fold_cv(
+        self,
+        x_arr: Any,
+        y_arr: Any,
+        weights_arr: Any,
+        xgb_params: dict[str, Any],
+        bars_meta_raw: list[dict[str, Any]] | None,
+        lookahead_bars: int,
+        embargo_days: int,
+    ) -> tuple[list[int], list[list[float]], list[Any], tuple[Any, ...]]:
+        """Walk-forward K-fold CV: collect every test fold's predictions
+        (with matching bars_meta when available) for the real-PnL
+        backtest, or accumulate the legacy +1%/-0.5% synthetic payoff for
+        callers without bars_meta. Train folds are purged by the label
+        window + embargo (see _purge_fold_train_idx).
+
+        Returns (collected_preds, collected_probas, collected_meta,
+        synthetic) where synthetic = (returns, wins, losses,
+        gross_profit, gross_loss)."""
+        import xgboost as xgb
+        from sklearn.model_selection import TimeSeriesSplit
+
+        from yolovest.strategy.walk_forward_backtest import BarMeta
+
+        tscv = TimeSeriesSplit(n_splits=min(5, len(y_arr) // 50 or 2))
+        collected_preds: list[int] = []
+        collected_probas: list[list[float]] = []
+        collected_meta: list[Any] = []
+        synthetic_returns: list[float] = []
+        synthetic_wins = 0
+        synthetic_losses = 0
+        synthetic_gross_profit = 0.0
+        synthetic_gross_loss = 0.0
+
+        for train_idx, test_idx in tscv.split(x_arr):
+            train_idx = _purge_fold_train_idx(
+                train_idx, test_idx, bars_meta_raw,
+                lookahead_bars, embargo_days,
+            )
+            X_train, X_test = x_arr[train_idx], x_arr[test_idx]
+            y_train, y_test = y_arr[train_idx], y_arr[test_idx]
+            w_train = weights_arr[train_idx] if weights_arr is not None else None
+
+            fold_model = xgb.XGBClassifier(**xgb_params)
+            fold_model.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+
+            preds = fold_model.predict(X_test)
+
+            if bars_meta_raw is not None:
+                fold_probas = fold_model.predict_proba(X_test)
+                for pred, idx, probs in zip(
+                    preds, test_idx, fold_probas, strict=False,
+                ):
+                    meta = bars_meta_raw[int(idx)]
+                    collected_preds.append(int(pred))
+                    collected_probas.append([float(p) for p in probs])
+                    collected_meta.append(BarMeta(
+                        symbol=str(meta.get("symbol", "")),
+                        entry_close=float(meta.get("entry_close") or 0.0),
+                        exit_close=float(meta.get("exit_close") or 0.0),
+                        path_highs=list(meta.get("path_highs") or []),
+                        path_lows=list(meta.get("path_lows") or []),
+                        target_pct=float(meta.get("target_pct") or 0.0),
+                        sl_pct=float(meta.get("sl_pct") or 0.0),
+                        entry_date=str(meta.get("entry_date") or ""),
+                        buy_exit=meta.get("buy_exit"),
+                        sell_exit=meta.get("sell_exit"),
+                        hold_days=meta.get("hold_days"),
+                    ))
+            else:
+                # Legacy synthetic payoff — kept for backwards compat
+                # with callers that don't yet thread bars_meta.
+                for pred, actual in zip(preds, y_test, strict=False):
+                    if pred == actual and pred != 1:
+                        ret = 0.01
+                        synthetic_wins += 1
+                        synthetic_gross_profit += ret
+                    elif pred != actual and pred != 1:
+                        ret = -0.005
+                        synthetic_losses += 1
+                        synthetic_gross_loss += abs(ret)
+                    else:
+                        ret = 0.0
+                    synthetic_returns.append(ret)
+
+        synthetic = (
+            synthetic_returns, synthetic_wins, synthetic_losses,
+            synthetic_gross_profit, synthetic_gross_loss,
+        )
+        return collected_preds, collected_probas, collected_meta, synthetic
+
+    def _early_stopped_tree_count(
+        self,
+        x_arr: Any,
+        y_arr: Any,
+        weights_arr: Any,
+        xgb_params: dict[str, Any],
+        es_rounds: int,
+        es_min_samples: int,
+        bars_meta_raw: list[dict[str, Any]] | None,
+        lookahead_bars: int,
+        embargo_days: int,
+    ) -> int:
+        """Early stopping: a fixed n_estimators either over-fits (too many
+        trees on noise) or under-fits. Probe the right tree count on a
+        purged chronological validation TAIL, then the caller refits the
+        deployed model on ALL data at that count — so it still sees the
+        full history but stops boosting where validation logloss
+        plateaus. Gated on a min sample count; small corpora keep the
+        configured n_estimators (returned unchanged)."""
+        import gc as _gc
+
+        import xgboost as xgb
+
+        n_samples = len(x_arr)
+        n_est_final = int(xgb_params["n_estimators"])
+        if es_rounds <= 0 or n_samples < es_min_samples:
+            return n_est_final
+        es_cut = int(n_samples * 0.85)
+        es_train_end = (
+            _purge_boundary(
+                bars_meta_raw, es_cut, lookahead_bars,
+                min_keep=max(50, int(n_samples * 0.4)),
+                embargo_days=embargo_days,
+            )
+            if bars_meta_raw is not None else es_cut
+        )
+        if es_train_end <= 50 or (n_samples - es_cut) < 50:
+            return n_est_final
+        # n_estimators is the UPPER BOUND; early stopping picks the best
+        # count <= it on the validation tail.
+        es_ceiling = int(xgb_params["n_estimators"])
+        probe = xgb.XGBClassifier(
+            **{**xgb_params, "n_estimators": es_ceiling,
+               "early_stopping_rounds": es_rounds}
+        )
+        w_es = weights_arr[:es_train_end] if weights_arr is not None else None
+        probe.fit(
+            x_arr[:es_train_end], y_arr[:es_train_end],
+            sample_weight=w_es,
+            eval_set=[(x_arr[es_cut:], y_arr[es_cut:])],
+            verbose=False,
+        )
+        bi = getattr(probe, "best_iteration", None)
+        if bi is not None and 0 < int(bi) + 1 < es_ceiling:
+            n_est_final = int(bi) + 1
+            logger.info(
+                "Early stopping: n_estimators %d → %d (%d rounds)",
+                es_ceiling, n_est_final, es_rounds,
+            )
+        del probe
+        _gc.collect()
+        return n_est_final
+
+    def _fit_calibrator(
+        self,
+        model: Any,
+        x_arr: Any,
+        y_arr: Any,
+        weights_arr: Any,
+        sample_dates: list[Any] | None,
+        label_purge_days: int,
+    ) -> Any:
+        """Calibrate probabilities (Platt scaling). cv MUST be temporal —
+        an int would silently select shuffled StratifiedKFold, leaking
+        future bars into past calibration. Fit with the SAME sample
+        weights the model trained on (class-balance × feedback ×
+        time-decay) — an unweighted calibrator re-learns the raw
+        HOLD-heavy prior and compresses directional probabilities back
+        toward HOLD. Folds are purged by the label window + embargo when
+        sample dates are available — a multi-bar label straddling a fold
+        boundary otherwise leaks into the per-fold calibrators."""
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.model_selection import TimeSeriesSplit
+
+        calibration_n_splits = max(2, min(3, len(y_arr) // 50 or 2))
+        cal_cv: Any
+        if sample_dates is not None and label_purge_days > 0:
+            cal_cv = _purged_time_series_splits(
+                len(y_arr), calibration_n_splits,
+                sample_dates, label_purge_days,
+            )
+        else:
+            cal_cv = TimeSeriesSplit(n_splits=calibration_n_splits)
+        calibrator = CalibratedClassifierCV(model, method="sigmoid", cv=cal_cv)
+        calibrator.fit(x_arr, y_arr, sample_weight=weights_arr)
+        return calibrator
+
     async def train(
         self, model_type: str, X: Any, y: Any, params: dict[str, Any],  # noqa: N803
         feature_names: list[str] | None = None,
@@ -1029,8 +1817,10 @@ class XGBoostSignalModel(MLBase):
                 ) from e
 
             try:
-                from sklearn.calibration import CalibratedClassifierCV
-                from sklearn.model_selection import TimeSeriesSplit
+                # Dependency check only — the phase methods import what
+                # they use; fail here with a friendly message before any
+                # expensive work begins.
+                import sklearn  # noqa: F401
             except ImportError as e:
                 raise ImportError(
                     "scikit-learn is required for training. "
@@ -1050,27 +1840,7 @@ class XGBoostSignalModel(MLBase):
             _gc.collect()
             y_arr = np.asarray(y)
 
-            # Per-feature training distribution, stamped into the saved
-            # artifact so drift-watch can PSI-compare the live feature
-            # distribution against what this model actually trained on.
-            # Decile edges (11 per feature) define the PSI bins: by
-            # construction each bin holds 10% of training rows.
-            feature_stats: dict[str, Any] | None = None
-            try:
-                _dec = np.percentile(X_arr, [i * 10 for i in range(11)], axis=0)
-                feature_stats = {
-                    "mean": [float(v) for v in X_arr.mean(axis=0)],
-                    "std": [float(v) for v in X_arr.std(axis=0)],
-                    "deciles": [
-                        [float(_dec[j, k]) for j in range(11)]
-                        for k in range(X_arr.shape[1])
-                    ],
-                }
-            except Exception:
-                logger.debug("feature-stats computation failed", exc_info=True)
-
-            # Walk-forward split via TimeSeriesSplit
-            tscv = TimeSeriesSplit(n_splits=min(5, len(y_arr) // 50 or 2))
+            feature_stats = _compute_feature_stats(X_arr)
 
             # Hyperparameter resolution precedence: explicit `params`
             # (caller / test override) > config.retraining.xgb > literal
@@ -1126,38 +1896,6 @@ class XGBoostSignalModel(MLBase):
             # Train on full data first
             model = xgb.XGBClassifier(**xgb_params)
 
-            # Walk-forward predictions accumulator. We collect every test
-            # fold's predictions (with the matching bars_meta when
-            # available) and feed them through the real-PnL backtest at
-            # the end so the metrics reflect actual costs / sizing /
-            # slippage rather than the legacy +1%/-0.5% fiction.
-            from yolovest.strategy.walk_forward_backtest import (
-                BacktestConfig,
-                BarMeta,
-                _bootstrap_sharpe_lower_bound,
-                backtest_by_period,
-                run_walk_forward_backtest,
-                sweep_thresholds,
-            )
-            from yolovest.strategy.walk_forward_backtest import (
-                apply_thresholds as _apply_thresholds,
-            )
-
-            collected_preds: list[int] = []
-            collected_meta: list[BarMeta] = []
-            # Per-fold class probabilities — only used when bars_meta is
-            # provided; needed for the post-CV threshold sweep that finds
-            # the (buy, sell) cutoff pair maximising backtest Sharpe.
-            collected_probas: list[list[float]] = []
-            # Legacy synthetic accumulators — kept so trainings without
-            # bars_meta (older callers, focused unit tests) still emit
-            # comparable metrics.
-            synthetic_returns: list[float] = []
-            synthetic_wins = 0
-            synthetic_losses = 0
-            synthetic_gross_profit = 0.0
-            synthetic_gross_loss = 0.0
-
             # Threshold tuning + metrics use a final-scale chronological
             # holdout (see the metrics block below) when there's enough
             # data + bars_meta: a tuning model trained only on the early
@@ -1177,48 +1915,13 @@ class XGBoostSignalModel(MLBase):
                 and int(n_samples * _holdout_frac) >= 2 * _min_each_side
             )
 
-            # Embargo (López de Prado): an extra purge buffer beyond label
-            # overlap, absorbing serial-correlation / delayed-reaction
-            # leakage between the train tail and the test/holdout head.
-            # Sized as a fraction of the data's calendar span; bars_meta_raw
-            # is chronologically sorted so index 0/-1 are the span ends.
-            _embargo_days = 0
             _embargo_frac = (
                 float(getattr(getattr(self._config, "retraining", None),
                               "cv_embargo_frac", 0.0) or 0.0)
                 if self._config is not None else 0.0
             )
-            if _embargo_frac > 0 and bars_meta_raw:
-                from datetime import date as _edate
-
-                def _span_date(i: int) -> "_edate | None":
-                    try:
-                        return _edate.fromisoformat(
-                            str(bars_meta_raw[i].get("entry_date", ""))[:10]
-                        )
-                    except (ValueError, TypeError, IndexError, AttributeError):
-                        return None
-
-                _first_d = _span_date(0)
-                _last_d = _span_date(len(bars_meta_raw) - 1)
-                if _first_d and _last_d and _last_d > _first_d:
-                    _embargo_days = int((_last_d - _first_d).days * _embargo_frac)
-
-            # Column-parallel sample dates, parsed once — feed the purged
-            # calibration folds below and any other date-keyed split.
-            _sample_dates: list[Any] | None = None
-            if bars_meta_raw is not None:
-                from datetime import date as _pdate
-
-                def _parse_d(m: dict[str, Any]) -> "_pdate | None":
-                    try:
-                        return _pdate.fromisoformat(
-                            str(m.get("entry_date", ""))[:10]
-                        )
-                    except (ValueError, TypeError, AttributeError):
-                        return None
-
-                _sample_dates = [_parse_d(m) for m in bars_meta_raw]
+            _embargo_days = _compute_embargo_days(bars_meta_raw, _embargo_frac)
+            _sample_dates = _parse_sample_dates(bars_meta_raw)
             # Label-overlap + embargo window in calendar days — the same
             # discipline the fold CV / holdout purge uses.
             _label_purge_days = (
@@ -1226,596 +1929,74 @@ class XGBoostSignalModel(MLBase):
                 + _embargo_days
             )
 
-            for train_idx, test_idx in tscv.split(X_arr):
-                if use_final_holdout:
-                    break
-                # Purge: drop train samples whose label window overlaps
-                # the test fold. A train sample at date d has a label
-                # computed from bars up to ~d + lookahead trading days;
-                # if that reaches the test fold's date range the label
-                # peeked at test-period data → leakage. Samples are a
-                # cross-sectional panel (many symbols per day) so a
-                # fixed sample-count gap can't express a day-gap — we
-                # purge by date explicitly. Over-purge slightly
-                # (calendar-day conversion of trading days) rather than
-                # risk leaving any overlap.
-                if (
-                    lookahead_bars > 0
-                    and bars_meta_raw is not None
-                    and len(test_idx) > 0
-                ):
-                    from datetime import date as _date
-                    from datetime import timedelta as _td
-
-                    def _meta_date(i: int) -> "_date | None":
-                        raw = bars_meta_raw[int(i)].get("entry_date", "")
-                        try:
-                            return _date.fromisoformat(str(raw)[:10])
-                        except (ValueError, TypeError):
-                            return None
-
-                    test_dates = [d for d in (_meta_date(i) for i in test_idx) if d]
-                    if test_dates:
-                        test_min = min(test_dates)
-                        # trading days → calendar days (×7/5) + slack + embargo
-                        purge_calendar_days = (
-                            int(lookahead_bars * 7 / 5) + 2 + _embargo_days
-                        )
-                        cutoff = test_min - _td(days=purge_calendar_days)
-                        kept = [
-                            i for i in train_idx
-                            if (_meta_date(i) is None or _meta_date(i) < cutoff)  # type: ignore[operator]  # None short-circuits
-                        ]
-                        purged = len(train_idx) - len(kept)
-                        if kept and purged > 0:
-                            train_idx = np.asarray(kept, dtype=train_idx.dtype)
-                            logger.debug(
-                                "CV purge: dropped %d train samples within "
-                                "%dd of test fold start %s",
-                                purged, purge_calendar_days, test_min,
-                            )
-
-                X_train, X_test = X_arr[train_idx], X_arr[test_idx]
-                y_train, y_test = y_arr[train_idx], y_arr[test_idx]
-                w_train = weights_arr[train_idx] if weights_arr is not None else None
-
-                fold_model = xgb.XGBClassifier(**xgb_params)
-                fold_model.fit(X_train, y_train, sample_weight=w_train, verbose=False)
-
-                preds = fold_model.predict(X_test)
-
-                if bars_meta_raw is not None:
-                    fold_probas = fold_model.predict_proba(X_test)
-                    for pred, idx, probs in zip(
-                        preds, test_idx, fold_probas, strict=False,
-                    ):
-                        meta = bars_meta_raw[int(idx)]
-                        collected_preds.append(int(pred))
-                        collected_probas.append([float(p) for p in probs])
-                        collected_meta.append(BarMeta(
-                            symbol=str(meta.get("symbol", "")),
-                            entry_close=float(meta.get("entry_close") or 0.0),
-                            exit_close=float(meta.get("exit_close") or 0.0),
-                            path_highs=list(meta.get("path_highs") or []),
-                            path_lows=list(meta.get("path_lows") or []),
-                            target_pct=float(meta.get("target_pct") or 0.0),
-                            sl_pct=float(meta.get("sl_pct") or 0.0),
-                            entry_date=str(meta.get("entry_date") or ""),
-                            buy_exit=meta.get("buy_exit"),
-                            sell_exit=meta.get("sell_exit"),
-                            hold_days=meta.get("hold_days"),
-                        ))
-                else:
-                    # Legacy synthetic payoff — kept for backwards compat
-                    # with callers that don't yet thread bars_meta.
-                    for pred, actual in zip(preds, y_test, strict=False):
-                        if pred == actual and pred != 1:
-                            ret = 0.01
-                            synthetic_wins += 1
-                            synthetic_gross_profit += ret
-                        elif pred != actual and pred != 1:
-                            ret = -0.005
-                            synthetic_losses += 1
-                            synthetic_gross_loss += abs(ret)
-                        else:
-                            ret = 0.0
-                        synthetic_returns.append(ret)
+            # K-fold OOF collection — skipped on the final-holdout path
+            # (its tuning model supersedes the per-fold OOF stream; see
+            # the comment above use_final_holdout).
+            if use_final_holdout:
+                collected_preds: list[int] = []
+                collected_probas: list[list[float]] = []
+                collected_meta: list[Any] = []
+                synthetic: tuple[Any, ...] = ([], 0, 0, 0.0, 0.0)
+            else:
+                (
+                    collected_preds, collected_probas, collected_meta,
+                    synthetic,
+                ) = self._run_purged_fold_cv(
+                    X_arr, y_arr, weights_arr, xgb_params,
+                    bars_meta_raw, lookahead_bars, _embargo_days,
+                )
+            (
+                synthetic_returns, synthetic_wins, synthetic_losses,
+                synthetic_gross_profit, synthetic_gross_loss,
+            ) = synthetic
 
             # Free per-fold scratch before the final fit allocates its
             # own DMatrix copy — XGBoost's hist tree-method copies the
             # data into its own bin-quantized representation, briefly
             # doubling memory; collect first to keep the peak bounded.
             _gc.collect()
-            # Early stopping: a fixed n_estimators either over-fits (too
-            # many trees on noise) or under-fits. Probe the right tree count
-            # on a purged chronological validation TAIL, then refit the
-            # deployed model on ALL data at that count — so it still sees the
-            # full history but stops boosting where validation logloss
-            # plateaus. Gated on a min sample count; small corpora keep the
-            # configured n_estimators.
-            n_est_final = xgb_params["n_estimators"]
-            if _es_rounds > 0 and n_samples >= _es_min_samples:
-                _es_cut = int(n_samples * 0.85)
-                _es_train_end = (
-                    _purge_boundary(
-                        bars_meta_raw, _es_cut, lookahead_bars,
-                        min_keep=max(50, int(n_samples * 0.4)),
-                        embargo_days=_embargo_days,
-                    )
-                    if bars_meta_raw is not None else _es_cut
-                )
-                if _es_train_end > 50 and (n_samples - _es_cut) >= 50:
-                    # n_estimators is the UPPER BOUND; early stopping picks
-                    # the best count <= it on the validation tail.
-                    _es_ceiling = int(xgb_params["n_estimators"])
-                    _probe = xgb.XGBClassifier(
-                        **{**xgb_params, "n_estimators": _es_ceiling,
-                           "early_stopping_rounds": _es_rounds}
-                    )
-                    _w_es = (
-                        weights_arr[:_es_train_end] if weights_arr is not None else None
-                    )
-                    _probe.fit(
-                        X_arr[:_es_train_end], y_arr[:_es_train_end],
-                        sample_weight=_w_es,
-                        eval_set=[(X_arr[_es_cut:], y_arr[_es_cut:])],
-                        verbose=False,
-                    )
-                    _bi = getattr(_probe, "best_iteration", None)
-                    if _bi is not None and 0 < int(_bi) + 1 < _es_ceiling:
-                        n_est_final = int(_bi) + 1
-                        logger.info(
-                            "Early stopping: n_estimators %d → %d (%d rounds)",
-                            _es_ceiling, n_est_final, _es_rounds,
-                        )
-                    del _probe
-                    _gc.collect()
+            n_est_final = self._early_stopped_tree_count(
+                X_arr, y_arr, weights_arr, xgb_params,
+                _es_rounds, _es_min_samples,
+                bars_meta_raw, lookahead_bars, _embargo_days,
+            )
             model.set_params(n_estimators=n_est_final)
             # Final model trained on all data (with sample weights if available)
             model.fit(X_arr, y_arr, sample_weight=weights_arr, verbose=False)
 
-            # Calibrate probabilities (Platt scaling). cv MUST be a
-            # TimeSeriesSplit — passing an int makes sklearn default to
-            # StratifiedKFold, which shuffles. Shuffled CV leaks future
-            # data into past calibration on time-series, silently
-            # corrupting every downstream probability the system reads.
-            # Fit with the SAME sample weights the model trained on
-            # (class-balance × feedback × time-decay) — an unweighted
-            # calibrator re-learns the raw HOLD-heavy prior and
-            # systematically compresses directional probabilities back
-            # toward HOLD, which is what forced the agreement-rule
-            # patch in _predict.
-            # Folds are purged by the label window + embargo when sample
-            # dates are available — a multi-bar label straddling a fold
-            # boundary otherwise leaks into the per-fold calibrators.
-            calibration_n_splits = max(2, min(3, len(y_arr) // 50 or 2))
-            _cal_cv: Any
-            if _sample_dates is not None and _label_purge_days > 0:
-                _cal_cv = _purged_time_series_splits(
-                    len(y_arr), calibration_n_splits,
-                    _sample_dates, _label_purge_days,
-                )
-            else:
-                _cal_cv = TimeSeriesSplit(n_splits=calibration_n_splits)
-            calibrator = CalibratedClassifierCV(
-                model,
-                method="sigmoid",
-                cv=_cal_cv,
+            calibrator = self._fit_calibrator(
+                model, X_arr, y_arr, weights_arr,
+                _sample_dates, _label_purge_days,
             )
-            calibrator.fit(X_arr, y_arr, sample_weight=weights_arr)
 
             if bars_meta_raw is not None and (use_final_holdout or collected_preds):
-                # Real-PnL backtest path
-                bt_cfg = BacktestConfig(
-                    product=backtest_product,
-                    max_concurrent_positions=backtest_max_positions,
+                metrics = self._evaluate_real_pnl(
+                    model_type=model_type,
+                    x_arr=X_arr,
+                    y_arr=y_arr,
+                    weights_arr=weights_arr,
+                    bars_meta_raw=bars_meta_raw,
+                    sample_dates=_sample_dates,
+                    label_purge_days=_label_purge_days,
+                    embargo_days=_embargo_days,
+                    lookahead_bars=lookahead_bars,
+                    use_final_holdout=use_final_holdout,
+                    holdout_frac=_holdout_frac,
+                    min_each_side=_min_each_side,
+                    xgb_params=xgb_params,
+                    n_est_final=n_est_final,
+                    collected_preds=collected_preds,
+                    collected_probas=collected_probas,
+                    collected_meta=collected_meta,
+                    backtest_product=backtest_product,
+                    backtest_max_positions=backtest_max_positions,
                 )
-
-                # Bound the sweep to the range production can actually
-                # trade. The inference layer (_get_effective_thresholds)
-                # clamps tuned thresholds to risk.tuned_threshold_max_value
-                # / _max_diff; without mirroring those caps here the sweep
-                # can pick a cell (e.g. 0.75/0.80) the live model clamps to
-                # 0.60/0.60, so the reported Sharpe/win-rate describe a
-                # model that never trades. Caps None when config is absent
-                # (tests) → unbounded, preserving prior behaviour.
-                _risk_cfg = getattr(self._config, "risk", None) if self._config else None
-                _sweep_max_value = (
-                    float(getattr(_risk_cfg, "tuned_threshold_max_value", 0.60))
-                    if _risk_cfg is not None else None
-                )
-                _sweep_max_diff = (
-                    float(getattr(_risk_cfg, "tuned_threshold_max_diff", 0.05))
-                    if _risk_cfg is not None else None
-                )
-                # Signal-rate floor so the sweep can't pick an unreachable
-                # ceiling cell that fires ~never live (the silent-model bug).
-                _sweep_min_signal_rate = (
-                    float(getattr(_risk_cfg, "tuned_min_signal_rate", 0.0))
-                    if _risk_cfg is not None else 0.0
-                )
-
-                # Deflated Sharpe of the chosen cell — captured from the
-                # sweep (which holds the full grid of trial Sharpes) so the
-                # reported metric corrects for selection across the 81-cell
-                # search, which the per-cell bootstrap lower bound can't.
-                _dsr: float | None = None
-                # Out-of-sample discrimination diagnostics — the cleanest
-                # threshold/cost-independent read of whether the model has
-                # ANY edge (AUC≈0.50 / separation≈0 = none). Hoisted so they
-                # persist into `metrics` instead of living only in the log.
-                _oos_auc_buy: float | None = None
-                _oos_auc_sell: float | None = None
-                _oos_logloss: float | None = None
-                _oos_buy_sep: float | None = None
-                if use_final_holdout:
-                    # Final-scale holdout. Train a tuning model on the
-                    # chronological early data only, score the strict-
-                    # future holdout with it (out-of-sample, at ~the
-                    # deployed full-data model's probability scale), then
-                    # tune thresholds on the FIRST half of that holdout
-                    # and report metrics on the SECOND half (keeps the
-                    # threshold choice out of the reported slice). A purge
-                    # gap before the holdout stops the tuning model's
-                    # labels peeking into it. This is what makes the tuned
-                    # thresholds reachable at inference — the per-fold OOF
-                    # probabilities are from over-confident sub-models and
-                    # don't transfer to the deployed model.
-                    _cut = int(n_samples * (1.0 - _holdout_frac))
-                    _purge_cut = _purge_boundary(
-                        bars_meta_raw, _cut, lookahead_bars, _min_each_side,
-                        embargo_days=_embargo_days,
-                    )
-                    _tw = weights_arr[:_purge_cut] if weights_arr is not None else None
-                    # Tuning model at the DEPLOYED tree count (n_est_final,
-                    # not the n_estimators ceiling) — tree count shifts the
-                    # probability scale, and the whole point of the final-
-                    # scale holdout is that the swept cutoffs transfer to
-                    # the model that actually trades.
-                    _tuning_model = xgb.XGBClassifier(
-                        **{**xgb_params, "n_estimators": n_est_final},
-                    )
-                    _tuning_model.fit(
-                        X_arr[:_purge_cut], y_arr[:_purge_cut],
-                        sample_weight=_tw, verbose=False,
-                    )
-                    _ho_proba = _tuning_model.predict_proba(X_arr[_cut:])
-                    # Tuning-side calibrator: the live gate reads the
-                    # CHOSEN stream (agreement-gated calibration adoption,
-                    # see _choose_calibrated), so the sweep must run on the
-                    # same stream. Fit ONLY on the tuning slice — the
-                    # production calibrator saw the holdout. Fail-open to
-                    # raw probas (argmax is unaffected either way).
-                    _ho_cal = None
-                    try:
-                        _tcal_splits = max(2, min(3, _purge_cut // 50 or 2))
-                        if _sample_dates is not None and _label_purge_days > 0:
-                            _tcal_cv: Any = _purged_time_series_splits(
-                                _purge_cut, _tcal_splits,
-                                _sample_dates[:_purge_cut], _label_purge_days,
-                            )
-                        else:
-                            _tcal_cv = TimeSeriesSplit(n_splits=_tcal_splits)
-                        _tuning_cal = CalibratedClassifierCV(
-                            _tuning_model, method="sigmoid", cv=_tcal_cv,
-                        )
-                        _tuning_cal.fit(
-                            X_arr[:_purge_cut], y_arr[:_purge_cut],
-                            sample_weight=_tw,
-                        )
-                        _ho_cal = _tuning_cal.predict_proba(X_arr[_cut:])
-                        del _tuning_cal
-                    except Exception:
-                        logger.debug(
-                            "tuning-side calibrator failed; sweeping on raw "
-                            "probabilities", exc_info=True,
-                        )
-                    del _tuning_model
-                    _gc.collect()
-                    _ho_probas = [
-                        _choose_calibrated(
-                            [float(p) for p in _ho_proba[i]],
-                            [float(p) for p in _ho_cal[i]]
-                            if _ho_cal is not None else None,
-                        )
-                        for i in range(len(_ho_proba))
-                    ]
-                    # argmax(chosen) == argmax(raw) by the adoption rule.
-                    _ho_preds = [int(row.argmax()) for row in _ho_proba]
-                    # Discrimination diagnostics on the strict-future
-                    # holdout. The tuning model trained only on
-                    # X_arr[:_purge_cut] and scored X_arr[_cut:], so this is
-                    # a clean out-of-sample read of whether the model can
-                    # RANK winners above losers at all — independent of any
-                    # threshold. AUC≈0.50 = no edge (no cutoff/label tweak
-                    # fixes that); >0.55 = a real signal worth tuning.
-                    # BUY-separation is mean P(BUY) on true-BUY rows minus
-                    # the rest: a prior-predictor leaves it ~0. Logged only;
-                    # never gates deploy.
-                    try:
-                        from sklearn.metrics import (
-                            log_loss as _log_loss,
-                        )
-                        from sklearn.metrics import (
-                            roc_auc_score as _roc_auc,
-                        )
-                        _y_ho = y_arr[_cut:]
-                        _p_buy = _ho_proba[:, _LABEL_BUY]
-                        _p_sell = _ho_proba[:, _LABEL_SELL]
-
-                        def _ovr_auc(pos: int, score: Any) -> float:
-                            _yb = (_y_ho == pos).astype(int)
-                            if _yb.min() == _yb.max():
-                                return float("nan")
-                            return float(_roc_auc(_yb, score))
-
-                        _auc_buy = _ovr_auc(_LABEL_BUY, _p_buy)
-                        _auc_sell = _ovr_auc(_LABEL_SELL, _p_sell)
-                        try:
-                            _ll = float(
-                                _log_loss(_y_ho, _ho_proba, labels=[0, 1, 2])
-                            )
-                        except Exception:
-                            _ll = float("nan")
-                        _m_buy = _y_ho == _LABEL_BUY
-                        _sep = (
-                            float(_p_buy[_m_buy].mean() - _p_buy[~_m_buy].mean())
-                            if _m_buy.any() and (~_m_buy).any()
-                            else float("nan")
-                        )
-                        _q = np.percentile(_p_buy, [50, 90, 99])
-
-                        def _finite(x: float) -> float | None:
-                            # NaN (absent class) → None so metrics stay
-                            # JSON-serializable for the dashboard.
-                            return None if x != x else round(float(x), 4)
-
-                        _oos_auc_buy = _finite(_auc_buy)
-                        _oos_auc_sell = _finite(_auc_sell)
-                        _oos_logloss = _finite(_ll)
-                        _oos_buy_sep = _finite(_sep)
-                        logger.info(
-                            "Discrimination %s (holdout n=%d): AUC_buy=%.3f "
-                            "AUC_sell=%.3f logloss=%.3f | P(BUY) mean=%.3f "
-                            "std=%.3f p50=%.3f p90=%.3f p99=%.3f max=%.3f | "
-                            "BUY-separation=%.3f",
-                            model_type, len(_y_ho), _auc_buy, _auc_sell, _ll,
-                            float(_p_buy.mean()), float(_p_buy.std()),
-                            float(_q[0]), float(_q[1]), float(_q[2]),
-                            float(_p_buy.max()), _sep,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "discrimination diagnostics failed", exc_info=True,
-                        )
-                    _ho_meta = [
-                        BarMeta(
-                            symbol=str(m.get("symbol", "")),
-                            entry_close=float(m.get("entry_close") or 0.0),
-                            exit_close=float(m.get("exit_close") or 0.0),
-                            path_highs=list(m.get("path_highs") or []),
-                            path_lows=list(m.get("path_lows") or []),
-                            target_pct=float(m.get("target_pct") or 0.0),
-                            sl_pct=float(m.get("sl_pct") or 0.0),
-                            entry_date=str(m.get("entry_date") or ""),
-                            buy_exit=m.get("buy_exit"),
-                            sell_exit=m.get("sell_exit"),
-                            hold_days=m.get("hold_days"),
-                        )
-                        for m in bars_meta_raw[_cut:]
-                    ]
-                    # Snap the tune/report split to a date boundary so
-                    # same-day cross-sectional rows can't straddle it.
-                    _sub = _snap_to_date_boundary(_ho_meta, len(_ho_probas) // 2)
-                    tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
-                        probas=_ho_probas[:_sub],
-                        bars_meta=_ho_meta[:_sub],
-                        config=bt_cfg,
-                        max_threshold=_sweep_max_value,
-                        max_diff=_sweep_max_diff,
-                        min_signal_rate=_sweep_min_signal_rate,
-                    )
-                    _dsr = _tune_bt.deflated_sharpe
-                    _ht_preds = _apply_thresholds(
-                        _ho_probas[_sub:], tuned_buy, tuned_sell,
-                    )
-                    tuned_bt = run_walk_forward_backtest(
-                        preds=_ht_preds,
-                        bars_meta=_ho_meta[_sub:],
-                        config=bt_cfg,
-                    )
-                    bt = run_walk_forward_backtest(
-                        preds=_ho_preds[_sub:],
-                        bars_meta=_ho_meta[_sub:],
-                        config=bt_cfg,
-                    )
-                    _holdout_used = True
-                else:
-                    # Small bars_meta corpus (not enough for the holdout):
-                    # fall back to the K-fold OOF collection. Tune on the
-                    # chronological first slice, report on the strict-
-                    # future slice; if too small to split, tune in-sample
-                    # (flagged via threshold_holdout_used).
-                    _split = _snap_to_date_boundary(
-                        collected_meta,
-                        int(len(collected_preds) * (1.0 - _holdout_frac)),
-                    )
-                    _can_split = (
-                        _split >= _min_each_side
-                        and (len(collected_preds) - _split) >= _min_each_side
-                    )
-                    if _can_split:
-                        tuned_buy, tuned_sell, _tune_bt = sweep_thresholds(
-                            probas=collected_probas[:_split],
-                            bars_meta=collected_meta[:_split],
-                            config=bt_cfg,
-                            max_threshold=_sweep_max_value,
-                            max_diff=_sweep_max_diff,
-                            min_signal_rate=_sweep_min_signal_rate,
-                        )
-                        _dsr = _tune_bt.deflated_sharpe
-                        _holdout_tuned_preds = _apply_thresholds(
-                            collected_probas[_split:], tuned_buy, tuned_sell,
-                        )
-                        tuned_bt = run_walk_forward_backtest(
-                            preds=_holdout_tuned_preds,
-                            bars_meta=collected_meta[_split:],
-                            config=bt_cfg,
-                        )
-                        bt = run_walk_forward_backtest(
-                            preds=collected_preds[_split:],
-                            bars_meta=collected_meta[_split:],
-                            config=bt_cfg,
-                        )
-                        _holdout_used = True
-                    else:
-                        bt = run_walk_forward_backtest(
-                            preds=collected_preds,
-                            bars_meta=collected_meta,
-                            config=bt_cfg,
-                        )
-                        tuned_buy, tuned_sell, tuned_bt = sweep_thresholds(
-                            probas=collected_probas,
-                            bars_meta=collected_meta,
-                            config=bt_cfg,
-                            max_threshold=_sweep_max_value,
-                            max_diff=_sweep_max_diff,
-                            min_signal_rate=_sweep_min_signal_rate,
-                        )
-                        _dsr = tuned_bt.deflated_sharpe
-                        _holdout_used = False
-                # When tuned thresholds beat the argmax baseline, report
-                # the tuned metrics as the headline numbers — that's what
-                # live trading will actually see. Keep the argmax sharpe
-                # accessible for comparison.
-                use_tuned = tuned_bt.sharpe > bt.sharpe
-                headline = tuned_bt if use_tuned else bt
-                # Robust decision Sharpe: bootstrap the SAME daily-return
-                # series the headline point Sharpe is computed from, and
-                # take its p25 lower bound. The headline is a point
-                # estimate on a single contiguous holdout slice — high
-                # variance and regime-dependent — so deploy/promote
-                # decisions compare on this lower bound instead (a Sharpe
-                # propped up by a couple of lucky days collapses here,
-                # while a consistent edge survives).
-                _boot_series = headline.daily_returns or headline.returns
-                _boot_annual = 252 if headline.daily_returns else bt_cfg.annualization_factor
-                sharpe_lower = _bootstrap_sharpe_lower_bound(
-                    _boot_series, annualization=_boot_annual,
-                    n_iter=200, percentile=25.0,
-                ) if _boot_series else headline.sharpe
-                metrics: dict[str, Any] = {
-                    "sharpe": headline.sharpe,
-                    "sharpe_lower": sharpe_lower,
-                    "max_drawdown_pct": headline.max_drawdown_pct,
-                    "win_rate": headline.win_rate,
-                    "profit_factor": (
-                        headline.profit_factor if headline.profit_factor != float("inf")
-                        else 999.0
-                    ),
-                    "total_trades": headline.total_trades,
-                    "total_samples": len(y_arr),
-                    # Extra real-PnL fields not produced by the legacy
-                    # synthetic path — useful on the ML Models dashboard.
-                    "net_pnl": headline.net_pnl,
-                    "final_capital": headline.final_capital,
-                    "backtest_source": (
-                        "walk_forward_threshold_tuned" if use_tuned
-                        else "walk_forward_real_pnl"
-                    ),
-                    "signals_skipped_at_cap": headline.signals_skipped_at_cap,
-                    "backtest_max_positions": backtest_max_positions,
-                    # Tuned thresholds: applied at inference when present.
-                    "tuned_buy_threshold": tuned_buy,
-                    "tuned_sell_threshold": tuned_sell,
-                    "argmax_sharpe": bt.sharpe,
-                    "tuned_sharpe": tuned_bt.sharpe,
-                    "threshold_holdout_used": _holdout_used,
-                    # Selection-bias-adjusted confidence the chosen cell's
-                    # edge is real (P(true Sharpe > 0) after correcting for
-                    # the number of grid trials + return skew/kurtosis).
-                    # None when there weren't enough trials to estimate it.
-                    "deflated_sharpe": _dsr,
-                    # Threshold/cost-independent discrimination on the
-                    # strict-future holdout — AUC≈0.50 / separation≈0 means
-                    # the model has no edge no matter how thresholds are
-                    # tuned. None on the small-corpus (non-holdout) path.
-                    "oos_auc_buy": _oos_auc_buy,
-                    "oos_auc_sell": _oos_auc_sell,
-                    "oos_logloss": _oos_logloss,
-                    "oos_buy_separation": _oos_buy_sep,
-                }
-                if _dsr is not None and _dsr < 0.95:
-                    logger.warning(
-                        "%s: deflated Sharpe %.3f < 0.95 — the tuned edge may "
-                        "be a selection-bias artifact of the threshold sweep, "
-                        "not a real signal.",
-                        model_type, _dsr,
-                    )
-                # Per-calendar-year OOS edge profile at the DEPLOYED
-                # thresholds — diagnoses regime shift vs edge decay. We
-                # apply the single chosen (buy, sell) cutoff across the
-                # whole holdout and bucket realized trades by entry year,
-                # so a Sharpe that's positive in older years and negative
-                # only recently reads as regime/decay rather than "never
-                # worked". Diagnostic only (logged + stashed in metrics);
-                # never feeds the deploy/promote decision.
-                try:
-                    _bp_probas = _ho_probas if use_final_holdout else collected_probas
-                    _bp_meta = _ho_meta if use_final_holdout else collected_meta
-                    _bp_preds = _apply_thresholds(_bp_probas, tuned_buy, tuned_sell)
-                    _by_year: dict[str, Any] = {}
-                    for _yr, _res in backtest_by_period(
-                        _bp_preds, _bp_meta, bt_cfg,
-                    ).items():
-                        _by_year[_yr] = {
-                            "sharpe": round(_res.sharpe, 3),
-                            "win_rate": round(_res.win_rate, 3),
-                            "trades": _res.total_trades,
-                            "net_pnl": round(_res.net_pnl, 1),
-                        }
-                        logger.info(
-                            "  [%s] %s OOS @ tuned: sharpe=%.2f win=%.2f trades=%d net=%.0f",
-                            model_type, _yr, _res.sharpe, _res.win_rate,
-                            _res.total_trades, _res.net_pnl,
-                        )
-                    metrics["per_year_oos"] = _by_year
-                except Exception:
-                    logger.debug("per-year OOS breakdown failed", exc_info=True)
             else:
-                # Legacy synthetic metrics — kept for tests / older callers
-                returns_arr = np.array(synthetic_returns)
-                if len(returns_arr) > 0 and returns_arr.std() > 0:
-                    sharpe = float(
-                        (returns_arr.mean() / returns_arr.std()) * np.sqrt(252)
-                    )
-                else:
-                    sharpe = 0.0
-                equity = np.cumsum(returns_arr) + 1.0
-                peak = np.maximum.accumulate(equity)
-                drawdowns = (peak - equity) / np.where(peak > 0, peak, 1.0)
-                max_dd = float(drawdowns.max()) if len(drawdowns) > 0 else 0.0
-                total_trades = synthetic_wins + synthetic_losses
-                win_rate = (
-                    synthetic_wins / total_trades if total_trades > 0 else 0.0
+                metrics = _synthetic_metrics(
+                    synthetic_returns, synthetic_wins, synthetic_losses,
+                    synthetic_gross_profit, synthetic_gross_loss,
+                    total_samples=len(y_arr),
                 )
-                profit_factor = (
-                    synthetic_gross_profit / synthetic_gross_loss
-                    if synthetic_gross_loss > 0 else float("inf")
-                )
-                metrics = {
-                    "sharpe": round(sharpe, 4),
-                    # No bootstrap on the synthetic legacy path — mirror
-                    # the point Sharpe so the decision metric is always
-                    # present for downstream comparisons.
-                    "sharpe_lower": round(sharpe, 4),
-                    "max_drawdown_pct": round(max_dd, 4),
-                    "win_rate": round(win_rate, 4),
-                    "profit_factor": round(profit_factor, 4),
-                    "total_trades": total_trades,
-                    "total_samples": len(y_arr),
-                    "backtest_source": "synthetic_legacy",
-                }
 
             return model, calibrator, metrics, feature_stats
 
