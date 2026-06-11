@@ -175,6 +175,8 @@ class GenerateSignalsSkill(SkillBase):
             volume_profile=self.ctx.config.strategy.indicators.volume_profile,
             obv=self.ctx.config.strategy.indicators.obv,
             supertrend=self.ctx.config.strategy.indicators.supertrend,
+            # Daily inference → must match the swing model's training set.
+            extended_momentum=self.ctx.config.strategy.indicators.extended_momentum,
         )
 
         # Build set of currently held symbols (open positions)

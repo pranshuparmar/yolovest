@@ -35,6 +35,7 @@ def _purge_boundary(
     cut: int,
     lookahead_bars: int,
     min_keep: int,
+    embargo_days: int = 0,
 ) -> int:
     """Largest index ≤ `cut` a tuning model may train up to without its
     label window peeking into the holdout that begins at `cut`.
@@ -43,11 +44,13 @@ def _purge_boundary(
     future bars; if that reaches the holdout's first date the label saw
     holdout-period data → leakage into the tuning model. Walk back from
     `cut` past any sample within the lookahead (converted to calendar
-    days) of the holdout start. Floored at `min_keep` so the tuning fit
-    is never starved. Returns `cut` unchanged when there's no lookahead
-    or dates are unusable.
+    days) plus `embargo_days` of the holdout start. The embargo widens the
+    gap beyond label overlap to absorb serial-correlation leakage between
+    the train tail and the holdout head. Floored at `min_keep` so the
+    tuning fit is never starved. Returns `cut` unchanged when there's no
+    lookahead/embargo or dates are unusable.
     """
-    if lookahead_bars <= 0 or not bars_meta_raw or cut <= 0:
+    if (lookahead_bars <= 0 and embargo_days <= 0) or not bars_meta_raw or cut <= 0:
         return cut
     from datetime import date as _date
     from datetime import timedelta as _td
@@ -61,7 +64,7 @@ def _purge_boundary(
     ho_start = _md(cut) if cut < len(bars_meta_raw) else None
     if ho_start is None:
         return cut
-    boundary = ho_start - _td(days=int(lookahead_bars * 7 / 5) + 2)
+    boundary = ho_start - _td(days=int(lookahead_bars * 7 / 5) + 2 + max(0, embargo_days))
     j = cut
     while j > min_keep:
         d = _md(j - 1)
@@ -818,10 +821,35 @@ class XGBoostSignalModel(MLBase):
             # Walk-forward split via TimeSeriesSplit
             tscv = TimeSeriesSplit(n_splits=min(5, len(y_arr) // 50 or 2))
 
+            # Hyperparameter resolution precedence: explicit `params`
+            # (caller / test override) > config.retraining.xgb > literal
+            # default. The literals mirror the XGBoostConfig defaults so a
+            # config-less model (config=None, or a config without a
+            # retraining section) still trains with the same regularized
+            # setup. Subsample / colsample / min_child_weight / gamma /
+            # reg_lambda are the core variance-reduction knobs for noisy
+            # financial features — fixed n_estimators=100 / max_depth=6 with
+            # no regularization over-fits daily and under-fits the much
+            # larger 5-min corpus.
+            _xgbc = getattr(getattr(self._config, "retraining", None), "xgb", None)
+
+            def _hp(name: str, literal: Any) -> Any:
+                if name in params:
+                    return params[name]
+                if _xgbc is not None:
+                    return getattr(_xgbc, name, literal)
+                return literal
+
             xgb_params = {
-                "n_estimators": params.get("n_estimators", 100),
-                "max_depth": params.get("max_depth", 6),
-                "learning_rate": params.get("learning_rate", 0.1),
+                "n_estimators": _hp("n_estimators", 400),
+                "max_depth": _hp("max_depth", 6),
+                "learning_rate": _hp("learning_rate", 0.05),
+                "min_child_weight": _hp("min_child_weight", 5.0),
+                "subsample": _hp("subsample", 0.8),
+                "colsample_bytree": _hp("colsample_bytree", 0.8),
+                "gamma": _hp("gamma", 0.0),
+                "reg_lambda": _hp("reg_lambda", 1.0),
+                "reg_alpha": _hp("reg_alpha", 0.0),
                 "objective": "multi:softprob",
                 "num_class": 3,
                 "eval_metric": "mlogloss",
@@ -838,6 +866,11 @@ class XGBoostSignalModel(MLBase):
                 # if you're training offline and want full parallelism.
                 "n_jobs": params.get("n_jobs", 1),
             }
+            # Early-stopping knobs (read here so the final-fit block can use
+            # them). 0 rounds = off; small corpora below the min-samples
+            # floor also skip it.
+            _es_rounds = int(_hp("early_stopping_rounds", 0))
+            _es_min_samples = int(_hp("early_stopping_min_samples", 2000))
 
             # Train on full data first
             model = xgb.XGBClassifier(**xgb_params)
@@ -893,6 +926,33 @@ class XGBoostSignalModel(MLBase):
                 and int(n_samples * _holdout_frac) >= 2 * _min_each_side
             )
 
+            # Embargo (López de Prado): an extra purge buffer beyond label
+            # overlap, absorbing serial-correlation / delayed-reaction
+            # leakage between the train tail and the test/holdout head.
+            # Sized as a fraction of the data's calendar span; bars_meta_raw
+            # is chronologically sorted so index 0/-1 are the span ends.
+            _embargo_days = 0
+            _embargo_frac = (
+                float(getattr(getattr(self._config, "retraining", None),
+                              "cv_embargo_frac", 0.0) or 0.0)
+                if self._config is not None else 0.0
+            )
+            if _embargo_frac > 0 and bars_meta_raw:
+                from datetime import date as _edate
+
+                def _span_date(i: int) -> "_edate | None":
+                    try:
+                        return _edate.fromisoformat(
+                            str(bars_meta_raw[i].get("entry_date", ""))[:10]
+                        )
+                    except (ValueError, TypeError, IndexError, AttributeError):
+                        return None
+
+                _first_d = _span_date(0)
+                _last_d = _span_date(len(bars_meta_raw) - 1)
+                if _first_d and _last_d and _last_d > _first_d:
+                    _embargo_days = int((_last_d - _first_d).days * _embargo_frac)
+
             for train_idx, test_idx in tscv.split(X_arr):
                 if use_final_holdout:
                     break
@@ -924,8 +984,10 @@ class XGBoostSignalModel(MLBase):
                     test_dates = [d for d in (_meta_date(i) for i in test_idx) if d]
                     if test_dates:
                         test_min = min(test_dates)
-                        # trading days → calendar days (×7/5) + slack
-                        purge_calendar_days = int(lookahead_bars * 7 / 5) + 2
+                        # trading days → calendar days (×7/5) + slack + embargo
+                        purge_calendar_days = (
+                            int(lookahead_bars * 7 / 5) + 2 + _embargo_days
+                        )
                         cutoff = test_min - _td(days=purge_calendar_days)
                         kept = [
                             i for i in train_idx
@@ -992,6 +1054,51 @@ class XGBoostSignalModel(MLBase):
             # doubling memory. On a 2 GB host this can OOM without the
             # collect.
             _gc.collect()
+            # Early stopping: a fixed n_estimators either over-fits (too
+            # many trees on noise) or under-fits. Probe the right tree count
+            # on a purged chronological validation TAIL, then refit the
+            # deployed model on ALL data at that count — so it still sees the
+            # full history but stops boosting where validation logloss
+            # plateaus. Gated on a min sample count; small corpora keep the
+            # configured n_estimators.
+            n_est_final = xgb_params["n_estimators"]
+            if _es_rounds > 0 and n_samples >= _es_min_samples:
+                _es_cut = int(n_samples * 0.85)
+                _es_train_end = (
+                    _purge_boundary(
+                        bars_meta_raw, _es_cut, lookahead_bars,
+                        min_keep=max(50, int(n_samples * 0.4)),
+                        embargo_days=_embargo_days,
+                    )
+                    if bars_meta_raw is not None else _es_cut
+                )
+                if _es_train_end > 50 and (n_samples - _es_cut) >= 50:
+                    # n_estimators is the UPPER BOUND; early stopping picks
+                    # the best count <= it on the validation tail.
+                    _es_ceiling = int(xgb_params["n_estimators"])
+                    _probe = xgb.XGBClassifier(
+                        **{**xgb_params, "n_estimators": _es_ceiling,
+                           "early_stopping_rounds": _es_rounds}
+                    )
+                    _w_es = (
+                        weights_arr[:_es_train_end] if weights_arr is not None else None
+                    )
+                    _probe.fit(
+                        X_arr[:_es_train_end], y_arr[:_es_train_end],
+                        sample_weight=_w_es,
+                        eval_set=[(X_arr[_es_cut:], y_arr[_es_cut:])],
+                        verbose=False,
+                    )
+                    _bi = getattr(_probe, "best_iteration", None)
+                    if _bi is not None and 0 < int(_bi) + 1 < _es_ceiling:
+                        n_est_final = int(_bi) + 1
+                        logger.info(
+                            "Early stopping: n_estimators %d → %d (%d rounds)",
+                            _es_ceiling, n_est_final, _es_rounds,
+                        )
+                    del _probe
+                    _gc.collect()
+            model.set_params(n_estimators=n_est_final)
             # Final model trained on all data (with sample weights if available)
             model.fit(X_arr, y_arr, sample_weight=weights_arr, verbose=False)
 
@@ -1039,6 +1146,19 @@ class XGBoostSignalModel(MLBase):
                     if _risk_cfg is not None else 0.0
                 )
 
+                # Deflated Sharpe of the chosen cell — captured from the
+                # sweep (which holds the full grid of trial Sharpes) so the
+                # reported metric corrects for selection across the 81-cell
+                # search, which the per-cell bootstrap lower bound can't.
+                _dsr: float | None = None
+                # Out-of-sample discrimination diagnostics — the cleanest
+                # threshold/cost-independent read of whether the model has
+                # ANY edge (AUC≈0.50 / separation≈0 = none). Hoisted so they
+                # persist into `metrics` instead of living only in the log.
+                _oos_auc_buy: float | None = None
+                _oos_auc_sell: float | None = None
+                _oos_logloss: float | None = None
+                _oos_buy_sep: float | None = None
                 if use_final_holdout:
                     # Final-scale holdout. Train a tuning model on the
                     # chronological early data only, score the strict-
@@ -1055,6 +1175,7 @@ class XGBoostSignalModel(MLBase):
                     _cut = int(n_samples * (1.0 - _holdout_frac))
                     _purge_cut = _purge_boundary(
                         bars_meta_raw, _cut, lookahead_bars, _min_each_side,
+                        embargo_days=_embargo_days,
                     )
                     _tw = weights_arr[:_purge_cut] if weights_arr is not None else None
                     _tuning_model = xgb.XGBClassifier(**xgb_params)
@@ -1107,6 +1228,16 @@ class XGBoostSignalModel(MLBase):
                             else float("nan")
                         )
                         _q = np.percentile(_p_buy, [50, 90, 99])
+
+                        def _finite(x: float) -> float | None:
+                            # NaN (absent class) → None so metrics stay
+                            # JSON-serializable for the dashboard.
+                            return None if x != x else round(float(x), 4)
+
+                        _oos_auc_buy = _finite(_auc_buy)
+                        _oos_auc_sell = _finite(_auc_sell)
+                        _oos_logloss = _finite(_ll)
+                        _oos_buy_sep = _finite(_sep)
                         logger.info(
                             "Discrimination %s (holdout n=%d): AUC_buy=%.3f "
                             "AUC_sell=%.3f logloss=%.3f | P(BUY) mean=%.3f "
@@ -1146,6 +1277,7 @@ class XGBoostSignalModel(MLBase):
                         max_diff=_sweep_max_diff,
                         min_signal_rate=_sweep_min_signal_rate,
                     )
+                    _dsr = _tune_bt.deflated_sharpe
                     _ht_preds = _apply_thresholds(
                         _ho_probas[_sub:], tuned_buy, tuned_sell,
                     )
@@ -1180,6 +1312,7 @@ class XGBoostSignalModel(MLBase):
                             max_diff=_sweep_max_diff,
                             min_signal_rate=_sweep_min_signal_rate,
                         )
+                        _dsr = _tune_bt.deflated_sharpe
                         _holdout_tuned_preds = _apply_thresholds(
                             collected_probas[_split:], tuned_buy, tuned_sell,
                         )
@@ -1208,6 +1341,7 @@ class XGBoostSignalModel(MLBase):
                             max_diff=_sweep_max_diff,
                             min_signal_rate=_sweep_min_signal_rate,
                         )
+                        _dsr = tuned_bt.deflated_sharpe
                         _holdout_used = False
                 # When tuned thresholds beat the argmax baseline, report
                 # the tuned metrics as the headline numbers — that's what
@@ -1256,7 +1390,27 @@ class XGBoostSignalModel(MLBase):
                     "argmax_sharpe": bt.sharpe,
                     "tuned_sharpe": tuned_bt.sharpe,
                     "threshold_holdout_used": _holdout_used,
+                    # Selection-bias-adjusted confidence the chosen cell's
+                    # edge is real (P(true Sharpe > 0) after correcting for
+                    # the number of grid trials + return skew/kurtosis).
+                    # None when there weren't enough trials to estimate it.
+                    "deflated_sharpe": _dsr,
+                    # Threshold/cost-independent discrimination on the
+                    # strict-future holdout — AUC≈0.50 / separation≈0 means
+                    # the model has no edge no matter how thresholds are
+                    # tuned. None on the small-corpus (non-holdout) path.
+                    "oos_auc_buy": _oos_auc_buy,
+                    "oos_auc_sell": _oos_auc_sell,
+                    "oos_logloss": _oos_logloss,
+                    "oos_buy_separation": _oos_buy_sep,
                 }
+                if _dsr is not None and _dsr < 0.95:
+                    logger.warning(
+                        "%s: deflated Sharpe %.3f < 0.95 — the tuned edge may "
+                        "be a selection-bias artifact of the threshold sweep, "
+                        "not a real signal.",
+                        model_type, _dsr,
+                    )
                 # Per-calendar-year OOS edge profile at the DEPLOYED
                 # thresholds — diagnoses regime shift vs edge decay. We
                 # apply the single chosen (buy, sell) cutoff across the
@@ -1336,22 +1490,37 @@ class XGBoostSignalModel(MLBase):
             elif model_type == "swing":
                 self._swing_features = feature_names
 
-        # Persist tuned thresholds when the sweep produced them and the
-        # tuned variant actually beat the argmax baseline (use_tuned in
-        # the train block already gated this — non-improving sweeps just
-        # don't write tuned_*_threshold to metrics).
+        # DEPLOY tuned thresholds only when the tuned variant actually beat
+        # the argmax baseline on the holdout (signalled by backtest_source
+        # == "walk_forward_threshold_tuned" — set iff use_tuned). When
+        # argmax won, the headline metrics describe argmax, so the deployed
+        # model must run argmax too: applying cutoffs the backtest judged
+        # WORSE both underperforms and makes the saved Sharpe misrepresent
+        # live behaviour. The swept values stay in `metrics` for visibility
+        # regardless; this only gates what the live model actually uses.
         tuned_buy = metrics.get("tuned_buy_threshold")
         tuned_sell = metrics.get("tuned_sell_threshold")
-        if tuned_buy is not None and tuned_sell is not None:
+        tuning_won = metrics.get("backtest_source") == "walk_forward_threshold_tuned"
+        if tuning_won and tuned_buy is not None and tuned_sell is not None:
             self._set_thresholds(
                 model_type, {"buy": float(tuned_buy), "sell": float(tuned_sell)},
             )
             logger.info(
-                "Tuned %s thresholds: buy=%.2f sell=%.2f (argmax_sharpe=%.4f, "
-                "tuned_sharpe=%.4f)",
+                "Tuned %s thresholds DEPLOYED: buy=%.2f sell=%.2f "
+                "(tuned_sharpe=%.4f > argmax_sharpe=%.4f)",
                 model_type, tuned_buy, tuned_sell,
-                metrics.get("argmax_sharpe", 0.0),
                 metrics.get("tuned_sharpe", 0.0),
+                metrics.get("argmax_sharpe", 0.0),
+            )
+        else:
+            # Argmax won (or no sweep) → deploy argmax, clearing any cutoffs.
+            self._set_thresholds(model_type, None)
+            logger.info(
+                "%s deploying ARGMAX (tuned sweep did not beat argmax: "
+                "argmax_sharpe=%.4f >= tuned_sharpe=%.4f); swept cutoffs "
+                "%s/%s kept in metrics for reference only",
+                model_type, metrics.get("argmax_sharpe", 0.0),
+                metrics.get("tuned_sharpe", 0.0), tuned_buy, tuned_sell,
             )
 
         # Version stamp in IST so it matches log timestamps the user

@@ -27,7 +27,13 @@ from yolovest.timezone import IST
 #   2 — intraday gains higher-timeframe daily-trend features
 #       (daily_ema9_vs_ema21_pct, daily_close_vs_ema50_pct) and
 #       session-relative features (session_vwap_dist_pct, session_orb_pos).
-MODEL_SCHEMA_VERSION = 2
+#   3 — swing/daily gains extended-momentum features (multi-horizon
+#       returns return_{21,63,126,189}d, risk-adjusted momentum_quality_63d,
+#       vol_regime_ratio, fracdiff_logprice). Gated by
+#       IndicatorConfig.extended_momentum — emitted on the daily path only
+#       (meaningless on 5-min intraday bars), so the intraday vocabulary is
+#       unchanged but the swing vocabulary grows.
+MODEL_SCHEMA_VERSION = 3
 
 # Feature keys that compute_features emits but the ML model should NOT
 # see. These are raw absolute prices, raw cumulative levels, or raw
@@ -59,6 +65,82 @@ MODEL_FEATURE_EXCLUSIONS: frozenset[str] = frozenset({
 })
 
 
+# Fractional-differencing weights (López de Prado), precomputed once at
+# import — they depend only on the differencing order d, not the data, so
+# per-bar computation is a cheap dot product. d=0.4 is a common choice:
+# enough differencing to render the (otherwise unit-root) log-price series
+# stationary while preserving long memory the integer first-difference
+# (plain returns) throws away. Truncated at K terms (the tail weights
+# decay ~k^-(1+d), so K=64 captures essentially all the signal).
+_FRACDIFF_D = 0.4
+_FRACDIFF_K = 64
+
+
+def _fracdiff_weights(d: float, k: int) -> list[float]:
+    """w[0]=1; w[j] = -w[j-1] * (d - j + 1) / j. w[j] multiplies the j-th
+    most recent observation (w[0] → latest)."""
+    w = [1.0]
+    for j in range(1, k):
+        w.append(-w[-1] * (d - j + 1) / j)
+    return w
+
+
+_FRACDIFF_WEIGHTS = _fracdiff_weights(_FRACDIFF_D, _FRACDIFF_K)
+
+
+def _pct_return(closes: list[float], lookback: int) -> float | None:
+    """Simple return over `lookback` bars ending at the last bar:
+    close[-1] / close[-1-lookback] - 1. Price-invariant. None when there
+    isn't enough history or the past close is non-positive."""
+    if lookback <= 0 or len(closes) < lookback + 1:
+        return None
+    past = closes[-1 - lookback]
+    if past <= 0:
+        return None
+    return closes[-1] / past - 1.0
+
+
+def _realized_vol(closes: list[float], window: int) -> float | None:
+    """Standard deviation of the last `window` simple daily returns.
+    Price-invariant (returns, not levels). None when insufficient history."""
+    if window < 2 or len(closes) < window + 1:
+        return None
+    seg = closes[-(window + 1):]
+    rets = [
+        seg[i] / seg[i - 1] - 1.0
+        for i in range(1, len(seg))
+        if seg[i - 1] > 0
+    ]
+    if len(rets) < 2:
+        return None
+    mu = sum(rets) / len(rets)
+    var = sum((r - mu) ** 2 for r in rets) / len(rets)
+    return math.sqrt(var)
+
+
+def _fracdiff_logprice(closes: list[float]) -> float | None:
+    """Fractionally-differenced log-price at the last bar, computed on the
+    window-standardized (z-scored) log-price segment so the value is
+    cross-sectionally comparable across stocks at different price levels —
+    the same price-invariance discipline as the rest of the model's
+    features. None when insufficient history or a degenerate (flat) window."""
+    k = len(_FRACDIFF_WEIGHTS)
+    if len(closes) < k:
+        return None
+    seg = closes[-k:]
+    if any(c <= 0 for c in seg):
+        return None
+    logp = [math.log(c) for c in seg]
+    mu = sum(logp) / len(logp)
+    var = sum((x - mu) ** 2 for x in logp) / len(logp)
+    sd = math.sqrt(var)
+    if sd <= 0:
+        return None
+    z = [(x - mu) / sd for x in logp]  # oldest → newest
+    # w[j] pairs with the j-th most recent value, i.e. z[-1-j].
+    return sum(_FRACDIFF_WEIGHTS[j] * z[-1 - j] for j in range(k))
+
+
 @dataclass
 class IndicatorConfig:
     """Which indicators to compute. Maps to strategy.indicators config."""
@@ -72,6 +154,11 @@ class IndicatorConfig:
     obv: bool = True
     supertrend: bool = True
     ema_periods: list[int] | None = None
+    # Multi-horizon momentum + volatility-regime + fractional-difference
+    # features. Only meaningful on DAILY bars (the horizons are in trading
+    # days), so callers building a 5-min intraday config pass False. Daily
+    # callers read strategy.indicators.extended_momentum.
+    extended_momentum: bool = True
 
     def __post_init__(self) -> None:
         if self.ema_periods is None:
@@ -258,6 +345,48 @@ def compute_features(
                 features["volume_zscore_20d"] = (volumes[-1] - mu) / sigma
             else:
                 features["volume_zscore_20d"] = 0.0
+
+    # Extended momentum / volatility-regime / fractional-difference block.
+    # Daily-only (horizons are trading days): the longest lookback is 189
+    # bars (9 months), which fits inside the 200-bar training window AND
+    # the ~250-bar inference fetch, so each value references the tail of
+    # whatever bar list it's given — identical in training and live. All
+    # outputs are price-invariant ratios / z-scored quantities, so they
+    # transfer across the Nifty 500 (and thus are NOT in
+    # MODEL_FEATURE_EXCLUSIONS — they ARE features the model trains on).
+    if cfg.extended_momentum:
+        # Multi-horizon momentum — 1 / 3 / 6 / 9 months. 3-9mo momentum is
+        # the best-documented cross-sectional anomaly in Indian equities.
+        for horizon, key in (
+            (21, "return_21d"), (63, "return_63d"),
+            (126, "return_126d"), (189, "return_189d"),
+        ):
+            r = _pct_return(closes, horizon)
+            if r is not None:
+                features[key] = r
+
+        # Risk-adjusted momentum: 3-month return scaled by the dispersion
+        # of that period's return (≈ a t-stat of the move). Distinguishes a
+        # clean trend from a noisy one that drifted the same distance.
+        vol_63 = _realized_vol(closes, 63)
+        ret_63 = features.get("return_63d")
+        if ret_63 is not None and vol_63 is not None:
+            denom = vol_63 * math.sqrt(63)
+            features["momentum_quality_63d"] = (
+                ret_63 / denom if denom > 0 else 0.0
+            )
+
+        # Volatility regime: short-term vs long-term realized vol. >1 =
+        # vol expanding (risk-off / breakout), <1 = contracting (calm).
+        vol_20 = _realized_vol(closes, 20)
+        vol_100 = _realized_vol(closes, 100)
+        if vol_20 is not None and vol_100 is not None and vol_100 > 0:
+            features["vol_regime_ratio"] = vol_20 / vol_100
+
+        # Fractionally-differenced log-price (stationary, long-memory).
+        fd = _fracdiff_logprice(closes)
+        if fd is not None:
+            features["fracdiff_logprice"] = fd
 
     return features
 

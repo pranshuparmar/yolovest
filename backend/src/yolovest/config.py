@@ -175,6 +175,12 @@ class IndicatorsConfig(BaseModel):
     volume_profile: bool = True
     obv: bool = True
     supertrend: bool = True
+    # Multi-horizon momentum + volatility-regime + fractional-difference
+    # features for the SWING/daily model (3-9mo momentum is the strongest
+    # Indian-equity anomaly). Daily-only — meaningless on 5-min intraday
+    # bars, so the intraday feature set is unchanged. Default on; flip off
+    # to A/B against a price-snapshot-only swing model.
+    extended_momentum: bool = True
 
 
 class ATRMultipliers(BaseModel):
@@ -599,6 +605,24 @@ class StrategyConfig(BaseModel):
     # output is a failure mode users will hit on first deploy without
     # it; disable if you ever want the unbalanced classifier back.
     class_balance_enabled: bool = True
+    # Floor the triple-barrier TARGET at the round-trip transaction-cost +
+    # slippage level when labelling. A "win" whose ATR-derived target is
+    # smaller than the round-trip cost is a net loss — labelling it BUY/SELL
+    # teaches the model an unprofitable, unreachable target (worst on the
+    # tight 0.6×ATR intraday geometry). When the ATR target already clears
+    # costs (typical swing), the label is unchanged. The same effective
+    # target is stored in bars_meta so the walk-forward backtest exits at
+    # the same barrier it was labelled against. Set False for legacy
+    # gross-return labels.
+    label_cost_floor_enabled: bool = True
+    # Time-decay sample weighting: older training samples get a linearly
+    # decaying weight down to this floor (newest sample = 1.0). Tilts the
+    # model toward recent regimes on a non-stationary market. 1.0 = off
+    # (every sample weighted equally). Kept off by default — an expanding
+    # training window deliberately retains rare old-regime samples (2008 /
+    # 2020 crashes), and aggressive decay discards that coverage; lower to
+    # ~0.5 to tilt toward recent data once a paper run confirms it helps.
+    time_decay_last_weight: float = Field(default=1.0, ge=0.0, le=1.0)
     # Refuse to save a model when any of {BUY, HOLD, SELL} accounts for
     # less than this fraction of training labels. Catches the
     # "BUY is functionally extinct in the data" failure mode at train
@@ -994,8 +1018,33 @@ class DatabaseConfig(BaseModel):
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
 
 
+class XGBoostConfig(BaseModel):
+    """XGBoost training hyperparameters. Defaults favour generalization on
+    noisy financial features: a lower learning rate with more trees gated
+    by early stopping, plus row/column subsampling and a higher
+    min_child_weight (the core variance-reduction knobs). Tune via Settings
+    for offline training; the live retrain reads these."""
+    max_depth: int = Field(default=6, ge=1, le=16)
+    learning_rate: float = Field(default=0.05, gt=0.0, le=1.0)
+    # Upper bound on trees; early stopping usually selects far fewer.
+    n_estimators: int = Field(default=400, ge=10, le=5000)
+    min_child_weight: float = Field(default=5.0, ge=0.0, le=1000.0)
+    subsample: float = Field(default=0.8, gt=0.0, le=1.0)
+    colsample_bytree: float = Field(default=0.8, gt=0.0, le=1.0)
+    gamma: float = Field(default=0.0, ge=0.0, le=10.0)
+    reg_lambda: float = Field(default=1.0, ge=0.0, le=100.0)
+    reg_alpha: float = Field(default=0.0, ge=0.0, le=100.0)
+    # Early stopping: probe the tree count on a purged chronological
+    # validation tail, then refit on all data at that count. 0 = off.
+    early_stopping_rounds: int = Field(default=50, ge=0, le=500)
+    # Corpora below this skip the probe and keep the configured n_estimators
+    # (the validation tail would be too small to trust).
+    early_stopping_min_samples: int = Field(default=2000, ge=0)
+
+
 class RetrainingConfig(BaseModel):
     schedule_cron: str = "0 6 * * 6"
+    xgb: XGBoostConfig = Field(default_factory=XGBoostConfig)
     shadow_mode_days: int = 7
     shadow_min_predictions: int = 10
     retired_model_cleanup_days: int = 30
@@ -1018,6 +1067,16 @@ class RetrainingConfig(BaseModel):
     # untuned edge first. Default 0.0 blocks net-losing models. Set
     # negative to disable (not recommended on a live account).
     min_argmax_sharpe_for_promotion: float = Field(default=0.0, ge=-100.0, le=100.0)
+    # CV/holdout embargo (López de Prado). The label-overlap purge already
+    # drops train rows whose label window reaches the test/holdout start;
+    # the embargo adds a further buffer to absorb serial-correlation and
+    # delayed-market-reaction leakage between the train tail and the
+    # test/holdout head (features near the boundary stay correlated even
+    # when label windows don't overlap). Expressed as a fraction of the
+    # data's calendar span (~0.01 = 1% is the standard rule of thumb).
+    # Widens both the K-fold purge gap and the final-scale tuning-holdout
+    # gap. 0 disables (legacy: label-overlap purge only).
+    cv_embargo_frac: float = Field(default=0.01, ge=0.0, le=0.2)
 
 
 class ReportsConfig(BaseModel):

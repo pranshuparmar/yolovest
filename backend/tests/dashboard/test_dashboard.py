@@ -2,7 +2,7 @@
 
 import base64
 from datetime import datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -248,6 +248,12 @@ class TestDryRunDiagnostics:
         self._setup_universe(dashboard_ctx, symbols)
         dashboard_ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
         dashboard_ctx.ml = AsyncMock()
+        # get_effective_thresholds is a SYNC method on the real model; a
+        # blanket AsyncMock would make it return an un-awaited coroutine
+        # that the dry-run conviction diagnostics can't serialize.
+        dashboard_ctx.ml.get_effective_thresholds = Mock(
+            return_value={"buy": 0.5, "sell": 0.5}
+        )
         dashboard_ctx.ml.predict_swing = AsyncMock(side_effect=_hold_prediction)
         dashboard_ctx.db.insert_dry_run_results = AsyncMock()
 
@@ -266,6 +272,12 @@ class TestDryRunDiagnostics:
         self._setup_universe(dashboard_ctx, symbols)
         dashboard_ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
         dashboard_ctx.ml = AsyncMock()
+        # get_effective_thresholds is a SYNC method on the real model; a
+        # blanket AsyncMock would make it return an un-awaited coroutine
+        # that the dry-run conviction diagnostics can't serialize.
+        dashboard_ctx.ml.get_effective_thresholds = Mock(
+            return_value={"buy": 0.5, "sell": 0.5}
+        )
         dashboard_ctx.ml.predict_swing = AsyncMock(side_effect=_low_confidence_prediction)
         dashboard_ctx.db.insert_dry_run_results = AsyncMock()
 
@@ -284,6 +296,12 @@ class TestDryRunDiagnostics:
         self._setup_universe(dashboard_ctx, symbols)
         dashboard_ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(30))
         dashboard_ctx.ml = AsyncMock()
+        # get_effective_thresholds is a SYNC method on the real model; a
+        # blanket AsyncMock would make it return an un-awaited coroutine
+        # that the dry-run conviction diagnostics can't serialize.
+        dashboard_ctx.ml.get_effective_thresholds = Mock(
+            return_value={"buy": 0.5, "sell": 0.5}
+        )
         dashboard_ctx.db.insert_dry_run_results = AsyncMock()
 
         resp = client.post("/api/dry-run", headers=auth_headers)
@@ -299,6 +317,12 @@ class TestDryRunDiagnostics:
         self._setup_universe(dashboard_ctx, symbols)
         dashboard_ctx.db.get_ohlcv = AsyncMock(return_value=_make_bars(60))
         dashboard_ctx.ml = AsyncMock()
+        # get_effective_thresholds is a SYNC method on the real model; a
+        # blanket AsyncMock would make it return an un-awaited coroutine
+        # that the dry-run conviction diagnostics can't serialize.
+        dashboard_ctx.ml.get_effective_thresholds = Mock(
+            return_value={"buy": 0.5, "sell": 0.5}
+        )
         dashboard_ctx.ml.predict_swing = AsyncMock(side_effect=_high_confidence_prediction)
         dashboard_ctx.db.insert_dry_run_results = AsyncMock()
 

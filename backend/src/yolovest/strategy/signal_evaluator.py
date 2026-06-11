@@ -67,6 +67,8 @@ def _intraday_indicator_cfg(ctx: AppContext) -> IndicatorConfig:
         volume_profile=s.indicators.volume_profile,
         obv=s.indicators.obv,
         supertrend=s.indicators.supertrend,
+        # 5-min intraday features → extended (daily-horizon) momentum off.
+        extended_momentum=False,
     )
 
 logger = logging.getLogger(__name__)
