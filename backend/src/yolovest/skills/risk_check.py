@@ -417,36 +417,9 @@ class RiskCheckSkill(SkillBase):
         # Per-signal pacing cap. Keeps the first 1-2 signals of a
         # heartbeat from saturating the daily portfolio budget,
         # leaving room for higher-conviction setups later in the
-        # day. Optionally scaled by ML confidence so a 0.95-conf
-        # signal gets a bigger slot than a 0.75 one (interpolated
-        # linearly between confidence_scaled_min_factor at threshold
-        # and 1.0 at conf=0.95+).
+        # day. Confidence-based scaling lives in conviction_sizing
+        # (the single confidence-scaling path).
         signal_slot_pct = cfg.max_pct_per_signal
-        if cfg.confidence_scaled_sizing_enabled:
-            conf = float(signal.get("confidence_score") or 0)
-            # threshold = lower of the BUY/SELL minimums so we don't
-            # accidentally scale below the floor for a SELL when the
-            # BUY threshold is set higher (or vice versa).
-            sig_type = signal.get("signal_type", "BUY")
-            sig_holding = str(
-                signal.get("expected_holding_period")
-                or signal.get("holding_period")
-                or ""
-            )
-            base_threshold = cfg.resolve_min_confidence(sig_holding, sig_type)
-            top = 0.95
-            if conf <= base_threshold:
-                factor = cfg.confidence_scaled_min_factor
-            elif conf >= top:
-                factor = 1.0
-            else:
-                span = top - base_threshold
-                progress = (conf - base_threshold) / span if span > 0 else 1.0
-                factor = (
-                    cfg.confidence_scaled_min_factor
-                    + (1.0 - cfg.confidence_scaled_min_factor) * progress
-                )
-            signal_slot_pct = cfg.max_pct_per_signal * factor
         max_by_signal = int((signal_slot_pct * capital) / entry)
         if max_by_signal < position_size:
             logger.info(

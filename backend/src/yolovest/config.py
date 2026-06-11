@@ -678,21 +678,6 @@ class RiskConfig(BaseModel):
     # binding, instead of just 2-3 at the looser single-stock cap.
     # Set equal to max_single_stock_pct to disable.
     max_pct_per_signal: float = Field(default=0.10, gt=0, le=1)
-    # DEPRECATED in favour of `conviction_sizing` (below). Both knobs
-    # scale position size by ML confidence — keeping them both on
-    # double-modulates the same input with overlapping ranges, making
-    # "why is my size this number?" hard to audit. conviction_sizing is
-    # the canonical path because it scales position_size bidirectionally
-    # (can shrink OR expand), while confidence_scaled_sizing only acts
-    # as a one-sided pacing cap that clips conviction's upscaling.
-    #
-    # Default flipped to False (was True). Existing deployments that
-    # explicitly persisted True keep working — change is opt-out via
-    # Settings if you want the legacy stacked behaviour. The cumulative
-    # size_multiplier audit log in risk-check shows the combined effect
-    # of every multiplier in either case.
-    confidence_scaled_sizing_enabled: bool = False
-    confidence_scaled_min_factor: float = Field(default=0.5, gt=0, le=1)
     daily_loss_limit_pct: float = Field(default=0.03, gt=0, lt=1)
     weekly_loss_limit_pct: float = Field(default=0.05, gt=0, lt=1)
     weekly_loss_sizing_reduction: float = Field(default=0.50, gt=0, le=1)
