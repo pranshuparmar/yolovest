@@ -8,8 +8,14 @@
 
 ## Baseline result (2026-05-24) — decision: do NOT build
 
-`backend/scripts/intraday_baseline.py` answered the "is there ANY
-net-of-cost edge?" gate before investing in the full build. Setup: top 50
+A one-off baseline script (since removed — superseded by
+`backend/scripts/experiment.py --lanes intraday`, which runs the FULL
+training pipeline instead of this cheap approximation) answered the
+"is there ANY net-of-cost edge?" gate before investing in the full
+build. The 2026-06 full-fidelity runs confirmed the same verdict at
+both label formulations: real ranking information (AUC ~0.58), no
+net-of-cost edge — see the depth_snapshots collection plan below for
+the only remaining path. Setup: top 50
 liquid names with ~1y of 5-min bars, XGBoost argmax, 60-min horizon,
 sqrt(horizon)-scaled ATR barriers (2.08/1.04 x 5-min ATR), 1x-capital cap,
 MIS cost stack + slippage, daily-aggregated equity.
