@@ -692,6 +692,23 @@ class XGBoostSignalModel(MLBase):
         elif model_type == "swing":
             self._swing_feature_stats = stats
 
+    def clear_model(self, model_type: str) -> None:
+        """Empty the PRODUCTION slot for a lane. Used when a bootstrap
+        promotion is refused (no incumbent exists and the candidate has
+        no honest edge): train() left the candidate in the live slot,
+        and clearing it makes the lane genuinely inert — a strategy.mode
+        flip then raises 'No model loaded' per symbol instead of quietly
+        trading an unvetted artifact."""
+        self._set_model(model_type, None)
+        self._set_calibrator(model_type, None)
+        self._set_version(model_type, "untrained")
+        self._set_thresholds(model_type, None)
+        self._set_feature_stats_slot(model_type, None)
+        if model_type == "intraday":
+            self._intraday_features = None
+        elif model_type == "swing":
+            self._swing_features = None
+
     def get_feature_stats(self, model_type: str) -> dict[str, Any] | None:
         """Training-time per-feature distribution for the loaded model:
         ``{"feature_names": [...], "mean": [...], "std": [...],

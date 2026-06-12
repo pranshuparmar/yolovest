@@ -969,13 +969,71 @@ class ModelRetrainSkill(SkillBase):
                 # system with no model can't shadow-test.
                 deployed_as = "shadow"
                 if current is None:
+                    # Bootstrap still has to clear the honest-edge gate:
+                    # "no incumbent" means the lane is PARKED, not that
+                    # any candidate deserves production. A negative-argmax
+                    # model promoted here would go live the moment the
+                    # user re-enables the lane via strategy.mode — the
+                    # exact unvetted-deployment path this system exists
+                    # to close. Refused candidates stay shadow-only (the
+                    # normal evaluation cycle retires them) and the live
+                    # slot is cleared so a mode flip can't trade them.
+                    edge_ok, edge_reason = passes_edge_gate(
+                        metrics,
+                        self.ctx.config.retraining.min_argmax_sharpe_for_promotion,
+                    )
+                    if not edge_ok:
+                        deployed_as = "shadow (bootstrap refused: no honest edge)"
+                        logger.warning(
+                            "Bootstrap promotion REFUSED for %s/%s: %s. "
+                            "Lane stays parked; candidate saved as shadow "
+                            "only.",
+                            model_type, version, edge_reason,
+                        )
+                        try:
+                            await self.ctx.notify.send(
+                                f"Model retrain: {model_type} candidate "
+                                f"{version} was NOT promoted (no incumbent, "
+                                f"but {edge_reason}). The lane stays parked.",
+                                alert_type="errors",
+                            )
+                        except Exception:
+                            logger.debug(
+                                "bootstrap-refusal notify failed",
+                                exc_info=True,
+                            )
+                        try:
+                            await self.ctx.ml.load_shadow_model(
+                                model_type, version,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "shadow load after bootstrap refusal failed",
+                                exc_info=True,
+                            )
+                        # train() left the candidate in the live slot and
+                        # there is no incumbent to restore — clear it.
+                        try:
+                            self.ctx.ml.clear_model(model_type)
+                        except Exception:
+                            logger.debug(
+                                "clear_model after bootstrap refusal failed",
+                                exc_info=True,
+                            )
+                        results[model_type] = {
+                            "version": version,
+                            "metrics": metrics,
+                            "improved": improved,
+                            "deployed_as": deployed_as,
+                        }
+                        continue
                     try:
                         await self.ctx.db.promote_model(model_type, version)
                         deployed_as = "production (bootstrap)"
                         logger.info(
                             "No production %s model in the registry — "
-                            "promoted %s directly (bootstrap).",
-                            model_type, version,
+                            "promoted %s directly (bootstrap, %s).",
+                            model_type, version, edge_reason,
                         )
                         try:
                             await self.ctx.notify.send(

@@ -80,6 +80,10 @@ class MLBase(ABC):
         """Version string of the model in the shadow slot, if any."""
         return None
 
+    def clear_model(self, model_type: str) -> None:
+        """Empty the production slot for a lane (parked-lane safety)."""
+
+
     def clear_shadow(self, model_type: str) -> None:
         """Unload shadow model."""
 

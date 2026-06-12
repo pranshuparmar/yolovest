@@ -116,9 +116,13 @@ class TestPostTrainGuardIntegration:
 
 class TestRegistryHonouringDeployment:
     async def test_first_train_bootstraps_candidate_to_production(self, retrain_ctx):
-        """No production row in the registry → the first-ever candidate
-        is promoted directly (a system with no model can't shadow-test)."""
+        """No production row in the registry → the candidate is promoted
+        directly, PROVIDED it clears the honest-edge gate (disabled here
+        so the lifecycle assertion doesn't depend on the random fixture
+        corpus's argmax sign — the gate itself is covered by
+        TestBootstrapEdgeGate)."""
         ctx, _ = retrain_ctx
+        ctx.config.retraining.min_argmax_sharpe_for_promotion = -100.0
         result = await ModelRetrainSkill(ctx).execute()
 
         swing = result.data["models"]["swing"]
@@ -153,6 +157,45 @@ class TestRegistryHonouringDeployment:
         assert ctx.ml.has_shadow("swing")
         assert ctx.ml.get_shadow_version("swing") == swing["version"]
         ctx.db.promote_model.assert_not_awaited()
+
+
+class TestBootstrapEdgeGate:
+    """'No incumbent' means the lane is PARKED — bootstrap promotion must
+    still clear the honest-edge gate, or a negative-argmax candidate goes
+    live the moment the user re-enables the lane via strategy.mode."""
+
+    def _mock_ml(self, ctx, argmax: float) -> None:
+        ctx.ml = AsyncMock()
+        ctx.ml.train = AsyncMock(return_value={
+            "sharpe": 1.5, "sharpe_lower": 1.2, "argmax_sharpe": argmax,
+            "win_rate": 0.5,
+        })
+        ctx.ml.save_model = AsyncMock(return_value="swing_vCAND")
+
+    async def test_negative_edge_candidate_is_refused(self, retrain_ctx):
+        ctx, _ = retrain_ctx
+        self._mock_ml(ctx, argmax=-0.61)
+
+        result = await ModelRetrainSkill(ctx).execute()
+
+        ctx.db.promote_model.assert_not_awaited()
+        # Candidate parked as shadow; the live slot train() filled is
+        # cleared so a mode flip can't trade it.
+        ctx.ml.load_shadow_model.assert_awaited_with("swing", "swing_vCAND")
+        ctx.ml.clear_model.assert_called_with("swing")
+        swing = result.data["models"]["swing"]
+        assert "bootstrap refused" in swing["deployed_as"]
+
+    async def test_positive_edge_candidate_bootstraps(self, retrain_ctx):
+        ctx, _ = retrain_ctx
+        self._mock_ml(ctx, argmax=1.2)
+
+        result = await ModelRetrainSkill(ctx).execute()
+
+        ctx.db.promote_model.assert_any_await("swing", "swing_vCAND")
+        assert result.data["models"]["swing"]["deployed_as"] == (
+            "production (bootstrap)"
+        )
 
 
 class TestRetrainFailureVisibility:
