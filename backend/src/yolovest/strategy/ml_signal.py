@@ -1547,12 +1547,21 @@ class XGBoostSignalModel(MLBase):
         # whole holdout and bucket realized trades by entry year,
         # so a Sharpe that's positive in older years and negative
         # only recently reads as regime/decay rather than "never
-        # worked". Diagnostic only (logged + stashed in metrics);
+        # worked". Uses the stream that actually DEPLOYS — tuned
+        # cutoffs when tuning won, argmax otherwise — so the per-year
+        # numbers describe the shipped model, not a variant it
+        # discarded. Diagnostic only (logged + stashed in metrics);
         # never feeds the deploy/promote decision.
         try:
             _bp_probas = _ho_probas if use_final_holdout else collected_probas
             _bp_meta = _ho_meta if use_final_holdout else collected_meta
-            _bp_preds = _apply_thresholds(_bp_probas, tuned_buy, tuned_sell)
+            if use_tuned:
+                _bp_preds = _apply_thresholds(_bp_probas, tuned_buy, tuned_sell)
+            else:
+                _bp_preds = [
+                    max(range(len(p)), key=p.__getitem__) if p else _LABEL_HOLD
+                    for p in _bp_probas
+                ]
             _by_year: dict[str, Any] = {}
             for _yr, _res in backtest_by_period(
                 _bp_preds, _bp_meta, bt_cfg,
