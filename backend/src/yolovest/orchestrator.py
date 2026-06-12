@@ -43,6 +43,7 @@ class HeartbeatOrchestrator:
     PIPELINE_SKILLS: ClassVar[list[str]] = [
         "health-check",
         "ingest-data",
+        "depth-snapshot",
         "market-scan",
         "generate-signals",
     ]
@@ -178,6 +179,11 @@ class HeartbeatOrchestrator:
             results["position-monitor"] = pm_result
             await self._alert_position_monitor(pm_result)
             return results
+
+        # --- Step 2b: depth-snapshot (best-effort data collection;
+        # never blocks the pipeline — the skill itself returns success
+        # with a reason on any failure) ---
+        results["depth-snapshot"] = await self._run_skill("depth-snapshot")
 
         # --- Step 3: market-scan (SKIP signals on failure) ---
         scan_result = await self._run_skill("market-scan")

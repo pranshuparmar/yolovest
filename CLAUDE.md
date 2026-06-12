@@ -104,7 +104,7 @@ Skills are registered in `SKILL_REGISTRY` dict in `skills/__init__.py`.
 ### Heartbeat Pipeline (market hours, every 15min)
 
 ```
-expire-pending → health-check → ingest-data → market-scan → generate-signals
+expire-pending → health-check → ingest-data → depth-snapshot → market-scan → generate-signals
   → [per signal]: risk-check → llm-review → [manual: queue pending] OR [auto: trade-execute] → predict-track
   → position-monitor (always runs)
 ```
@@ -255,6 +255,7 @@ For writes/cleanups: build the snippet to print a before/after count, keep destr
 | `feature_snapshots` | Unconditioned (pre-gate) per-(day, symbol, mode) inference feature vectors written by generate-signals. drift-watch PSI-compares them against the production swing model's training distribution. Self-pruned to 30 days. |
 | `audit_log` | Skill execution audit trail. |
 | `agent_memory` | Cross-restart state persistence with TTL. |
+| `depth_snapshots` | Order-book depth archive (bid/ask, full + top-5 quantities) written by the `depth-snapshot` heartbeat skill via one batched Kite quote call per cycle. Pure collection for the future intraday order-flow feature set — nothing trades on it. Self-pruned to `market_data.depth_snapshot_retention_days`. |
 
 ### Quarantine and Replacement Resolution
 

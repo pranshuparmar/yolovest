@@ -84,6 +84,17 @@ class MarketDataConfig(BaseModel):
     daily_fallback: str = "yfinance"
     intraday_provider: str = "tvdatafeed"
     kite_data_enabled: bool = False  # enable Kite Connect as data provider
+    # Collect order-book depth snapshots (one batched Kite quote call per
+    # heartbeat across the watchlist) into the depth_snapshots table.
+    # Pure data collection — nothing trades on it. This builds the
+    # dataset that can eventually make an intraday model viable:
+    # bar-derived features rank intraday outcomes (AUC ~0.58) but can't
+    # pay intraday costs; order-flow imbalance is the feature class that
+    # can. No-ops unless kite_data_enabled and the broker is authed.
+    depth_snapshots_enabled: bool = True
+    # Self-pruned retention for the snapshots (>= ~13 months keeps a
+    # year of history plus headroom for the eventual training window).
+    depth_snapshot_retention_days: int = Field(default=400, ge=30)
     # KiteTicker WebSocket for sub-second LTP cache. Requires the paid
     # Kite data plan and a valid access token. Position-monitor uses
     # the cached price first, falling back to REST when stale or

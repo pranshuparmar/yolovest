@@ -436,6 +436,61 @@ class KiteDataProvider(MarketDataBase):
             logger.warning("Kite quote failed for %s: %s", symbol, e)
             raise
 
+    async def get_quotes_batch(
+        self, symbols: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Batched depth quotes for many symbols in few API calls.
+
+        Kite's quote endpoint accepts up to ~500 instruments per call —
+        one heartbeat's whole watchlist costs a single request instead
+        of N. Returns {symbol: payload} with the depth-snapshot fields;
+        symbols with invalid/missing quotes are silently absent (this
+        feeds best-effort data collection, not trading decisions).
+        """
+        self._assert_kite_authed()
+        kite = self._get_kite()
+        out: dict[str, dict[str, Any]] = {}
+        _BATCH = 450  # margin under Kite's per-call instrument cap
+        for start in range(0, len(symbols), _BATCH):
+            chunk = symbols[start:start + _BATCH]
+            keys = [f"NSE:{sym}" for sym in chunk]
+            try:
+                async with self._rate_limiter:
+                    quotes = await asyncio.to_thread(kite.quote, keys)
+            except Exception as e:
+                if self._is_token_error(e):
+                    self._token_known_invalid = True
+                logger.warning(
+                    "Kite batch quote failed for %d symbols: %s",
+                    len(chunk), e,
+                )
+                continue
+            for sym in chunk:
+                quote = quotes.get(f"NSE:{sym}") or {}
+                ltp = quote.get("last_price")
+                if not ltp or ltp <= 0:
+                    continue
+                depth = quote.get("depth", {}) or {}
+                buy_depth = depth.get("buy") or []
+                sell_depth = depth.get("sell") or []
+                out[sym] = {
+                    "ltp": float(ltp),
+                    "bid": (buy_depth[0].get("price") if buy_depth else None),
+                    "ask": (sell_depth[0].get("price") if sell_depth else None),
+                    "total_buy_qty": int(quote.get("buy_quantity") or 0),
+                    "total_sell_qty": int(quote.get("sell_quantity") or 0),
+                    "top5_buy_qty": sum(
+                        int(level.get("quantity") or 0)
+                        for level in buy_depth[:5]
+                    ),
+                    "top5_sell_qty": sum(
+                        int(level.get("quantity") or 0)
+                        for level in sell_depth[:5]
+                    ),
+                    "volume": int(quote.get("volume") or 0),
+                }
+        return out
+
     async def health_check(self) -> bool:
         """Check if Kite API is accessible."""
         if not self._access_token:

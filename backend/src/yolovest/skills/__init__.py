@@ -14,6 +14,7 @@ from yolovest.skills.backfill_intraday import (
 from yolovest.skills.base import SkillBase
 from yolovest.skills.cdsl_auth_check import CdslAuthCheckSkill
 from yolovest.skills.db_maintenance import DatabaseMaintenanceSkill
+from yolovest.skills.depth_snapshot import DepthSnapshotSkill
 from yolovest.skills.drift_watch import DriftWatchSkill
 from yolovest.skills.expire_pending import ExpirePendingSkill
 from yolovest.skills.funds_snapshot import FundsSnapshotSkill
@@ -64,6 +65,7 @@ SKILL_REGISTRY: dict[str, type[SkillBase]] = {
     "database-maintenance": DatabaseMaintenanceSkill,
     "news-digest": NewsDigestSkill,
     "drift-watch": DriftWatchSkill,
+    "depth-snapshot": DepthSnapshotSkill,
     "auto-score": AutoScoreSkill,
     "expire-pending-trades": ExpirePendingSkill,
     "reprice-pending-trades": RepricePendingSkill,

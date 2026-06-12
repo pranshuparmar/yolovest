@@ -327,6 +327,8 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "market_data.daily_fallback": "Daily Fallback",
   "market_data.intraday_provider": "Intraday Provider",
   "market_data.kite_data_enabled": "Kite Data (paid plan)",
+  "market_data.depth_snapshots_enabled": "Archive order-book depth (bid/ask, full + top-5 quantities) for the watchlist each heartbeat via one batched Kite quote call. Pure data collection — nothing trades on it. Builds the order-flow dataset that can eventually make an intraday model viable. Requires Kite data.",
+  "market_data.depth_snapshot_retention_days": "Self-pruned retention for depth snapshots. Keep >= ~400 so a year of history survives for offline experiments.",
   "market_data.kite_websocket_enabled": "Kite WebSocket Feed",
   "market_data.max_signal_data_age_trading_days": "Max Signal Data Age (trading days)",
   "market_data.news_enabled": "News Sources",
