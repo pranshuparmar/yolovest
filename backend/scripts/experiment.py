@@ -43,7 +43,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
-from yolovest.config import AppConfig
+from yolovest.config import AppConfig, apply_db_config
 from yolovest.data.db import Database
 from yolovest.skills.model_retrain import ModelRetrainSkill, _time_decay_multipliers
 from yolovest.strategy.ml_signal import XGBoostSignalModel
@@ -57,6 +57,24 @@ def _fmt(v: Any, nd: int = 3) -> str:
     return str(v)
 
 
+async def _deployment_config(db: Database) -> AppConfig:
+    """The DEPLOYMENT's config, not code defaults: overlay the snapshot's
+    own config table onto a fresh AppConfig via the same apply_db_config
+    path the live app uses at startup. Without this, every non-swept knob
+    silently reverted to code defaults — an intraday sweep once simulated
+    exits at the default 0.6x/0.3x ATR geometry instead of the deployed
+    8x/4x, turning every trade into a sub-cost grinder (Sharpe -48) and
+    invalidating the economics columns."""
+    base = AppConfig(broker={"api_key": "x", "api_secret": "x"})
+    try:
+        rows = await db.get_all_config()
+        return apply_db_config(base, rows)
+    except Exception as e:
+        print(f"WARNING: could not load the snapshot's config table ({e}); "
+              "falling back to code defaults — verify geometry/retention!")
+        return base
+
+
 async def run_combo(
     db: Database,
     *,
@@ -67,7 +85,7 @@ async def run_combo(
     n_jobs: int,
     quantile: float,
 ) -> dict[str, Any]:
-    cfg = AppConfig(broker={"api_key": "x", "api_secret": "x"})
+    cfg = await _deployment_config(db)
     cfg.retraining.max_training_days = window
     cfg.strategy.time_decay_last_weight = decay
     cfg.strategy.relative_label_quantile = quantile
@@ -90,6 +108,12 @@ async def run_combo(
 
     hp = cfg.strategy.holding_periods
     if lane == "intraday":
+        _ret = int(getattr(cfg.database.retention, "intraday_ohlcv_days", 365))
+        print(
+            f"  [{lane}] effective: geometry {hp.intraday.target}x/"
+            f"{hp.intraday.stop_loss}x ATR(5m), intraday retention {_ret}d "
+            f"-> window {min(window, _ret)}d"
+        )
         # Intraday: "barrier" on the CLI means the lane's triple-barrier.
         intraday_mode = (
             "triple_barrier" if label_mode in ("barrier", "triple_barrier")
