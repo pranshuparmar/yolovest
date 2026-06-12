@@ -199,3 +199,46 @@ class TestMissingRequiredFields:
         risk = RiskConfig()
         assert risk.max_risk_per_trade_pct == 0.02
         assert risk.max_open_positions == 10
+
+
+class TestConfigFieldKinds:
+    """field kinds come from Pydantic ANNOTATIONS, not values — JSON
+    erases int/float (1.0 -> 1), which made the Settings UI reject
+    decimals on whole-valued float fields like time_decay_last_weight."""
+
+    def test_float_fields_classified_float_even_when_default_is_whole(self):
+        from yolovest.config import config_field_kinds
+
+        kinds = config_field_kinds()
+        for key in (
+            "strategy.time_decay_last_weight",      # default 1.0
+            "strategy.feedback.sample_weight_boost",  # default 2.0
+            "strategy.holding_periods.long.target",   # default 5.0
+            "strategy.relative_label_quantile",
+        ):
+            assert kinds.get(key) == "float", key
+
+    def test_int_fields_classified_int(self):
+        from yolovest.config import config_field_kinds
+
+        kinds = config_field_kinds()
+        for key in (
+            "risk.max_open_positions",
+            "retraining.max_training_days",
+            "strategy.swing_horizon_cap_days",
+        ):
+            assert kinds.get(key) == "int", key
+
+    def test_optional_numbers_unwrap(self):
+        from yolovest.config import config_field_kinds
+
+        kinds = config_field_kinds()
+        assert kinds.get("risk.max_mis_trades_per_day") == "int"
+        assert kinds.get("risk.buy_threshold_override") == "float"
+
+    def test_bools_and_strings_excluded(self):
+        from yolovest.config import config_field_kinds
+
+        kinds = config_field_kinds()
+        assert "llm.enabled" not in kinds
+        assert "strategy.mode" not in kinds

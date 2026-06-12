@@ -1362,6 +1362,19 @@ export default function SettingsPage() {
   // Optional fields).
   const fieldTypes = useMemo<Record<string, FieldKind>>(() => {
     const out: Record<string, FieldKind> = {};
+    // Authoritative kinds from the server's Pydantic annotations — JSON
+    // erases int/float (1.0 -> 1), so the value heuristic below
+    // misclassifies whole-valued float fields (e.g.
+    // time_decay_last_weight = 1.0) and the input then rejects valid
+    // decimals like 0.5. Server map wins; heuristic remains a fallback
+    // for older backends that don't send field_kinds yet.
+    const serverKinds = (defaultsData as { field_kinds?: Record<string, string> } | undefined)
+      ?.field_kinds;
+    if (serverKinds) {
+      for (const [k, v] of Object.entries(serverKinds)) {
+        if (v === "int" || v === "float") out[k] = v;
+      }
+    }
     const collect = (sections: Record<string, Record<string, unknown>> | undefined) => {
       if (!sections) return;
       for (const sec of Object.values(sections)) {
@@ -1377,7 +1390,7 @@ export default function SettingsPage() {
     // Explicit overrides for fields the heuristic can't classify
     // (Optional[int] with default None has no carrying value).
     for (const k of EXPLICIT_INT_KEYS) {
-      out[k] = "int";
+      if (!(k in out)) out[k] = "int";
     }
     return out;
   }, [data, defaultsData]);

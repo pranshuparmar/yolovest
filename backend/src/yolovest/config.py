@@ -1350,6 +1350,56 @@ def apply_db_config(base_config: AppConfig, db_values: dict[str, str]) -> AppCon
     return merged
 
 
+def _annotation_number_kind(annotation: Any) -> str | None:
+    """Classify a field annotation as "int" / "float" / None (not a
+    scalar number). Unwraps Optional[X]; bool is excluded explicitly
+    (it subclasses int but is a toggle, not a number)."""
+    import types as _types
+    import typing as _typing
+
+    origin = _typing.get_origin(annotation)
+    if origin is _typing.Union or origin is getattr(_types, "UnionType", None):
+        args = [a for a in _typing.get_args(annotation) if a is not type(None)]
+        return _annotation_number_kind(args[0]) if len(args) == 1 else None
+    if annotation is bool:
+        return None
+    if annotation is int:
+        return "int"
+    if annotation is float:
+        return "float"
+    return None
+
+
+def config_field_kinds(
+    model: BaseModel | None = None, prefix: str = "",
+) -> dict[str, str]:
+    """Dot-notation key -> "int"/"float" for every numeric config field,
+    derived from the Pydantic ANNOTATIONS (the source of truth).
+
+    The Settings UI needs this because JSON erases the distinction: a
+    float field sitting at a whole-number value (time_decay_last_weight
+    = 1.0) serializes as `1`, the frontend's value-based heuristic
+    classifies it as int, and the number input then rejects perfectly
+    valid decimals like 0.5. Mirrors _flatten_model's traversal so the
+    keys match /api/config exactly.
+    """
+    if model is None:
+        model = AppConfig()
+    kinds: dict[str, str] = {}
+    for field_name, field_info in model.model_fields.items():
+        key = f"{prefix}{field_name}" if prefix else field_name
+        value = getattr(model, field_name)
+        if isinstance(value, SecretStr):
+            continue
+        if isinstance(value, BaseModel):
+            kinds.update(config_field_kinds(value, prefix=f"{key}."))
+            continue
+        kind = _annotation_number_kind(field_info.annotation)
+        if kind:
+            kinds[key] = kind
+    return kinds
+
+
 def config_to_ui_sections(config: AppConfig) -> dict[str, dict[str, Any]]:
     """Convert the DB-editable portion of config into UI-friendly sections.
 
