@@ -62,8 +62,9 @@ def _make_bars(symbol: str, n: int, seed: int) -> list[dict[str, Any]]:
 @pytest.fixture
 def retrain_ctx(app_context, tmp_path):
     """app_context wired with a REAL XGBoost model + synthetic training
-    data sized for a fast but genuine train (3 symbols × 320 bars →
-    ~330 samples ≥ the 200-sample floor)."""
+    data sized for a fast but genuine train. 12 symbols × 320 bars →
+    ~1,300 samples: enough for the 200-sample floor AND for the
+    cross-sectional relative label (needs ≥10 names per date)."""
     ctx = app_context
     cfg = ctx.config
     cfg.retraining.xgb.n_estimators = 20
@@ -75,8 +76,8 @@ def retrain_ctx(app_context, tmp_path):
     ctx.ml = XGBoostSignalModel(model_dir=str(tmp_path), db=None, config=cfg)
 
     bars = []
-    for i, sym in enumerate(("AAA", "BBB", "CCC")):
-        bars.extend(_make_bars(sym, 320, seed=100 + i))
+    for i in range(12):
+        bars.extend(_make_bars(f"SYM{i:02d}", 320, seed=100 + i))
     ctx.db.get_training_dataset = AsyncMock(return_value={"bars": bars})
     # No 1-min path coverage → the intraday lane skips with
     # insufficient_features, exactly like a daily-data-only install.

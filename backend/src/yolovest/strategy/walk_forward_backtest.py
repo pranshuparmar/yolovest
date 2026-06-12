@@ -124,6 +124,13 @@ class BacktestConfig:
     # is fillable — overstates Sharpe on broad universes with
     # high concurrency).
     max_concurrent_positions: int = 0
+    # Long-only evaluation: SELL predictions are skipped instead of
+    # simulated as short trades. The swing lane sets this — its live
+    # book can't act on SELLs (no overnight retail shorting; non-held
+    # swing shorts are dropped, held-name exits belong to
+    # position-monitor), so booking simulated shorts measures an edge
+    # the account can never trade.
+    long_only: bool = False
 
 
 @dataclass
@@ -301,6 +308,8 @@ def run_walk_forward_backtest(
 
     for pred, meta in zip(preds, bars_meta, strict=False):
         if pred == _LABEL_HOLD:
+            continue
+        if cfg.long_only and pred == _LABEL_SELL:
             continue
         if meta.entry_close <= 0 or meta.exit_close <= 0:
             continue
@@ -691,6 +700,16 @@ def sweep_thresholds(
             "must be the same length"
         )
 
+    # Long-only: SELL trades never execute, so cells differing only in
+    # sell_thresh are identical — sweeping them would multiply-count the
+    # same strategy in the Deflated-Sharpe trial set. Pin the sell axis
+    # to the strictest value and disable the SELL side of the
+    # class-share floor (single-class is the design, not a collapse).
+    sell_grid: tuple[float, ...] = grid
+    if cfg.long_only:
+        sell_grid = (max(grid),)
+        min_class_share = 0.0
+
     best_buy: float | None = None
     best_sell: float | None = None
     best_result: BacktestResult | None = None
@@ -705,10 +724,12 @@ def sweep_thresholds(
     for buy_thresh in grid:
         if max_threshold is not None and buy_thresh > max_threshold + _eps:
             continue
-        for sell_thresh in grid:
-            if max_threshold is not None and sell_thresh > max_threshold + _eps:
+        for sell_thresh in sell_grid:
+            if not cfg.long_only and max_threshold is not None \
+                    and sell_thresh > max_threshold + _eps:
                 continue
-            if max_diff is not None and abs(buy_thresh - sell_thresh) > max_diff + _eps:
+            if not cfg.long_only and max_diff is not None \
+                    and abs(buy_thresh - sell_thresh) > max_diff + _eps:
                 continue
             preds: list[int] = []
             for p in probas:
@@ -725,7 +746,7 @@ def sweep_thresholds(
                 continue
             buy_count = sum(1 for p in preds if p == _LABEL_BUY)
             sell_count = sum(1 for p in preds if p == _LABEL_SELL)
-            total_nh = buy_count + sell_count
+            total_nh = buy_count if cfg.long_only else buy_count + sell_count
             # Signal-RATE floor (fraction of samples that produce a
             # signal), not just an absolute trade count. On a large
             # holdout `min_trades=100` is a trivial 0.2% rate, so the sweep

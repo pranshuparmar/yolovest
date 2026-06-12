@@ -1161,6 +1161,7 @@ class XGBoostSignalModel(MLBase):
         collected_meta: list[Any],
         backtest_product: str,
         backtest_max_positions: int,
+        backtest_long_only: bool = False,
     ) -> dict[str, Any]:
         """Real-PnL evaluation + threshold tuning — the headline metrics.
 
@@ -1195,6 +1196,7 @@ class XGBoostSignalModel(MLBase):
         bt_cfg = BacktestConfig(
             product=backtest_product,
             max_concurrent_positions=backtest_max_positions,
+            long_only=backtest_long_only,
         )
 
         # Bound the sweep to the range production can actually
@@ -1511,6 +1513,7 @@ class XGBoostSignalModel(MLBase):
             ),
             "signals_skipped_at_cap": headline.signals_skipped_at_cap,
             "backtest_max_positions": backtest_max_positions,
+            "backtest_long_only": backtest_long_only,
             # Tuned thresholds: applied at inference when present.
             "tuned_buy_threshold": tuned_buy,
             "tuned_sell_threshold": tuned_sell,
@@ -1786,6 +1789,7 @@ class XGBoostSignalModel(MLBase):
         bars_meta_raw = params.pop("bars_meta", None)
         backtest_product = params.pop("backtest_product", "MIS")
         backtest_max_positions = int(params.pop("backtest_max_positions", 0))
+        backtest_long_only = bool(params.pop("backtest_long_only", False))
         # Label lookahead in trading days — used to purge train samples
         # whose label window overlaps the test fold (cross-sectional
         # leakage). 0 disables purging.
@@ -1990,6 +1994,7 @@ class XGBoostSignalModel(MLBase):
                     collected_meta=collected_meta,
                     backtest_product=backtest_product,
                     backtest_max_positions=backtest_max_positions,
+                    backtest_long_only=backtest_long_only,
                 )
             else:
                 metrics = _synthetic_metrics(

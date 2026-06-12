@@ -576,6 +576,24 @@ class StrategyConfig(BaseModel):
     mode: Literal["intraday", "short_term", "balanced", "long_term", "swing"] = "balanced"
     allowed_holding_periods: list[str] | None = None
     holding_periods: HoldingPeriodConfig = Field(default_factory=HoldingPeriodConfig)
+    # Swing label mode. "relative" (default): cross-sectional
+    # relative-momentum label — per trading date, every symbol's forward
+    # 10-bar return (entry next-open -> horizon close) is ranked across
+    # the universe; the top relative_label_quantile become BUY, the
+    # bottom become SELL, the middle HOLD. This subtracts the market's
+    # own drift from the label (an absolute barrier label is dominated
+    # by it: a zero-skill coin-flip already wins ~40% of 2:1-barrier
+    # trades in a rising market) and targets the best-documented
+    # Indian-equity anomaly, cross-sectional momentum. Trades still
+    # execute with the ATR target/SL geometry — the backtest exits at
+    # the LIVE geometry, not at label barriers, which also breaks the
+    # label/exit circularity that inflated barrier-mode Sharpe.
+    # "barrier": legacy absolute path-aware triple-barrier label.
+    # The intraday lane always uses its 1-min triple-barrier label.
+    swing_label_mode: Literal["barrier", "relative"] = "relative"
+    # Top/bottom quantile for the relative label (0.20 = top/bottom 20%,
+    # giving a ~20/60/20 BUY/HOLD/SELL class mix by construction).
+    relative_label_quantile: float = Field(default=0.20, gt=0.0, le=0.4)
     # Horizon-consistency cap on ML swing trades. The swing model's
     # path-aware label measures a 10-bar (~2-week) window — execution
     # horizons far beyond that ride an edge the label never measured

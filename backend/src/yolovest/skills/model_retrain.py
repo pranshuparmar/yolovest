@@ -241,6 +241,47 @@ def intraday_triple_barrier_label(
     return 1
 
 
+# A cross-sectional rank needs breadth: dates with fewer valid forward
+# returns than this label everything HOLD (no meaningful quantile exists
+# over a handful of names — early-history dates, thin test fixtures).
+_RELATIVE_MIN_NAMES = 10
+
+
+def _assign_relative_labels(
+    fwd_returns: list[float | None],
+    dates: list[str],
+    quantile: float,
+    min_names: int = _RELATIVE_MIN_NAMES,
+) -> list[int]:
+    """Cross-sectional relative-momentum labels.
+
+    Per trading date, rank every sample's forward return (entry next-open
+    -> horizon close) across the universe: the top `quantile` become BUY
+    (2), the bottom `quantile` SELL (0), the middle HOLD (1). Subtracting
+    the cross-section's own move removes the market-drift component that
+    dominates absolute barrier labels (a zero-skill pick wins ~40% of
+    2:1-barrier trades in a rising market — the model was being graded
+    against the tide, not the swimmers). Samples with no valid forward
+    return, or on dates thinner than `min_names`, are HOLD.
+    """
+    by_date: dict[str, list[int]] = {}
+    for idx, d in enumerate(dates):
+        if fwd_returns[idx] is not None:
+            by_date.setdefault(d, []).append(idx)
+
+    labels = [1] * len(fwd_returns)
+    for idxs in by_date.values():
+        if len(idxs) < min_names:
+            continue
+        ranked = sorted(idxs, key=lambda i: fwd_returns[i])  # type: ignore[arg-type, return-value]
+        k = max(1, int(len(ranked) * quantile))
+        for i in ranked[-k:]:
+            labels[i] = 2  # BUY: top-quantile relative performer
+        for i in ranked[:k]:
+            labels[i] = 0  # SELL: bottom-quantile relative performer
+    return labels
+
+
 def _index_bulk_deal_dates(
     bulk_deal_lookup: dict[tuple[str, str], dict[str, int]],
 ) -> dict[str, list[str]]:
@@ -578,15 +619,19 @@ class ModelRetrainSkill(SkillBase):
                     )
                 )
             else:
+                swing_label_mode = str(
+                    getattr(self.ctx.config.strategy, "swing_label_mode", "barrier")
+                )
                 logger.info(
-                    "=== Retraining %s model: label geometry lookahead=%d bars, "
-                    "target=%.2f×ATR, SL=%.2f×ATR ===",
-                    model_type, lookahead, target_mult, sl_mult,
+                    "=== Retraining %s model: label=%s, lookahead=%d bars, "
+                    "exit geometry target=%.2f×ATR, SL=%.2f×ATR ===",
+                    model_type, swing_label_mode, lookahead, target_mult, sl_mult,
                 )
                 X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
                     training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
                     target_atr_mult=target_mult, sl_atr_mult=sl_mult,
                     cost_floor_pct=cost_floor,
+                    label_mode=swing_label_mode,
                     sector_map=sector_map,
                     bulk_deal_lookup=bulk_deal_lookup,
                     news_lookup=news_lookup,
@@ -731,6 +776,14 @@ class ModelRetrainSkill(SkillBase):
                 train_params["backtest_product"] = (
                     "MIS" if model_type == "intraday" else "CNC"
                 )
+                # The live book cannot act on swing SELLs: shorts on
+                # non-held names are MIS-only (no overnight retail
+                # shorting) and get dropped at swing horizons, while
+                # exits on held names belong to position-monitor. A
+                # backtest that books SELL trades therefore measures an
+                # edge the account can't trade — evaluate the swing lane
+                # long-only so its Sharpe describes reality.
+                train_params["backtest_long_only"] = model_type == "swing"
                 # Bound the backtest's concurrent-positions count to
                 # the same cap the live engine enforces. Without
                 # this, the simulator treats every signal as
@@ -770,6 +823,10 @@ class ModelRetrainSkill(SkillBase):
                 # source is wired; treat absolute backtest numbers
                 # accordingly.
                 metrics["data_caveats"] = ["survivor_universe"]
+                metrics["label_mode"] = (
+                    "intraday_triple_barrier" if model_type == "intraday"
+                    else swing_label_mode
+                )
                 if class_weights:
                     metrics["class_weights"] = {
                         "BUY": round(class_weights.get(2, 0.0), 4),
@@ -803,8 +860,15 @@ class ModelRetrainSkill(SkillBase):
                             "BUY": pred_counts.get(2, 0),
                         }
                         n_eval = len(prod_labels) or 1
-                        non_hold = pred_dist["BUY"] + pred_dist["SELL"]
-                        signal_rate = non_hold / n_eval
+                        # Tradeability-aware rate: swing SELLs are no-ops
+                        # live (non-held shorts dropped; held-name exits
+                        # belong to position-monitor), so a SELL-heavy
+                        # swing model must not pass as "non-silent".
+                        # Intraday can short, so both sides count there.
+                        tradeable = pred_dist["BUY"] + (
+                            pred_dist["SELL"] if model_type == "intraday" else 0
+                        )
+                        signal_rate = tradeable / n_eval
                         logger.info(
                             "Post-train production-path distribution for %s "
                             "(n=%d): BUY=%d, HOLD=%d, SELL=%d (signal_rate=%.2f%%)",
@@ -913,6 +977,20 @@ class ModelRetrainSkill(SkillBase):
                             "promoted %s directly (bootstrap).",
                             model_type, version,
                         )
+                        try:
+                            await self.ctx.notify.send(
+                                f"Model retrain: {model_type} model {version} "
+                                f"passed its gates and was promoted to "
+                                f"production (no incumbent). If this lane was "
+                                f"parked via strategy.mode, it can be "
+                                f"re-enabled now.",
+                                alert_type="daily_summary",
+                            )
+                        except Exception:
+                            logger.debug(
+                                "bootstrap-promotion notify failed",
+                                exc_info=True,
+                            )
                     except Exception:
                         logger.warning(
                             "Bootstrap promotion failed for %s/%s",
@@ -1079,6 +1157,7 @@ class ModelRetrainSkill(SkillBase):
         target_atr_mult: float = 1.5,
         sl_atr_mult: float = 0.75,
         cost_floor_pct: float = 0.0,
+        label_mode: str = "barrier",
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
         news_lookup: dict[str, list[tuple[str, str]]] | None = None,
@@ -1146,6 +1225,10 @@ class ModelRetrainSkill(SkillBase):
         sample_weights: list[float] = []
         feature_names: list[str] = []
         feature_names_set: set[str] = set()
+        # Relative-label mode: per-sample forward return (entry next-open
+        # -> horizon close), labelled cross-sectionally AFTER the global
+        # date sort below. Parallel to X/y; None = no valid entry.
+        rel_fwd_returns: list[float | None] = []
 
         # Train-time feature-group gate. Price/technical features always
         # stay; disabled support groups (config.strategy.feature_groups)
@@ -1402,7 +1485,19 @@ class ModelRetrainSkill(SkillBase):
                 # value flows into bars_meta so the backtest exits at the
                 # labelled barrier.
                 eff_target_pct = max(atr_pct * target_atr_mult, cost_floor_pct)
-                if next_open <= 0 or atr_pct <= 0:
+                if label_mode == "relative":
+                    # Cross-sectional label, assigned after the global
+                    # date sort (needs every symbol's same-date forward
+                    # return). Placeholder HOLD here; the ATR target/SL
+                    # still flow into bars_meta so the backtest exits at
+                    # the LIVE trade geometry — which also breaks the
+                    # label/exit circularity of barrier mode.
+                    label = 1
+                    rel_fwd_returns.append(
+                        (future_close / next_open - 1.0)
+                        if next_open > 0 else None
+                    )
+                elif next_open <= 0 or atr_pct <= 0:
                     label = 1
                 else:
                     label = self._path_aware_label(
@@ -1513,6 +1608,18 @@ class ModelRetrainSkill(SkillBase):
             y = [y[i] for i in order]
             sample_weights = [sample_weights[i] for i in order]
             bars_meta = [bars_meta[i] for i in order]
+            if label_mode == "relative" and rel_fwd_returns:
+                rel_fwd_returns = [rel_fwd_returns[i] for i in order]
+
+        if label_mode == "relative" and rel_fwd_returns:
+            y = _assign_relative_labels(
+                rel_fwd_returns,
+                [str(m.get("entry_date", "")) for m in bars_meta],
+                quantile=float(
+                    getattr(self.ctx.config.strategy,
+                            "relative_label_quantile", 0.20)
+                ),
+            )
 
         return X, y, feature_names, sample_weights, bars_meta
 
