@@ -602,10 +602,15 @@ class ModelRetrainSkill(SkillBase):
                 # (MIS auto-squares EOD). The old daily-bar "intraday" model
                 # (1-day lookahead) was really a next-day predictor with no
                 # real intraday edge — see docs/intraday-model-design.md.
+                intraday_label_mode = str(
+                    getattr(self.ctx.config.strategy, "intraday_label_mode",
+                            "triple_barrier")
+                )
                 logger.info(
-                    "=== Retraining intraday (5-min) model: 1-min path labels, "
-                    "to-session-close horizon, target=%.2f×ATR, SL=%.2f×ATR ===",
-                    target_mult, sl_mult,
+                    "=== Retraining intraday (5-min) model: label=%s "
+                    "(1-min path), to-session-close horizon, "
+                    "exit geometry target=%.2f×ATR, SL=%.2f×ATR ===",
+                    intraday_label_mode, target_mult, sl_mult,
                 )
                 X, y, feat_names, sample_weights, bars_meta = (
                     await self._build_intraday_matrix(
@@ -613,6 +618,7 @@ class ModelRetrainSkill(SkillBase):
                         horizon_minutes=_INTRADAY_TO_CLOSE_HORIZON_MIN,
                         target_atr_mult=target_mult, sl_atr_mult=sl_mult,
                         cost_floor_pct=cost_floor,
+                        label_mode=intraday_label_mode,
                         feedback_data=feedback_data, sector_map=sector_map,
                         bulk_deal_lookup=bulk_deal_lookup, news_lookup=news_lookup,
                         vix_timeline=vix_timeline, fno_lookup=fno_lookup,
@@ -824,7 +830,7 @@ class ModelRetrainSkill(SkillBase):
                 # accordingly.
                 metrics["data_caveats"] = ["survivor_universe"]
                 metrics["label_mode"] = (
-                    "intraday_triple_barrier" if model_type == "intraday"
+                    intraday_label_mode if model_type == "intraday"
                     else swing_label_mode
                 )
                 if class_weights:
@@ -1690,6 +1696,7 @@ class ModelRetrainSkill(SkillBase):
         target_atr_mult: float,
         sl_atr_mult: float,
         cost_floor_pct: float = 0.0,
+        label_mode: str = "triple_barrier",
         feedback_data: dict[str, Any] | None = None,
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
@@ -1999,6 +2006,15 @@ class ModelRetrainSkill(SkillBase):
                 if next_open <= 0 or atr_pct <= 0 or not mbars:
                     label = 1
                     m_start = len(mbars)
+                elif label_mode == "relative":
+                    # Cross-sectional label: ranked per decision INSTANT
+                    # across the universe by _build_intraday_matrix AFTER
+                    # the cross-chunk concat (per-chunk cross-sections are
+                    # <= chunk-size symbols — too thin to rank). The
+                    # forward return-to-close it ranks comes from the
+                    # 1-min flat_exit walk below; placeholder HOLD here.
+                    label = 1
+                    m_start = bisect.bisect_left(mts, entry_bar.timestamp)
                 else:
                     m_start = bisect.bisect_left(mts, entry_bar.timestamp)
                     label = intraday_triple_barrier_label(
@@ -2086,7 +2102,7 @@ class ModelRetrainSkill(SkillBase):
                 X.append([features.get(k, 0.0) for k in feature_names])
                 y.append(label)
                 sample_weights.append(bar_weight)
-                bars_meta.append({
+                meta: dict[str, Any] = {
                     "symbol": sym,
                     "entry_close": float(next_open),
                     "exit_close": float(flat_exit),
@@ -2096,7 +2112,17 @@ class ModelRetrainSkill(SkillBase):
                     "target_pct": float(target_pct),
                     "sl_pct": float(sl_pct),
                     "entry_date": entry_bar.timestamp.strftime("%Y-%m-%d"),
-                })
+                }
+                if label_mode == "relative":
+                    # Forward return-to-close (entry next-5min-open ->
+                    # session close via the 1-min walk) + the exact
+                    # decision instant as the cross-sectional group key.
+                    meta["_rel_fwd"] = (
+                        (flat_exit / next_open - 1.0)
+                        if (mbars and next_open > 0) else None
+                    )
+                    meta["_rel_group"] = bars[i].timestamp.isoformat()
+                bars_meta.append(meta)
 
         if bars_meta:
             order = sorted(
@@ -2118,6 +2144,7 @@ class ModelRetrainSkill(SkillBase):
         target_atr_mult: float,
         sl_atr_mult: float,
         cost_floor_pct: float = 0.0,
+        label_mode: str = "triple_barrier",
         feedback_data: dict[str, Any] | None = None,
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
@@ -2193,6 +2220,7 @@ class ModelRetrainSkill(SkillBase):
                 horizon_minutes=horizon_minutes,
                 target_atr_mult=target_atr_mult, sl_atr_mult=sl_atr_mult,
                 cost_floor_pct=cost_floor_pct,
+                label_mode=label_mode,
                 feedback_data=feedback_data, sector_map=sector_map,
                 bulk_deal_lookup=bulk_deal_lookup, news_lookup=news_lookup,
                 vix_timeline=vix_timeline, fno_lookup=fno_lookup,
@@ -2224,6 +2252,18 @@ class ModelRetrainSkill(SkillBase):
             y_all = [y_all[i] for i in order]
             w_all = [w_all[i] for i in order]
             meta_all = [meta_all[i] for i in order]
+
+        if label_mode == "relative" and meta_all:
+            # Cross-sectional ranking per decision INSTANT, now that all
+            # symbol chunks are concatenated (~full universe per instant).
+            y_all = _assign_relative_labels(
+                [m.get("_rel_fwd") for m in meta_all],
+                [str(m.get("_rel_group", "")) for m in meta_all],
+                quantile=float(
+                    getattr(self.ctx.config.strategy,
+                            "relative_label_quantile", 0.20)
+                ),
+            )
 
         logger.info(
             "Intraday matrix: %d samples across %d symbols | %d feature cols "

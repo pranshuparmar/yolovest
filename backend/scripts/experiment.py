@@ -27,9 +27,11 @@ USAGE (run on the training box against a COPY of the live DB)
       --label-modes relative,barrier \
       --n-jobs 4
 
-Swing lane only (the intraday lane has its own cheap baseline script —
-see intraday_baseline.py). Results print as they finish and are dumped
-to experiment_results.json for later comparison.
+Lanes: --lanes swing (default) and/or intraday. The intraday lane maps
+label-mode "barrier" to its "triple_barrier" and is bounded by the
+1-min/5-min retention window; expect ~20 min per combo just for the
+chunked matrix build. Results print as they finish and are dumped to
+experiment_results.json for later comparison.
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ def _fmt(v: Any, nd: int = 3) -> str:
 async def run_combo(
     db: Database,
     *,
+    lane: str,
     window: int,
     decay: float,
     label_mode: str,
@@ -67,7 +70,6 @@ async def run_combo(
     cfg = AppConfig(broker={"api_key": "x", "api_secret": "x"})
     cfg.retraining.max_training_days = window
     cfg.strategy.time_decay_last_weight = decay
-    cfg.strategy.swing_label_mode = label_mode  # type: ignore[assignment]
     cfg.strategy.relative_label_quantile = quantile
     cfg.strategy.feedback.enabled = False
 
@@ -87,14 +89,33 @@ async def run_combo(
         pass
 
     hp = cfg.strategy.holding_periods
-    X, y, names, weights, meta = skill._prepare_training_data(
-        training_data,
-        lookahead_bars=10,
-        target_atr_mult=hp.short_swing.target,
-        sl_atr_mult=hp.short_swing.stop_loss,
-        label_mode=label_mode,
-        sector_map=sector_map,
-    )
+    if lane == "intraday":
+        # Intraday: "barrier" on the CLI means the lane's triple-barrier.
+        intraday_mode = (
+            "triple_barrier" if label_mode in ("barrier", "triple_barrier")
+            else "relative"
+        )
+        X, y, names, weights, meta = await skill._build_intraday_matrix(
+            training_data,
+            horizon_minutes=375,
+            target_atr_mult=hp.intraday.target,
+            sl_atr_mult=hp.intraday.stop_loss,
+            label_mode=intraday_mode,
+            sector_map=sector_map,
+        )
+        lookahead = 1
+        product, long_only = "MIS", False
+    else:
+        X, y, names, weights, meta = skill._prepare_training_data(
+            training_data,
+            lookahead_bars=10,
+            target_atr_mult=hp.short_swing.target,
+            sl_atr_mult=hp.short_swing.stop_loss,
+            label_mode=label_mode,
+            sector_map=sector_map,
+        )
+        lookahead = 10
+        product, long_only = "CNC", True
     n = len(y)
     dist = {c: y.count(lbl) for lbl, c in ((2, "BUY"), (1, "HOLD"), (0, "SELL"))}
     if n < 500:
@@ -119,12 +140,12 @@ async def run_combo(
 
     ml = XGBoostSignalModel(model_dir="/tmp/experiment_models", config=cfg)
     metrics = await ml.train(
-        "swing", X, y,
+        lane, X, y,
         {
             "bars_meta": meta,
-            "lookahead_bars": 10,
-            "backtest_product": "CNC",
-            "backtest_long_only": True,
+            "lookahead_bars": lookahead,
+            "backtest_product": product,
+            "backtest_long_only": long_only,
             "backtest_max_positions": cfg.risk.max_open_positions,
             "sample_weights": weights,
             "n_jobs": n_jobs,
@@ -136,14 +157,17 @@ async def run_combo(
     rate = None
     prod_dist = None
     try:
-        labels = ml.predict_labels_batch(guard_x, "swing")
+        labels = ml.predict_labels_batch(guard_x, lane)
         if labels:
             prod_dist = {
                 "BUY": sum(1 for p in labels if p == 2),
                 "HOLD": sum(1 for p in labels if p == 1),
                 "SELL": sum(1 for p in labels if p == 0),
             }
-            rate = prod_dist["BUY"] / len(labels)
+            tradeable = prod_dist["BUY"] + (
+                prod_dist["SELL"] if lane == "intraday" else 0
+            )
+            rate = tradeable / len(labels)
     except Exception:
         pass
 
@@ -171,6 +195,8 @@ async def main() -> None:
         description="Sweep training configs and print the staged-gate table",
     )
     ap.add_argument("--db", required=True, help="Path to a COPY of yolovest.db")
+    ap.add_argument("--lanes", default="swing",
+                    help="comma list: swing,intraday")
     ap.add_argument("--windows", default="1100,2000,4015")
     ap.add_argument("--decays", default="1.0,0.4")
     ap.add_argument("--label-modes", default="relative,barrier")
@@ -184,34 +210,35 @@ async def main() -> None:
     await db.initialize()
 
     combos = [
-        (w, d, m)
+        (lane, w, d, m)
+        for lane in args.lanes.split(",")
         for w in (int(x) for x in args.windows.split(","))
         for d in (float(x) for x in args.decays.split(","))
         for m in args.label_modes.split(",")
     ]
     header = (
-        f"{'window':>6} {'decay':>5} {'label':>8} | {'n':>8} {'AUCb':>5} "
+        f"{'lane':>8} {'window':>6} {'decay':>5} {'label':>8} | {'n':>8} {'AUCb':>5} "
         f"{'sep':>6} {'argmax':>7} {'tuned':>6} {'lower':>6} {'DSR':>5} "
         f"{'win':>5} {'trades':>6} {'buy_thr':>7} {'rate':>6} {'secs':>6}"
     )
     print(header)
     print("-" * len(header))
     results = []
-    for w, d, m in combos:
+    for lane, w, d, m in combos:
         try:
             r = await run_combo(
-                db, window=w, decay=d, label_mode=m,
+                db, lane=lane, window=w, decay=d, label_mode=m,
                 n_jobs=args.n_jobs, quantile=args.quantile,
             )
         except Exception as e:  # keep sweeping; report the failure
             r = {"error": str(e)}
-        r.update({"window": w, "decay": d, "label_mode": m})
+        r.update({"lane": lane, "window": w, "decay": d, "label_mode": m})
         results.append(r)
         if "error" in r:
-            print(f"{w:>6} {d:>5} {m:>8} | ERROR: {r['error']}")
+            print(f"{lane:>8} {w:>6} {d:>5} {m:>8} | ERROR: {r['error']}")
             continue
         print(
-            f"{w:>6} {d:>5} {m:>8} | {r['n']:>8} {_fmt(r['auc_buy']):>5} "
+            f"{lane:>8} {w:>6} {d:>5} {m:>8} | {r['n']:>8} {_fmt(r['auc_buy']):>5} "
             f"{_fmt(r['buy_sep'], 4):>6} {_fmt(r['argmax_sharpe'], 2):>7} "
             f"{_fmt(r['tuned_sharpe'], 2):>6} {_fmt(r['sharpe_lower'], 2):>6} "
             f"{_fmt(r['deflated'], 2):>5} {_fmt(r['win_rate'], 2):>5} "

@@ -593,7 +593,19 @@ class StrategyConfig(BaseModel):
     swing_label_mode: Literal["barrier", "relative"] = "relative"
     # Top/bottom quantile for the relative label (0.20 = top/bottom 20%,
     # giving a ~20/60/20 BUY/HOLD/SELL class mix by construction).
+    # Shared by the swing and intraday relative modes.
     relative_label_quantile: float = Field(default=0.20, gt=0.0, le=0.4)
+    # Intraday label mode. "triple_barrier" (default): 1-min path-resolved
+    # hit-target-before-SL, walked to the session close. "relative": the
+    # intraday edition of the swing relative label — per 5-min decision
+    # INSTANT, every symbol's forward return-to-close is ranked across the
+    # universe; top relative_label_quantile -> BUY, bottom -> SELL.
+    # Isolates "which stocks outperform TODAY" from absolute barrier hits
+    # (the component the intraday features could rank — AUC 0.58/0.63 —
+    # but couldn't monetise at absolute barriers). Trade exits keep the
+    # ATR geometry either way. Validate via scripts/experiment.py before
+    # flipping.
+    intraday_label_mode: Literal["triple_barrier", "relative"] = "triple_barrier"
     # Horizon-consistency cap on ML swing trades. The swing model's
     # path-aware label measures a 10-bar (~2-week) window — execution
     # horizons far beyond that ride an edge the label never measured

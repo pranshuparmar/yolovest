@@ -375,3 +375,96 @@ class TestBuildIntradayMatrix:
             for c in skill.ctx.db.get_intraday_training_dataset.await_args_list
         }
         assert fetched == {"AAA"}
+
+
+class TestIntradayRelativeLabel:
+    """intraday_label_mode='relative': per 5-min decision INSTANT, forward
+    returns-to-close are ranked ACROSS symbols (assigned after the
+    cross-chunk concat in _build_intraday_matrix — per-chunk
+    cross-sections are too thin to rank)."""
+
+    @staticmethod
+    def _panel(n_symbols: int = 12, sessions: int = 3):
+        """Per symbol s: a 1-min price path with slope proportional to
+        (s - mid), so the top symbols always rally into the close and the
+        bottom ones always fade — a deterministic cross-sectional rank."""
+        first = datetime(2026, 5, 18, 9, 15)
+        decision, minute = [], {}
+        for s in range(n_symbols):
+            sym = f"S{s:02d}"
+            slope = (s - (n_symbols - 1) / 2) * 2e-4  # per minute
+            d_bars, m_bars = [], []
+            day = first
+            for _ in range(sessions):
+                for j in range(_PER_SESSION * 5):  # 1-min path
+                    px = 100.0 * (1 + slope * j)
+                    t = day + timedelta(minutes=j)
+                    m_bars.append({
+                        "symbol": sym, "timestamp": t.isoformat(),
+                        "open": px, "high": px + 0.05, "low": px - 0.05,
+                        "close": px, "volume": 2000,
+                    })
+                for j in range(_PER_SESSION):  # 5-min decision bars
+                    px = 100.0 * (1 + slope * j * 5)
+                    t = day + timedelta(minutes=5 * j)
+                    d_bars.append({
+                        "symbol": sym, "timestamp": t.isoformat(),
+                        "open": px, "high": px + 0.3, "low": px - 0.3,
+                        "close": px + 0.02, "volume": 10000 + j,
+                    })
+                day += timedelta(days=1)
+            decision.extend(d_bars)
+            minute[sym] = m_bars
+        return decision, minute
+
+    async def test_top_and_bottom_symbols_get_directional_labels(self, skill):
+        from unittest.mock import AsyncMock
+
+        decision, minute = self._panel()
+        symbols = sorted(minute.keys())
+        span = sorted({b["timestamp"][:10] for b in decision})
+        daily = {"bars": _daily_bars(span)}
+
+        skill.ctx.db.get_distinct_ohlcv_symbols = AsyncMock(
+            return_value=symbols,
+        )
+        skill.ctx.db.get_intraday_training_dataset = AsyncMock(
+            return_value={"decision_bars": decision, "minute_bars": minute},
+        )
+
+        _x, y, _names, _w, meta = await skill._build_intraday_matrix(
+            daily, horizon_minutes=375,
+            target_atr_mult=8.0, sl_atr_mult=4.0,
+            label_mode="relative",
+        )
+        assert y, "no samples emitted"
+        by_symbol: dict[str, set[int]] = {}
+        for lbl, m in zip(y, meta, strict=True):
+            by_symbol.setdefault(m["symbol"], set()).add(lbl)
+
+        # quantile 0.2 over 12 names -> top 2 BUY, bottom 2 SELL, per instant.
+        assert by_symbol["S11"] == {2}, by_symbol["S11"]
+        assert by_symbol["S10"] == {2}
+        assert by_symbol["S00"] == {0}
+        assert by_symbol["S01"] == {0}
+        assert by_symbol["S05"] == {1}
+        # Ranking inputs rode along on the meta dicts.
+        assert all("_rel_fwd" in m and "_rel_group" in m for m in meta)
+
+    async def test_triple_barrier_mode_unchanged(self, skill):
+        from unittest.mock import AsyncMock
+
+        decision, minute = self._panel()
+        span = sorted({b["timestamp"][:10] for b in decision})
+        skill.ctx.db.get_distinct_ohlcv_symbols = AsyncMock(
+            return_value=sorted(minute.keys()),
+        )
+        skill.ctx.db.get_intraday_training_dataset = AsyncMock(
+            return_value={"decision_bars": decision, "minute_bars": minute},
+        )
+        _x, y, _names, _w, meta = await skill._build_intraday_matrix(
+            {"bars": _daily_bars(span)}, horizon_minutes=375,
+            target_atr_mult=8.0, sl_atr_mult=4.0,
+        )
+        assert y
+        assert all("_rel_fwd" not in m for m in meta)
