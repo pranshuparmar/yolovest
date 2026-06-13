@@ -128,10 +128,19 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
     ) -> dict[str, Any]:
         """Return the default values for every DB-editable config key,
         in the same {section: {key: value}} shape as /api/config so the
-        frontend can diff current vs default and offer a per-tab reset."""
-        from yolovest.config import AppConfig, config_to_ui_sections
+        frontend can diff current vs default and offer a per-tab reset.
+
+        `field_kinds` maps every numeric key to "int"/"float" from the
+        Pydantic annotations — JSON erases the distinction (1.0 -> 1),
+        so a value-based frontend heuristic misclassifies whole-valued
+        float fields and rejects valid decimals."""
+        from yolovest.config import (
+            AppConfig,
+            config_field_kinds,
+            config_to_ui_sections,
+        )
         defaults = config_to_ui_sections(AppConfig())
-        return {"sections": defaults}
+        return {"sections": defaults, "field_kinds": config_field_kinds()}
 
     @app.put("/api/config")
     async def update_config(

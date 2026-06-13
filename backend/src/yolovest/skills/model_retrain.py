@@ -138,98 +138,6 @@ def passes_edge_gate(
     return True, f"argmax Sharpe {argmax:.2f} >= {min_argmax_sharpe:.2f}"
 
 
-def intraday_path_aware_label(
-    *,
-    bars: list["OHLCVBar"],
-    start_idx: int,
-    lookahead: int,
-    entry: float,
-    target_pct: float,
-    sl_pct: float,
-) -> int:
-    """Path-aware label for an intraday (same-session) trade.
-
-    Same target-before-SL geometry as the daily ``_path_aware_label`` but
-    with a HARD same-day close-out: the forward walk stops at the session
-    boundary — the first bar whose calendar date differs from the entry
-    bar's. There is no overnight carry for MIS, so a move that only
-    materialises in a later session must not count toward the label
-    (the contamination the daily labels suffer). A trade that hits
-    neither barrier within ``lookahead`` bars OR before the session ends
-    is a no-trade → HOLD.
-
-    `entry` is the fill price (the caller passes ``bars[start_idx+1].open``
-    — the next-bar open, the earliest an intraday signal computed at
-    ``bars[start_idx].close`` can actually fill). Barriers are checked
-    from the entry bar onward.
-
-    Returns: 2 BUY, 0 SELL, 1 HOLD.
-    """
-    if start_idx + 1 >= len(bars):
-        return 1
-    session_date = bars[start_idx + 1].timestamp.date()
-
-    buy_target = entry * (1 + target_pct)
-    buy_sl = entry * (1 - sl_pct)
-    sell_target = entry * (1 - target_pct)
-    sell_sl = entry * (1 + sl_pct)
-
-    buy_outcome: str | None = None
-    sell_outcome: str | None = None
-    buy_win_bar: int | None = None
-    sell_win_bar: int | None = None
-
-    end_idx = min(start_idx + lookahead, len(bars) - 1)
-    for k in range(start_idx + 1, end_idx + 1):
-        bar = bars[k]
-        # Hard same-session close-out — never look across the day boundary.
-        if bar.timestamp.date() != session_date:
-            break
-        hi, lo = bar.high, bar.low
-
-        if buy_outcome is None:
-            target_now = hi >= buy_target
-            sl_now = lo <= buy_sl
-            if target_now and sl_now:
-                buy_outcome = "ambiguous"
-            elif target_now:
-                buy_outcome = "win"
-                buy_win_bar = k
-            elif sl_now:
-                buy_outcome = "loss"
-
-        if sell_outcome is None:
-            target_now = lo <= sell_target
-            sl_now = hi >= sell_sl
-            if target_now and sl_now:
-                sell_outcome = "ambiguous"
-            elif target_now:
-                sell_outcome = "win"
-                sell_win_bar = k
-            elif sl_now:
-                sell_outcome = "loss"
-
-        if buy_outcome is not None and sell_outcome is not None:
-            break
-
-    buy_won = buy_outcome == "win"
-    sell_won = sell_outcome == "win"
-
-    if buy_won and sell_won:
-        # First-winner disambiguation; same-bar cross-direction → HOLD.
-        if buy_win_bar is not None and sell_win_bar is not None:
-            if buy_win_bar < sell_win_bar:
-                return 2
-            if sell_win_bar < buy_win_bar:
-                return 0
-        return 1
-    if buy_won:
-        return 2
-    if sell_won:
-        return 0
-    return 1
-
-
 def intraday_triple_barrier_label(
     *,
     entry: float,
@@ -249,7 +157,7 @@ def intraday_triple_barrier_label(
     walked bar-by-bar on the 1-min series, so the intra-5-min ambiguity
     ("did the high or the low print first inside the bar?") is decided by
     real finer-grained data instead of collapsing to HOLD the way a
-    5-min-only walk must (see ``intraday_path_aware_label``).
+    5-min-only walk must (high and low inside one 5-min bar are unordered).
 
     Discipline carried over:
       - **Hard same-session close-out**: the walk stops at the first 1-min
@@ -333,6 +241,84 @@ def intraday_triple_barrier_label(
     return 1
 
 
+# A cross-sectional rank needs breadth: dates with fewer valid forward
+# returns than this label everything HOLD (no meaningful quantile exists
+# over a handful of names — early-history dates, thin test fixtures).
+_RELATIVE_MIN_NAMES = 10
+
+
+def _assign_relative_labels(
+    fwd_returns: list[float | None],
+    dates: list[str],
+    quantile: float,
+    min_names: int = _RELATIVE_MIN_NAMES,
+) -> list[int]:
+    """Cross-sectional relative-momentum labels.
+
+    Per trading date, rank every sample's forward return (entry next-open
+    -> horizon close) across the universe: the top `quantile` become BUY
+    (2), the bottom `quantile` SELL (0), the middle HOLD (1). Subtracting
+    the cross-section's own move removes the market-drift component that
+    dominates absolute barrier labels (a zero-skill pick wins ~40% of
+    2:1-barrier trades in a rising market — the model was being graded
+    against the tide, not the swimmers). Samples with no valid forward
+    return, or on dates thinner than `min_names`, are HOLD.
+    """
+    by_date: dict[str, list[int]] = {}
+    for idx, d in enumerate(dates):
+        if fwd_returns[idx] is not None:
+            by_date.setdefault(d, []).append(idx)
+
+    labels = [1] * len(fwd_returns)
+    for idxs in by_date.values():
+        if len(idxs) < min_names:
+            continue
+        ranked = sorted(idxs, key=lambda i: fwd_returns[i])  # type: ignore[arg-type, return-value]
+        k = max(1, int(len(ranked) * quantile))
+        for i in ranked[-k:]:
+            labels[i] = 2  # BUY: top-quantile relative performer
+        for i in ranked[:k]:
+            labels[i] = 0  # SELL: bottom-quantile relative performer
+    return labels
+
+
+def _index_bulk_deal_dates(
+    bulk_deal_lookup: dict[tuple[str, str], dict[str, int]],
+) -> dict[str, list[str]]:
+    """Per-symbol sorted deal-date list for fast trailing-window lookups
+    over the (symbol, deal_date) -> counts map. Shared by the daily and
+    intraday matrix builders."""
+    out: dict[str, list[str]] = {}
+    for sym_key, date_key in bulk_deal_lookup:
+        out.setdefault(sym_key, []).append(date_key)
+    for v in out.values():
+        v.sort()
+    return out
+
+
+def _parse_news_timelines(
+    news_lookup: dict[str, list[tuple[str, str]]],
+) -> dict[str, list[tuple[str, "datetime"]]]:
+    """Parse each headline's published_at once (ISO -> aware-IST datetime)
+    so the per-sample loops can window-slice the symbol's timeline without
+    re-parsing. Unparseable rows are dropped. Shared by the daily and
+    intraday matrix builders."""
+    out: dict[str, list[tuple[str, datetime]]] = {}
+    for sym_key, entries in news_lookup.items():
+        parsed: list[tuple[str, datetime]] = []
+        for headline, published_at in entries:
+            try:
+                dt = datetime.fromisoformat(published_at)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=IST)
+                parsed.append((headline, dt))
+            except (ValueError, TypeError):
+                continue
+        if parsed:
+            out[sym_key] = parsed
+    return out
+
+
 def _time_decay_multipliers(n: int, last_weight: float) -> list[float]:
     """Linear time-decay multipliers for `n` chronologically-ordered
     samples: index 0 (oldest) → `last_weight`, index n-1 (newest) → 1.0.
@@ -350,8 +336,8 @@ def _time_decay_multipliers(n: int, last_weight: float) -> list[float]:
 # intraday_triple_barrier_label the binding stop = "to session close".
 _INTRADAY_TO_CLOSE_HORIZON_MIN = 375
 
-# 1-min bars for the whole intraday universe at once would OOM a small host,
-# so the intraday matrix is built in symbol chunks of this size.
+# 1-min bars for the whole intraday universe at once can exhaust available
+# memory, so the intraday matrix is built in symbol chunks of this size.
 _INTRADAY_SYMBOL_CHUNK = 15
 
 # Sample a 5-min decision bar every 15 minutes (every 3rd bar), matching the
@@ -386,8 +372,8 @@ class ModelRetrainSkill(SkillBase):
         min_samples = self.ctx.config.strategy.min_training_samples
 
         # Step 1-2: Load training data and feedback. max_training_days
-        # caps history so the feature matrix fits in RAM on small
-        # hosts (a 2 GB EC2 instance OOMs on 5 years × ~500 symbols).
+        # caps history so the feature matrix fits in available RAM —
+        # peak memory scales with days × symbols.
         training_data = await self.ctx.db.get_training_dataset(
             max_days=cfg.max_training_days,
         )
@@ -616,10 +602,15 @@ class ModelRetrainSkill(SkillBase):
                 # (MIS auto-squares EOD). The old daily-bar "intraday" model
                 # (1-day lookahead) was really a next-day predictor with no
                 # real intraday edge — see docs/intraday-model-design.md.
+                intraday_label_mode = str(
+                    getattr(self.ctx.config.strategy, "intraday_label_mode",
+                            "triple_barrier")
+                )
                 logger.info(
-                    "=== Retraining intraday (5-min) model: 1-min path labels, "
-                    "to-session-close horizon, target=%.2f×ATR, SL=%.2f×ATR ===",
-                    target_mult, sl_mult,
+                    "=== Retraining intraday (5-min) model: label=%s "
+                    "(1-min path), to-session-close horizon, "
+                    "exit geometry target=%.2f×ATR, SL=%.2f×ATR ===",
+                    intraday_label_mode, target_mult, sl_mult,
                 )
                 X, y, feat_names, sample_weights, bars_meta = (
                     await self._build_intraday_matrix(
@@ -627,21 +618,26 @@ class ModelRetrainSkill(SkillBase):
                         horizon_minutes=_INTRADAY_TO_CLOSE_HORIZON_MIN,
                         target_atr_mult=target_mult, sl_atr_mult=sl_mult,
                         cost_floor_pct=cost_floor,
+                        label_mode=intraday_label_mode,
                         feedback_data=feedback_data, sector_map=sector_map,
                         bulk_deal_lookup=bulk_deal_lookup, news_lookup=news_lookup,
                         vix_timeline=vix_timeline, fno_lookup=fno_lookup,
                     )
                 )
             else:
+                swing_label_mode = str(
+                    getattr(self.ctx.config.strategy, "swing_label_mode", "barrier")
+                )
                 logger.info(
-                    "=== Retraining %s model: label geometry lookahead=%d bars, "
-                    "target=%.2f×ATR, SL=%.2f×ATR ===",
-                    model_type, lookahead, target_mult, sl_mult,
+                    "=== Retraining %s model: label=%s, lookahead=%d bars, "
+                    "exit geometry target=%.2f×ATR, SL=%.2f×ATR ===",
+                    model_type, swing_label_mode, lookahead, target_mult, sl_mult,
                 )
                 X, y, feat_names, sample_weights, bars_meta = self._prepare_training_data(
                     training_data, lookahead_bars=lookahead, feedback_data=feedback_data,
                     target_atr_mult=target_mult, sl_atr_mult=sl_mult,
                     cost_floor_pct=cost_floor,
+                    label_mode=swing_label_mode,
                     sector_map=sector_map,
                     bulk_deal_lookup=bulk_deal_lookup,
                     news_lookup=news_lookup,
@@ -786,6 +782,14 @@ class ModelRetrainSkill(SkillBase):
                 train_params["backtest_product"] = (
                     "MIS" if model_type == "intraday" else "CNC"
                 )
+                # The live book cannot act on swing SELLs: shorts on
+                # non-held names are MIS-only (no overnight retail
+                # shorting) and get dropped at swing horizons, while
+                # exits on held names belong to position-monitor. A
+                # backtest that books SELL trades therefore measures an
+                # edge the account can't trade — evaluate the swing lane
+                # long-only so its Sharpe describes reality.
+                train_params["backtest_long_only"] = model_type == "swing"
                 # Bound the backtest's concurrent-positions count to
                 # the same cap the live engine enforces. Without
                 # this, the simulator treats every signal as
@@ -793,6 +797,18 @@ class ModelRetrainSkill(SkillBase):
                 # 12.98 intraday on the user's last run).
                 train_params["backtest_max_positions"] = (
                     self.ctx.config.risk.max_open_positions
+                )
+                # train() consumes X in place (it frees the list once the
+                # numpy matrix is built, to bound peak memory) — capture
+                # the post-train guard's evaluation slice BEFORE training.
+                # The slice shares row objects with X, so it survives the
+                # outer list being cleared. Without this the guard scored
+                # an empty matrix and its crash was swallowed: the
+                # silent-model check never actually ran.
+                guard_x: list[list[float]] = (
+                    X[-1000:]
+                    if self.ctx.config.strategy.post_train_class_check_enabled
+                    else []
                 )
                 metrics = await self.ctx.ml.train(
                     model_type, X, y, train_params, feature_names=feat_names,
@@ -804,6 +820,19 @@ class ModelRetrainSkill(SkillBase):
                 # metrics_json.
                 metrics["label_counts"] = label_counts
                 metrics["label_pct"] = label_pct
+                # Honest-data caveat, stamped into the artifact metrics:
+                # the corpus is whatever history this install accumulated
+                # for CURRENT constituents — names that exited the index
+                # or delisted before ingestion are absent, so the
+                # cross-sectional features and the backtest Sharpe skew
+                # optimistic (survivorship). No point-in-time constituent
+                # source is wired; treat absolute backtest numbers
+                # accordingly.
+                metrics["data_caveats"] = ["survivor_universe"]
+                metrics["label_mode"] = (
+                    intraday_label_mode if model_type == "intraday"
+                    else swing_label_mode
+                )
                 if class_weights:
                     metrics["class_weights"] = {
                         "BUY": round(class_weights.get(2, 0.0), 4),
@@ -820,12 +849,12 @@ class ModelRetrainSkill(SkillBase):
                 # calibration). This catches that end-to-end.
                 if self.ctx.config.strategy.post_train_class_check_enabled:
                     try:
-                        # Sample the freshest N rows — what the production
-                        # model sees first in live use.
-                        n_check = min(1000, len(X))
-                        X_check = X[-n_check:]
+                        # The freshest N rows — what the production model
+                        # sees first in live use. Captured before train()
+                        # (which consumes X) — see guard_x above.
+                        n_check = len(guard_x)
                         prod_labels = self.ctx.ml.predict_labels_batch(
-                            X_check, model_type,
+                            guard_x, model_type,
                         )
                         pred_counts = {0: 0, 1: 0, 2: 0}
                         for p in prod_labels:
@@ -837,8 +866,15 @@ class ModelRetrainSkill(SkillBase):
                             "BUY": pred_counts.get(2, 0),
                         }
                         n_eval = len(prod_labels) or 1
-                        non_hold = pred_dist["BUY"] + pred_dist["SELL"]
-                        signal_rate = non_hold / n_eval
+                        # Tradeability-aware rate: swing SELLs are no-ops
+                        # live (non-held shorts dropped; held-name exits
+                        # belong to position-monitor), so a SELL-heavy
+                        # swing model must not pass as "non-silent".
+                        # Intraday can short, so both sides count there.
+                        tradeable = pred_dist["BUY"] + (
+                            pred_dist["SELL"] if model_type == "intraday" else 0
+                        )
+                        signal_rate = tradeable / n_eval
                         logger.info(
                             "Post-train production-path distribution for %s "
                             "(n=%d): BUY=%d, HOLD=%d, SELL=%d (signal_rate=%.2f%%)",
@@ -880,12 +916,30 @@ class ModelRetrainSkill(SkillBase):
                             }
                             continue
                     except Exception:
-                        # Inference inside the guard shouldn't crash
-                        # the retrain — fall through and save the model.
-                        logger.debug(
-                            "Post-train signal-rate check failed; saving anyway",
-                            exc_info=True,
+                        # Inference inside the guard shouldn't crash the
+                        # retrain — fall through and save the model. But
+                        # a guard that can't run is a real degradation
+                        # (the silent-model check is the last gate before
+                        # an unvetted artifact ships), so say it loudly.
+                        logger.warning(
+                            "Post-train signal-rate check CRASHED for %s — "
+                            "saving the model without the silent-model "
+                            "guard. Investigate before trusting this "
+                            "artifact.",
+                            model_type, exc_info=True,
                         )
+                        try:
+                            await self.ctx.notify.send(
+                                f"Model retrain: post-train guard crashed "
+                                f"for {model_type}; model saved WITHOUT the "
+                                f"silent-model check.",
+                                alert_type="errors",
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to notify on guard crash",
+                                exc_info=True,
+                            )
 
                 version = await self.ctx.ml.save_model(model_type, metrics=metrics)
                 await self.broadcast("retrain_progress", {
@@ -909,18 +963,167 @@ class ModelRetrainSkill(SkillBase):
                 if improved:
                     shadow_deployed.append(model_type)
 
+                # Step 6: registry-honouring deployment. train() leaves
+                # the candidate in the live production slots (save_model
+                # and the post-train guard need it there), but the
+                # REGISTRY decides what trades: the candidate's row is
+                # 'shadow' until the promotion gates pass. Restore the
+                # incumbent to the production slots and start the
+                # candidate's A/B trial in the shadow slot immediately
+                # (no restart needed). First-ever train (no production
+                # row) bootstraps: promote the candidate directly — a
+                # system with no model can't shadow-test.
+                deployed_as = "shadow"
+                if current is None:
+                    # Bootstrap still has to clear the honest-edge gate:
+                    # "no incumbent" means the lane is PARKED, not that
+                    # any candidate deserves production. A negative-argmax
+                    # model promoted here would go live the moment the
+                    # user re-enables the lane via strategy.mode — the
+                    # exact unvetted-deployment path this system exists
+                    # to close. Refused candidates stay shadow-only (the
+                    # normal evaluation cycle retires them) and the live
+                    # slot is cleared so a mode flip can't trade them.
+                    edge_ok, edge_reason = passes_edge_gate(
+                        metrics,
+                        self.ctx.config.retraining.min_argmax_sharpe_for_promotion,
+                    )
+                    if not edge_ok:
+                        deployed_as = "shadow (bootstrap refused: no honest edge)"
+                        logger.warning(
+                            "Bootstrap promotion REFUSED for %s/%s: %s. "
+                            "Lane stays parked; candidate saved as shadow "
+                            "only.",
+                            model_type, version, edge_reason,
+                        )
+                        try:
+                            await self.ctx.notify.send(
+                                f"Model retrain: {model_type} candidate "
+                                f"{version} was NOT promoted (no incumbent, "
+                                f"but {edge_reason}). The lane stays parked.",
+                                alert_type="errors",
+                            )
+                        except Exception:
+                            logger.debug(
+                                "bootstrap-refusal notify failed",
+                                exc_info=True,
+                            )
+                        try:
+                            await self.ctx.ml.load_shadow_model(
+                                model_type, version,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "shadow load after bootstrap refusal failed",
+                                exc_info=True,
+                            )
+                        # train() left the candidate in the live slot and
+                        # there is no incumbent to restore — clear it.
+                        try:
+                            self.ctx.ml.clear_model(model_type)
+                        except Exception:
+                            logger.debug(
+                                "clear_model after bootstrap refusal failed",
+                                exc_info=True,
+                            )
+                        results[model_type] = {
+                            "version": version,
+                            "metrics": metrics,
+                            "improved": improved,
+                            "deployed_as": deployed_as,
+                        }
+                        continue
+                    try:
+                        await self.ctx.db.promote_model(model_type, version)
+                        deployed_as = "production (bootstrap)"
+                        logger.info(
+                            "No production %s model in the registry — "
+                            "promoted %s directly (bootstrap, %s).",
+                            model_type, version, edge_reason,
+                        )
+                        try:
+                            await self.ctx.notify.send(
+                                f"Model retrain: {model_type} model {version} "
+                                f"passed its gates and was promoted to "
+                                f"production (no incumbent). If this lane was "
+                                f"parked via strategy.mode, it can be "
+                                f"re-enabled now.",
+                                alert_type="daily_summary",
+                            )
+                        except Exception:
+                            logger.debug(
+                                "bootstrap-promotion notify failed",
+                                exc_info=True,
+                            )
+                    except Exception:
+                        logger.warning(
+                            "Bootstrap promotion failed for %s/%s",
+                            model_type, version, exc_info=True,
+                        )
+                else:
+                    try:
+                        await self.ctx.ml.load_shadow_model(model_type, version)
+                    except Exception:
+                        logger.warning(
+                            "Failed to load candidate %s/%s into the shadow "
+                            "slot — its A/B trial starts at next restart.",
+                            model_type, version, exc_info=True,
+                        )
+                    try:
+                        await self.ctx.ml.load_model(
+                            model_type, str(current["version"]),
+                        )
+                        logger.info(
+                            "Restored production %s model %s to the live "
+                            "slots; candidate %s runs as shadow.",
+                            model_type, current["version"], version,
+                        )
+                    except Exception:
+                        deployed_as = "production (incumbent restore failed)"
+                        logger.warning(
+                            "Could not restore production %s model %s — the "
+                            "fresh candidate %s stays in the live slots so "
+                            "trading continues. Re-promote or retrain to "
+                            "restore registry state.",
+                            model_type, current.get("version"), version,
+                            exc_info=True,
+                        )
+                        try:
+                            await self.ctx.notify.send(
+                                f"Model retrain: failed to restore production "
+                                f"{model_type} model "
+                                f"{current.get('version')}; unvetted candidate "
+                                f"{version} is live until fixed.",
+                                alert_type="errors",
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to notify on restore failure",
+                                exc_info=True,
+                            )
+
                 results[model_type] = {
                     "version": version,
                     "metrics": metrics,
                     "improved": improved,
+                    "deployed_as": deployed_as,
                 }
             except Exception as e:
                 logger.warning("Retrain failed for %s: %s", model_type, e)
                 results[model_type] = {"error": str(e)}
+                try:
+                    await self.ctx.notify.send(
+                        f"Model retrain FAILED for {model_type}: {e}",
+                        alert_type="errors",
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to notify on retrain failure", exc_info=True,
+                    )
             # Free per-model scratch (feature matrix + bars_meta) before
             # the next model's _prepare_training_data allocates its
             # own copy. Without this the intraday and swing matrices
-            # would briefly coexist and OOM the process on a 2 GB host.
+            # would briefly coexist and double peak memory.
             X = y = feat_names = sample_weights = bars_meta = None  # type: ignore[assignment]
             _gc.collect()
 
@@ -973,6 +1176,34 @@ class ModelRetrainSkill(SkillBase):
                 except Exception as e:
                     logger.warning("Failure analysis failed: %s", e)
 
+        # A run where NO model shipped is a failed retrain — the stale
+        # incumbent keeps trading (deliberately: keep trading, alert),
+        # but the audit log must say the retrain produced nothing.
+        # Partial success (e.g. intraday lane short on 1-min data while
+        # swing trained fine) stays a success.
+        if not any_success:
+            error_summary = "; ".join(
+                f"{mt}: {r.get('error', 'unknown')}"
+                for mt, r in results.items()
+                if isinstance(r, dict)
+            ) or "no models attempted"
+            logger.warning(
+                "model-retrain produced no new model (%s) — the existing "
+                "production model keeps trading.",
+                error_summary,
+            )
+            return SkillResult(
+                success=False,
+                skill_name=self.name,
+                error=error_summary,
+                data={
+                    "models": results,
+                    "shadow_deployed": shadow_deployed,
+                    "promotions": promotions,
+                    "failure_analysis_generated": failure_analysis is not None,
+                },
+            )
+
         return SkillResult(
             success=True,
             skill_name=self.name,
@@ -990,6 +1221,7 @@ class ModelRetrainSkill(SkillBase):
         target_atr_mult: float = 1.5,
         sl_atr_mult: float = 0.75,
         cost_floor_pct: float = 0.0,
+        label_mode: str = "barrier",
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
         news_lookup: dict[str, list[tuple[str, str]]] | None = None,
@@ -1057,6 +1289,10 @@ class ModelRetrainSkill(SkillBase):
         sample_weights: list[float] = []
         feature_names: list[str] = []
         feature_names_set: set[str] = set()
+        # Relative-label mode: per-sample forward return (entry next-open
+        # -> horizon close), labelled cross-sectionally AFTER the global
+        # date sort below. Parallel to X/y; None = no valid entry.
+        rel_fwd_returns: list[float | None] = []
 
         # Train-time feature-group gate. Price/technical features always
         # stay; disabled support groups (config.strategy.feature_groups)
@@ -1104,29 +1340,9 @@ class ModelRetrainSkill(SkillBase):
         # Pre-built in execute() (async) and passed in via bulk_deal_lookup
         # so we only need one DB scan instead of one query per sample.
         bulk_deal_lookup = bulk_deal_lookup or {}
-        # Per-symbol sorted deal-date list for fast 5-day window lookups.
-        bulk_dates_by_sym: dict[str, list[str]] = {}
-        for sym_key, date_key in bulk_deal_lookup:
-            bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
-        for v in bulk_dates_by_sym.values():
-            v.sort()
-
-        # News-sentiment lookup: parse published_at once per article so the
-        # per-sample loop can binary-slice the symbol's headline timeline.
+        bulk_dates_by_sym = _index_bulk_deal_dates(bulk_deal_lookup)
         news_lookup = news_lookup or {}
-        news_parsed_by_sym: dict[str, list[tuple[str, datetime]]] = {}
-        for sym_key, entries in news_lookup.items():
-            parsed: list[tuple[str, datetime]] = []
-            for headline, published_at in entries:
-                try:
-                    dt = datetime.fromisoformat(published_at)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=IST)
-                    parsed.append((headline, dt))
-                except (ValueError, TypeError):
-                    continue
-            if parsed:
-                news_parsed_by_sym[sym_key] = parsed
+        news_parsed_by_sym = _parse_news_timelines(news_lookup)
 
         for sym, rows in by_symbol.items():
             if len(rows) < window_size + 1:
@@ -1207,21 +1423,29 @@ class ModelRetrainSkill(SkillBase):
                     features["sector_avg_return"] = 0.0
                     features["relative_momentum"] = 0.0
 
-                # Institutional flow features: bulk-deal net count and
-                # average delivery % over the prior 5 bars. Both default
-                # to 0 when no data is available (older training rows
-                # predate the data sources). Compounds with the
-                # institutional_flow risk-check multiplier so the model
-                # learns to score these signals natively at inference.
+                # EOD-PUBLISHED broadcast data (bulk deals, delivery %,
+                # VIX, F&O) is merged AS-OF THE PRIOR SESSION (bars[i-1])
+                # — the daily-lane mirror of the intraday lane's
+                # _merge_daily_broadcast. The heartbeat runs mid-session,
+                # BEFORE the day's EOD publications and ingests land
+                # (bulk deals + delivery % publish after close,
+                # ingest-vix runs 16:00, ingest-fno 18:30), so the
+                # freshest value live inference can ever see is the
+                # prior session's. Training on same-day EOD values
+                # taught a lag-0 relationship that serving could only
+                # feed at lag-1 — a systematic train/serve skew.
                 # bars[i].timestamp is a datetime; the bulk_deals table
                 # stores deal_date as YYYY-MM-DD strings, so format
-                # consistently before the lookup.
+                # consistently before the lookup. i >= window_size=200,
+                # so bars[i-1] / bars[i-2] always exist.
                 _sample_date = bars[i].timestamp.strftime("%Y-%m-%d")
+                _prior_date = bars[i - 1].timestamp.strftime("%Y-%m-%d")
+                # Bulk deals: 5 sessions ending at the PRIOR session.
                 _bulk_window_start = bars[max(0, i - 5)].timestamp.strftime("%Y-%m-%d")
                 _bd_dates = bulk_dates_by_sym.get(sym, [])
                 _bd_buy = _bd_sell = 0
                 for d in _bd_dates:
-                    if d > _sample_date:
+                    if d > _prior_date:
                         break
                     if d >= _bulk_window_start:
                         counts = bulk_deal_lookup.get((sym, d), {})
@@ -1231,11 +1455,12 @@ class ModelRetrainSkill(SkillBase):
                 features["bulk_deal_sell_5d"] = float(_bd_sell)
                 features["bulk_deal_net_5d"] = float(_bd_buy - _bd_sell)
 
-                # delivery_pct rolling-5 average. bars[i] is the current
-                # sample's bar; look back 5 bars including it. Rows
-                # ingested before migration 038 have NULL → treated as 0.
+                # delivery_pct rolling-5 average over the 5 sessions
+                # ENDING AT bars[i-1] — today's delivery % isn't
+                # published until after the close. Rows ingested before
+                # migration 038 have NULL → treated as missing.
                 _delivery_values: list[float] = []
-                for k in range(max(0, i - 4), i + 1):
+                for k in range(max(0, i - 5), i):
                     dp = getattr(bars[k], "delivery_pct", None)
                     if dp is None and isinstance(rows[k], dict):
                         dp = rows[k].get("delivery_pct")
@@ -1251,45 +1476,49 @@ class ModelRetrainSkill(SkillBase):
                 else:
                     features["delivery_pct_avg_5d"] = 0.0
 
-                # News-sentiment features. Slice the symbol's pre-parsed
-                # headline timeline to entries published before this bar's
-                # timestamp; compute_news_features handles the 24h / 7d
-                # window aggregation. Bar timestamps in training_data are
-                # naive; coerce to IST to match the parsed published_at
-                # tz so the window-cutoff comparisons stay correct.
-                _bar_ts = bars[i].timestamp
-                if _bar_ts.tzinfo is None:
-                    _bar_ts = _bar_ts.replace(tzinfo=IST)
+                # News-sentiment features, windowed to the ENTRY bar's
+                # timestamp (midnight opening the entry day): live
+                # inference reads news up to the moment of entry, so
+                # cutting training at bars[i]'s own midnight (the old
+                # behaviour) excluded the decision day's headlines the
+                # live model does see — day-i news is public well before
+                # the day-i+1 open, so this is lag-aligned and leak-free.
+                # Bar timestamps in training_data are naive; coerce to
+                # IST to match the parsed published_at tz.
+                _news_cutoff = bars[i + 1].timestamp
+                if _news_cutoff.tzinfo is None:
+                    _news_cutoff = _news_cutoff.replace(tzinfo=IST)
                 _sym_news = news_parsed_by_sym.get(sym)
                 if _sym_news:
-                    news_feats = compute_news_features(_sym_news, _bar_ts)
+                    news_feats = compute_news_features(_sym_news, _news_cutoff)
                 else:
                     news_feats = {k: 0.0 for k in NEWS_FEATURE_KEYS}
                 features.update(news_feats)
 
-                # India VIX regime features. Single broadcast series — every
-                # symbol on the same _sample_date sees identical VIX values.
-                # compute_vix_features handles the trailing-window slicing.
+                # India VIX regime features as-of the PRIOR session —
+                # the day-i VIX close lands in the DB at 16:00, after
+                # any heartbeat that could trade on it. Single broadcast
+                # series; compute_vix_features slices the trailing window.
                 if vix_timeline:
-                    vix_feats = compute_vix_features(vix_timeline, _sample_date)
+                    vix_feats = compute_vix_features(vix_timeline, _prior_date)
                 else:
                     vix_feats = {k: 0.0 for k in VIX_FEATURE_KEYS}
                 features.update(vix_feats)
 
-                # F&O derivatives features. Only F&O-eligible symbols have
-                # rows in the timeline; misses return is_fno_stock=0 and
-                # the model learns to weight these features only when
-                # present. Pass equity closes from the OHLCV window so the
-                # oi_buildup classification uses the canonical underlying
-                # price change instead of the futures close (which can
-                # diverge near expiry).
+                # F&O derivatives features as-of the PRIOR session
+                # (ingest-fno runs 18:30). The oi_buildup price pair is
+                # the prior session's move — (close[i-2], close[i-1]) —
+                # matching what inference derives from a daily window
+                # ending at the last completed session. Only
+                # F&O-eligible symbols have rows; misses return
+                # is_fno_stock=0 and the model learns to weight these
+                # features only when present.
                 _sym_fno = (fno_lookup or {}).get(sym)
                 if _sym_fno:
-                    _prior_close = bars[i - 1].close if i >= 1 else None
                     fno_feats = compute_fno_features(
-                        _sym_fno, _sample_date,
-                        prior_stock_close=_prior_close,
-                        current_stock_close=bars[i].close,
+                        _sym_fno, _prior_date,
+                        prior_stock_close=bars[i - 2].close,
+                        current_stock_close=bars[i - 1].close,
                     )
                 else:
                     fno_feats = {k: 0.0 for k in FNO_FEATURE_KEYS}
@@ -1320,7 +1549,19 @@ class ModelRetrainSkill(SkillBase):
                 # value flows into bars_meta so the backtest exits at the
                 # labelled barrier.
                 eff_target_pct = max(atr_pct * target_atr_mult, cost_floor_pct)
-                if next_open <= 0 or atr_pct <= 0:
+                if label_mode == "relative":
+                    # Cross-sectional label, assigned after the global
+                    # date sort (needs every symbol's same-date forward
+                    # return). Placeholder HOLD here; the ATR target/SL
+                    # still flow into bars_meta so the backtest exits at
+                    # the LIVE trade geometry — which also breaks the
+                    # label/exit circularity of barrier mode.
+                    label = 1
+                    rel_fwd_returns.append(
+                        (future_close / next_open - 1.0)
+                        if next_open > 0 else None
+                    )
+                elif next_open <= 0 or atr_pct <= 0:
                     label = 1
                 else:
                     label = self._path_aware_label(
@@ -1431,6 +1672,18 @@ class ModelRetrainSkill(SkillBase):
             y = [y[i] for i in order]
             sample_weights = [sample_weights[i] for i in order]
             bars_meta = [bars_meta[i] for i in order]
+            if label_mode == "relative" and rel_fwd_returns:
+                rel_fwd_returns = [rel_fwd_returns[i] for i in order]
+
+        if label_mode == "relative" and rel_fwd_returns:
+            y = _assign_relative_labels(
+                rel_fwd_returns,
+                [str(m.get("entry_date", "")) for m in bars_meta],
+                quantile=float(
+                    getattr(self.ctx.config.strategy,
+                            "relative_label_quantile", 0.20)
+                ),
+            )
 
         return X, y, feature_names, sample_weights, bars_meta
 
@@ -1443,6 +1696,7 @@ class ModelRetrainSkill(SkillBase):
         target_atr_mult: float,
         sl_atr_mult: float,
         cost_floor_pct: float = 0.0,
+        label_mode: str = "triple_barrier",
         feedback_data: dict[str, Any] | None = None,
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
@@ -1566,25 +1820,9 @@ class ModelRetrainSkill(SkillBase):
             hi = bisect.bisect_right(daily_dates_sorted, end_date)
             return daily_dates_sorted[max(0, hi - n):hi]
 
-        # Bulk-deal date index + parsed news timeline (mirror daily path).
-        bulk_dates_by_sym: dict[str, list[str]] = {}
-        for sym_key, date_key in bulk_deal_lookup:
-            bulk_dates_by_sym.setdefault(sym_key, []).append(date_key)
-        for v in bulk_dates_by_sym.values():
-            v.sort()
-        news_parsed_by_sym: dict[str, list[tuple[str, datetime]]] = {}
-        for sym_key, entries in news_lookup.items():
-            parsed: list[tuple[str, datetime]] = []
-            for headline, published_at in entries:
-                try:
-                    dt = datetime.fromisoformat(published_at)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=IST)
-                    parsed.append((headline, dt))
-                except (ValueError, TypeError):
-                    continue
-            if parsed:
-                news_parsed_by_sym[sym_key] = parsed
+        # Bulk-deal date index + parsed news timeline (shared helpers).
+        bulk_dates_by_sym = _index_bulk_deal_dates(bulk_deal_lookup)
+        news_parsed_by_sym = _parse_news_timelines(news_lookup)
 
         def _merge_daily_broadcast(features: dict[str, Any], sym: str, bar_ts: datetime) -> None:
             """Merge prior-session daily features into `features` in place."""
@@ -1768,6 +2006,15 @@ class ModelRetrainSkill(SkillBase):
                 if next_open <= 0 or atr_pct <= 0 or not mbars:
                     label = 1
                     m_start = len(mbars)
+                elif label_mode == "relative":
+                    # Cross-sectional label: ranked per decision INSTANT
+                    # across the universe by _build_intraday_matrix AFTER
+                    # the cross-chunk concat (per-chunk cross-sections are
+                    # <= chunk-size symbols — too thin to rank). The
+                    # forward return-to-close it ranks comes from the
+                    # 1-min flat_exit walk below; placeholder HOLD here.
+                    label = 1
+                    m_start = bisect.bisect_left(mts, entry_bar.timestamp)
                 else:
                     m_start = bisect.bisect_left(mts, entry_bar.timestamp)
                     label = intraday_triple_barrier_label(
@@ -1855,7 +2102,7 @@ class ModelRetrainSkill(SkillBase):
                 X.append([features.get(k, 0.0) for k in feature_names])
                 y.append(label)
                 sample_weights.append(bar_weight)
-                bars_meta.append({
+                meta: dict[str, Any] = {
                     "symbol": sym,
                     "entry_close": float(next_open),
                     "exit_close": float(flat_exit),
@@ -1865,7 +2112,17 @@ class ModelRetrainSkill(SkillBase):
                     "target_pct": float(target_pct),
                     "sl_pct": float(sl_pct),
                     "entry_date": entry_bar.timestamp.strftime("%Y-%m-%d"),
-                })
+                }
+                if label_mode == "relative":
+                    # Forward return-to-close (entry next-5min-open ->
+                    # session close via the 1-min walk) + the exact
+                    # decision instant as the cross-sectional group key.
+                    meta["_rel_fwd"] = (
+                        (flat_exit / next_open - 1.0)
+                        if (mbars and next_open > 0) else None
+                    )
+                    meta["_rel_group"] = bars[i].timestamp.isoformat()
+                bars_meta.append(meta)
 
         if bars_meta:
             order = sorted(
@@ -1887,6 +2144,7 @@ class ModelRetrainSkill(SkillBase):
         target_atr_mult: float,
         sl_atr_mult: float,
         cost_floor_pct: float = 0.0,
+        label_mode: str = "triple_barrier",
         feedback_data: dict[str, Any] | None = None,
         sector_map: dict[str, str] | None = None,
         bulk_deal_lookup: dict[tuple[str, str], dict[str, int]] | None = None,
@@ -1898,8 +2156,8 @@ class ModelRetrainSkill(SkillBase):
     ]:
         """Memory-safe builder for the 5-min intraday training matrix.
 
-        1-min path bars for the whole intraday universe at once would OOM a
-        small host, so we walk the symbol set in chunks: fetch each chunk's
+        1-min path bars for the whole intraday universe at once can exhaust
+        available memory, so we walk the symbol set in chunks: fetch each chunk's
         5-min + 1-min bars, run ``_prepare_intraday_training_data`` on it, and
         concatenate. Per-chunk ``feature_names`` are realigned to a canonical
         column order (a feature absent from a chunk → 0.0) before concat, and
@@ -1962,6 +2220,7 @@ class ModelRetrainSkill(SkillBase):
                 horizon_minutes=horizon_minutes,
                 target_atr_mult=target_atr_mult, sl_atr_mult=sl_atr_mult,
                 cost_floor_pct=cost_floor_pct,
+                label_mode=label_mode,
                 feedback_data=feedback_data, sector_map=sector_map,
                 bulk_deal_lookup=bulk_deal_lookup, news_lookup=news_lookup,
                 vix_timeline=vix_timeline, fno_lookup=fno_lookup,
@@ -1993,6 +2252,18 @@ class ModelRetrainSkill(SkillBase):
             y_all = [y_all[i] for i in order]
             w_all = [w_all[i] for i in order]
             meta_all = [meta_all[i] for i in order]
+
+        if label_mode == "relative" and meta_all:
+            # Cross-sectional ranking per decision INSTANT, now that all
+            # symbol chunks are concatenated (~full universe per instant).
+            y_all = _assign_relative_labels(
+                [m.get("_rel_fwd") for m in meta_all],
+                [str(m.get("_rel_group", "")) for m in meta_all],
+                quantile=float(
+                    getattr(self.ctx.config.strategy,
+                            "relative_label_quantile", 0.20)
+                ),
+            )
 
         logger.info(
             "Intraday matrix: %d samples across %d symbols | %d feature cols "
@@ -2197,6 +2468,28 @@ class ModelRetrainSkill(SkillBase):
             return 0
         return 1
 
+    def _clear_shadow_slot_if_holds(self, model_type: str, version: str) -> None:
+        """Unload the in-memory shadow slot when it hosts `version`.
+
+        After a promotion the version lives in the production slot
+        (keeping it in the shadow slot would double-log its shadow
+        predictions); after a retirement it must stop emitting shadow
+        predictions entirely. The slot may instead hold a NEWER
+        candidate loaded by this run's deployment step — leave that
+        one alone.
+        """
+        ml = self.ctx.ml
+        if ml is None:
+            return
+        try:
+            if ml.get_shadow_version(model_type) == version:
+                ml.clear_shadow(model_type)
+        except Exception:
+            logger.debug(
+                "shadow-slot hygiene failed for %s/%s",
+                model_type, version, exc_info=True,
+            )
+
     async def _check_shadow_promotions(self) -> list[dict[str, Any]]:
         """Check if shadow models have completed trial period.
 
@@ -2303,6 +2596,7 @@ class ModelRetrainSkill(SkillBase):
                             "Failed to load promoted model %s/%s: %s",
                             model_type, shadow["version"], e,
                         )
+                    self._clear_shadow_slot_if_holds(model_type, shadow["version"])
                 promotions.append({
                     "model_type": model_type,
                     "version": shadow["version"],
@@ -2327,6 +2621,8 @@ class ModelRetrainSkill(SkillBase):
             else:
                 # Retire underperforming shadow
                 await self.ctx.db.retire_model(model_type, shadow["version"])
+                if self.ctx.ml:
+                    self._clear_shadow_slot_if_holds(model_type, shadow["version"])
                 fail_reason_parts = []
                 if not backtest_pass:
                     fail_reason_parts.append(

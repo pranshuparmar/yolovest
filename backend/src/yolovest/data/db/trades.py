@@ -171,7 +171,10 @@ class TradesMixin:
             "quantity", "stop_loss_price", "target_price", "order_id", "sl_order_id",
             "product", "mode", "status", "slippage",
         ]
-        optional_cols = ["estimated_costs", "expected_holding_days", "signal_id"]
+        optional_cols = [
+            "estimated_costs", "expected_holding_days", "signal_id",
+            "model_version",
+        ]
         insert_cols = base_cols + [c for c in optional_cols if c in trade_columns] + ["created_at"]
         placeholders = ", ".join("?" for _ in insert_cols)
         col_names = ", ".join(insert_cols)

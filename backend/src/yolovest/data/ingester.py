@@ -148,6 +148,27 @@ class MarketDataIngester(MarketDataBase):
             raise last_error
         raise ValueError(f"No providers returned data for {symbol}/{interval}")
 
+    async def get_quotes_batch(
+        self, symbols: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Batched depth quotes — Kite-only (the free providers expose no
+        order book). Returns {} when the Kite provider is absent or
+        unavailable, so callers can treat depth collection as strictly
+        best-effort."""
+        for provider in [
+            *self._daily_providers,
+            *( [self._intraday_provider] if self._intraday_provider else [] ),
+        ]:
+            fn = getattr(provider, "get_quotes_batch", None)
+            if fn is None or not provider.is_available():
+                continue
+            try:
+                return await fn(symbols)
+            except Exception:
+                logger.warning("batch depth quote failed", exc_info=True)
+                return {}
+        return {}
+
     async def get_quote(self, symbol: str) -> dict[str, Any]:
         """Get latest quote with fallback."""
         providers = self._daily_providers.copy()

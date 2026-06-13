@@ -15,6 +15,46 @@ logger = logging.getLogger(__name__)
 
 
 class MarketMetaMixin:
+    # Order-book depth snapshots (intraday order-flow dataset)
+    # ------------------------------------------------------------------
+
+    async def insert_depth_snapshots(
+        self, ts: str, rows: dict[str, dict[str, Any]],
+    ) -> int:
+        """Persist one heartbeat's batched depth quotes. `rows` is
+        {symbol: payload} from the Kite batch quote. INSERT OR REPLACE
+        so a retried heartbeat at the same instant is idempotent."""
+        if not rows:
+            return 0
+        payload = [
+            (
+                ts, symbol, q.get("ltp"), q.get("bid"), q.get("ask"),
+                q.get("total_buy_qty"), q.get("total_sell_qty"),
+                q.get("top5_buy_qty"), q.get("top5_sell_qty"),
+                q.get("volume"),
+            )
+            for symbol, q in rows.items()
+        ]
+        await self.conn.executemany(
+            "INSERT OR REPLACE INTO depth_snapshots "
+            "(ts, symbol, ltp, bid, ask, total_buy_qty, total_sell_qty, "
+            "top5_buy_qty, top5_sell_qty, volume) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            payload,
+        )
+        await self.conn.commit()
+        return len(payload)
+
+    async def prune_depth_snapshots(self, keep_days: int) -> int:
+        """Trim snapshots older than `keep_days` (self-maintaining)."""
+        cutoff = (now_utc() - timedelta(days=keep_days)).isoformat()
+        cursor = await self.conn.execute(
+            "DELETE FROM depth_snapshots WHERE ts < ?", (cutoff,),
+        )
+        await self.conn.commit()
+        return int(cursor.rowcount or 0)
+
+
     # Symbol sectors (canonical lookup populated from NSE constituents)
     # ------------------------------------------------------------------
 

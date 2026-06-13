@@ -122,7 +122,7 @@ checksum verification; using both would just be redundant. Wire it up
 later if HTTP postbacks turn out to be lossy in practice.
 
 **Default:** off (`kite_websocket_enabled: false`). Opt-in until the
-user has tested it on their EC2 setup.
+user has tested it on their own deployment.
 
 ---
 

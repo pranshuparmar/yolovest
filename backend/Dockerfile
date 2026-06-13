@@ -35,9 +35,11 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Copy application code and migrations
+# Copy application code, migrations, and operational scripts
+# (offline experiment harness etc. — run via docker exec)
 COPY --from=builder /app/src/ src/
 COPY --from=builder /app/migrations/ migrations/
+COPY scripts/ scripts/
 COPY config.example.yaml config.example.yaml
 
 # Create data directories

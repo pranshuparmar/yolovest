@@ -466,6 +466,21 @@ class GenerateSignalsSkill(SkillBase):
                     )
 
             daily_bars = await self.ctx.db.get_ohlcv(symbol, "daily", days=365)
+            # Drop today's DEVELOPING daily bar (present whenever an
+            # intra-session ingest ran: close = running LTP, partial
+            # volume). The model trained exclusively on completed
+            # sessions — partial-bar volume z-scores / ranges / closes
+            # are a different distribution, worst in the morning when
+            # most signals fire. All features are therefore as-of the
+            # last COMPLETED session; entry price stays the live LTP.
+            _today = now.date()
+            daily_bars = [
+                b for b in daily_bars
+                if (
+                    b.timestamp.astimezone(IST) if b.timestamp.tzinfo
+                    else b.timestamp
+                ).date() < _today
+            ]
             if len(daily_bars) < 50:
                 return {
                     "outcome": "skip",
@@ -551,6 +566,22 @@ class GenerateSignalsSkill(SkillBase):
             # Regime / sector / institutional / feedback features — the
             # set the model trains on but compute_features doesn't produce.
             await enrich_features(self.ctx, symbol, features, inference_ctx)
+
+            # Persist the UNCONDITIONED feature vector for drift-watch's
+            # PSI check (pre-gate: every evaluated symbol, not just
+            # passed signals — signals.features_snapshot is a gate-
+            # conditioned subset and would alarm spuriously). One row
+            # per (day, symbol, mode); later heartbeats overwrite.
+            try:
+                await self.ctx.db.upsert_feature_snapshot(
+                    now.strftime("%Y-%m-%d"), symbol,
+                    self.ctx.config.mode, features,
+                )
+            except Exception:
+                logger.debug(
+                    "feature snapshot persist failed for %s",
+                    symbol, exc_info=True,
+                )
 
             current_price: float | None = None
             try:

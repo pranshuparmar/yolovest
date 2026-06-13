@@ -67,21 +67,31 @@ class ReportsDashboardMixin:
 
         Dates are YYYY-MM-DD. end_date is inclusive (includes all of that day).
         """
-        query = "SELECT * FROM trades WHERE 1=1"
+        # model_version: stamped on the trade row at execution (migration
+        # 050). The signal's version rides along under a UNIQUE alias —
+        # selecting it as "model_version" would duplicate the t.* column
+        # name and dict(row) would resolve to the raw (NULL-for-legacy)
+        # one — and is coalesced in Python below so legacy rows still
+        # resolve while their signal exists.
+        query = (
+            "SELECT t.*, s.model_version AS signal_model_version "
+            "FROM trades t "
+            "LEFT JOIN signals s ON s.id = t.signal_id WHERE 1=1"
+        )
         params: list[Any] = []
 
         if mode:
-            query += " AND mode = ?"
+            query += " AND t.mode = ?"
             params.append(mode)
         if start_date:
-            query += " AND created_at >= ?"
+            query += " AND t.created_at >= ?"
             params.append(start_date)
         if end_date:
             # end_date is inclusive: add one day as exclusive upper bound.
             # This avoids the T23:59:59 hack which misses the last second.
             from datetime import date, timedelta
             next_day = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
-            query += " AND created_at < ?"
+            query += " AND t.created_at < ?"
             params.append(next_day)
         if symbol:
             # Substring match (case-insensitive) so the Trades page search
@@ -89,15 +99,23 @@ class ReportsDashboardMixin:
             # typing "REL" matches RELIANCE, RELINFRA, etc. SQLite LIKE
             # is already case-insensitive for ASCII; symbol names are
             # ASCII so no need for unicode-aware collation.
-            query += " AND symbol LIKE ?"
+            query += " AND t.symbol LIKE ?"
             params.append(f"%{symbol}%")
 
-        query += " ORDER BY created_at DESC LIMIT ?"
+        query += " ORDER BY t.created_at DESC LIMIT ?"
         params.append(limit)
 
         cursor = await self.read_conn.execute(query, params)
         rows = await cursor.fetchall()
-        return [dict[str, Any](row) for row in rows]
+        out = []
+        for row in rows:
+            d = dict[str, Any](row)
+            d["model_version"] = (
+                d.get("model_version") or d.pop("signal_model_version", None)
+            )
+            d.pop("signal_model_version", None)
+            out.append(d)
+        return out
 
     async def get_equity_curve(self, days: int = 30, mode: str | None = None) -> list[dict[str, Any]]:
         """Compute daily equity curve from closed trades.
@@ -170,15 +188,25 @@ class ReportsDashboardMixin:
 
         Returns trade + linked signal, LLM review, prediction, and audit entries.
         """
-        # Trade record
+        # Trade record. The producing signal's model_version rides along
+        # under a unique alias and is coalesced in Python so legacy rows
+        # (pre-migration-050) resolve while their signal exists.
         cursor = await self.conn.execute(
-            "SELECT * FROM trades WHERE trade_id = ?", (trade_id,)
+            "SELECT t.*, s.model_version AS signal_model_version "
+            "FROM trades t "
+            "LEFT JOIN signals s ON s.id = t.signal_id "
+            "WHERE t.trade_id = ?",
+            (trade_id,),
         )
         trade_row = await cursor.fetchone()
         if not trade_row:
             return None
 
         trade = dict[str, Any](trade_row)
+        trade["model_version"] = (
+            trade.get("model_version") or trade.pop("signal_model_version", None)
+        )
+        trade.pop("signal_model_version", None)
 
         # Linked LLM review
         cursor = await self.conn.execute(

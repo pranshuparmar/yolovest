@@ -327,6 +327,8 @@ const FULL_KEY_LABELS: Record<string, string> = {
   "market_data.daily_fallback": "Daily Fallback",
   "market_data.intraday_provider": "Intraday Provider",
   "market_data.kite_data_enabled": "Kite Data (paid plan)",
+  "market_data.depth_snapshots_enabled": "Archive order-book depth (bid/ask, full + top-5 quantities) for the watchlist each heartbeat via one batched Kite quote call. Pure data collection — nothing trades on it. Builds the order-flow dataset that can eventually make an intraday model viable. Requires Kite data.",
+  "market_data.depth_snapshot_retention_days": "Self-pruned retention for depth snapshots. Keep >= ~400 so a year of history survives for offline experiments.",
   "market_data.kite_websocket_enabled": "Kite WebSocket Feed",
   "market_data.max_signal_data_age_trading_days": "Max Signal Data Age (trading days)",
   "market_data.news_enabled": "News Sources",
@@ -610,6 +612,10 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "scanning.rotation_no_signal_threshold": "How many consecutive heartbeats a symbol can go without producing a signal before being placed on cooldown.",
   "scanning.rotation_cooldown_hours": "How long an evicted symbol stays out of the watchlist before market-scan can re-add it.",
   "strategy.mode": "Controls which holding periods are allowed and how stocks are selected.",
+  "strategy.swing_label_mode": "How swing training labels are made. 'relative' (default): per date, rank every stock's forward 10-bar return across the universe — top quantile = BUY, bottom = SELL. Subtracts the market's own drift from the label and targets cross-sectional momentum (the best-documented Indian-equity edge); the backtest exits at the live ATR geometry, not at label barriers. 'barrier': legacy absolute hit-target-before-SL label.",
+  "strategy.relative_label_quantile": "Top/bottom quantile for the relative label. 0.20 = top/bottom 20%, giving a ~20/60/20 BUY/HOLD/SELL class mix by construction.",
+  "strategy.intraday_label_mode": "How intraday training labels are made. 'triple_barrier' (default): did price hit the ATR target before the SL by session close (1-min resolution). 'relative': per 5-min instant, rank every stock's forward return-to-close across the universe — top quantile = BUY, bottom = SELL (the intraday edition of the swing relative label). Validate with the offline experiment harness before flipping.",
+  "strategy.swing_horizon_cap_days": "Cap on the holding days the chooser may assign to ML swing trades. The swing model's label only measures a ~10-bar (2-week) window — horizons far beyond it ride an edge the model never measured. Default 15; long_term/swing modes' 66-day tails clamp to this. Raise or set 0 to disable knowingly.",
   "strategy.min_training_samples": "Minimum data points required to train an ML model.",
   "strategy.ema_periods": "Exponential moving average periods used in technical analysis.",
   "strategy.allowed_holding_periods": "Which holding periods the strategy is allowed to use.",
@@ -804,7 +810,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   "retraining.shadow_mode_days": "Run new model in shadow alongside production for this many days.",
   "retraining.shadow_min_predictions": "Minimum scored predictions before promotion decision.",
   "retraining.retired_model_cleanup_days": "Auto-delete retired model files after this many days.",
-  "retraining.max_training_days": "Cap how far back daily bars are loaded for training. Default 730 (2 years) — fits a 2 GB host with ~500 symbols. Raise on larger hosts; the full ohlcv table (5 years × 500 symbols) can OOM the feature-matrix builder.",
+  "retraining.max_training_days": "Cap how far back daily bars are loaded for training. Default 730 (2 years). Training memory scales with days × symbols — raise this if the training host has memory to spare and you want the model to see deeper history.",
   "dashboard.show_degraded_banner": "Show warning banner when LLM or services are unavailable.",
   "news_digest.enabled": "Send daily news headlines summary to Telegram.",
   "news_digest.max_headlines": "Number of headlines to include in the daily digest.",
@@ -1359,6 +1365,19 @@ export default function SettingsPage() {
   // Optional fields).
   const fieldTypes = useMemo<Record<string, FieldKind>>(() => {
     const out: Record<string, FieldKind> = {};
+    // Authoritative kinds from the server's Pydantic annotations — JSON
+    // erases int/float (1.0 -> 1), so the value heuristic below
+    // misclassifies whole-valued float fields (e.g.
+    // time_decay_last_weight = 1.0) and the input then rejects valid
+    // decimals like 0.5. Server map wins; heuristic remains a fallback
+    // for older backends that don't send field_kinds yet.
+    const serverKinds = (defaultsData as { field_kinds?: Record<string, string> } | undefined)
+      ?.field_kinds;
+    if (serverKinds) {
+      for (const [k, v] of Object.entries(serverKinds)) {
+        if (v === "int" || v === "float") out[k] = v;
+      }
+    }
     const collect = (sections: Record<string, Record<string, unknown>> | undefined) => {
       if (!sections) return;
       for (const sec of Object.values(sections)) {
@@ -1374,7 +1393,7 @@ export default function SettingsPage() {
     // Explicit overrides for fields the heuristic can't classify
     // (Optional[int] with default None has no carrying value).
     for (const k of EXPLICIT_INT_KEYS) {
-      out[k] = "int";
+      if (!(k in out)) out[k] = "int";
     }
     return out;
   }, [data, defaultsData]);

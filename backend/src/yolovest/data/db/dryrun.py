@@ -474,7 +474,7 @@ class DryRunMixin:
         await self.conn.commit()
         db_deleted = cursor.rowcount > 0
 
-        # Remove .pkl file from disk
+        # Remove .pkl file (and its sha256 sidecar) from disk
         file_deleted = False
         if model_dir:
             pkl_path = Path(model_dir) / f"{version}.pkl"
@@ -482,6 +482,9 @@ class DryRunMixin:
                 pkl_path.unlink()
                 file_deleted = True
                 logger.info("Deleted model artifact: %s", pkl_path)
+            sidecar = pkl_path.with_name(pkl_path.name + ".sha256")
+            if sidecar.exists():
+                sidecar.unlink()
 
         return {
             "model_type": model_type,

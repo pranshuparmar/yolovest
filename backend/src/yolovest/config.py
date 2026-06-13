@@ -84,6 +84,17 @@ class MarketDataConfig(BaseModel):
     daily_fallback: str = "yfinance"
     intraday_provider: str = "tvdatafeed"
     kite_data_enabled: bool = False  # enable Kite Connect as data provider
+    # Collect order-book depth snapshots (one batched Kite quote call per
+    # heartbeat across the watchlist) into the depth_snapshots table.
+    # Pure data collection — nothing trades on it. This builds the
+    # dataset that can eventually make an intraday model viable:
+    # bar-derived features rank intraday outcomes (AUC ~0.58) but can't
+    # pay intraday costs; order-flow imbalance is the feature class that
+    # can. No-ops unless kite_data_enabled and the broker is authed.
+    depth_snapshots_enabled: bool = True
+    # Self-pruned retention for the snapshots (>= ~13 months keeps a
+    # year of history plus headroom for the eventual training window).
+    depth_snapshot_retention_days: int = Field(default=400, ge=30)
     # KiteTicker WebSocket for sub-second LTP cache. Requires the paid
     # Kite data plan and a valid access token. Position-monitor uses
     # the cached price first, falling back to REST when stale or
@@ -576,6 +587,45 @@ class StrategyConfig(BaseModel):
     mode: Literal["intraday", "short_term", "balanced", "long_term", "swing"] = "balanced"
     allowed_holding_periods: list[str] | None = None
     holding_periods: HoldingPeriodConfig = Field(default_factory=HoldingPeriodConfig)
+    # Swing label mode. "relative" (default): cross-sectional
+    # relative-momentum label — per trading date, every symbol's forward
+    # 10-bar return (entry next-open -> horizon close) is ranked across
+    # the universe; the top relative_label_quantile become BUY, the
+    # bottom become SELL, the middle HOLD. This subtracts the market's
+    # own drift from the label (an absolute barrier label is dominated
+    # by it: a zero-skill coin-flip already wins ~40% of 2:1-barrier
+    # trades in a rising market) and targets the best-documented
+    # Indian-equity anomaly, cross-sectional momentum. Trades still
+    # execute with the ATR target/SL geometry — the backtest exits at
+    # the LIVE geometry, not at label barriers, which also breaks the
+    # label/exit circularity that inflated barrier-mode Sharpe.
+    # "barrier": legacy absolute path-aware triple-barrier label.
+    # The intraday lane always uses its 1-min triple-barrier label.
+    swing_label_mode: Literal["barrier", "relative"] = "relative"
+    # Top/bottom quantile for the relative label (0.20 = top/bottom 20%,
+    # giving a ~20/60/20 BUY/HOLD/SELL class mix by construction).
+    # Shared by the swing and intraday relative modes.
+    relative_label_quantile: float = Field(default=0.20, gt=0.0, le=0.4)
+    # Intraday label mode. "triple_barrier" (default): 1-min path-resolved
+    # hit-target-before-SL, walked to the session close. "relative": the
+    # intraday edition of the swing relative label — per 5-min decision
+    # INSTANT, every symbol's forward return-to-close is ranked across the
+    # universe; top relative_label_quantile -> BUY, bottom -> SELL.
+    # Isolates "which stocks outperform TODAY" from absolute barrier hits
+    # (the component the intraday features could rank — AUC 0.58/0.63 —
+    # but couldn't monetise at absolute barriers). Trade exits keep the
+    # ATR geometry either way. Validate via scripts/experiment.py before
+    # flipping.
+    intraday_label_mode: Literal["triple_barrier", "relative"] = "triple_barrier"
+    # Horizon-consistency cap on ML swing trades. The swing model's
+    # path-aware label measures a 10-bar (~2-week) window — execution
+    # horizons far beyond that ride an edge the label never measured
+    # (the trade is held on a model that was only ever asked "does the
+    # target hit within ~2 weeks?"). Caps the upper bound of the
+    # holding-day range the chooser may assign (long_term/swing modes'
+    # 66-day tails clamp to this; balanced's 0-15 is already inside).
+    # Raise or set 0 to disable if you knowingly want longer rides.
+    swing_horizon_cap_days: int = Field(default=15, ge=0, le=66)
     # Hard sanity ceiling on ATR% (= ATR / entry). A daily ATR above this
     # fraction of price is implausible for an NSE equity (real ATRs run
     # ~1-8%) and almost always means corrupt OHLCV — so the signal is
@@ -1034,15 +1084,12 @@ class RetrainingConfig(BaseModel):
     shadow_mode_days: int = 7
     shadow_min_predictions: int = 10
     retired_model_cleanup_days: int = 30
-    # Cap training history to fit in available RAM. On a 2 GB instance,
-    # 5 years × ~500 symbols ≈ 911K bars OOM-kills the process during
-    # feature-matrix construction. 730 days × 500 symbols ≈ 365K bars
-    # fits comfortably under 2 GB. Raise on hosts with more memory if
-    # you want the model to see deeper history — the ceiling is 12000
-    # (~33yr), comfortably covering the full available history (daily data
-    # starts ~1996). WARNING: memory scales with days × symbols; budget
-    # for it (the offline-training box) before going past ~10yr on the
-    # full universe.
+    # Cap training history loaded for the feature matrix. Peak training
+    # memory scales with days × symbols, so this is the primary knob for
+    # sizing a retrain to whatever host it runs on. Raise it if you want
+    # the model to see deeper history — the ceiling is 12000 (~33yr),
+    # comfortably covering the full available history (daily data starts
+    # ~1996).
     max_training_days: int = Field(default=730, ge=90, le=12000)
     # Honest-edge promotion gate. A model may only be promoted to
     # production when its *argmax* walk-forward Sharpe (the edge of its
@@ -1324,6 +1371,56 @@ def apply_db_config(base_config: AppConfig, db_values: dict[str, str]) -> AppCon
     merged.notifications.telegram.bot_token = base_config.notifications.telegram.bot_token
     merged.dashboard.password = base_config.dashboard.password
     return merged
+
+
+def _annotation_number_kind(annotation: Any) -> str | None:
+    """Classify a field annotation as "int" / "float" / None (not a
+    scalar number). Unwraps Optional[X]; bool is excluded explicitly
+    (it subclasses int but is a toggle, not a number)."""
+    import types as _types
+    import typing as _typing
+
+    origin = _typing.get_origin(annotation)
+    if origin is _typing.Union or origin is getattr(_types, "UnionType", None):
+        args = [a for a in _typing.get_args(annotation) if a is not type(None)]
+        return _annotation_number_kind(args[0]) if len(args) == 1 else None
+    if annotation is bool:
+        return None
+    if annotation is int:
+        return "int"
+    if annotation is float:
+        return "float"
+    return None
+
+
+def config_field_kinds(
+    model: BaseModel | None = None, prefix: str = "",
+) -> dict[str, str]:
+    """Dot-notation key -> "int"/"float" for every numeric config field,
+    derived from the Pydantic ANNOTATIONS (the source of truth).
+
+    The Settings UI needs this because JSON erases the distinction: a
+    float field sitting at a whole-number value (time_decay_last_weight
+    = 1.0) serializes as `1`, the frontend's value-based heuristic
+    classifies it as int, and the number input then rejects perfectly
+    valid decimals like 0.5. Mirrors _flatten_model's traversal so the
+    keys match /api/config exactly.
+    """
+    if model is None:
+        model = AppConfig()
+    kinds: dict[str, str] = {}
+    for field_name, field_info in model.model_fields.items():
+        key = f"{prefix}{field_name}" if prefix else field_name
+        value = getattr(model, field_name)
+        if isinstance(value, SecretStr):
+            continue
+        if isinstance(value, BaseModel):
+            kinds.update(config_field_kinds(value, prefix=f"{key}."))
+            continue
+        kind = _annotation_number_kind(field_info.annotation)
+        if kind:
+            kinds[key] = kind
+    return kinds
 
 
 def config_to_ui_sections(config: AppConfig) -> dict[str, dict[str, Any]]:
