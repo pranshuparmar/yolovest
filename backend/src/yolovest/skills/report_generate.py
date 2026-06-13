@@ -39,10 +39,16 @@ class ReportGenerateSkill(SkillBase):
 
     def __init__(self, context: Any) -> None:
         super().__init__(context)
+        self.schedule = self.compute_schedule()
+
+    def compute_schedule(self) -> str | None:
         # Daily report: convert HH:MM to cron (e.g. "16:00" -> "0 16 * * 1-5")
         daily_time = self.ctx.config.reports.daily_report_time
-        h, m = daily_time.split(":")
-        self.schedule = f"{m} {h} * * 1-5"
+        try:
+            h, m = daily_time.split(":")
+            return f"{int(m)} {int(h)} * * 1-5"
+        except (ValueError, AttributeError):
+            return self.schedule
 
     def should_run(self) -> bool:
         return not self.ctx.market_hours.is_market_hours()

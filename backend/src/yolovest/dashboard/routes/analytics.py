@@ -39,8 +39,28 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
     async def get_recommendations(
         user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
-        """Today's signals with disposition (executed/pending/rejected)."""
-        return await ctx.db.get_todays_recommendations()
+        """Today's signals with disposition (executed/pending/rejected).
+
+        Each row is enriched with the derived target (predicted-exit) date
+        and the cost-adjusted net gain / loss so the UI can show MIS/CNC,
+        the target date, and approximate P&L after deductions.
+        """
+        from yolovest.dashboard.helpers import compute_signal_economics
+
+        rows = await ctx.db.get_todays_recommendations()
+        for r in rows:
+            r.update(compute_signal_economics(
+                ctx,
+                signal_type=r.get("signal_type"),
+                entry_price=r.get("entry_price"),
+                target_price=r.get("target_price"),
+                stop_loss_price=r.get("stop_loss_price"),
+                position_size=r.get("position_size"),
+                product=r.get("product"),
+                base_date=r.get("created_at"),
+                expected_holding_days=r.get("expected_holding_days"),
+            ))
+        return rows
 
     # ------------------------------------------------------------------
     # Historical Reports

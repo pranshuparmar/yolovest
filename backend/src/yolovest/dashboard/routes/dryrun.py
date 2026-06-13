@@ -173,8 +173,23 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         )
 
         # Step 3: Persist for next-day comparison
+        scoring: dict[str, Any] | None = None
         if signals_out:
             await ctx.db.insert_dry_run_results(run_id, signals_out, as_of=as_of)
+
+            # For a historical (as_of) run, the holding windows of some or
+            # all signals already lie in the past — score them right away
+            # so the user doesn't have to click "Score". score_dry_run is
+            # partial: anything whose window hasn't elapsed yet is left
+            # pending for a later pass. Latest-data (as_of=None) runs always
+            # predict the future, so there's nothing to score yet.
+            if as_of:
+                try:
+                    scoring = await ctx.db.score_dry_run(run_id)
+                    logger.info("Dry-run %s auto-scored (as_of=%s): %s",
+                                run_id, as_of, scoring)
+                except Exception:
+                    logger.warning("Dry-run %s auto-score failed", run_id, exc_info=True)
 
         result: dict[str, Any] = {
             "success": True,
@@ -185,6 +200,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             "universe_size": len(universe),
             "shortlist_size": len(shortlist),
             "signals": signals_out,
+            "scoring": scoring,
             "diagnostics": {
                 "min_confidence_threshold": min(cfg.risk.min_confidence_buy, cfg.risk.min_confidence_sell),
                 "min_confidence_buy": cfg.risk.min_confidence_buy,
@@ -216,8 +232,30 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         run_id: str,
         _user: str = Depends(verify_credentials),
     ) -> list[dict[str, Any]]:
-        """Get all signals for a specific dry-run."""
-        return await ctx.db.get_dry_run_signals(run_id)
+        """Get all signals for a specific dry-run.
+
+        Each signal is enriched with its target (predicted-exit) date and
+        the cost-adjusted net gain / loss, mirroring the recommendations
+        view. The base date is the run's `as_of` (historical run) or the
+        row's created date (latest-data run); the target date is that plus
+        the expected holding-day horizon.
+        """
+        from yolovest.dashboard.helpers import compute_signal_economics
+
+        rows = await ctx.db.get_dry_run_signals(run_id)
+        for r in rows:
+            r.update(compute_signal_economics(
+                ctx,
+                signal_type=r.get("signal_type"),
+                entry_price=r.get("entry_price"),
+                target_price=r.get("target_price"),
+                stop_loss_price=r.get("stop_loss_price"),
+                position_size=r.get("position_size"),
+                product=r.get("product"),
+                base_date=r.get("as_of") or r.get("created_at"),
+                expected_holding_days=r.get("expected_holding_days"),
+            ))
+        return rows
 
     @app.post("/api/dry-run/{run_id}/score")
     async def score_dry_run(

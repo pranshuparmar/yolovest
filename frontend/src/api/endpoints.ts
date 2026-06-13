@@ -700,7 +700,7 @@ export const api = {
     ),
 
   listSkills: () =>
-    apiFetch<{ name: string; description: string; trigger: string; schedule: string | null }[]>(
+    apiFetch<{ name: string; description: string; trigger: string; schedule: string | null; enabled: boolean | null; next_run: string | null }[]>(
       "/api/skills",
     ),
 
@@ -708,6 +708,12 @@ export const api = {
     apiFetch<{ success: boolean; skill: string; data: Record<string, unknown>; error: string | null }>(
       `/api/skills/${skillName}/run`,
       { method: "POST" },
+    ),
+
+  setScheduleEnabled: (skillName: string, enabled: boolean) =>
+    apiFetch<{ success: boolean; skill: string; enabled: boolean }>(
+      `/api/skills/${skillName}/schedule`,
+      { method: "POST", body: JSON.stringify({ enabled }) },
     ),
 
   // Holidays

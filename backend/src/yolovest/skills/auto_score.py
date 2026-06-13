@@ -26,7 +26,10 @@ class AutoScoreSkill(SkillBase):
 
     def __init__(self, ctx: Any) -> None:
         super().__init__(ctx)
-        self.schedule = ctx.config.scoring.auto_score_cron
+        self.schedule = self.compute_schedule()
+
+    def compute_schedule(self) -> str | None:
+        return self.ctx.config.scoring.auto_score_cron
 
     def should_run(self) -> bool:
         return bool(self.ctx.config.scoring.auto_score_enabled)

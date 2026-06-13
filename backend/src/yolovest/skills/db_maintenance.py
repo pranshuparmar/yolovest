@@ -22,7 +22,10 @@ class DatabaseMaintenanceSkill(SkillBase):
 
     def __init__(self, context: Any) -> None:
         super().__init__(context)
-        self.schedule = self.ctx.config.database.backup_cron
+        self.schedule = self.compute_schedule()
+
+    def compute_schedule(self) -> str | None:
+        return self.ctx.config.database.backup_cron
 
     def should_run(self) -> bool:
         return bool(self.ctx.config.database.backup_enabled)

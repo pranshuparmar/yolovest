@@ -19,6 +19,11 @@ function fmt(n: number | null | undefined, d = 2) {
   });
 }
 
+// Signed rupee for net P&L (e.g. "+₹1,234.00" / "−₹987.00").
+function netRupee(n: number) {
+  return `${n >= 0 ? "+" : "−"}₹${fmt(Math.abs(n))}`;
+}
+
 import { formatIST } from "../utils/datetime";
 import { SymbolLink } from "../components/SymbolLink";
 
@@ -164,6 +169,16 @@ export function DryRunPage() {
             {runDryRun.data.signals.length}
           </span>{" "}
           signals.
+          {runDryRun.data.scoring && (runDryRun.data.scoring.scored > 0 || (runDryRun.data.scoring.pending ?? 0) > 0) && (
+            <>
+              {" "}Auto-scored{" "}
+              <span className="font-semibold">{runDryRun.data.scoring.scored}</span>{" "}
+              against actuals
+              {(runDryRun.data.scoring.pending ?? 0) > 0
+                ? `, ${runDryRun.data.scoring.pending} still pending (window not elapsed).`
+                : "."}
+            </>
+          )}
         </div>
       )}
 
@@ -239,6 +254,7 @@ export function DryRunPage() {
                 <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
                   <th className="py-2 px-4 text-left">Run ID</th>
                   <th className="py-2 px-4 text-left">Strategy</th>
+                  <th className="py-2 px-4 text-left">As Of</th>
                   <th className="py-2 px-4 text-right">Signals</th>
                   <th className="py-2 px-4 text-right">Scored</th>
                   <th className="py-2 px-4 text-right">Correct</th>
@@ -261,6 +277,13 @@ export function DryRunPage() {
                     </td>
                     <td className="py-2 px-4 text-xs text-gray-400 capitalize">
                       {(run.strategy_mode ?? "balanced").replace("_", " ")}
+                    </td>
+                    <td className="py-2 px-4 text-xs">
+                      {run.as_of ? (
+                        <span className="text-gray-300 font-mono">{run.as_of}</span>
+                      ) : (
+                        <span className="text-gray-600">latest</span>
+                      )}
                     </td>
                     <td className="py-2 px-4 text-right text-gray-300">
                       {run.signal_count}
@@ -404,11 +427,13 @@ export function DryRunPage() {
                     <th className="py-2 px-3 text-center">Signal</th>
                     <th className="py-2 px-3 text-center">Hold</th>
                     <th className="py-2 px-3 text-center">Product</th>
+                    <th className="py-2 px-3 text-center">Target Date</th>
                     <th className="py-2 px-3 text-right">Entry</th>
                     <th className="py-2 px-3 text-right">Target</th>
                     <th className="py-2 px-3 text-right">SL</th>
                     <th className="py-2 px-3 text-right">Confidence</th>
                     <th className="py-2 px-3 text-right">Est. Costs</th>
+                    <th className="py-2 px-3 text-right">Net G/L</th>
                     <th className="py-2 px-3 text-right">Actual Close</th>
                     <th className="py-2 px-3 text-right">Move %</th>
                     <th className="py-2 px-3 text-center">Direction</th>
@@ -456,6 +481,9 @@ export function DryRunPage() {
                           <span className="text-gray-600">--</span>
                         )}
                       </td>
+                      <td className="py-2 px-3 text-center font-mono text-xs text-gray-400">
+                        {s.target_date ?? <span className="text-gray-600">--</span>}
+                      </td>
                       <td className="py-2 px-3 text-right font-mono text-gray-300">
                         {fmt(s.entry_price)}
                       </td>
@@ -487,6 +515,17 @@ export function DryRunPage() {
                       </td>
                       <td className="py-2 px-3 text-right font-mono text-xs text-gray-400">
                         {s.estimated_costs != null ? `₹${fmt(s.estimated_costs)}` : "--"}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-xs">
+                        {s.est_net_gain != null && s.est_net_loss != null ? (
+                          <span title="Net P&L after all deductions if target hits / if SL hits">
+                            <span className="text-emerald-400">{netRupee(s.est_net_gain)}</span>
+                            <span className="text-gray-600"> / </span>
+                            <span className="text-red-400">{netRupee(s.est_net_loss)}</span>
+                          </span>
+                        ) : (
+                          <span className="text-gray-600">--</span>
+                        )}
                       </td>
                       <td className="py-2 px-3 text-right font-mono text-gray-300">
                         {s.actual_close != null ? fmt(s.actual_close) : (
@@ -579,8 +618,10 @@ export function DryRunPage() {
             confidence.
           </li>
           <li>
-            After the next trading day, click "Score" to compare predictions
-            against actual market data.
+            Pick a past "as of" date and the run scores itself instantly —
+            each signal is compared against the actual close on its target
+            date (% change shown). For latest-data runs, click "Score" after
+            the next trading day once market data is ingested.
           </li>
           <li>
             Check direction accuracy and target hit rate to evaluate model

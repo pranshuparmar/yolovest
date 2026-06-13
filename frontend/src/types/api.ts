@@ -309,6 +309,14 @@ export interface Recommendation {
   disposition: SignalDisposition;
   disposition_reason: string | null;
   created_at: string;
+  // Holding-period decision + derived economics (backend-enriched).
+  product?: string | null; // "MIS" (intraday) / "CNC" (delivery)
+  holding_period?: string | null;
+  expected_holding_days?: number | null;
+  target_date?: string | null; // predicted exit date (YYYY-MM-DD)
+  estimated_costs?: number | null;
+  est_net_gain?: number | null; // net P&L if target hits, after costs
+  est_net_loss?: number | null; // net P&L if SL hits, after costs (<= 0)
 }
 
 export interface GeminiStatus {
@@ -834,6 +842,10 @@ export interface DryRunSignal {
   actual_move_pct: number | null;
   created_at: string;
   scored_at: string | null;
+  // Derived economics (backend-enriched, same as recommendations).
+  target_date?: string | null; // predicted exit date (YYYY-MM-DD)
+  est_net_gain?: number | null;
+  est_net_loss?: number | null;
 }
 
 export interface DryRunSummary {
@@ -893,6 +905,8 @@ export interface DryRunResult {
   universe_size: number;
   shortlist_size: number;
   signals: DryRunSignal[];
+  // Present when a past-date run was auto-scored in the same request.
+  scoring?: { scored: number; pending?: number; not_found?: number; already_scored?: number; message?: string } | null;
   warning?: string;
 }
 

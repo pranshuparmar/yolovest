@@ -1058,7 +1058,14 @@ export function useRunDryRun() {
   return useMutation({
     mutationFn: (args?: { mode?: string; asOf?: string; modelVersion?: string }) =>
       api.runDryRun(args?.mode, args?.asOf, args?.modelVersion),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["dry-run-history"] }),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["dry-run-history"] });
+      // A past-date run may have auto-scored; refresh its detail so the
+      // actual-close / move% / net P&L columns show immediately.
+      if (result?.run_id) {
+        qc.invalidateQueries({ queryKey: ["dry-run-detail", result.run_id] });
+      }
+    },
   });
 }
 
@@ -1073,6 +1080,15 @@ export function useListSkills() {
 export function useRunSkill() {
   return useMutation({
     mutationFn: (skillName: string) => api.runSkill(skillName),
+  });
+}
+
+export function useSetScheduleEnabled() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ skillName, enabled }: { skillName: string; enabled: boolean }) =>
+      api.setScheduleEnabled(skillName, enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["skills"] }),
   });
 }
 

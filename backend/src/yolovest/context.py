@@ -571,6 +571,29 @@ class MarketHoursChecker:
             d += _td(days=1)
         return n
 
+    def add_trading_days(self, start: date, n: int) -> date:
+        """Return the date `n` trading days after `start` (holiday- and
+        weekend-aware). n <= 0 returns `start` unchanged — an intraday
+        signal (0-day horizon) targets the same session it's generated in.
+
+        Used to derive a signal's target / predicted-exit date from its
+        base date plus the model's expected holding-day horizon, so the
+        UI can show "expected to close by <date>". Walks at most a few
+        hundred calendar days as a safety bound.
+        """
+        from datetime import timedelta as _td
+        if n <= 0:
+            return start
+        d = start
+        added = 0
+        for _ in range(n * 3 + 30):  # generous bound for stacked holidays
+            d += _td(days=1)
+            if self.is_trading_day(d):
+                added += 1
+                if added >= n:
+                    return d
+        return d
+
     def get_square_off_time(self, check_date: date | None = None) -> time:
         """Get the square-off time, accounting for early close days."""
         if check_date is None:

@@ -4,6 +4,7 @@ import { useRecommendations } from "../hooks/queries";
 import { useLtpStream } from "../hooks/useLtpStream";
 import type { Recommendation, SignalDisposition } from "../types/api";
 import { formatPriceMovePct, priceMovePct } from "../utils/priceMove";
+import { parseUTC, formatISTDate } from "../utils/datetime";
 import { SymbolLink } from "./SymbolLink";
 
 const DISPOSITION_LABELS: Record<SignalDisposition, string> = {
@@ -35,8 +36,15 @@ function fmt(n: number, decimals = 2) {
   });
 }
 
+// Signed rupee for net P&L (e.g. "+₹1,234.00" / "−₹987.00").
+function netRupee(n: number) {
+  return `${n >= 0 ? "+" : "−"}₹${fmt(Math.abs(n))}`;
+}
+
 function timeAgo(iso: string) {
-  const ts = new Date(iso).getTime();
+  // Backend stores timestamps as naive UTC (SQLite datetime('now')); parse
+  // them as UTC, not browser-local, or the age is off by the IST offset.
+  const ts = parseUTC(iso).getTime();
   const ageSec = Math.max(0, (Date.now() - ts) / 1000);
   if (ageSec < 60) return `${Math.floor(ageSec)}s ago`;
   if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
@@ -76,6 +84,19 @@ function RecommendationRow({ r, ltp }: { r: Recommendation; ltp?: number }) {
           <span className="font-medium text-gray-100 truncate">
             <SymbolLink symbol={r.symbol} className="text-gray-100" />
           </span>
+          {r.product && (
+            <span
+              className={clsx(
+                "text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0",
+                r.product === "MIS"
+                  ? "bg-amber-900/30 text-amber-400"
+                  : "bg-blue-900/30 text-blue-400",
+              )}
+              title={r.product === "MIS" ? "Intraday (square-off same day)" : "Delivery (held overnight)"}
+            >
+              {r.product}
+            </span>
+          )}
           <span className="text-xs text-gray-500">
             ₹{fmt(r.entry_price)} × {r.position_size}
           </span>
@@ -140,6 +161,40 @@ function RecommendationRow({ r, ltp }: { r: Recommendation; ltp?: number }) {
             <div className="text-gray-500">Confidence</div>
             <div className="text-gray-200">
               {(r.confidence_score * 100).toFixed(0)}%
+            </div>
+          </div>
+          <div>
+            <div className="text-gray-500">Type</div>
+            <div className="text-gray-200">
+              {r.product ?? "--"}
+              {r.holding_period && (
+                <span className="text-gray-500 ml-1">({r.holding_period})</span>
+              )}
+            </div>
+          </div>
+          <div>
+            <div className="text-gray-500">Target Date</div>
+            <div className="text-gray-200">
+              {r.target_date ? formatISTDate(r.target_date) : "--"}
+            </div>
+          </div>
+          <div className="col-span-2">
+            <div className="text-gray-500">Net Gain / Loss (after costs)</div>
+            <div>
+              {r.est_net_gain != null && r.est_net_loss != null ? (
+                <>
+                  <span className="text-emerald-400">{netRupee(r.est_net_gain)}</span>
+                  <span className="text-gray-600"> / </span>
+                  <span className="text-red-400">{netRupee(r.est_net_loss)}</span>
+                  {r.estimated_costs != null && (
+                    <span className="text-gray-500 ml-1">
+                      (costs ₹{fmt(r.estimated_costs)})
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="text-gray-500">--</span>
+              )}
             </div>
           </div>
           {r.disposition_reason && (

@@ -846,6 +846,26 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   // Auto-scoring
   "scoring.auto_score_enabled": "Run the daily auto-score CRON. When on, a post-close job scores every dry-run with unscored signals and every elapsed prediction against the actuals on its OWN target date (path-aware over the holding window) — no manual 'Score' clicks needed. Partial by design: signals whose horizon hasn't fully elapsed are left pending for a later run.",
   "scoring.auto_score_cron": "When the auto-score job runs (cron, IST). Default 16:45 on weekdays — after the day's daily bars are ingested (~15:30–16:00) so target dates that closed today can be scored. Only matters when Auto-Score is enabled.",
+  // Depth snapshots (order-book archive)
+  "market_data.depth_snapshots_enabled": "Archive the Kite top-5 order-book (bid/ask quantities) once per heartbeat via the depth-snapshot skill. Pure data collection for a future intraday order-flow feature set — nothing trades on it. Requires Kite paid data.",
+  "market_data.depth_snapshot_retention_days": "How many days of order-book depth snapshots to keep before the nightly maintenance prunes them. Depth rows accumulate fast (one per open symbol per cycle), so keep this short.",
+  // Training — extended features / labels
+  "strategy.indicators.extended_momentum": "Train on the extended multi-horizon momentum feature set (1/3/6/9-month returns, risk-adjusted momentum quality, vol-regime ratio, fractional-differenced log-price). Daily/swing only — meaningless on 5-min intraday bars. 3–9 month momentum is the strongest documented Indian-equity anomaly. Takes effect on next retrain.",
+  "strategy.label_cost_floor_enabled": "Floor the triple-barrier target at the round-trip transaction cost + slippage when labelling training data, so a labelled 'win' always clears costs. Bites hardest on the tight 0.6×ATR intraday geometry. The same effective target flows into the walk-forward backtest so labels and backtest agree on what's profitable. Next-retrain only.",
+  "strategy.time_decay_last_weight": "Linear time-decay applied to training sample weights, oldest→newest. 1.0 = off (every bar weighted equally). Lower values (e.g. 0.5) tilt training toward recent regimes by down-weighting the oldest bars to this fraction. Next-retrain only.",
+  // Retraining — cross-validation + XGBoost hyperparameters
+  "retraining.cv_embargo_frac": "Embargo gap (as a fraction of the calendar span) inserted on top of the label-overlap purge between train and validation/holdout folds. Absorbs serial-correlation / delayed-reaction leakage beyond label overlap. Default ~0.01 (1% of the span).",
+  "retraining.xgb.max_depth": "XGBoost maximum tree depth. Deeper trees fit more complex interactions but overfit noisy financial features faster. Lower = more regularized. Next-retrain only.",
+  "retraining.xgb.learning_rate": "XGBoost learning rate (eta). Lower learns more slowly and generalizes better but needs more trees. Paired with early stopping, which picks the actual tree count. Next-retrain only.",
+  "retraining.xgb.n_estimators": "Upper bound on the number of boosting rounds (trees). Early stopping on a purged + embargoed validation tail picks the real count; the deployed model then refits on ALL data at that count. Next-retrain only.",
+  "retraining.xgb.min_child_weight": "Minimum sum of instance weight (hessian) needed in a leaf. Higher = more conservative splits = stronger regularization on noisy data. Next-retrain only.",
+  "retraining.xgb.subsample": "Fraction of training rows sampled per boosting round. < 1.0 adds randomness that reduces variance/overfitting. A core variance-reduction knob for noisy features. Next-retrain only.",
+  "retraining.xgb.colsample_bytree": "Fraction of features sampled per tree. < 1.0 de-correlates trees and curbs overfitting. A core variance-reduction knob. Next-retrain only.",
+  "retraining.xgb.gamma": "Minimum loss reduction required to make a further split (complexity penalty). Higher = fewer, more conservative splits. Next-retrain only.",
+  "retraining.xgb.reg_lambda": "L2 regularization on leaf weights. Higher shrinks weights toward zero, reducing overfitting. Next-retrain only.",
+  "retraining.xgb.reg_alpha": "L1 regularization on leaf weights. Higher drives some weights to exactly zero (feature sparsity). Next-retrain only.",
+  "retraining.xgb.early_stopping_rounds": "Stop boosting if the purged validation metric hasn't improved for this many consecutive rounds; the best round becomes the deployed tree count. Next-retrain only.",
+  "retraining.xgb.early_stopping_min_samples": "Minimum training samples required before early stopping is used. Below this the probe is skipped and the full n_estimators is used (too little data to carve out a reliable validation tail). Next-retrain only.",
 };
 
 // Cron key labels (friendly names for the virtual cron section)
@@ -1524,7 +1544,10 @@ export default function SettingsPage() {
   const currentTab = TABS.find((t) => t.id === activeTab) || TABS[0];
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col h-full min-h-0">
+      {/* Sticky top region — header, tabs and the per-tab toolbar stay
+          put while only the settings content below scrolls. */}
+      <div className="shrink-0 space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -1631,14 +1654,20 @@ export default function SettingsPage() {
           changedKeys.forEach((k) => handleChange(k, flatDefaults[k]));
         }}
       />
+      </div>
 
-      {/* Tab content. CSS columns instead of CSS grid so a tall card
-          (e.g. the Risk Management list with 50+ rows) doesn't force
-          its neighbours to grow with empty space below short cards.
-          Each section uses break-inside-avoid so it never splits
-          across columns mid-card. */}
+      {/* Scrollable content region — starts below the sticky tabs.
+          The scroll lives on this wrapper (block, natural-height child)
+          rather than on the columns element itself: CSS multi-column on a
+          height-bounded box expands into extra columns horizontally
+          instead of scrolling vertically. */}
+      <div className="flex-1 overflow-y-auto min-h-0 pt-4">
       <DefaultsContext.Provider value={flatDefaults}>
       <FieldTypesContext.Provider value={fieldTypes}>
+      {/* CSS columns instead of CSS grid so a tall card (e.g. the Risk
+          Management list with 50+ rows) doesn't force its neighbours to
+          grow with empty space below short cards. Each section uses
+          break-inside-avoid so it never splits across columns mid-card. */}
       <div className="columns-1 lg:columns-2 gap-4 [column-fill:balance]">
         {currentTab.sections.map((sectionKey) => {
           let entries = getEntries(sectionKey);
@@ -1666,6 +1695,7 @@ export default function SettingsPage() {
       </div>
       </FieldTypesContext.Provider>
       </DefaultsContext.Provider>
+      </div>
     </div>
   );
 }

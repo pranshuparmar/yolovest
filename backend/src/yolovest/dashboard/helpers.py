@@ -3,9 +3,127 @@ CDSL TPIN handling, market-scan scoring. No FastAPI dependencies
 beyond response shapes."""
 
 import logging
+from datetime import UTC, date, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _to_base_date(raw: Any) -> date | None:
+    """Best-effort parse of a signal's base date.
+
+    Accepts a date, a 'YYYY-MM-DD' string, or a full ISO/SQLite UTC
+    timestamp (which is converted to its IST calendar date). Returns
+    None when nothing parseable is supplied.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, date) and not isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, datetime):
+        return raw.date()
+    s = str(raw).strip()
+    if not s:
+        return None
+    # Plain date prefix.
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        # If there's a time component, treat the stamp as UTC and convert
+        # to the IST calendar date (signals store UTC via datetime('now')).
+        if len(s) > 10:
+            from yolovest.timezone import IST
+            try:
+                ts = datetime.fromisoformat(s.replace(" ", "T"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                return ts.astimezone(IST).date()
+            except ValueError:
+                pass
+        try:
+            return date.fromisoformat(s[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def compute_signal_economics(
+    ctx: Any,
+    *,
+    signal_type: Any,
+    entry_price: Any,
+    target_price: Any,
+    stop_loss_price: Any,
+    position_size: Any,
+    product: Any,
+    base_date: Any,
+    expected_holding_days: Any,
+) -> dict[str, Any]:
+    """Derive display economics shared by the recommendations + dry-run views.
+
+    Returns a dict with:
+      - target_date:    base_date + expected_holding_days trading days
+                        ('YYYY-MM-DD'), or None when undeterminable.
+      - estimated_costs: round-trip transaction costs at the target.
+      - est_net_gain:    net P&L if the target hits, after all costs.
+      - est_net_loss:    net P&L if the SL hits, after all costs (<= 0).
+
+    All fields are best-effort; any that can't be computed come back None
+    instead of raising, so a malformed row never breaks the endpoint.
+    """
+    from yolovest.costs import compute_transaction_costs
+
+    out: dict[str, Any] = {
+        "target_date": None,
+        "estimated_costs": None,
+        "est_net_gain": None,
+        "est_net_loss": None,
+    }
+
+    # --- Target / predicted-exit date ---
+    bd = _to_base_date(base_date)
+    try:
+        horizon = int(expected_holding_days) if expected_holding_days is not None else None
+    except (TypeError, ValueError):
+        horizon = None
+    if bd is not None and horizon is not None:
+        try:
+            out["target_date"] = ctx.market_hours.add_trading_days(
+                bd, max(0, horizon),
+            ).isoformat()
+        except Exception:
+            logger.debug("target-date computation failed", exc_info=True)
+
+    # --- Net gain / loss after costs ---
+    try:
+        entry = float(entry_price)
+        target = float(target_price)
+        sl = float(stop_loss_price)
+        qty = int(position_size) if position_size is not None else 0
+    except (TypeError, ValueError):
+        return out
+    if entry <= 0 or target <= 0 or sl <= 0 or qty <= 0:
+        return out
+
+    prod = product if product in ("MIS", "CNC") else "MIS"
+    direction = 1 if str(signal_type).upper() == "BUY" else -1
+    gross_win = (target - entry) * direction * qty
+    gross_loss = (entry - sl) * direction * qty  # positive = rupees at risk
+    # STT lands on the sell leg — flip entry/exit for SELL so the cost model
+    # taxes the correct side.
+    if direction > 0:
+        costs = compute_transaction_costs(
+            entry, target, qty, product=prod,
+            cost_config=ctx.config.transaction_costs,
+        )
+    else:
+        costs = compute_transaction_costs(
+            target, entry, qty, product=prod,
+            cost_config=ctx.config.transaction_costs,
+        )
+    out["estimated_costs"] = round(costs, 2)
+    out["est_net_gain"] = round(gross_win - costs, 2)
+    out["est_net_loss"] = round(-(gross_loss + costs), 2)
+    return out
+
 
 def _extract_broker_capital(margins: dict[str, Any]) -> float:
     """Extract free cash + utilised margin from Kite margins response.
