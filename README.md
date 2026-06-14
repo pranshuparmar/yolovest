@@ -1,372 +1,190 @@
 # YoloVest
 
-YoloVest is a fully autonomous AI-driven stock trading platform for the Indian market. It runs a heartbeat pipeline every 15 minutes during market hours — scanning stocks, generating ML signals, validating them through risk checks and optional LLM review, and executing trades via Zerodha Kite Connect. It learns from its own predictions, retrains models weekly, and sends you Telegram alerts so you can monitor everything from your phone.
+**YoloVest is a self-hosted, AI-driven trading assistant for the Indian stock market.** It watches the market for you during trading hours, finds opportunities using machine learning, double-checks each one against your risk rules (and, optionally, an AI second opinion), and can place and manage trades through your Zerodha account — all on autopilot, with you in control from a web dashboard or Telegram.
 
-**Paper trading by default** — live trading requires explicit opt-in after you're confident in the system's performance.
+**It runs in paper (simulated) mode by default.** Live trading with real money is strictly opt-in, and only after you've watched it long enough to trust it.
 
 > **Disclaimer:** This application was vibe-coded for personal use. I do not take any responsibility for financial losses, bugs, or unexpected behavior. If you choose to run this in live mode with real money, you do so entirely at your own risk. Markets are unpredictable, software has bugs, and past performance (including backtests) does not guarantee future results. Always start with paper mode and small capital.
 
 ---
 
-## What It Does
+## What You Get
 
-- **Autonomous trading pipeline** — Every 15 minutes during market hours: fetches data, scans the market, generates ML signals, runs risk checks, optionally gets LLM approval, and executes trades
-- **ML signal generation** — XGBoost models with probability calibration, **real-PnL walk-forward backtesting** (simulates each fold-test prediction through actual transaction costs, sizing, and slippage — not a synthetic payoff), and automatic weekly retraining
-- **Shadow A/B testing** — New models run in shadow mode alongside production for 7 days before promotion, based on real market performance
-- **LLM trade review** — Optional Google Gemini gate that approves, rejects, or resizes trades with full reasoning
-- **Multi-source market data** — Kite paid plan (when enabled, primary for both daily and intraday) with free-provider fallback chain (jugaad-data, yfinance, tvDatafeed). Optional **KiteTicker WebSocket** gives sub-second LTP for instant target/SL detection on the heartbeat cycle.
-- **News sentiment** — Aggregates from MoneyControl, ET Markets, LiveMint, NSE, and Google Finance with Gemini-powered sentiment scoring
-- **Full risk management** — Position sizing (via Kite's pre-trade `order_margins` when leverage is on, falling back to notional), exposure caps, daily/weekly circuit breakers, trailing stop-loss, kill switch, symbol cooldowns, sector caps, correlation limits
-- **Broker-side exit enforcement** — Two-leg OCO GTT for CNC trades (target + SL placed at the broker after entry fills; ghost-recovery closes the local row when one fires); resting target LIMIT + SL for MIS (Zerodha doesn't allow GTT on intraday — this is the OCO equivalent). Position-monitor reconciles GTT state every heartbeat so user-cancelled / rejected / expired GTTs fall back to client-side detection automatically.
-- **Real transaction costs** — When the broker is authenticated, realized PnL on close uses Kite's actual contract-note charges (`POST /charges/orders`). Falls back to a config-based estimate on paper / offline. Same breakdown is stored on the trade row so the detail view shows actuals rather than recomputing on every page load.
-- **Signed postbacks with business logic** — `/api/auth/zerodha/postback` verifies `SHA-256(order_id + order_timestamp + api_secret)` and drives real trade-row updates (entry COMPLETE backfills fill_price; SL/target COMPLETE cancels the other leg; entry/SL REJECTED alerts you immediately) so trade state stays current between heartbeats.
-- **Self-learning loop** — Tracks predictions, scores them against actual outcomes, feeds failures back into retraining
-- **Web dashboard** — 20+ pages covering portfolio, trades (with broker order history + GTT lifecycle audit), positions, ML models, dry-run previews, risk simulation, analytics, reports, settings
-- **Telegram bot** — Real-time alerts, portfolio status, kill switch control, trade approval/rejection, daily Kite re-authentication
-- **Dry-run previews** — Generate signals without executing them to see what the system would do today
+- **Hands-off trading** — During market hours the system continuously scans stocks, generates trade ideas, vets them, and (in live mode) executes and manages them without you lifting a finger.
+- **A second opinion on every trade** — An optional AI reviewer can approve, reject, or resize trades, with its reasoning recorded so you can see *why*.
+- **Real risk controls** — Position sizing, exposure caps, daily and weekly loss limits, trailing stop-losses, a one-tap kill switch, and a mandatory stop-loss on every trade.
+- **Your positions stay protected** — Stop-loss and target are placed *at the broker*, so an open position is guarded even if the app restarts or your server briefly goes down.
+- **It learns from itself** — Every prediction is scored against what actually happened, and that feedback flows into a weekly model refresh.
+- **Try before you trust** — Paper mode simulates everything (including costs and slippage) with no real money, and a one-click "dry run" shows you exactly what the system *would* do today.
+- **Monitor from anywhere** — A full web dashboard plus a Telegram bot that sends alerts and takes commands from your phone.
+
+---
+
+## How It Works (the short version)
+
+You don't need to understand the internals to use YoloVest, but here's the gist:
+
+- **A trading cycle runs every 15 minutes** while the market is open: pull fresh prices, scan the market, rank candidates with a machine-learning model, run each through risk checks and an optional AI review, then act.
+- **The brain is a machine-learning model** (gradient-boosted trees) that outputs a calibrated confidence for each stock. It's validated with realistic backtests that account for actual brokerage, taxes, and slippage — not a rosy simulation — and is **retrained weekly**. New models run quietly in "shadow" mode alongside the live one for a week and are only promoted if they genuinely perform better.
+- **Market data** comes from your paid Zerodha data plan when enabled, with free public sources as an automatic fallback so the system keeps working even if one source fails. An optional live price feed enables near-instant exits.
+- **News & sentiment** from major Indian financial outlets is folded into the signal.
+- **Self-hosted and private** — everything runs on your own server in Docker, with automatic HTTPS, database backups, and log rotation. Your data and keys never leave your machine.
 
 ---
 
 ## Paper Mode vs Live Mode
 
-YoloVest has two operating modes, controlled by the `mode` setting (changeable via the Settings page):
+YoloVest always starts in **paper mode**. You switch modes from the Settings page when you're ready.
 
-### Paper Mode (default)
+| | Paper Mode (default) | Live Mode |
+|---|---|---|
+| **Money** | Simulated — none at risk | Real orders on your Zerodha account |
+| **Zerodha account** | Not required | Required |
+| **Slippage & costs** | Simulated realistically and deducted from results | Real |
+| **Safety controls** | Active | Active |
+| **Use it to** | Evaluate the system risk-free | Trade once you trust it |
 
-- All orders are **simulated locally** — no real money is involved
-- Simulated slippage is applied (configurable, default 0.1%) to keep results realistic
-- Transaction costs (brokerage, STT, GST) are still deducted from PnL
-- Does **not** require a Zerodha account — the system runs with a simulated broker if Kite credentials aren't set
-- If Kite credentials are provided, it will still fetch real market data and holdings but won't place real orders
-
-Use paper mode to evaluate the system's performance before committing real capital.
-
-### Live Mode
-
-- Orders are placed directly via Zerodha Kite Connect API
-- Real positions, margins, and order lifecycle are tracked
-- Requires valid Zerodha API credentials and **daily re-authentication** (Zerodha expires tokens at 6 AM IST)
-- Price drift rejection prevents stale signals from executing at unexpected prices
-- All safety mechanisms (kill switch, circuit breakers, exposure caps) are active
-
-Switch to live mode only after you've run paper mode long enough to trust the system's signals and risk management.
+In paper mode the system still uses **real market data** (and your real holdings, if you connect Zerodha) — it just doesn't place real orders. Switch to live mode only after paper trading has earned your confidence.
 
 ---
 
 ## Setup
 
-### Prerequisites
+The recommended way to run YoloVest is with Docker on a server you control (a small cloud VM or a home machine that stays on during market hours).
 
-| Requirement | Notes |
-|-------------|-------|
-| **Zerodha Kite Connect** | Required for live trading. Paper mode works without it. Get API keys at [kite.trade](https://kite.trade/) |
-| **Google Gemini API** | Optional. Enables sentiment analysis, LLM trade review, and failure analysis. Get a key at [ai.google.dev](https://ai.google.dev/) |
-| **Telegram Bot** | Optional but recommended. Create one via [@BotFather](https://t.me/botfather) for alerts and remote control |
+### What you'll need
 
-### Option 1: Docker (recommended)
+| | Required? | Notes |
+|---|---|---|
+| **A server with Docker** | Yes | Any Linux host that can stay online 9 AM–4 PM IST on weekdays |
+| **A domain name** | Recommended | For automatic HTTPS on the dashboard |
+| **Zerodha Kite Connect** | For live trading only | Paper mode works without it. Sign up at [kite.trade](https://kite.trade/) |
+| **Google Gemini API key** | Optional | Unlocks AI trade review and news sentiment. Free key at [ai.google.dev](https://ai.google.dev/) |
+| **Telegram bot** | Optional, recommended | The easiest way to monitor and control the system from your phone — create one via [@BotFather](https://t.me/botfather) |
+
+### Get it running
 
 ```bash
 git clone https://github.com/pranshuparmar/yolovest.git
 cd yolovest
 
-# Create config
+# Copy the example settings and secrets files
 cp backend/config.example.yaml backend/config.yaml
-
-# Create .env with your secrets
 cp .env.example .env
-# Edit .env and fill in your API keys
 ```
 
-Edit your `.env` file:
+Open `.env` and fill in what applies to you (everything except the domain is optional for paper mode):
 
 ```env
-DOMAIN=yolovest.example.com        # Your domain (for SSL)
-LETSENCRYPT_EMAIL=you@example.com   # For Let's Encrypt certificate
-KITE_API_KEY=your_key               # Zerodha (leave blank for paper-only)
-KITE_API_SECRET=your_secret
-GEMINI_API_KEY=your_key             # Google Gemini (optional)
-TELEGRAM_BOT_TOKEN=your_token       # Telegram (optional)
-TELEGRAM_CHAT_ID=your_chat_id
+DOMAIN=yolovest.example.com         # your domain, for HTTPS
+LETSENCRYPT_EMAIL=you@example.com    # for the SSL certificate
+KITE_API_KEY=                        # Zerodha — leave blank for paper-only
+KITE_API_SECRET=
+GEMINI_API_KEY=                      # Google Gemini — optional
+TELEGRAM_BOT_TOKEN=                  # Telegram — optional
+TELEGRAM_CHAT_ID=
 ```
 
-Start everything:
+Then start everything:
 
 ```bash
 docker compose up -d
-
-# Check logs
-docker compose logs -f backend
 ```
 
-The dashboard will be available at `https://your-domain`. Default password: `yolovest`.
+The dashboard comes up at `https://your-domain`. **Log in with the default password `yolovest` and change it immediately** from the Settings page — it's the only thing standing between the internet and your trading controls. Docker handles HTTPS certificates, the web server, database backups, and log rotation automatically, and your data persists across restarts.
 
-Docker automatically manages SSL certificates, nginx reverse proxy, database backups, and log rotation. Data is persisted across restarts via Docker volumes (database, models, backups, logs).
-
-### Option 2: Run Locally (without Docker)
-
-**Backend** (Python 3.11+):
-
-```bash
-cd backend
-pip install -e ".[dev]"
-cp config.example.yaml config.yaml
-# Edit config.yaml — set your API keys or export them as environment variables
-PYTHONPATH=src python -m yolovest.main --config config.yaml
-```
-
-**Frontend** (Node.js 18+, separate terminal):
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-The backend runs on `http://localhost:8080` and the frontend dev server on `http://localhost:5173` (proxies API calls to the backend).
-
-For production frontend builds:
-
-```bash
-cd frontend
-npm run build   # Outputs to dist/
-```
+That's it — out of the box you're paper trading with free market data.
 
 ---
 
 ## Daily Kite Re-Authentication
 
-Zerodha expires API tokens daily at 6:00 AM IST. If you're using Kite Connect (paper with real data, or live mode), you need to re-authenticate each trading day:
+Zerodha expires its API access every morning (around 6 AM IST) for security. If you've connected Zerodha (for live trading, or for paid real-time data), you re-authorize once per trading day:
 
-1. The system sends you a Telegram message at **8:30 AM IST** (configurable) with a Kite login link
-2. Click the link and log in to Zerodha — the app receives the token automatically via OAuth redirect
-3. As a fallback (e.g., if the redirect doesn't work), you can also send the token manually via `/auth <request_token>` on Telegram or paste it on the **Integrations** page
+1. Each morning the Telegram bot sends you a Zerodha login link (default 8:30 AM IST).
+2. Tap it, log in to Zerodha, and you're done — the authorization is captured automatically.
+3. If that ever doesn't go through, you can paste the login token into Telegram or the dashboard's Integrations page as a fallback.
 
-The token is cached in the database and restored automatically if you restart the app during the day.
+The authorization is remembered for the rest of the day, even if you restart the app. Paper mode with free data needs none of this.
 
 ---
 
-## Configuration
+## Using YoloVest
 
-Configuration is split into two layers:
+### The Dashboard
 
-### 1. Config File (`config.yaml`)
+A web dashboard gives you a full view of the system, organized into a few areas:
 
-Contains secrets and infrastructure settings that can't be changed at runtime:
+- **Trading** — your portfolio and equity curve, open positions with live P&L, trade history, and a detailed breakdown of any single trade (why it was taken, how it was executed, and how it turned out).
+- **Research** — sentiment-scored news, a market calendar (holidays and economic events), the watchlist/shortlist, and brokerage holdings.
+- **Models & predictions** — how accurate the system has been, model versions and their shadow-test results, and a one-click **dry run** that previews today's signals without trading.
+- **Analysis** — win rate, returns, risk-adjusted performance, execution/slippage quality, and a risk simulator that replays history under different settings.
+- **Admin** — settings, data management and backups, an audit log, and manual controls.
 
-- API keys and secrets (Zerodha, Gemini, Telegram)
-- Database and backup paths
-- Server host/port
-- Log file paths and rotation settings
+### Telegram Bot
 
-These use `${VAR_NAME}` syntax to pull values from environment variables. See `config.example.yaml` for all options with inline documentation.
+Once connected, the bot sends real-time alerts (trade entries/exits, daily summaries, warnings) and takes commands:
 
-### 2. Settings Page (DB config, ~90 keys)
-
-Everything else is editable live from the **Settings** page in the dashboard — no restart needed. Changes take effect immediately. Settings are grouped into sections:
-
-| Section | What You Can Tune |
-|---------|------------------|
-| **Capital** | Starting capital amount |
-| **Risk** | Max risk per trade, exposure caps, position limits, daily/weekly loss limits, confidence thresholds, symbol cooldowns, kill switch |
-| **Scanning** | Stock universe, shortlist size, minimum volume, sector weights |
-| **Strategy** | Indicator toggles (RSI, MACD, Bollinger, etc.), EMA periods, volatility filters, market regime detection |
-| **Execution** | Paper slippage %, max order retries, price drift tolerance, scaled entry |
-| **Transaction Costs** | Brokerage, STT, stamp duty rates (pre-filled with current NSE/Zerodha rates) |
-| **Heartbeat** | Pipeline interval during/outside market hours |
-| **Market Hours** | Open/close times, square-off time, timezone |
-| **Market Data** | Data providers, news/scraper toggles, staleness thresholds |
-| **LLM** | Enable/disable Gemini, model selection |
-| **Reports** | Daily report time, weekly report schedule |
-| **Retraining** | Retrain schedule, shadow mode duration, minimum samples |
-| **Notifications** | Telegram alert toggles (trade entry, exit, daily summary, errors, kill switch) |
-
-### Service Toggles
-
-External services can be independently enabled or disabled:
-
-| Service | Config Key | Default | What It Controls |
-|---------|-----------|---------|-----------------|
-| Gemini LLM | `llm.enabled` | `false` | Sentiment analysis, trade review, failure analysis |
-| News sources | `market_data.news_enabled` | `true` | MoneyControl, ET Markets, LiveMint RSS feeds |
-| Scrapers | `market_data.scrapers_enabled` | `true` | Screener.in, Trendlyne, Google Finance, NSE filings |
-| Kite data plan | `market_data.kite_data_enabled` | `false` | Paid Kite Connect historical data API (preferred over free providers when on) |
-| KiteTicker WebSocket | `market_data.kite_websocket_enabled` | `false` | Sub-second LTP cache; position-monitor reads from it before falling back to REST |
-| Telegram | `notifications.telegram.enabled` | `false` | Telegram bot and notifications |
-| LLM review gate | `risk.llm_review_enabled` | `true` | Gemini trade approval (falls back to rules-only if LLM disabled) |
-| Trailing SL | `risk.trailing_sl_enabled` | `true` | Raises SL as profit accrues — works for both client-side SL orders and broker-side GTT (via `kite.modify_gtt`) |
-| Margin / leverage | `risk.margin_usage_enabled` | `false` | When on, risk-check sizes positions against Kite's `order_margins` instead of full notional |
-
-### Broker Integration (Zerodha Kite)
-
-The Kite integration goes well beyond `place_order` — every part of the
-order lifecycle is wired so trade state stays consistent between the
-broker and the local database.
-
-| Surface | What's wired |
+| Command | What it does |
 |---|---|
-| **Order placement** | MARKET → LIMIT auto-conversion at LTP ± buffer (Kite rejects raw MARKET via API now). SL-M → SL with a 0.5% past-trigger limit. Universal tick rounding (NSE 0.05). Every order carries a `tag` (`yv-entry`, `yv-sl`, `yv-tgt`, `yv-sqoff`, `yv-close`, `yv-partial`, etc.) so the placer is visible in `kite.orders()`. Residual MARKET/SL-M orders carry `market_protection=-1` to satisfy Kite's new requirement. |
-| **CNC OCO GTT** | Two-leg target + SL GTT placed at the broker on entry fill. Pre-flight validates SL/target sides; slot-cap (≥45 active GTTs out of 50) skips placement and falls back to client-side. Reconciler each heartbeat detects user-cancelled / rejected / expired / vanished GTTs and clears `gtt_id` locally so client-side detection resumes. Status badge on trade detail. |
-| **MIS OCO** | Kite doesn't allow GTT on MIS, so trade-execute places a resting LIMIT at target alongside the SL. Position-monitor enforces OCO: when one fills, the other is cancelled. Same ghost-recovery path closes the local row. |
-| **Trailing SL** | When profit ≥ `trailing_sl_trigger_multiple × risk`, the SL leg is raised in place — `kite.modify_gtt` for CNC, `kite.modify_order` for plain SL orders. |
-| **Partial profit booking** | Books a fraction of the position at an intermediate target. GTT is resized to the remaining quantity so subsequent fires aren't rejected for over-qty. |
-| **Square-off / kill switch** | Cancels SL + target orders and deletes attached GTT before the market exit. Kill switch additionally sweeps orphan GTTs (live at broker but with no matching open local trade). |
-| **`convert_position`** | `POST /api/positions/{trade_id}/convert` promotes winning MIS to CNC before square-off; cancels stale MIS-side OCO orders since they're product-specific. |
-| **Postback handler** | Verifies `SHA-256(order_id + order_timestamp + api_secret)` against the payload's `checksum` — rejects 401 on mismatch. Drives real trade-row updates: entry REJECTED → mark failed + alert; entry COMPLETE → backfill fill_price / slippage; SL or target COMPLETE → cancel the other leg; SL REJECTED → loud alert (position unprotected). |
-| **Real transaction costs** | On close, `compute_charges` calls `kite.get_virtual_contract_note` for actual brokerage / STT / GST / exchange / SEBI / stamp. Stored on `trades.realized_costs_json`; trade detail page shows the breakdown with a source badge (`Contract note` / `Broker actuals` / `Estimate`). |
-| **Pre-trade margin** | `risk.margin_usage_enabled=true` switches sizing from `entry × qty ≤ available_cash` to Kite's `order_margins` total — gives the real MIS leverage and includes broker-side charges. |
-| **WebSocket** | Optional `KiteTicker` runs in threaded mode with auto-reconnect. Position-monitor subscribes to open-position symbols and reads the cached LTP (max 5s freshness) before falling back to REST. Order-update frames are bridged into the same business logic as the HTTP postback handler (WebSocket is the primary push channel; signed postbacks stay as backup, heartbeat ghost-recovery as last resort — all three idempotent). |
-| **Audit trail** | Every GTT lifecycle event (placed / modified / deleted / status_change / rejected_placement) is logged to `gtt_events` with a `details_json` payload; trade detail page renders the per-trade history. Same goes for broker order history + per-fill records via `kite.order_history` / `kite.order_trades`, surfaced behind a "Fetch from broker" toggle on the trade detail page. |
-
----
-
-### How Config Impacts Trades
-
-The settings you change directly affect trading behavior:
-
-- **`risk.max_open_positions`** — Limits how many stocks you hold simultaneously. Lower = more conservative.
-- **`risk.max_portfolio_exposure_pct`** — Caps total capital deployed. At 0.60, the system never invests more than 60% of capital.
-- **`risk.daily_loss_limit_pct`** — Circuit breaker. At 0.03, if you lose 3% of capital in a day, all new trades stop.
-- **`risk.min_confidence_buy` / `risk.min_confidence_sell`** — Per-direction ML confidence gates (defaults 0.60 / 0.75). Higher = fewer, more selective trades. SELL is typically tighter than BUY because exit signals carry less asymmetric upside.
-- **`scanning.shortlist_size`** — How many stocks are evaluated each cycle. Larger shortlists find more opportunities but take longer.
-- **`strategy.mode`** — Controls holding period preference: `intraday` (MIS, auto-squared at EOD), `short_term`, `balanced`, or `long_term` (CNC, held overnight).
-- **`execution.paper_slippage_pct`** — Simulated slippage in paper mode. Set higher (e.g., 0.3%) for more conservative backtests.
-- **`risk.target_early_exit_pct`** — How close LTP must get to target before client-side detection exits (default 0.15%). Heartbeats run every 15 min; a price that gets within a paisa of target but never quite prints there would otherwise wait a full cycle. Set to 0 for exact-target behaviour.
-- **`risk.llm_review_enabled`** — When on, every signal goes through Gemini for a second opinion. Gemini can APPROVE, REJECT, or RESIZE the trade.
-
----
-
-## Safety Mechanisms
-
-### Kill Switch
-
-Available via Telegram (`/stop`, `/kill`, `/resume`) and the dashboard:
-
-| Command | Effect |
-|---------|--------|
-| `/stop` | Pause all trading. Existing positions are kept, no new trades. |
-| `/kill` | Square off ALL open positions at market price and pause trading. |
-| `/resume` | Resume trading after a stop/kill. |
-
-Kill switch state persists across restarts.
-
-### Circuit Breakers
-
-- **Daily loss limit** (default 3%): If cumulative daily losses exceed this, all new trades are blocked until next market day.
-- **Weekly loss limit** (default 5%): If weekly losses exceed this, position sizing is automatically reduced by 50%.
-
-### Other Protections
-
-- **Mandatory stop-loss** on every trade (cannot be disabled)
-- **Symbol cooldown** — Hard block on re-trading a symbol for N days after last trade
-- **Symbol quarantine** — Auto-blocks symbols after 3 consecutive data fetch failures
-- **Price drift rejection** — In live mode, rejects orders if the market price has drifted too far from the signal price
-- **Broker circuit breaker** — Trips after 5 consecutive API failures, 30-second cooldown
-- **Heartbeat overrun protection** — If a pipeline cycle takes too long, the next one is skipped (with alerts after 3 consecutive skips)
-
----
-
-## Telegram Bot Commands
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Quick status summary (mode, positions, PnL, pending trades) |
+| `/start` | Quick status: mode, positions, P&L, anything awaiting approval |
 | `/help` | Full command reference |
-| `/status` | System health — DB, broker, LLM, Telegram connectivity |
-| `/pnl` | Today's PnL summary |
-| `/positions` | Open positions with entry prices, targets, stop-losses |
-| `/dashboard` | Link to the web dashboard |
-| `/pending` | Show trades awaiting manual approval |
-| `/approve SYMBOL` | Approve a pending trade (supports overrides — see `/help`) |
+| `/status` | System health check |
+| `/pnl` | Today's profit and loss |
+| `/positions` | Open positions with targets and stop-losses |
+| `/pending` | Trades waiting for your approval |
+| `/approve SYMBOL` | Approve a pending trade (overrides supported) |
 | `/reject SYMBOL` | Reject a pending trade |
 | `/trade BUY SYMBOL entry target sl` | Place a manual trade |
-| `/stop` | Activate kill switch |
-| `/kill` | Square off all positions + activate kill switch |
-| `/resume` | Deactivate kill switch |
-| `/auth TOKEN` | Daily Kite Connect re-authentication |
-| `/holiday` | List market holidays |
-| `/holiday add YYYY-MM-DD` | Add a holiday (also accepts `today`/`tomorrow`) |
-| `/holiday rm YYYY-MM-DD` | Remove a holiday |
+| `/stop` | Pause new trading (keep existing positions) |
+| `/kill` | Close everything and pause |
+| `/resume` | Resume trading |
+| `/auth TOKEN` | Daily Zerodha re-authorization (fallback) |
+| `/holiday` | View or edit the market-holiday list |
+| `/dashboard` | Link to the web dashboard |
+
+### What You Can Tune
+
+Almost everything is adjustable live from the **Settings** page — changes take effect immediately, no restart needed. The main levers:
+
+- **Capital & risk** — starting capital, how much to risk per trade, how many positions to hold at once, the cap on total money deployed, daily and weekly loss limits, and how confident the model must be before acting.
+- **Strategy** — your holding-period style (intraday, short-term, balanced, or long-term), which technical indicators to use, and market-condition filters.
+- **What to trade** — which universe of stocks to scan, how many to evaluate each cycle, and minimum liquidity.
+- **Execution** — simulated slippage for paper mode, order retry behavior, and how far the price may drift before a live order is rejected.
+- **Costs** — brokerage and tax rates (pre-filled with current Zerodha/NSE figures) so simulated and real P&L are honest.
+- **Services** — turn the AI reviewer, news, scrapers, paid data, live price feed, and Telegram on or off independently.
+- **Schedules** — how often the trading cycle runs, when reports are sent, and when weekly retraining happens.
+
+### Safety Mechanisms
+
+- **Kill switch** — `/stop` pauses new trades; `/kill` closes everything immediately; `/resume` re-enables. The state survives restarts.
+- **Circuit breakers** — hit your daily loss limit and new trading halts until the next market day; hit the weekly limit and position sizes are automatically cut.
+- **Always-on protections** — a stop-loss on every trade (can't be turned off), per-symbol cooldowns, automatic blocking of symbols with unreliable data, rejection of trades when the price has moved too far from the signal, and protection against the system overrunning itself.
 
 ---
 
-## Dashboard Pages
+## Recommended First Month
 
-| Page | What It Shows |
-|------|--------------|
-| **Dashboard** | Portfolio overview, equity curve, today's PnL, quick stats |
-| **Positions** | Open positions with real-time unrealized P&L |
-| **Trades** | Trade history with full execution details |
-| **Trade Detail** | Complete reasoning chain for a single trade (signal → risk → LLM → execution → outcome), broker order IDs, GTT lifecycle audit, broker order history on demand, transaction-cost breakdown with source badge, gross/net/% PnL |
-| **Watchlist** | Sector rotation view, shortlisted symbols |
-| **Holdings** | Brokerage account holdings (from Zerodha) |
-| **News** | Sentiment-scored articles from all sources |
-| **Calendar** | Market holidays, early close days, economic events |
-| **Predictions** | Model predictions with scoring status |
-| **ML Models** | Model management — versions, shadow testing, promotion, performance comparison |
-| **Symbol Deep-Dive** | OHLCV chart, trades, and predictions for a specific stock |
-| **Strategy** | Win rate, average gains, Sharpe ratio, performance by strategy |
-| **Execution Quality** | Slippage analysis, fill quality metrics |
-| **Correlations** | Inter-symbol correlation heatmap |
-| **Risk Simulator** | Replay historical signals under different risk parameters |
-| **Dry-Run** | Preview what signals would be generated today without executing |
-| **Reports** | Daily and weekly generated reports |
-| **Audit Log** | Complete system action history |
-| **Data Management** | Database size, row counts, backups, cleanup |
-| **Skills** | Manually trigger pipeline stages (ingest data, retrain model, etc.) |
-| **Integrations** | Zerodha, Gemini, Telegram connection status and auth flow |
-| **Settings** | All editable configuration parameters |
+A gentle on-ramp from "just watching" to "trading with confidence":
+
+**Week 1 — Set up and observe.** Deploy in paper mode (no Zerodha needed). Connect Telegram so you can watch from your phone. Use the **dry run** to see what the system would do each day. Don't change any risk settings yet.
+
+**Week 2 — Paper trade.** Let it run for several market days. Watch the **predictions** to see how accuracy holds up, and the **trade history** to understand its entry/exit and sizing behavior. Try the **risk simulator** to see how different settings would have changed outcomes.
+
+**Week 3 — Let it learn.** Once enough history accumulates, the weekly retrain runs automatically (you can also trigger it manually). New models shadow-test for a week and are promoted only if they're better. Start nudging risk settings — begin conservative and loosen slowly.
+
+**Week 4 — Decide.** Review win rate, risk-adjusted returns, and drawdowns. Confirm paper results are positive *after* costs across different market days. Test the kill switch. Get comfortable with the daily Zerodha re-auth.
+
+Only then, if you're convinced, switch to live mode — pull your real account capital, start small, and set a daily loss limit you can genuinely afford.
 
 ---
 
-## Recommended Approach
+## Indian Market Context (good to know)
 
-If you're setting this up for the first time, here's a suggested timeline:
-
-### Week 1: Setup and Observation
-
-1. Deploy with Docker or run locally. Don't set Kite credentials yet — the system works fully in paper mode with free market data.
-2. Set `GEMINI_API_KEY` if you want LLM features (sentiment, trade review). This is optional but improves signal quality.
-3. Set up the Telegram bot — it's the easiest way to monitor the system without opening the dashboard.
-4. Watch the dashboard daily. Use the **Dry-Run** page to see what signals the system generates. Don't change any risk parameters yet.
-
-### Week 2: Paper Trading
-
-1. Let the system run through several market days. It generates signals and executes paper trades automatically.
-2. Check the **Predictions** page to see how signal accuracy tracks over time.
-3. Review the **Trades** page to understand the system's behavior — entry/exit logic, position sizing, stop-loss placement.
-4. Use the **Risk Simulator** to replay historical signals under different risk parameters and see how outcomes change.
-
-### Week 3: Model Retraining
-
-1. After enough predictions accumulate, the weekly retraining kicks in automatically (Saturday 6 AM by default). You can also trigger it manually from the **Skills** page.
-2. New models enter **shadow mode** for 7 days — running predictions alongside production without affecting trades.
-3. If the shadow model outperforms, it's automatically promoted. Watch the **ML Models** page for promotion events.
-4. Tune risk parameters based on what you observe. Start conservative (lower exposure, fewer positions) and loosen gradually.
-
-### Week 4: Evaluate and Decide
-
-1. Use the **Strategy** page to review win rate, Sharpe ratio, and drawdowns.
-2. Check that the model has been retrained at least once with real prediction feedback.
-3. Verify that paper PnL shows positive returns after transaction costs across different market conditions.
-4. Set up the **kill switch** via Telegram and test that `/stop` and `/resume` work.
-5. Make sure you're comfortable with the daily Kite re-authentication routine.
-
-If you're confident in the system, switch to live mode from **Settings**. Use the **Sync with Zerodha** button on the Integrations page to pull your actual account capital. Start with a small amount and a conservative daily loss limit you can genuinely afford to lose.
+- **Intraday vs delivery** — Intraday positions are auto-closed by the broker at end of day (the system squares off a bit early, at 3:15 PM IST, to stay ahead of that). Delivery positions are held overnight or longer, used by the short- and long-term strategy styles.
+- **Market hours** — 9:15 AM to 3:30 PM IST, Monday to Friday, minus ~15 holidays a year (managed from the Calendar page or Telegram).
+- **Short selling** — Indian rules don't allow retail overnight short selling, so any "sell" idea on a stock you don't own is handled as an intraday trade.
 
 ---
 
-## Market Context
-
-- **MIS** (Margin Intraday Square-off) — Positions are auto-squared by the broker at end of day. The system squares off at 3:15 PM IST to avoid broker's forced square-off.
-- **CNC** (Cash and Carry) — Delivery trades held overnight or longer. Used for short-term and long-term strategy modes.
-- **Market hours** — 9:15 AM to 3:30 PM IST, Monday through Friday. ~15 NSE holidays per year (managed via the Calendar page or Telegram).
-- **Kite API rate limit** — 10 requests/second aggregate. The system respects this with built-in rate limiting.
-
----
-
-## Running Tests
-
-```bash
-cd backend
-PYTHONPATH=src python -m pytest tests/ -v
-```
+*Questions about the internals or contributing? Technical and architecture documentation lives in `CLAUDE.md` and the `docs/` folder.*
