@@ -173,7 +173,10 @@ export function SkillsPage() {
                 </div>
               )}
 
-              <div className="mt-auto flex flex-col gap-2">
+              {/* Stop/Start schedule sits inline with Run Now as a split
+                  control so the two actions share one row instead of
+                  stacking and eating vertical space. */}
+              <div className="mt-auto flex gap-2">
                 {/* CRON skills (enabled is bool, null for non-cron) can be
                     started/stopped — pauses only the auto-fire, not Run Now. */}
                 {skill.enabled !== null && (
@@ -183,7 +186,7 @@ export function SkillsPage() {
                     }
                     disabled={toggleSchedule.isPending}
                     className={clsx(
-                      "px-3 py-1.5 rounded text-xs font-medium transition-colors border disabled:opacity-50",
+                      "flex-1 px-3 py-1.5 rounded text-xs font-medium transition-colors border disabled:opacity-50 whitespace-nowrap",
                       skill.enabled
                         ? "bg-amber-900/20 hover:bg-amber-900/40 text-amber-400 border-amber-800"
                         : "bg-emerald-900/20 hover:bg-emerald-900/40 text-emerald-400 border-emerald-800",
@@ -196,14 +199,14 @@ export function SkillsPage() {
                   </button>
                 )}
                 {isRunning ? (
-                  <div className="flex items-center gap-2 px-3 py-1.5 rounded text-xs font-medium bg-amber-900/20 border border-amber-800 text-amber-400">
+                  <div className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 rounded text-xs font-medium bg-amber-900/20 border border-amber-800 text-amber-400">
                     <div className="w-3 h-3 border-2 border-amber-800 border-t-amber-400 rounded-full animate-spin" />
                     Running...
                   </div>
                 ) : (
                   <button
                     onClick={() => handleRun(skill.name)}
-                    className="px-3 py-1.5 rounded text-xs font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-700"
+                    className="flex-1 px-3 py-1.5 rounded text-xs font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-700"
                   >
                     Run Now
                   </button>

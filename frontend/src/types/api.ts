@@ -420,6 +420,13 @@ export interface PredictionDetail {
   direction_correct: boolean | null;
   target_hit: boolean | null;
   actual_pnl_pct: number | null;
+  // Signal setup (joined from signals/trades) — mirrors the dry-run / signal detail.
+  entry_price?: number | null;
+  target_price?: number | null;
+  stop_loss_price?: number | null;
+  product?: string | null;
+  holding_period?: string | null;
+  expected_holding_days?: number | null;
 }
 
 export interface PaginatedPredictions {

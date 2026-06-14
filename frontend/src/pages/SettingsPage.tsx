@@ -1116,7 +1116,7 @@ function NumberField({
       <FieldLabel label={label} description={description} fullKey={fullKey} hint={hint} />
       <input
         type="number"
-        step={isInt ? 1 : value % 1 !== 0 ? 0.001 : 1}
+        step={isInt ? 1 : value % 1 !== 0 ? 0.01 : 1}
         value={draft}
         onChange={(e) => {
           const v = e.target.value;

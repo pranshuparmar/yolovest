@@ -122,15 +122,21 @@ export function DryRunPage() {
             title="Evaluate as of a past date (leave blank for latest)"
             className="px-3 py-2 rounded text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-emerald-500"
           />
-          {asOf && (
-            <button
-              onClick={() => setAsOf("")}
-              title="Clear date — use latest data"
-              className="px-2 py-2 rounded text-sm text-gray-400 hover:text-gray-200"
-            >
-              ×
-            </button>
-          )}
+          {/* Always mounted so the toolbar width is identical with/without a
+              date — toggling visibility (not mount) stops the controls from
+              reflowing onto a new line when a date is picked or cleared. */}
+          <button
+            onClick={() => setAsOf("")}
+            title="Clear date — use latest data"
+            aria-hidden={!asOf}
+            tabIndex={asOf ? 0 : -1}
+            className={clsx(
+              "px-2 py-2 rounded text-sm text-gray-400 hover:text-gray-200",
+              !asOf && "invisible pointer-events-none",
+            )}
+          >
+            ×
+          </button>
           <select
             value={selectedModel}
             onChange={(e) => setSelectedModel(e.target.value)}
@@ -424,81 +430,82 @@ export function DryRunPage() {
                 <thead>
                   <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
                     <th className="py-2 px-3 text-left">Symbol</th>
-                    <th className="py-2 px-3 text-center">Signal</th>
-                    <th className="py-2 px-3 text-center">Hold</th>
-                    <th className="py-2 px-3 text-center">Product</th>
-                    <th className="py-2 px-3 text-center">Target Date</th>
-                    <th className="py-2 px-3 text-right">Entry</th>
-                    <th className="py-2 px-3 text-right">Target</th>
-                    <th className="py-2 px-3 text-right">SL</th>
-                    <th className="py-2 px-3 text-right">Confidence</th>
-                    <th className="py-2 px-3 text-right">Est. Costs</th>
-                    <th className="py-2 px-3 text-right">Net G/L</th>
-                    <th className="py-2 px-3 text-right">Actual Close</th>
-                    <th className="py-2 px-3 text-right">Move %</th>
-                    <th className="py-2 px-3 text-center">Direction</th>
-                    <th className="py-2 px-3 text-center">Target Hit</th>
+                    <th className="py-2 px-3 text-left">Hold / Target</th>
+                    <th className="py-2 px-3 text-right">Entry / Target / SL</th>
+                    <th className="py-2 px-3 text-right">Conf.</th>
+                    <th className="py-2 px-3 text-right">Net G/L · Costs</th>
+                    <th className="py-2 px-3 text-right">Actual</th>
+                    <th className="py-2 px-3 text-center">Result</th>
                   </tr>
                 </thead>
                 <tbody>
                   {(signals || []).map((s) => (
                     <tr
                       key={s.id}
-                      className="border-b border-gray-800/50 hover:bg-gray-800/30"
+                      className="border-b border-gray-800/50 hover:bg-gray-800/30 align-top"
                     >
-                      <td className="py-2 px-3 font-medium text-gray-200">
-                        <SymbolLink symbol={s.symbol} className="text-gray-200" />
-                      </td>
-                      <td className="py-2 px-3 text-center">
-                        <span
-                          className={clsx(
-                            "px-1.5 py-0.5 rounded text-xs font-medium",
-                            s.signal_type === "BUY"
-                              ? "bg-emerald-900/40 text-emerald-400"
-                              : "bg-red-900/40 text-red-400"
-                          )}
-                        >
-                          {s.signal_type}
-                        </span>
-                      </td>
-                      <td className="py-2 px-3 text-center text-xs text-gray-400">
-                        {s.holding_period ?? "--"}
-                        {s.expected_holding_days != null && s.expected_holding_days > 0 && (
-                          <span className="text-gray-600 ml-1">({s.expected_holding_days}d)</span>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-center">
-                        {s.product ? (
-                          <span className={clsx(
-                            "px-1.5 py-0.5 rounded text-xs font-medium",
-                            s.product === "MIS"
-                              ? "bg-amber-900/30 text-amber-400"
-                              : "bg-blue-900/30 text-blue-400"
-                          )}>
-                            {s.product}
+                      {/* Symbol + direction + product */}
+                      <td className="py-2 px-3">
+                        <SymbolLink symbol={s.symbol} className="font-medium text-gray-200" />
+                        <div className="flex items-center gap-1 mt-1">
+                          <span
+                            className={clsx(
+                              "px-1.5 py-0.5 rounded text-[10px] font-medium",
+                              s.signal_type === "BUY"
+                                ? "bg-emerald-900/40 text-emerald-400"
+                                : "bg-red-900/40 text-red-400"
+                            )}
+                          >
+                            {s.signal_type}
                           </span>
-                        ) : (
-                          <span className="text-gray-600">--</span>
-                        )}
+                          {s.product && (
+                            <span
+                              className={clsx(
+                                "px-1.5 py-0.5 rounded text-[10px] font-medium",
+                                s.product === "MIS"
+                                  ? "bg-amber-900/30 text-amber-400"
+                                  : "bg-blue-900/30 text-blue-400"
+                              )}
+                            >
+                              {s.product}
+                            </span>
+                          )}
+                        </div>
                       </td>
-                      <td className="py-2 px-3 text-center font-mono text-xs text-gray-400">
-                        {s.target_date ?? <span className="text-gray-600">--</span>}
+                      {/* Holding period + target date */}
+                      <td className="py-2 px-3 text-xs">
+                        <div className="text-gray-300">
+                          {s.holding_period ?? "--"}
+                          {s.expected_holding_days != null && s.expected_holding_days > 0 && (
+                            <span className="text-gray-600 ml-1">({s.expected_holding_days}d)</span>
+                          )}
+                        </div>
+                        <div className="text-gray-500 font-mono mt-0.5">
+                          {s.target_date ?? "--"}
+                        </div>
                       </td>
-                      <td className="py-2 px-3 text-right font-mono text-gray-300">
-                        {fmt(s.entry_price)}
+                      {/* Entry / Target (+%) / SL (+%) */}
+                      <td className="py-2 px-3 text-right font-mono text-xs whitespace-nowrap">
+                        <div className="text-gray-300">
+                          <span className="text-gray-600 mr-1">E</span>
+                          {fmt(s.entry_price)}
+                        </div>
+                        <div className="text-emerald-400 mt-0.5">
+                          <span className="text-gray-600 mr-1">T</span>
+                          {fmt(s.target_price)}
+                          <span className="ml-1 text-[10px] text-emerald-400/70">
+                            {formatPriceMovePct(priceMovePct(s.entry_price, s.target_price, s.signal_type))}
+                          </span>
+                        </div>
+                        <div className="text-red-400 mt-0.5">
+                          <span className="text-gray-600 mr-1">SL</span>
+                          {fmt(s.stop_loss_price)}
+                          <span className="ml-1 text-[10px] text-red-400/70">
+                            {formatPriceMovePct(priceMovePct(s.entry_price, s.stop_loss_price, s.signal_type))}
+                          </span>
+                        </div>
                       </td>
-                      <td className="py-2 px-3 text-right font-mono text-emerald-400">
-                        {fmt(s.target_price)}
-                        <span className="ml-1 text-[10px] text-emerald-400/70">
-                          {formatPriceMovePct(priceMovePct(s.entry_price, s.target_price, s.signal_type))}
-                        </span>
-                      </td>
-                      <td className="py-2 px-3 text-right font-mono text-red-400">
-                        {fmt(s.stop_loss_price)}
-                        <span className="ml-1 text-[10px] text-red-400/70">
-                          {formatPriceMovePct(priceMovePct(s.entry_price, s.stop_loss_price, s.signal_type))}
-                        </span>
-                      </td>
+                      {/* Confidence */}
                       <td className="py-2 px-3 text-right">
                         <span
                           className={clsx(
@@ -513,30 +520,36 @@ export function DryRunPage() {
                           {(s.confidence_score * 100).toFixed(0)}%
                         </span>
                       </td>
-                      <td className="py-2 px-3 text-right font-mono text-xs text-gray-400">
-                        {s.estimated_costs != null ? `₹${fmt(s.estimated_costs)}` : "--"}
-                      </td>
+                      {/* Net G/L + estimated costs */}
                       <td className="py-2 px-3 text-right font-mono text-xs">
                         {s.est_net_gain != null && s.est_net_loss != null ? (
-                          <span title="Net P&L after all deductions if target hits / if SL hits">
+                          <div title="Net P&L after all deductions if target hits / if SL hits">
                             <span className="text-emerald-400">{netRupee(s.est_net_gain)}</span>
                             <span className="text-gray-600"> / </span>
                             <span className="text-red-400">{netRupee(s.est_net_loss)}</span>
-                          </span>
+                          </div>
                         ) : (
-                          <span className="text-gray-600">--</span>
+                          <div className="text-gray-600">--</div>
+                        )}
+                        {s.estimated_costs != null && (
+                          <div className="text-gray-500 mt-0.5">
+                            costs ₹{fmt(s.estimated_costs)}
+                          </div>
                         )}
                       </td>
-                      <td className="py-2 px-3 text-right font-mono text-gray-300">
-                        {s.actual_close != null ? fmt(s.actual_close) : (
-                          <span className="text-gray-600">pending</span>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-right">
-                        {s.actual_move_pct != null ? (
-                          <span
+                      {/* Actual close + realised move % */}
+                      <td className="py-2 px-3 text-right font-mono text-xs">
+                        <div className="text-gray-300">
+                          {s.actual_close != null ? (
+                            fmt(s.actual_close)
+                          ) : (
+                            <span className="text-gray-600">pending</span>
+                          )}
+                        </div>
+                        {s.actual_move_pct != null && (
+                          <div
                             className={clsx(
-                              "font-medium",
+                              "mt-0.5 font-medium",
                               s.actual_move_pct >= 0
                                 ? "text-emerald-400"
                                 : "text-red-400"
@@ -544,29 +557,38 @@ export function DryRunPage() {
                           >
                             {s.actual_move_pct >= 0 ? "+" : ""}
                             {fmt(s.actual_move_pct)}%
-                          </span>
-                        ) : (
-                          <span className="text-gray-600">--</span>
+                          </div>
                         )}
                       </td>
-                      <td className="py-2 px-3 text-center">
-                        {s.direction_correct != null ? (
-                          s.direction_correct === 1 ? (
-                            <span className="text-emerald-400">Y</span>
-                          ) : (
-                            <span className="text-red-400">N</span>
-                          )
-                        ) : (
-                          <span className="text-gray-600">--</span>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-center">
-                        {s.target_hit != null ? (
-                          s.target_hit === 1 ? (
-                            <span className="text-emerald-400">Y</span>
-                          ) : (
-                            <span className="text-red-400">N</span>
-                          )
+                      {/* Result: direction + target hit */}
+                      <td className="py-2 px-3 text-center whitespace-nowrap">
+                        {s.direction_correct != null || s.target_hit != null ? (
+                          <div className="flex flex-col items-center gap-1">
+                            {s.direction_correct != null && (
+                              <span
+                                className={clsx(
+                                  "px-1.5 py-0.5 rounded text-[10px] font-medium",
+                                  s.direction_correct === 1
+                                    ? "bg-emerald-900/40 text-emerald-400"
+                                    : "bg-red-900/40 text-red-400"
+                                )}
+                              >
+                                {s.direction_correct === 1 ? "Dir ✓" : "Dir ✗"}
+                              </span>
+                            )}
+                            {s.target_hit != null && (
+                              <span
+                                className={clsx(
+                                  "px-1.5 py-0.5 rounded text-[10px] font-medium",
+                                  s.target_hit === 1
+                                    ? "bg-emerald-900/40 text-emerald-400"
+                                    : "bg-amber-900/40 text-amber-400"
+                                )}
+                              >
+                                {s.target_hit === 1 ? "Tgt ✓" : "Tgt ✗"}
+                              </span>
+                            )}
+                          </div>
                         ) : (
                           <span className="text-gray-600">--</span>
                         )}
