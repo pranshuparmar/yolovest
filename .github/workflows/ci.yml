@@ -26,8 +26,13 @@ jobs:
           pip install --no-deps -e .
       - name: Lint (ruff)
         run: ruff check src/ tests/
-      - name: Test (pytest)
-        run: pytest tests/ -q
+      - name: Test (pytest + coverage gate)
+        # Coverage floor is a ratchet below the current ~59% overall — it
+        # guards against gross regression without flaking on small swings.
+        # The core money modules (risk_check / trade_execute / position_monitor
+        # / generate_signals / signal_evaluator / ml_signal / zerodha /
+        # orchestrator) sit well above this floor; raise it as coverage grows.
+        run: pytest tests/ -q --cov=yolovest --cov-report=term-missing --cov-fail-under=55
 
   backend-types:
     name: Backend (mypy)

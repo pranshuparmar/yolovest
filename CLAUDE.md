@@ -52,7 +52,12 @@ YoloVest is an AI-driven Indian stock trading platform. It uses Google Gemini fo
 │   ├── custom.conf         — Global HTTP-level overrides
 │   ├── heal-cert-symlinks.sh   — Restore <domain>.crt / <domain>.key on each boot
 │   └── tls-healthcheck.sh  — Detect ssl_reject_handshake / missing symlinks
-├── docs/                   — Operational + design docs
+├── docs/                   — Detail split out of CLAUDE.md + operational docs
+│   ├── architecture.md     — subsystems, heartbeat, risk gates, exit paths
+│   ├── database.md         — key tables, quarantine, universe resolution
+│   ├── configuration.md    — file-only keys, config sections, toggles
+│   ├── key-files.md        — file-by-file backend/frontend/infra map
+│   ├── telegram-commands.md
 │   ├── tls-recovery.md
 │   ├── kite-features-backlog.md
 │   └── intraday-model-design.md   — Design notes for a future 5-min intraday model
@@ -63,305 +68,48 @@ YoloVest is an AI-driven Indian stock trading platform. It uses Google Gemini fo
 
 ## Architecture
 
-### Abstraction Layers (ABCs)
+YoloVest layers cleanly: `orchestrator.py` drives a heartbeat pipeline of
+`SkillBase` units (`skills/`) that reach shared subsystems — `broker/`,
+`strategy/`, `data/`, `llm/`, `news/` — through Protocol-typed `AppContext`
+(`context.py`). Abstraction seams: `BrokerBase`→`ZerodhaBroker`,
+`LLMBase`→`GeminiLLM`, `MarketDataBase`→`MarketDataIngester` (provider
+fallback chain), `MLBase`→`XGBoostSignalModel`.
 
-- **`BrokerBase`** (`broker/base.py`) → `ZerodhaBroker`. Order placement, GTT (Good Till Triggered) two-leg OCO orders for CNC, position/holdings/margins queries, daily auth lifecycle. Paper mode simulates fills using Kite-compatible field names (`filled_quantity`, `average_price`, `tradingsymbol`). All Kite calls go through `KiteRateLimiter` (see below).
-- **`LLMBase`** (`llm/base.py`) → `GeminiLLM`. 7 methods: `ping`, `review_trade`, `analyze_sentiment`, `summarize_with_web_grounding`, `validate_watchlist`, `summarize_market_day`, `analyze_prediction_failures`.
-- **`MarketDataBase`** (`data/base.py`) → `MarketDataIngester` orchestrates a fallback chain. When `market_data.kite_data_enabled` is true, the chain is:
-  - **daily**: `KiteDataProvider` → `JugaadDataProvider` → `YFinanceProvider`
-  - **intraday (5min/15min/1m)**: `KiteDataProvider` → `TVDatafeedProvider`
-  When disabled, Kite is removed and jugaad/yfinance/tvdatafeed handle their lanes. Each provider has staleness validation and per-bar quality checks (high ≥ low, close in range).
-- **`NewsSource`** (`news/base.py`) → MoneyControl, ET Markets, LiveMint (RSS); NSE Official (API); Google Finance (scraper).
-- **`MLBase`** (`strategy/ml_base.py`) → `XGBoostSignalModel` with Platt scaling calibration, config-driven regularized hyperparameters with early stopping (`retraining.xgb`), and `tree_method='hist'` for memory-efficient training.
+**Heartbeat pipeline** (market hours, every 15 min):
+`expire-pending → health-check → ingest-data → depth-snapshot → market-scan
+→ generate-signals → [per signal: risk-check → llm-review → trade-execute →
+predict-track] → position-monitor`.
 
-### KiteTicker WebSocket
-
-Optional sub-second LTP feed (opt-in via `market_data.kite_websocket_enabled`). When enabled and the broker is authenticated, `main.async_main` instantiates `broker.kite_ticker.KiteTickerClient` and attaches it to `ctx.ticker`. Position-monitor subscribes to every open-position symbol each cycle (idempotent), and `_get_ltp_with_retry` reads from the cache first (max 5s freshness) before falling back to REST. Mode is `MODE_LTP` — the 8-byte payload is enough for target/SL; richer modes (`MODE_QUOTE` / `MODE_FULL`) are available on the wrapper but not consumed yet.
-
-The ticker also bridges `on_order_update` text frames into `dashboard.app._apply_order_postback` — the same business logic the HTTP postback handler runs. WebSocket is the primary push channel because Kite postbacks are explicitly best-effort with no retry; the HTTP handler stays as a backup, and the heartbeat ghost-recovery (which cancels dangling exit orders) is the last-resort reconciler. The three layers are idempotent — if the same event arrives via multiple channels, later hits are no-ops.
-
-Tick frames also fan out to dashboard clients as `tick_update` events, throttled to one broadcast per symbol per second so the browser socket doesn't drown. `frontend/src/hooks/useLtpStream.ts` maintains the per-symbol LTP map; `PositionsTable` consumes it to render live LTP + move% columns next to entry/SL/target.
-
-### Kite Rate Limiter
-
-`broker/kite_rate_limiter.py` provides a single `KiteRateLimiter` (concurrency cap + time-based interval) shared between `ZerodhaBroker` and `KiteDataProvider`. Built once in `main.build_context()` and injected. Default: 10 req/s and 8 concurrent.
-
-The `historical_data` endpoint additionally has its own tighter throttle (default 0.4s minimum interval = ~2.5 req/s) inside `KiteDataProvider`, since Kite enforces a separate per-second limit on that endpoint. On detected `429 Too many requests`, historical fetches back off 10s before retrying.
-
-`KiteDataProvider` pre-warms its instrument-token cache from a single `kite.instruments("NSE")` call on first lookup, then serves all subsequent lookups from memory.
-
-### Skill System
-
-Skills extend `SkillBase` (`skills/base.py`). Each skill has:
-- `async execute(**kwargs) -> SkillResult`
-- `should_run() -> bool`
-- `async safe_execute()` — wraps `execute` with exception logging (`logger.exception`)
-- A trigger type: `HEARTBEAT`, `CRON`, `EVENT`, or `MANUAL`
-- `compute_schedule() -> str | None` — for CRON skills, returns the LIVE cron
-  expression resolved from `self.ctx.config`. The scheduler calls this every
-  tick (not the cached `self.schedule`), so a schedule changed in the Settings
-  UI (which hot-replaces `ctx.config`) takes effect within one ~30s tick, no
-  restart. `__init__` sets `self.schedule = self.compute_schedule()`; skills
-  with a hardcoded schedule inherit the base default (returns `self.schedule`).
-- Access to shared context via `self.ctx`
-
-Skills are registered in `SKILL_REGISTRY` dict in `skills/__init__.py`.
-
-**Start/Stop schedules**: each CRON skill's auto-fire can be paused independently
-of manual `Run Now`. Paused skill names are persisted as a JSON list in
-`system_state.disabled_schedules`; `CronScheduler._check_and_fire` reads it fresh
-each tick and skips paused skills. `GET /api/skills` reports per-skill `enabled`
-(bool for CRON, null otherwise) + `next_run`; `POST /api/skills/{name}/schedule`
-`{enabled}` toggles it. Surfaced on the Skills page as a Start/Stop control.
-
-### Heartbeat Pipeline (market hours, every 15min)
-
-```
-expire-pending → health-check → ingest-data → depth-snapshot → market-scan → generate-signals
-  → [per signal]: risk-check → llm-review → [manual: queue pending] OR [auto: trade-execute] → predict-track
-  → position-monitor (always runs)
-```
-
-`expire-pending` runs first every cycle (`HeartbeatOrchestrator._execute_pipeline`) so abandoned pending trades free their `max_open_positions` / `max_trades_per_day` / `max_portfolio_exposure_pct` budgets before risk-check evaluates the day's signals. `execution.pending_expiry_minutes` (default 30) governs the timeout.
-
-Error propagation:
-- `health-check` fail → abort entire heartbeat.
-- `ingest-data` fail → skip scan + signals; always run `position-monitor`.
-- `trade-execute` fail in manual mode → pending row reverted to `status='pending'` for retry. When the failed `place_order` actually placed the order at the broker (Zerodha sometimes returns an error AFTER placing), trade-execute detects this via `kite.orders()` and **reconciles** the surviving order into a successful trade record instead of marking failed.
-
-### Strategy Modes
-
-- **`balanced`**: Runs both `predict_intraday()` and `predict_swing()` concurrently per stock, picks higher confidence. After `intraday_cutoff` (default 14:30 IST), only swing model runs.
-- **`intraday`**: Only intraday model (MIS, same-day).
-- **`short_term`**: Only swing model (2-5 day holds).
-- **`long_term`**: Only swing model (5-66 day holds, CNC).
-
-Holding period per stock is dynamic based on ATR%, trend strength, position-mix bias, and market regime. Target/SL multipliers come from `strategy.holding_periods.{intraday,short_swing,week,long}.{target,stop_loss}`, interpolated by holding-day count.
-
-### Intraday Circuit Caps
-
-For intraday signals (`holding_period == "intraday"`) when `market_data.kite_data_enabled`, ATR-based target/SL are constrained by the exchange's circuit limits read from the live quote:
-- BUY target capped at `upper_circuit × 0.99` (orders above won't fill)
-- SELL target capped at `lower_circuit × 1.01`
-- Stop-loss floored at the opposite circuit accordingly
-
-Today's session high/low are intentionally NOT enforced — they're current extremes, not forward boundaries. A breakout target above today's high is a legitimate model output and is allowed through.
-
-### Mode Filtering (Paper vs Live)
-
-All trade/position/prediction queries filter by `ctx.config.mode`. `trades`, `predictions`, `signals`, and `pending_trades` all carry a `mode` column. Paper and live data never mix in any view, skill, or API endpoint.
-
-**Critical**: When mode changes via Settings UI or config reload, `ctx.broker._mode` is synced automatically. `trade_execute` has a safety check that detects and auto-fixes broker/config mode mismatches.
-
-### Manual Approval Flow
-
-When `execution.transaction_mode == "manual"`:
-1. Signal passes risk-check → LLM review → queued to `pending_trades` table.
-2. Telegram notification: `/approve SYMBOL` or `/reject SYMBOL`.
-3. Dashboard: `PendingTradesBanner` shows pending count + total investment + per-row approve/edit/reject.
-4. On approval: executes immediately via `trade_execute`.
-5. On execution failure (non-reconciled): pending trade reverts to `status='pending'` for retry.
-6. Pending trades auto-expire after `execution.pending_expiry_minutes` (default 30). The heartbeat sweeps every cycle (`db.expire_pending_trades`); the dashboard endpoint defends the same way as a backstop.
-
-Risk-check includes pending-trade notional in the `max_portfolio_exposure_pct` check, so the queue can't accumulate past the cap. Square-off (EOD CRON) **ignores** manual mode and force-closes MIS positions — the broker auto-square at 15:30 is the binding deadline, asking for approval there buys nothing.
-
-### Signal-Disposition Retry Caps
-
-`db.get_todays_signaled_symbols` dedups today's signals so a symbol doesn't re-fire repeatedly, but distinguishes terminal from transient dispositions. A symbol with one of the **retryable** dispositions (`risk_rejected`, `expired`, `trade_execute_failed`, `skill_error`) is re-evaluated each heartbeat **until** its count of retryable signals today reaches `risk.max_risk_rejected_retries_per_day` (default 5). After that, the cap engages and the symbol is dedup-blocked for the rest of the day. Any **non-retryable** disposition (`executed`, `llm_rejected`, `awaiting_approval`, in-flight NULL) blocks immediately. The **deferred** disposition `time_blocked` (signal generated outside the order window) is a third class — re-evaluated freely AND cap-exempt, since the underlying condition is a scheduler edge case ("wait N minutes until `market_hours.order_start`"), not a real signal problem. Mode-scoped so paper and live retry budgets stay independent.
-
-This closes the failure mode where 12 transient risk-rejections (broad-market chop / depth / correlation with pending / exposure cap) at 9:30 would have permanently blocked those symbols for the rest of the day, leaving `max_trades_per_day` unused.
-
-### Position Adoption & Exit
-
-`position-monitor` auto-adopts untracked broker positions/holdings:
-1. Compares `broker.get_positions()` + `broker.get_holdings()` vs local DB.
-2. Untracked positions (not locked) are adopted with ATR-based SL/target.
-3. Trade record created with `origin='adopted'`, auto-added to watchlist.
-4. Locked holdings are never adopted or auto-managed.
-
-Exit paths:
-- **Broker-side GTT** (CNC only) — placed by `trade-execute._attach_oco_gtt` after entry fill. Pre-flight validation rejects nonsense SL/target combos; if the broker already has ≥45 active GTTs (cap is 50) we skip placement and fall back to client-side. `position-monitor` skips client-side target/SL checks when `gtt_id` is set; ghost-position reconciliation closes the DB row when the GTT fires and the broker position vanishes. Each cycle, `_reconcile_gtts` cross-checks `trades.gtt_id` against `broker.get_gtts()` — GTTs that have been cancelled, rejected, expired, or vanished get their `gtt_id` wiped so client-side detection resumes. Latest GTT status is cached in `trades.gtt_status` and rendered as a badge on the trade detail page. `_maybe_trail_gtt_sl` raises the SL leg in place via `broker.modify_gtt` once trailing-SL triggers, and partial-profit booking resizes the GTT to the remaining quantity so later fires aren't rejected.
-- **Broker-side MIS OCO** — Kite doesn't allow GTT on MIS, so `trade-execute._attach_mis_target_limit` places a resting LIMIT order at the target alongside the SL after entry fills. `position-monitor._enforce_mis_oco` watches both order statuses each cycle and cancels the surviving leg when one fills. `position-monitor._maybe_trail_mis_sl` lifts the broker-side SL trigger in place via `kite.modify_order` once trailing-SL triggers (mirror of `_maybe_trail_gtt_sl` for CNC), so MIS positions ratchet their breakeven floor the same way GTT-managed CNC trades do. Ghost-position reconciliation closes the DB row.
-- **Client-side detection** — fallback for trades that have neither `gtt_id` nor both `target_order_id`+`sl_order_id` (older rows, or LIMIT placement failed). `position-monitor` exits when LTP crosses target (with `risk.target_early_exit_pct` buffer) or SL.
-- **Manual close** — `POST /api/positions/{trade_id}/close` (UI: red Close button per row) cancels SL and target orders, deletes GTT, places market exit at the broker, computes realised PnL with costs, closes the row.
-- **Zerodha postback** (`POST /api/auth/zerodha/postback`) — verifies `SHA-256(order_id + order_timestamp + api_secret)` against the body's `checksum` (rejects 401 on mismatch). Looks up the trade via `db.find_trade_by_order_id` and reacts to terminal statuses: entry REJECTED → trade marked failed + alert; entry COMPLETE → backfills fill_price / slippage; SL COMPLETE → cancels the resting target LIMIT (ghost-recovery closes the row next cycle); SL REJECTED → loud alert (position unprotected); target LIMIT COMPLETE → cancels the SL leg. Polling still authoritative — postback is a latency optimisation.
-- **Square-off** — CRON skill at `market_hours.square_off` (default 15:15) cancels SL + target orders then market-exits open MIS positions. Ignores `transaction_mode` (manual mode does NOT block EOD square-off — Zerodha auto-squares at 15:30 with penalty regardless). `/kill` runs it with `force=True` for everything including CNC.
-
-### Optional Risk Gates (default off)
-
-All under `risk.*`, opt-in. Watch one or two paper sessions to calibrate before enabling:
-
-- **`regime_gate`** — refuses BUYs when cross-sectional `universe_breadth < min_breadth_for_buy` (0.40), SELLs when breadth > max threshold (0.60). Sizes up to `bullish_size_multiplier` × in strongly-favourable regimes. Live breadth computed once per heartbeat via `db.compute_live_regime` from today's daily-bar returns; cached on the skill instance.
-- **`liquidity_gate`** — refuses positions whose size > `max_pct_of_top5` (10%) of the relevant side of the Kite top-5 book. Requires `market_data.kite_data_enabled`.
-- **`depth_gate`** — does NOT hard-block. Maps order-book imbalance `(total_buy_qty − total_sell_qty) / (total_buy_qty + total_sell_qty)` to a position-**size multiplier** in `[min_size_multiplier, 1.0]` (default floor 0.4): a neutral / favourable book → full size, the worst-possible opposing book → 40%. Linear ramp between. A single order-book snapshot is too noisy to veto a signal that already passed the model + LLM + every other gate, so it sizes down rather than refusing. Same data source as liquidity_gate.
-- **`institutional_flow`** — conviction multiplier on position size based on (a) recent bulk/block deals on the symbol (last N days, BUY count − SELL count) and (b) today's FII net flow vs `fii_net_threshold_cr`. Aligning direction scales up; opposing scales down by 1/multiplier. Reads `bulk_deals` and `fii_dii_daily` tables populated by ingest-data.
-- **`earnings_blackout_days`** (default 0 = off) — hard-blocks new entries in any symbol with a scheduled earnings / board-meeting event within N calendar days. Reads the `economic_events` table (NSE corp-actions scraper). Earnings gaps routinely move stocks ±5-20% overnight, wider than any ATR-based SL.
-- **`max_portfolio_beta`** (default 0 = off) — caps the sum of `(position notional × |beta|)` across open positions + the candidate signal at `max_portfolio_beta × capital`. Beta is a CAPM-style regression of the symbol's 60-day daily returns against an equal-weight cross-sectional market proxy (`db.compute_symbol_beta`, per-heartbeat cached on the skill). Catches "every position is a high-beta name" correlated-drawdown setups.
-- **`max_risk_rejected_retries_per_day`** — caps daily retries of risk_rejected / expired / trade_execute_failed / skill_error dispositions (default 5).
-
-**Multiplier discipline (`risk.risk_uplift_cap`, default 1.5)** — conviction / regime / institutional-flow multipliers stack multiplicatively. After all of them, risk-check re-clamps so the effective rupees-at-risk never exceeds `max_risk_per_trade_pct × risk_uplift_cap`. Without this a strongly-favourable signal (1.5 × 1.5 × 1.2 = 2.7×) silently ran 5%+ risk. `conviction_sizing` is the single confidence-scaling path (the legacy `confidence_scaled_sizing_enabled` knob has been removed); a cumulative "final size N (base B, net multiplier M×)" audit line logs the combined effect.
-
-**Drift auto-suspend (`risk.drift_auto_suspend_enabled`, default off)** — when on, the daily `drift-watch` CRON (16:30 IST) sets a `signal_gen_suspended_by_drift` system_state flag on a >15pp win-rate decay or signal-class collapse. `generate-signals` reads it at `execute()` start and short-circuits to a no-op until the next successful `model-retrain` clears it (or the user clears it via `DELETE /api/drift-suspension`). Position-monitor keeps running so open trades retain protection.
-
-### Exit Tweaks (`risk.exit_tweaks`)
-
-Applied to client-side-managed positions (no GTT, no MIS OCO):
-- **`time_stop_enabled`** — exit intraday positions still open after `intraday_stop_after_min` (180) min with target-progress below `intraday_stop_progress_threshold` (30%). Catches the chop trade that never works nor breaks.
-- **`volume_exit_enabled`** — exit when the last 5-min bar volume drops below `volume_exit_min_ratio` (30%) of the previous N bars' average AND the position is in 0.5R-2R profit. "Trend is dying."
-
-Applied to all three trailing-SL paths (client-side + GTT + MIS OCO), default-on:
-- **`tighten_trailing_enabled`** — step-up curve. Once target progress crosses `tighten_start_at_target_pct` (0.50), trailing-SL step shrinks by `tighten_step_decay` (0.15) per bucket of `tighten_step_size` (0.10), floored at `tighten_min_multiplier` (0.20). Defaults give 1.00 → 0.85 → 0.70 → 0.55 → 0.40 → 0.25 → 0.20 across 50% → 100% target progress. Centralised in `_trailing_step_multiplier` so the three paths can't drift.
-
-### Margin Enforcement
-
-`risk.margin_usage_enabled` defaults `False` (notional-only sizing, no leverage). When enabled, risk-check calls `kite.order_margins` per signal so insufficient-funds / special-margin rejections are caught at signal time rather than at place-order time. When the broker says no, the position is sized down proportionally to whatever fits.
-
-### AppContext
-
-`AppContext` dataclass (`context.py`) holds references to all subsystems via Protocol types: `config`, `db`, `broker`, `llm`, `market_data`, `notify`, `market_hours`, `event_bus`, `ml`, `news_aggregator`, `memory`.
-
-### Inter-Skill Data Contracts
-
-All data exchange between skills uses typed Pydantic models in `models/schemas.py`: `Signal`, `Trade`, `Position`, `PortfolioState`, `TradeContext`, `TradeReview`, `SentimentResult`, `OHLCVBar`, `Prediction`, `NewsArticle`, `MLPrediction`, `BacktestResult`.
+Full detail (KiteTicker WebSocket, rate limiter, skill system + schedules,
+error propagation, strategy modes, intraday circuit caps, paper/live
+filtering, manual-approval flow, signal-disposition retry caps, position
+adoption & exit paths, optional risk gates, exit tweaks, margin enforcement,
+AppContext, inter-skill data contracts): **[docs/architecture.md](docs/architecture.md)**.
 
 ## Database
 
-SQLite with WAL mode. Schema versioned via numbered migration scripts in `backend/migrations/` (run in lexical order at startup).
+SQLite (WAL, `synchronous=FULL` — never lose the last write, `foreign_keys=ON`)
+versioned by numbered SQL migrations in `backend/migrations/` (lexical order at
+startup; **schema only** — never data cleanup). The `Database` class is composed
+from per-domain mixins under `data/db/`.
 
-**Migrations are schema only.** This is an OSS project — every user runs the same migrations against their own data. Never put data-cleanup queries (deduping rows, normalising existing values, backfilling content) into a migration file. A duplicate-row problem on one user's server is not something every fresh install needs to "fix". Limit `.sql` files to `CREATE TABLE` / `ALTER TABLE` / `CREATE INDEX` / `DROP …`. If you need a one-off data fix for a specific deployment, surface it as a `docker exec yolovest-backend python -c "..."` snippet in chat or the operational docs, never as a migration.
-
-**Server DB queries — always hand the user this exact runnable form.** The DB lives inside the `yolovest-backend` container at `/app/data/yolovest.db`; the user runs ad-hoc queries/cleanups via `docker exec`. Always provide them as a Python heredoc (the `sqlite3` CLI may not be installed in the image; Python always is). Use **bound parameters** for every literal so the SQL carries no nested quotes — this keeps the whole thing safe inside the double-quoted `sh -c` wrapper. Template:
-
-```bash
-docker exec yolovest-backend sh -c "python - <<'PY'
-import sqlite3
-con = sqlite3.connect('/app/data/yolovest.db')
-q = ('SELECT ... WHERE interval IN (?, ?) ...')
-for r in con.execute(q, ('5minute', '1m')).fetchall():
-    print(r)
-con.close()
-PY"
-```
-
-For writes/cleanups: build the snippet to print a before/after count, keep destructive `executemany` lines commented for a dry run first, and remind the user to back up. Never run such snippets yourself — you have no access to the server's container; hand them the command.
-
-### Key Tables
-
-| Table | Purpose |
-|-------|---------|
-| `trades` | Trade records. Key columns: `mode`, `status`, `origin` (`system` / `adopted`), `gtt_id` (broker OCO GTT id when active), `model_version` (producing model, stamped at execution; read paths fall back to the signal join for legacy rows). |
-| `signals` | Generated signals with `mode`, `disposition`, `attribution_json` (top-N TreeSHAP contributions stored per signal), plus `product` (MIS/CNC), `holding_period`, and `expected_holding_days` (the holding-period decision, stamped at generation so the recommendations view can show MIS/CNC + derive a target date). Dedup via `get_todays_signaled_symbols` is mode-scoped and respects the retryable-disposition cap. |
-| `predictions` | ML predictions with `mode`, `is_shadow`, `model_version`, `scored_at` columns. |
-| `pending_trades` | Manual approval queue with `mode` column. Python ISO timestamps for correct expiry comparison. |
-| `quarantined_symbols` | Auto-blocked after 3 fetch failures (transient errors don't count — see Conventions). `replacement_symbol` lets the user substitute (e.g. ZOMATO → ETERNAL). |
-| `locked_holdings` | User-protected holdings — never auto-sold or auto-adopted. |
-| `config` | Key-value store for UI-editable settings (dot-notation keys). |
-| `system_state` | Long-lived key-value: `kite_access_token`, `kill_switch`, `initial_capital`, `universe_constituents:<universe>`, etc. `partial_booked_{trade_id}` sentinels are auto-cleaned on `close_position`. |
-| `ohlcv` | OHLCV bars. Unique on (symbol, interval, timestamp). `delivery_pct` column stamped by ingest-data when NSE returns it. `source` records the actual winning provider (`kite` / `jugaad` / `yfinance` / `tvdatafeed` / `bhavcopy` / `yfinance_vix`), not the ingest skill — so data provenance is auditable. |
-| `bulk_deals` | NSE bulk/block deals — per-symbol institutional accumulation/distribution events. Powers the `institutional_flow` risk multiplier + `bulk_deal_*` ML features. Unique on (deal_date, symbol, client, side, qty, price). |
-| `fii_dii_daily` | One row per date with FII + DII buy/sell/net values in ₹ crore. Powers FII regime side of the `institutional_flow` multiplier. |
-| `fno_daily` | Per-underlying daily F&O aggregates (PCR-OI, PCR-vol, futures OI / vol / close). Populated by `ingest-fno`; consumed by the `fno_*` ML feature set. Forward-only (no historical backfill). |
-| `watchlist` | Auto-generated by market-scan. Adopted symbols auto-added. |
-| `user_watchlist` | User-managed, persists across market-scan refreshes. |
-| `dry_run_results` | Signal preview with next-day scoring. A run with an `as_of` (historical date) is **auto-scored in the same `POST /api/dry-run` request** — `score_dry_run` is partial, so any signal whose holding window has fully elapsed is compared against its target-date actuals immediately (no manual "Score" click), the rest left pending. |
-| `model_versions` | Trained model registry with `status` (production / shadow / retired) and performance metrics. `sharpe_lower` (bootstrapped p25 lower-bound Sharpe) is the deploy/promote decision metric — robust to a lucky single-holdout point estimate. |
-| `feature_snapshots` | Unconditioned (pre-gate) per-(day, symbol, mode) inference feature vectors written by generate-signals. drift-watch PSI-compares them against the production swing model's training distribution. Self-pruned to 30 days. |
-| `audit_log` | Skill execution audit trail. |
-| `agent_memory` | Cross-restart state persistence with TTL. |
-| `depth_snapshots` | Order-book depth archive (bid/ask, full + top-5 quantities) written by the `depth-snapshot` heartbeat skill via one batched Kite quote call per cycle. Pure collection for the future intraday order-flow feature set — nothing trades on it. Self-pruned to `market_data.depth_snapshot_retention_days`. |
-
-### Quarantine and Replacement Resolution
-
-`db.resolve_symbols_with_replacements(symbols)` is the single point that applies quarantine policy across all ingest paths:
-- Active symbol → keep as-is.
-- Quarantined + replacement set → swap to the replacement.
-- Quarantined + no replacement → **drop entirely** (returns shorter list).
-
-All ingest paths (`ingest-universe`, `ingest-data`, `backfill-data`, `backfill-intraday`, `generate-signals` when reading `user_watchlist`) route through this resolver. When `record_fetch_failure` crosses the 3-strike threshold the symbol is auto-quarantined; the appropriate skill logs a WARNING with a pointer to set a replacement.
-
-### Universe Resolution
-
-`scanning.universe` selects from `nifty50` / `nifty100` / `nifty200` / `nifty500`. `ingest-universe` resolves via a cached-fetch chain:
-1. `system_state.universe_constituents:<universe>` (≤ 7-day cache).
-2. Live fetch from `niftyindices.com/IndexConstituent/ind_<universe>list.csv` — filtered to `Series=EQ`, `DUMMY*` placeholders dropped.
-3. Bundled static list in `data/nse_symbols.py` as final fallback.
-
-The legacy alias `"all"` resolves to `"nifty500"` at fetch time for backwards-compat.
+Key tables, the quarantine/replacement resolver, and universe resolution:
+**[docs/database.md](docs/database.md)**.
 
 ## Telegram Commands
 
-| Command | Purpose |
-|---------|---------|
-| `/start` | Quick status summary |
-| `/help` | Full command reference |
-| `/status` | System health + integration checks |
-| `/pnl` | Today's PnL summary |
-| `/positions` | Open positions |
-| `/pending` | Show pending trades |
-| `/approve SYMBOL [overrides]` | Approve pending trade (supports full/partial overrides) |
-| `/reject SYMBOL` | Reject pending trade |
-| `/trade BUY SYMBOL ENTRY TARGET SL [PRODUCT] [QTY]` | Manual trade |
-| `/clear` | Clear today's signals + pending trades for regeneration |
-| `/review [SYMBOL ...]` | ML review of any symbol or all holdings |
-| `/skills` | List all registered skills |
-| `/run SKILL_NAME` | Execute a skill |
-| `/stop` | Pause trading (kill switch) |
-| `/kill` | Emergency square-off + pause |
-| `/resume` | Resume trading |
-| `/auth TOKEN` | Daily Kite re-auth (also syncs to `KiteDataProvider`) |
-| `/holiday [add\|rm DATE]` | Manage market holidays |
-| `/watch [add\|rm SYM ...]` | List or mutate `user_watchlist` |
-| `/quarantine [unblock\|replace SYM ...]` | List quarantined symbols / clear / route to replacement |
-| `/lock SYM [SYM ...]` / `/unlock SYM` | Protect / unprotect holdings from auto-management |
-| `/mode [auto\|manual]` | Show or hot-flip `execution.transaction_mode` (uses same `apply_db_config` path as the dashboard) |
-| `/symbol SYM` | One-stop snapshot: price + day-change, quarantine, 5d avg delivery %, latest signal + top-5 attribution, last 5 trades, last 5 bulk deals |
+Full command reference (`/status`, `/pnl`, `/approve`, `/trade`, `/kill`,
+`/auth`, `/symbol`, …): **[docs/telegram-commands.md](docs/telegram-commands.md)**.
 
 ## Configuration
 
-Config is split between a YAML file (file-only keys) and a SQLite `config` table (everything else, editable via Settings UI). On first start, code defaults are populated into the `config` table. Thereafter, changes are made via UI or API and hot-applied to the running config.
+Config is split between a YAML file (file-only keys: secrets, filesystem paths,
+server binding) and a SQLite `config` table (everything else — editable via the
+Settings UI and hot-applied). Code defaults seed the table on first start.
 
-**Bootstrap ordering** (`main.async_main`): DB is initialized and DB-config is applied to the in-memory `AppConfig` **before** `build_context()` constructs the broker / market_data / LLM. This ensures runtime-toggle changes (e.g. `kite_data_enabled`) actually take effect on next restart — previously they were ignored because the ingester chain was frozen during build.
-
-### File-only keys (config.yaml)
-
-Secrets, filesystem paths, and server binding:
-- `broker.api_key`, `broker.api_secret`, `llm.api_key`
-- `database.path`, `database.backup_dir`, `market_data.bhavcopy_dir`
-- `dashboard.host`, `dashboard.port`, `dashboard.password`
-- `log.log_dir`, `log.max_bytes`, `log.backup_count`
-- `notifications.telegram.bot_token`, `notifications.telegram.chat_id`
-
-### Key Config Sections
-
-| Section | Notable fields |
-|---------|----------------|
-| `mode` | `"paper"` or `"live"` |
-| `strategy.mode` | `"balanced"` / `"intraday"` / `"short_term"` / `"long_term"` |
-| `strategy.holding_periods.{intraday,short_swing,week,long}.{target,stop_loss}` | ATR multipliers per holding bucket |
-| `strategy.intraday_label_mode` | `"triple_barrier"` (default) — 1-min path-resolved hit-target-before-SL to session close. `"relative"` — per 5-min decision instant, forward returns-to-close ranked across the universe (assigned post-concat in `_build_intraday_matrix`; per-chunk cross-sections are too thin). Validate via `scripts/experiment.py --lanes intraday` before flipping. |
-| `strategy.swing_label_mode` | `"relative"` (default) — cross-sectional relative-momentum label: per date, forward 10-bar returns ranked across the universe; top `relative_label_quantile` → BUY, bottom → SELL. Market-drift-neutral by construction; the backtest exits at the LIVE ATR geometry (breaking barrier mode's label/exit circularity). `"barrier"` = legacy absolute triple-barrier. Intraday has its own `intraday_label_mode` (triple_barrier default / relative). |
-| `strategy.swing_horizon_cap_days` | Default 15 — caps the holding days the chooser may assign to ML swing trades (the swing label only measures a ~10-bar window; long_term/swing modes' 66-day tails clamp to it). 0 disables. |
-| `risk` | `max_risk_per_trade_pct`, `risk_uplift_cap` (default 1.5 — ceiling on the stacked conviction/regime/flow multipliers), `max_open_positions`, `max_single_stock_pct`, `max_portfolio_exposure_pct` (counts pending notional), `max_trades_per_day` + per-product `max_mis_trades_per_day` / `max_cnc_trades_per_day` (optional), `daily_loss_limit_pct`, `weekly_loss_limit_pct`, `max_same_sector_positions`, `target_early_exit_pct` (default 0.0015), `loss_cooldown_minutes` (portfolio + per-symbol), `max_risk_rejected_retries_per_day` (default 5), `margin_usage_enabled` (default `false`), `earnings_blackout_days` (default 0), `max_portfolio_beta` (default 0), `drift_auto_suspend_enabled` (default false) |
-| `risk.regime_gate` / `risk.liquidity_gate` / `risk.depth_gate` / `risk.institutional_flow` | All default-disabled. See `### Optional Risk Gates`. depth_gate is a size-multiplier, not a block. |
-| `risk.reentry` | Smart re-entry after cooldown. `require_higher_confidence` now uses `confidence_tolerance` (0.85) × original AND a `min_reentry_confidence` floor (0.55) instead of strict `>` — ML confidence decays as a trend matures, so strict-greater rejected most valid re-entries. |
-| `risk.exit_tweaks` | Time-stop / volume-exhaustion (default off), trailing-SL tighten step-up curve (default on). |
-| `strategy` (ML training) | `class_balance_enabled` (default on), `label_cost_floor_enabled` (default on — floor the triple-barrier target at round-trip cost + slippage so a labelled win clears costs), `time_decay_last_weight` (default 1.0 = off; lower to tilt training toward recent regimes), `indicators.extended_momentum` (default on — daily/swing multi-horizon momentum + vol-regime + fracdiff features) |
-| `retraining` | `max_training_days`, `min_argmax_sharpe_for_promotion`, `cv_embargo_frac` (default 0.01 — embargo on top of the label-overlap purge), and `retraining.xgb.*` XGBoost hyperparameters (`max_depth`, `learning_rate`, `n_estimators` (upper bound), `min_child_weight`, `subsample`, `colsample_bytree`, `gamma`, `reg_lambda`, `reg_alpha`, `early_stopping_rounds`, `early_stopping_min_samples`) |
-| `market_hours` | `open`, `close`, `square_off`, `intraday_cutoff` |
-| `execution` | `transaction_mode` (`auto`/`manual`), `max_order_retries`, `price_drift_max_pct`, `pending_expiry_minutes` (default 30) |
-| `scanning` | `universe`, `shortlist_size`, `min_avg_daily_volume`, `seed_symbols` (cold-start fallback only) |
-| `market_data` | `kite_data_enabled`, `news_enabled`, `scrapers_enabled`, `backfill_days` (daily, used by both ingest-universe and backfill-data), `intraday_backfill_days` (5-minute) |
-
-### Service Toggles
-
-| Service | Config key | Default |
-|---------|-----------|---------|
-| Gemini LLM | `llm.enabled` | `false` |
-| News sources | `market_data.news_enabled` | `true` |
-| Scrapers | `market_data.scrapers_enabled` | `true` |
-| Kite data plan | `market_data.kite_data_enabled` | `false` |
-| Telegram | `notifications.telegram.enabled` | `false` |
-| LLM review gate | `risk.llm_review_enabled` | `true` |
+File-only key list, key config sections (mode / strategy / risk / retraining /
+market_hours / execution / scanning / market_data), and service toggles:
+**[docs/configuration.md](docs/configuration.md)**.
 
 ## Domain Context
 
@@ -408,70 +156,19 @@ The frontend nginx config (`frontend/nginx.conf`) uses Docker's embedded DNS (`r
 
 ## Key Files
 
-### Backend
+A file-by-file map of the backend, frontend, and infrastructure:
+**[docs/key-files.md](docs/key-files.md)**.
 
-- **`main.py`** — Entry point. Loads file config → opens DB → applies DB config → builds context with shared `KiteRateLimiter` → starts orchestrator + Telegram + dashboard. Syncs broker mode on startup and config change. `_sync_kite_data_token` propagates the Kite access token from broker to `KiteDataProvider` after auth/restore. `_load_ml_models_background` fills the production inference slots from the **model registry** (`model_versions.status='production'`) — the registry is binding; the newest artifact on disk is only a bootstrap fallback when no production row exists (fresh install) or its `.pkl` is missing (keep trading, loudly).
-- **`orchestrator.py`** — Heartbeat pipeline, per-signal chain, manual approval queueing (sets `mode` on pending row), signal cleanup on execution failure. The first cycle of the day is anchored to `market_hours.order_start` (not `market.open`): if the loop enters or a prior iteration ends inside the `[market.open, order_start)` gap it sleeps to `order_start` rather than firing a wasted cycle whose signals all get deferred with "Outside order window".
-- **`context.py`** — `AppContext`, Protocol types, `MarketHoursChecker`.
-- **`config.py`** — Config models. `_MODE_HOLDING_DAYS` maps strategy modes to day ranges. `apply_db_config()` for hot-reload.
-- **`broker/zerodha.py`** — MARKET → LIMIT conversion, SL-M → SL conversion, universal tick rounding, two-leg OCO GTT (`place_oco_gtt` / `delete_gtt` / `get_gtts`), circuit breaker, daily-auth-cache.
-- **`broker/kite_rate_limiter.py`** — Async context manager combining concurrency cap + min-interval rate limit.
-- **`data/kite_data.py`** — Optional Kite data provider. Pagination for intraday windows beyond Kite's per-call limit; pre-warmed instrument cache; historical-specific throttle; quote includes circuit limits and depth.
-- **`data/ingester.py`** — Fallback chain. Quality + staleness validation.
-- **`data/nse_symbols.py`** — Universe constituent live fetch + bundled fallback. `parse_constituent_csv` filters `Series=EQ` and `DUMMY*` placeholders.
-- **`data/db/`** — SQLite layer as a package: `core.py` owns connections/migrations/health; 17 domain mixins (ohlcv, signals, trades, predictions, models_training, portfolio_analytics, pending, quarantine, dryrun, …) recomposed into `Database` in `__init__.py`. Import path `yolovest.data.db` unchanged.  `resolve_symbols_with_replacements`, mode-scoped queries, `set_trade_gtt`, `bulk_delete` (paper/live correctly mode-filtered including signals & pending_trades). `get_storage_stats` is 60s-TTL cached and invalidated by destructive endpoints (cleanup_table / bulk_delete / reset_all / restore_backup). `compute_live_regime` (cross-sectional breadth scan), `compute_recent_delivery_pct`, `count_recent_bulk_deals`, `get_latest_fii_dii`, `compute_symbol_beta` (CAPM regression vs equal-weight market proxy, for the portfolio-beta gate), `get_live_metrics_for_model` (live scored-prediction accuracy for the shadow-promotion gate) — all wired into risk-check / model-retrain. `get_portfolio_state` returns per-product `mis_trades_today` / `cnc_trades_today`. `record_fetch_failure` skips the counter on transient errors (rate limit / timeout / 5xx / SSL / unreachable). `save_model_version` persists `sharpe_lower` (the lower-bound decision metric). `run_retention_cleanup` trims daily + intraday OHLCV on separate windows; the daily window is floored by `database-maintenance` at `max(retention.ohlcv_days, max_training_days, backfill_days)` so the nightly prune can't erase training history (survivorship guard for exited/delisted names). `upsert_ohlcv` stores the real provider in `source` (resolved from the ingester's per-symbol fetch metadata via `SkillBase._ingest_source`).
-- **`skills/ingest_universe.py`** — Cached → live → bundled resolver. Calls `record_fetch_failure` on per-symbol errors so quarantine cascades.
-- **`skills/ingest_data.py`** — Deep ingest (news + sentiment + fundamentals). Per-symbol NSE corp-actions limited to open positions + top watchlist (no longer hardcoded `seed_symbols`).
-- **`skills/generate_signals.py`** — Production heartbeat orchestrator. Owns watchlist resolution, dedup (already_signaled / cooldown / recently_traded), shadow inference, signal persistence, ticker subscription, and the repeat-confidence ceiling on top of the base floor. Per-symbol evaluation (predict → chooser → gate → SELL adjust → target/SL geometry → reality-check → confidence floor) is delegated to `strategy/signal_evaluator.evaluate_symbol_signal` so the dashboard's `/api/dry-run` endpoint produces identical signals to the live engine. The watchlist is processed in **concurrent chunks** (`strategy.signal_generation_concurrency`, default 10) via `asyncio.gather` — `_evaluate_symbol_for_signal` does the pure async I/O + ML per symbol, `_apply_evaluation_result` does the serial state mutation (counters, insert, broadcast). Honours the drift-suspension flag (returns a no-op when set). The daily feature window **drops today's developing bar** (close = running LTP, partial volume) so features are as-of the last completed session — matching training, which only ever sees completed bars (the dry-run endpoint applies the same filter relative to its as-of date, and `enrich_features` passes `exclude_date` so the regime/sector model features exclude it too; the regime risk-gate keeps the live today-so-far read). Every evaluated symbol's enriched feature vector is also upserted into `feature_snapshots` (pre-gate, one row per day/symbol/mode) for drift-watch's PSI check.
-- **`strategy/signal_evaluator.py`** — Single source of truth for per-symbol signal evaluation. Called by BOTH `GenerateSignalsSkill.execute` and the dashboard `/api/dry-run` endpoint. Pure compute (no DB writes / event emissions / order placement). Returns `SignalEvaluation` with an `outcome` enum (`passed` / `hold_signal` / `low_confidence` / `locked_holding` / `sell_on_holding` / `short_on_swing_horizon` / `intraday_cutoff` / `intraday_atr_ineligible`) + the prediction + target/SL/holding-period decision so callers can persist, log, or render as they need. Adding a new gate goes here so both paths get it; any divergence between heartbeat and dry-run is a bug. Target/SL are snapped to the per-symbol tick grid via `ctx.broker.round_to_tick` before being stored, so the displayed exit matches the price the broker will actually place (no more `34.43` targets on a 0.05-tick stock).
-- **`skills/risk_check.py`** — Pending trades count toward both `max_open_positions` AND `max_portfolio_exposure_pct` (notional-weighted) AND per-product `max_mis/cnc_trades_per_day`. Per-symbol cooldown on top of portfolio-wide (`minutes_since_last_loss_for_symbol`). Correlation gate includes same-direction pending trades. Opt-in regime / liquidity / depth (size-multiplier) / institutional-flow gates compose multiplicatively with the conviction multiplier — then an **effective-risk re-clamp** (`risk_uplift_cap`) caps the net rupees-at-risk and a cumulative size-multiplier audit line is logged. Earnings-blackout and portfolio-beta gates (both opt-in) reject before sizing. All capped by `max_single_stock_pct`.
-- **`skills/trade_execute.py`** — Mode-mismatch safety check; reconciliation when `place_order` raises but the order actually placed; `_attach_oco_gtt` after CNC fill.
-- **`skills/position_monitor.py`** — Mode-scoped (`get_open_positions(mode=...)`). Three trailing-SL paths use the same `_trailing_step_multiplier` step-up curve: client-side (`modify_sl_order`, only when `sl_order_id` is present — guards adopted/paper rows that have no broker SL to modify), GTT (`_maybe_trail_gtt_sl` → `modify_gtt`), MIS broker-OCO (`_maybe_trail_mis_sl` → `modify_sl_order`). `_check_auxiliary_exits` runs before target/SL for client-side positions and handles time-stop + volume-exhaustion. `_check_holding_expiry` uses the holiday-aware `market_hours.trading_days_missing_after` counter (not a 5/7 calendar approximation). Position adoption from holdings remains.
-- **`skills/backfill_data.py`** / **`backfill_intraday.py`** — Default symbol set = watchlist + user_watchlist + regime index (not `seed_symbols`). Per-symbol delay configurable; daily and intraday share the same backbone with different defaults.
-- **`skills/model_retrain.py`** — `_prepare_training_data` uses a **200-bar per-sample window** (matches the longest EMA period) so every emitted sample carries the full feature set from its first iteration — this eliminates the old zero-backfill train/inference mismatch where early samples had `ema_200=0`. Label **entry price is `bars[i+1].open`** (the earliest price live trading can actually fill at), not `bars[i].close` — closes the overnight-gap mismatch where a close-entry "win" was already stopped out at the next open in production. Feedback `weight_boost` is applied **per-bar within the feedback-lookback window**, not to a symbol's entire history. `np.array(X)` rectangularity is preserved (a backfill path remains as a guarded fallback that now warns if it ever fires). **`MODEL_FEATURE_EXCLUSIONS`** (from `data/features.py`) is filtered out of `feature_names` so the trained model never sees raw absolute prices / cumulative levels (`close`, `open`, `high`, `low`, `vwap`, `obv`, `atr_14`, raw `ema_N`, raw `bb_*`, raw `macd_*`, raw `supertrend_*`, `avg_volume`). These stay in the features dict because the inference layer reads `close` and `atr_14` for entry-price fallbacks; their normalized counterparts (`range_pct`, `body_pct`, `gap_pct`, `close_change_pct`, `vwap_distance_pct`, `bb_position`, `close_vs_ema_N_pct`, `ema_9_vs_21_pct`, `macd_histogram_pct`, `macd_line_pct`, `supertrend_distance_pct`, `obv_change_5d_pct`, `volume_zscore_20d`, `atr_pct`) are what the model actually trains on — these are price-invariant and transfer across the Nifty 500. **Extended-momentum features** (`IndicatorConfig.extended_momentum`, `strategy.indicators.extended_momentum`, default on, **daily/swing-only** — meaningless on 5-min intraday bars so the intraday vocabulary is unchanged): multi-horizon returns `return_{21,63,126,189}d` (1/3/6/9-month — 3-9mo momentum is the strongest Indian-equity anomaly), risk-adjusted `momentum_quality_63d` (3mo return ÷ that period's realized-return dispersion), `vol_regime_ratio` (20d/100d realized-vol), and `fracdiff_logprice` (López de Prado fractional differencing of the window-standardized log-price — stationary with long memory). All reference the **tail** of the bar list (longest lookback 189 ≤ the 200-bar window), so a 201-bar training window and the ~250-bar inference fetch ending on the same bar yield identical values — no train/serve skew. Swing labels follow `strategy.swing_label_mode`: **relative** (default) assigns cross-sectional quantile labels after the global date sort (`_assign_relative_labels`; dates thinner than 10 names → HOLD), while bars_meta keeps the ATR target/SL so the walk-forward backtest exits at the live geometry; **barrier** mode's labels are **path-aware** (`_path_aware_label`): walks the future window bar-by-bar and labels BUY only when high reaches `entry × (1 + target_atr_mult × ATR%)` before low reaches `entry × (1 - sl_atr_mult × ATR%)`, mirroring the live target/SL geometry. The **target is floored at the round-trip transaction cost + slippage** for the product (`strategy.label_cost_floor_enabled`, default on — MIS for intraday / CNC for swing, via `costs.round_trip_cost_floor_pct`) so a labelled "win" always clears costs (this bites hardest on the tight 0.6×ATR intraday geometry); the same effective target flows into `bars_meta` so the backtest exits at the labelled barrier. Sample weights **stack** the per-bar feedback boost × inverse-frequency class weights (`class_balance_enabled`) × optional linear **time-decay** (`time_decay_last_weight`, default off — `_time_decay_multipliers` ramps oldest→newest). Each model trains against its own multipliers — intraday uses `holding_periods.intraday` (0.6 / 0.3), swing uses `holding_periods.short_swing` (1.5 / 0.75). When both BUY and SELL legs win in the window, the side that wins on the EARLIER bar takes the label (a real trader would have closed at the first target and not been around for the second). Only same-bar both-wins fall back to HOLD because daily OHLC can't tell us intra-bar order. Lookahead is 1 bar (intraday) / 10 bars (swing) — the swing window was widened from 5 → 10 so the 1.5×ATR target has room to develop without the 0.75×ATR SL noise-tripping on shorter windows. Per-sample feature merges (daily lane: EOD-published broadcast data — bulk deals, delivery %, VIX, F&O — is merged **as-of the prior session**, and the news window extends to the entry bar, mirroring what a mid-session heartbeat can actually have; the intraday lane already did this via `_merge_daily_broadcast`):
-  - **Universe regime** (`universe_breadth`, `universe_avg_return`) via `_compute_regime_index` — cross-sectional breadth proxy.
-  - **Sector-relative** (`sector_breadth`, `sector_avg_return`, `relative_momentum`) via `_compute_sector_index` over `symbol_sectors` join — stock vs its industry cohort.
-  - **Institutional flow** (`bulk_deal_buy_5d`, `bulk_deal_sell_5d`, `bulk_deal_net_5d`, `delivery_pct_avg_5d`) — pre-built lookup from `bulk_deals` + per-bar `ohlcv.delivery_pct`.
-  - **Time-of-day** (`minutes_since_open`, `day_phase`) via `data/features.py::_minutes_since_open`.
-  - **News sentiment** (`news_count_24h`, `news_count_7d`, `news_sentiment_24h`, `news_sentiment_7d`, `news_sentiment_momentum`) via `data/news_features.py::compute_news_features` — VADER compound polarity over headlines from the `news_articles` table, bucketed into trailing 24h / 7d windows ending at the bar's timestamp. Same code path runs at inference in `generate_signals`, so training and live features stay symmetric. Neutral defaults (0.0) when VADER isn't installed or no headlines exist.
-  - **VIX regime** (`vix_level`, `vix_change_5d_pct`, `vix_zscore_20d`) via `data/vix_features.py::compute_vix_features` — India VIX daily series ingested by `ingest-vix` (CRON 16:00 IST, yfinance `^INDIAVIX`) and stored in `ohlcv` under symbol `INDIA VIX`. Broadcast feature — every (symbol, date) sample on the same date sees the same VIX values. Neutral defaults (0.0) when the timeline is empty.
-  - **F&O derivatives** (`pcr_oi`, `pcr_volume`, `oi_change_pct_1d`, `oi_buildup_signal`, `is_fno_stock`) via `data/fno_features.py::compute_fno_features` — per-underlying option-chain aggregates from the `fno_daily` table, populated daily by `ingest-fno` (CRON 18:30 IST, Kite-only). `oi_buildup_signal` encodes the textbook quadrant (long buildup +1 / short buildup -1 / short covering +0.5 / long unwinding -0.5) using equity-close pair when supplied (canonical) or the stored futures-close pair as fallback. Forward-only: Kite doesn't expose historical option-chain snapshots, so older training rows return `is_fno_stock=0` and the model learns to weight these features only when present.
-  - **Feedback** (`fb_*`) including `fb_recent_loss_count` from `get_feedback_data`.
+## Detailed Documentation
 
-  Deploy/promote: a retrain is always saved as `shadow`, and the live slots honour the registry — after save, the incumbent production model is **restored** to the production slots and the candidate is loaded into the **shadow slot** so its A/B trial starts immediately (first-ever train bootstraps: no production row → the candidate is promoted directly). The swing lane's walk-forward backtest runs **long-only** (`BacktestConfig.long_only` — the live book can't act on swing SELLs: no overnight retail shorting, held-name exits belong to position-monitor; the sweep pins the SELL axis and applies its class-share floor to BUYs only). The post-train silent-model guard scores a pre-captured slice of the freshest training rows through the full production path (`predict_labels_batch`) — captured BEFORE `train()`, which consumes the caller's X to bound peak memory — and counts only **tradeable** signals toward the rate (BUY-only for swing; BUY+SELL for intraday). Bootstrap promotions push a Telegram note so a parked lane (`strategy.mode`) can be re-enabled. The promotion gate (`_check_shadow_promotions`) requires the candidate to beat the incumbent on `_decision_sharpe` (the bootstrapped **lower-bound** Sharpe when both carry it, else point-vs-point) AND match live scored-direction accuracy within tolerance; promoting/retiring a version that currently occupies the shadow slot clears that slot. A run where NO model ships returns `success=False` and pushes a Telegram error alert — the incumbent keeps trading. Metrics carry `data_caveats: ["survivor_universe"]` — the corpus is the accumulated history of CURRENT constituents; names that exited/delisted before ingestion are absent, so absolute backtest numbers skew optimistic. Threshold tuning itself happens in `ml_signal` on the final-scale holdout (see below).
-- **`skills/drift_watch.py`** — CRON 16:30 IST, calls `db.get_model_drift_stats(days=14)` + signal-class-collapse check + **feature-distribution drift** (PSI of the trailing-14d `feature_snapshots` vs the production swing model's training deciles stamped in its artifact; > 0.25 flags, top-5 features alerted; observational only — never feeds auto-suspend), pushes warnings to Telegram via `notify.send(alert_type="errors")`. When `risk.drift_auto_suspend_enabled`, also sets the `signal_gen_suspended_by_drift` system_state flag (hard-suspends generate-signals until the next successful retrain clears it). Flags when realised win-rate drops > 15 pp over last 7d vs prior 7d.
-- **`skills/ingest_vix.py`** — CRON 16:00 IST. Pulls India VIX daily history from yfinance (`^INDIAVIX`) and upserts into the shared `ohlcv` table under symbol `INDIA VIX`. Cold-start backfills 365d so the trailing-20d z-score is populated for every historical training sample; subsequent runs pull 30d as a missed-day reconciliation guard. Feeds the `vix_*` ML feature triad consumed by both `model_retrain` and `generate_signals`.
-- **`skills/ingest_fno.py`** — CRON 18:30 IST. Pulls the live NFO instrument master via Kite, groups by underlying, picks each name's nearest expiry, then batch-quotes all CE/PE strikes + the front-month futures contract to compute per-underlying PCR (OI + volume) and futures aggregates. Gates on `market_data.kite_data_enabled` AND broker authentication — F&O data is Kite-only (the other providers don't expose option-chain endpoints). Forward-only: historical option-chain snapshots aren't available, so the feature set only meaningfully kicks in after several months of daily ingest accumulate. Stored in `fno_daily` table; consumed by `compute_fno_features` in both `model_retrain` and `generate_signals`.
-- **`skills/report_generate.py`** — Daily (16:00) and weekly (Friday).
-- **`strategy/ml_signal.py`** — XGBoost training. `tree_method='hist'` for memory-efficient training over multi-year history. **Hyperparameters are config-driven** (`retraining.xgb`) with regularization defaults (`subsample`/`colsample_bytree`/`min_child_weight`/`reg_lambda`) — the core variance-reduction knobs for noisy financial features — and **early stopping**: a probe on a purged + embargoed chronological validation tail picks the tree count, then the deployed model refits on ALL data at that count (`n_estimators` is the upper bound). Resolution precedence is explicit `params` > config > literal, so param-override callers/tests and config-less models are unaffected. When `bars_meta` is threaded through from `model_retrain._prepare_training_data`, fold-test predictions are scored via `strategy/walk_forward_backtest.run_walk_forward_backtest` (real PnL: simulated one-bar trades through `compute_transaction_costs`, sized by `risk_per_trade_pct × capital`, with configurable entry slippage). Falls back to the legacy `+1%/-0.5%` synthetic payoff when bars_meta isn't supplied (older tests). `metrics["backtest_source"]` is `walk_forward_real_pnl`, `walk_forward_threshold_tuned`, or `synthetic_legacy`. **Calibration CV**: `CalibratedClassifierCV` is fit with `cv=TimeSeriesSplit(...)`, NOT an integer (an int silently selects shuffled `StratifiedKFold`, leaking future bars into past calibration on time-series), and with the SAME sample weights the model trained on (class-balance × feedback × time-decay) — an unweighted calibrator re-learns the raw HOLD-heavy prior and compresses directional probabilities. Calibration folds are **purged** by the label window + embargo (`_purged_time_series_splits`) so multi-bar labels can't straddle fold boundaries. The calibration-adoption rule and threshold gate live in module-level `_choose_calibrated` / `_threshold_label` — the single definitions shared by `_predict`, `_predict_shadow`, `predict_labels_batch`, and the tuning holdout, so the paths can't drift; the **shadow path runs the full production policy** (its artifact's tuned thresholds under the same config caps), making the A/B live-accuracy comparison like-for-like. **Threshold tuning (final-scale holdout)**: for large corpora the sweep runs on a **final-scale chronological holdout**, NOT the per-fold OOF probabilities. A tuning model trained only on the early data — at the SAME early-stopped tree count the deployed model uses — scores a strict-future holdout; the sweep runs on the **chosen stream** (agreement-gated calibration adoption via a tuning-side calibrator fit only on the tuning slice — the exact probability stream the live gate reads), thresholds are tuned on the first half of that holdout and metrics reported on the second half, with the split **snapped to a date boundary** so same-day cross-sectional rows can't straddle it. This puts the cutoffs at the *deployed* full-data model's probability scale — the per-fold OOF models are trained on less data, are more over-confident, and their probabilities don't transfer, so tuning on them produced cutoffs (e.g. 0.60) the deployed model couldn't reach, collapsing every live signal to HOLD. A purge gap (label overlap) plus an **embargo** (`retraining.cv_embargo_frac`, default ~1% of the calendar span — absorbs serial-correlation / delayed-reaction leakage beyond label overlap, via `_purge_boundary`) before the holdout stops the tuning model's labels peeking into it; this path also skips the (now redundant) K-fold OOF loop. `sweep_thresholds` searches a 9×9 (BUY, SELL) grid **bounded to the production-reachable range** (`tuned_threshold_max_value` / `_max_diff` passed in, so it can't pick a cell the live model clamps away) and ranks by **bootstrapped lower-bound Sharpe** (200 resamples, p25; tiebreak point-Sharpe → win_rate → trades). The held-out point Sharpe AND its bootstrapped lower bound (`metrics["sharpe_lower"]`) are saved; deploy/promote decisions compare on the lower bound. A **Deflated Sharpe Ratio** (`metrics["deflated_sharpe"]`, computed in `sweep_thresholds` from the full grid of trial Sharpes) reports P(true Sharpe > 0) after correcting for the selection bias of picking the best of ~81 cells — the bootstrap lower bound only covers estimation noise within a cell, not the across-cell max; a value below 0.95 logs a warning. Thresholds save to the artifact (`tuned_thresholds`) and gate `_predict` (BUY iff P(BUY) ≥ buy_thresh and ≥ P(SELL); SELL iff P(SELL) ≥ sell_thresh and > P(BUY); else HOLD). Small corpora / no-bars_meta callers keep the per-fold OOF / synthetic paths. **`_get_effective_thresholds`** still applies the `tuned_threshold_max_diff` (0.05) / `tuned_threshold_max_value` (0.60) caps at inference, bypassed by `risk.buy_threshold_override` / `risk.sell_threshold_override`. **Artifacts** are written atomically (tmp + fsync + rename) with a sha256 sidecar verified on every load (corrupt file fails loudly; sidecar-less legacy/uploaded artifacts load unverified), and carry `feature_stats` (per-feature mean/std/deciles of the training matrix) for drift-watch's PSI check. **Calibration policy**: calibrated probabilities are only adopted when the calibrator agrees with the raw model's argmax class — disagreement (typical case: raw says BUY, sigmoid calibrator pulls toward HOLD because the swing model's training labels are 73% HOLD) keeps raw probas so the trained model's directional intuition survives. When they agree, the higher-confidence version wins.
-- **`strategy/walk_forward_backtest.py`** — `BarMeta`, `BacktestConfig`, `run_walk_forward_backtest`, `sweep_thresholds`. Each prediction → real trade through entry slippage → walks the future window bar-by-bar via `_path_aware_exit` (target / SL / fallback to exit_close) → transaction costs → capital update. Tie-break when both barriers touched in the same bar = SL (keeps the Sharpe number hard to game). Returns `BacktestResult` with sharpe / max_drawdown_pct / win_rate / profit_factor / net_pnl / final_capital from the realised PnL series. `sweep_thresholds` runs the same backtest across an (n×n) probability-cutoff grid, ranks by **bootstrapped p25 lower-bound Sharpe** (point-Sharpe / win_rate / trade-count tiebreak), and skips cells below `min_trades`. `max_threshold` / `max_diff` bound the grid to the production-reachable range so the tuner can't pick cutoffs the live model clamps away (default `None` = unbounded for legacy callers). `deflated_sharpe_ratio` (Bailey & López de Prado) corrects the winning cell's Sharpe for the number of grid trials + the return series' skew/kurtosis; `sweep_thresholds` collects every eligible cell's Sharpe and attaches the result to `BacktestResult.deflated_sharpe`.
-- **`strategy/holding_period.py`** — ATR multiplier interpolation, `apply_session_caps`, `adjust_sell_for_holdings`.
-- **`telegram_bot.py`** — `/review` works for any NSE symbol. `/approve` uses symbol name. Token sync on `/auth` propagates to `KiteDataProvider`. State-mutation surface for Telegram-only operation: `/watch`, `/quarantine`, `/lock`/`/unlock`, `/mode` (hot-applies through the same `apply_db_config` path the dashboard PUT uses). `/symbol SYM` is the unified read snapshot (price + attribution + bulk deals + recent trades).
-- **`dashboard/`** — `app.py` is the slim factory (middleware, auth closures, registration order); endpoints live in `routes/<domain>.py` modules each exposing `register(app, ctx, deps)`; `security.py` (HMAC tokens + login throttle), `helpers.py`, `postback.py`, `ws.py` (token-gated `/ws`). Mode passed to all trade/position/prediction queries.  `POST /api/positions/{trade_id}/close` for per-position exit. `POST /api/review` for ML review of any symbol. `GET /api/recommendations` (today's signals) and `GET /api/dry-run/{run_id}` both enrich each signal row via `helpers.compute_signal_economics` — derived `target_date` (base date + `expected_holding_days` trading days, holiday-aware via `MarketHoursChecker.add_trading_days`) and cost-adjusted `est_net_gain` / `est_net_loss` (round-trip costs from `costs.compute_transaction_costs`) — so the UI shows MIS/CNC, target date, and approximate net P&L after deductions. Read endpoints: `GET /api/model-drift`, `GET /api/institutional-flows`, `GET /api/symbol/{symbol}/context`, `GET /api/symbol/{symbol}/quick-context` (compact card for the Quick-Review floater), `GET /api/trades/recent-symbols`, `GET /api/config/defaults` (for the Settings diff/reset), `GET /api/risk-gates` (consolidated drift-suspension + portfolio-beta + earnings-blackout status for the dashboard Risk Gates panel), `GET`/`DELETE /api/drift-suspension`. `GET /api/symbol/{symbol}/ohlcv` normalises `1d` / `1day` / `day` → `daily` and returns `delivery_pct` per bar. `DELETE /api/backups/{filename}` with path-traversal protection. Postback handler closes the trade row inline on SL/target COMPLETE (instead of waiting for ghost-recovery) and cancels orphan SL / target legs on late entry-REJECTED. **Offline-training export/import (UI-only)**: `GET`/`POST /api/backups/{filename}/download` + `/api/backups/upload` (SQLite-header validated), `GET`/`POST /api/ml-models/{version}/download` + `/api/ml-models/upload`, `POST /api/ml-models/import` (registers + optional promote + hot-reload behind a **compatibility gate** — `schema_version` + xgboost/sklearn version stamps; mismatch → 422 unless `force`), and `GET`/`POST /api/config/export` + `/api/config/import` (validated through the same `apply_db_config` path as Settings PUTs). Large files stream via a short-lived `GET /api/download-token` query token + native browser download (avoids buffering a 1 GB DB backup in memory); nginx has `proxy_buffering off` + `client_max_body_size 4g`.
+This file is the lean overview; deep detail lives in `docs/` and is pulled in
+only when a task needs it:
 
-### Frontend
-
-- **`pages/PositionsPage.tsx`** — Position list with price-level visualisation. Close button per row → `useClosePosition` mutation.
-- **`pages/HoldingsPage.tsx`** — Multi-select checkboxes, bulk lock/unlock, ML review panel.
-- **`pages/WatchlistPage.tsx`** — Paginated user + algo tabs. (Its old inline Quick-ML-Review was removed in favour of the global floater — see `QuickReviewFloater` below.)
-- **`pages/SymbolPage.tsx`** — Symbol detail: price chart with SMA 9/21/50 overlays, volume bars coloured by close-vs-open, delivery-% chart, quarantine banner, recent bulk-deals table, trade markers + linked trade history. New `/api/symbol/{symbol}/context` composes the extras in one round-trip.
-- **`pages/TradeDetailPage.tsx`** — Reasoning timeline + "Why this signal?" panel rendering top-5 TreeSHAP feature attribution from `signals.attribution_json`.
-- **`pages/ModelDriftPage.tsx`** — Predicted vs realised win-rate by day + calibration buckets per model version. Warning banner on > 15 pp 7d drop.
-- **`pages/InstitutionalFlowsPage.tsx`** — FII / DII bar chart + paginated bulk/block deals table. Symbol filter.
-- **`pages/IntegrationsPage.tsx`** — Per-service "Mark Inactive" toggles for Gemini and Telegram (flips `llm.enabled` / `notifications.telegram.enabled`). Status pills + test buttons.
-- **`pages/DataManagementPage.tsx`** — Mode-scoped bulk delete buttons (paper/live now correctly include signals & pending_trades; standalone all-modes groups for global wipes). Page-shell decouples from slow storage-stats — backups + quarantine + bulk-delete render immediately. Per-backup Delete + Download buttons; Upload Backup button (for cross-machine / offline-training moves). MLModelsPage has matching per-model Download + an Upload/Import panel (with a "Compatibility check failed → Import anyway" override on 422). `api/client.ts` `apiDownload` (token + native streaming download) / `apiUpload` (multipart) back these.
-- **`pages/SettingsPage.tsx`** — Per-tab "Diff from default" toggle + "Reset to default" (staged, requires Save). (i) tooltips reveal on hover, pin on click (mobile), and show the field's default (resolving `ref:` fallbacks for Optional fields). CSS-columns masonry layout so a tall card doesn't leave blank space. Number inputs reject blanks (NaN→null) and decimals on int fields via a `FieldTypesContext` built from server data. Risk + Strategy tabs have dedicated "MIS (Intraday)" / "CNC (Delivery)" sections grouping the per-product knobs. Universe dropdown: Nifty 50 / 100 / 200 / 500. Header Export / Import buttons round-trip all DB-editable config as JSON (file-only keys excluded; import re-validated server-side).
-- **`pages/AuditPage.tsx`** — Audit log + server logs tabs, paginated.
-- **`components/SymbolLink.tsx`** — Single source of truth for "click symbol → detail page". Used everywhere a symbol is rendered; preserves caller colour, stops propagation so row-level clicks still work.
-- **`components/Pagination.tsx`** — Shared Prev / N of M / Next widget used by trades / predictions / audit / watchlist tabs / institutional-flows / etc.
-- **`components/PendingTradesBanner.tsx`** — Approval UI with header showing trade count + total qty + total investment. Per-row Investment column. Override editor.
-- **`components/PositionsTable.tsx`** — Close button per row.
-- **`components/StatusBadge.tsx`** — Header pills: Healthy/Degraded, mode (live/paper), KILL SWITCH (when active).
-- **`components/QuickReviewFloater.tsx`** — Global floating "Quick ML Review" button (bottom-right, ⌘K / Ctrl+K) mounted in `Layout` so it's on every authenticated page. Symbol autocomplete (universe), "From your trades" + recent-reviews chips, compact stock card (`/api/symbol/{symbol}/quick-context`: sector, LTP, day/7d move, vol, quarantine/lock/holding/today's-disposition badges), and the ML review result. × button + Enter-on-empty clears; backdrop dismiss uses mousedown-identity so a text-selection drag doesn't close it.
-- **`components/RiskGatesPanel.tsx`** — Dashboard panel surfacing the opt-in gates (`/api/risk-gates`): drift-suspension status + "Clear & resume" button, portfolio-beta utilisation vs cap with per-symbol β, and the earnings-blackout symbol list. Hidden entirely when none of the three gates are enabled.
-
-### Infrastructure
-
-- **`docker-compose.yml`** — Pinned `nginx-proxy:1.10.1` and `acme-companion:2.6.3`. nginx-proxy entrypoint invokes the symlink heal script. Frontend depends on backend healthcheck (start_period 10s, interval 10s).
-- **`backend/Dockerfile`** — Healthcheck tightened to detect ready state ~20s after start.
-- **`frontend/nginx.conf`** — `resolver 127.0.0.11` + variable in `proxy_pass` for resilient backend resolution.
+- **[docs/architecture.md](docs/architecture.md)** — subsystems, heartbeat, skills, risk gates, exit paths, inter-skill contracts
+- **[docs/database.md](docs/database.md)** — key tables, quarantine, universe resolution
+- **[docs/configuration.md](docs/configuration.md)** — file-only keys, config sections, service toggles
+- **[docs/key-files.md](docs/key-files.md)** — file-by-file backend / frontend / infra map
+- **[docs/telegram-commands.md](docs/telegram-commands.md)** — bot command reference
+- **[docs/intraday-model-design.md](docs/intraday-model-design.md)** — design notes for the future 5-min intraday model
+- **[docs/kite-features-backlog.md](docs/kite-features-backlog.md)** — Kite integration backlog
+- **[docs/tls-recovery.md](docs/tls-recovery.md)** — TLS / nginx-proxy recovery runbook
