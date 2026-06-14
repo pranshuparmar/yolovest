@@ -1,6 +1,6 @@
 """SQLite database layer with WAL mode and migration support.
 
-Implements DatabaseProtocol from context.py. Uses aiosqlite for async access.
+The concrete DB layer injected into AppContext.db. Uses aiosqlite for async access.
 Schema versioned via numbered SQL migration files in migrations/ directory.
 """
 
