@@ -16,6 +16,9 @@ def _make_ctx(backup_enabled=True, backup_cron="0 18 * * *", backup_dir="./backu
     ctx.config.database.backup_enabled = backup_enabled
     ctx.config.database.backup_cron = backup_cron
     ctx.config.database.backup_dir = backup_dir
+    ctx.config.database.backup_keep = 7
+    ctx.config.database.path = "/data/yolovest.db"  # non-existent → preflight no-ops
+    ctx.config.database.retention.dry_run_days = 90
     ctx.config.database.retention.ohlcv_days = 730
     ctx.config.database.retention.audit_log_days = 365
     ctx.config.database.retention.predictions_days = 365
@@ -72,6 +75,7 @@ class TestDatabaseMaintenanceSkill:
             audit_days=365, predictions_days=365,
             news_days=ctx.config.database.retention.news_days,
             economic_events_days=ctx.config.database.retention.economic_events_days,
+            dry_run_days=ctx.config.database.retention.dry_run_days,
         )
         ctx.db.log_audit.assert_called_once()
         ctx.notify.send.assert_called()
