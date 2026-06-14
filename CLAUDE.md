@@ -57,7 +57,10 @@ YoloVest is an AI-driven Indian stock trading platform. It uses Google Gemini fo
 │   ├── database.md         — key tables, quarantine, universe resolution
 │   ├── configuration.md    — file-only keys, config sections, toggles
 │   ├── key-files.md        — file-by-file backend/frontend/infra map
+│   ├── domain-context.md   — Indian-market trading specifics
+│   ├── conventions.md      — coding conventions
 │   ├── telegram-commands.md
+│   ├── tls.md              — TLS reliability overview
 │   ├── tls-recovery.md
 │   ├── kite-features-backlog.md
 │   └── intraday-model-design.md   — Design notes for a future 5-min intraday model
@@ -113,46 +116,27 @@ market_hours / execution / scanning / market_data), and service toggles:
 
 ## Domain Context
 
-- **MIS** = Margin Intraday (auto-squared by broker at EOD). **CNC** = Cash and Carry (delivery, held overnight).
-- **SL** order = stop-loss limit (price + trigger_price). **SL-M** would be stop-loss market but Zerodha disabled it for retail API; `ZerodhaBroker` auto-converts incoming `SL-M` into `SL` with a 0.5% buffer past the trigger.
-- **MARKET** orders auto-convert to **LIMIT** at LTP ± buffer (1% without paid data, 0.5% with paid data) — Zerodha API restriction.
-- **Tick rounding** is applied automatically to every `price` and `trigger_price` in `_live_place_order` (default 0.05 tick).
-- Market hours: 9:15 AM – 3:30 PM IST. Default `intraday_cutoff` = 14:30 IST (configurable; no MIS signals after).
-- **GTT** (Good Till Triggered) is CNC-only at Zerodha. MIS positions get a broker-side resting LIMIT-target + SL pair (OCO enforced by position-monitor) instead.
-- Kite Connect daily re-auth required (paste request_token via Telegram `/auth` or dashboard).
-- SELL signals for stocks not in holdings are forced to MIS/intraday (Indian equity rules: no overnight short selling for retail).
+Indian-market trading specifics — MIS vs CNC, SL / SL-M conversion,
+MARKET→LIMIT conversion, tick rounding, market hours, GTT (CNC-only), daily
+Kite re-auth, no overnight retail shorting:
+**[docs/domain-context.md](docs/domain-context.md)**.
 
 ## TLS / nginx-proxy Reliability
 
-The stack hosts the dashboard behind `nginxproxy/nginx-proxy` + `nginxproxy/acme-companion` (pinned versions in `docker-compose.yml`). Three defensive layers protect against the well-known cert-symlink failure mode where acme-companion deletes top-level `<domain>.crt` / `<domain>.key` symlinks during a failed renewal attempt:
-
-1. **Pinned image versions** prevent silent upstream behaviour drift.
-2. **`nginx/heal-cert-symlinks.sh`** runs as the nginx-proxy entrypoint before nginx boots, recreating any missing symlinks.
-3. **`nginx/tls-healthcheck.sh`** marks the container unhealthy when `ssl_reject_handshake on;` is present in generated config or when a per-domain dir exists without its top-level symlinks — Docker's `restart: always` then re-runs the entrypoint heal. Worst-case dashboard downtime after a botched mid-life renewal is ~3 min (healthcheck interval 60s × 3 retries) which is fine for a single-user app.
-
-Details and manual recovery steps in `docs/tls-recovery.md`.
-
-The frontend nginx config (`frontend/nginx.conf`) uses Docker's embedded DNS (`resolver 127.0.0.11`) and a `proxy_pass` variable so that backend container restarts (which assign a new IP) don't strand cached DNS in the frontend's nginx and cause 502s.
+The dashboard runs behind pinned `nginx-proxy` + `acme-companion` with three
+defensive layers against the acme cert-symlink renewal failure mode. Overview:
+**[docs/tls.md](docs/tls.md)**; manual recovery runbook:
+**[docs/tls-recovery.md](docs/tls-recovery.md)**.
 
 ## Conventions
 
-- Python 3.11+, async throughout.
-- All skills follow the same pattern: extend `SkillBase`, implement `execute()` and `should_run()`.
-- `safe_execute()` wraps all skill execution with `logger.exception()` on failure.
-- Config via YAML (file-only keys) + DB `config` table (everything else) + Pydantic validation. Startup log prints effective values AFTER DB overrides are applied.
-- SQLite with WAL mode. Schema versioned via numbered migration scripts. **No explicit `BEGIN` in write methods** — Python sqlite3's default deferred isolation auto-begins on the first DML, and explicit `BEGIN` conflicts when other writers are active on the same connection.
-- Paper mode by default — live trading requires explicit `mode: live`.
-- All trade/position queries filter by `ctx.config.mode` — paper and live data never mix.
-- Trades track `origin` (`system` / `adopted`) and `mode` (`paper` / `live`). Signals, pending_trades, and predictions also carry `mode` so bulk-delete and analytics can scope cleanly.
-- Pending trades use Python ISO timestamps (not SQLite `datetime('now')`) for correct expiry comparison.
-- Broker `_retry_api_call` skips permanent errors (validation, margin, auth) — only retries transient errors.
-- Before retrying order placement, trade-execute checks `kite.orders()` for recent matching orders. If found, the surviving order is **reconciled** as a successful trade (not retried; not marked failed).
-- All Kite calls use the shared `KiteRateLimiter` (concurrency + time-based) plus, for `historical_data`, an additional tighter throttle inside `KiteDataProvider`.
-- All timestamps use IST for market logic, UTC for DB storage.
-- Frontend uses Vite + TypeScript + Tailwind. All UI timestamps localized to IST.
-- Destructive actions require user confirmation in the UI.
-- Tests: `cd backend && PYTHONPATH=src python -m pytest tests/ -v`.
-- Frontend dev: `cd frontend && npm run dev`. Build: `npm run build`.
+Essentials (full list in **[docs/conventions.md](docs/conventions.md)**):
+
+- Python 3.11+, async throughout; mypy (strict) + ruff enforced in CI.
+- Tests: `cd backend && PYTHONPATH=src python -m pytest tests/ -v`; frontend: `cd frontend && npm run test`.
+- Paper mode by default; all trade/position/prediction queries filter by `ctx.config.mode` — paper and live never mix.
+- SQLite WAL; **no explicit `BEGIN`** in write methods (deferred isolation auto-begins). Migrations are schema-only.
+- All timestamps: IST for market logic, UTC for DB storage.
 
 ## Key Files
 
@@ -168,7 +152,10 @@ only when a task needs it:
 - **[docs/database.md](docs/database.md)** — key tables, quarantine, universe resolution
 - **[docs/configuration.md](docs/configuration.md)** — file-only keys, config sections, service toggles
 - **[docs/key-files.md](docs/key-files.md)** — file-by-file backend / frontend / infra map
+- **[docs/domain-context.md](docs/domain-context.md)** — Indian-market trading specifics
+- **[docs/conventions.md](docs/conventions.md)** — full coding conventions
 - **[docs/telegram-commands.md](docs/telegram-commands.md)** — bot command reference
+- **[docs/tls.md](docs/tls.md)** — TLS / nginx-proxy reliability overview
 - **[docs/intraday-model-design.md](docs/intraday-model-design.md)** — design notes for the future 5-min intraday model
 - **[docs/kite-features-backlog.md](docs/kite-features-backlog.md)** — Kite integration backlog
 - **[docs/tls-recovery.md](docs/tls-recovery.md)** — TLS / nginx-proxy recovery runbook
