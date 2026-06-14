@@ -76,6 +76,11 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
     ) -> dict[str, Any]:
         """Restore a database backup. Application should be restarted after restore."""
         backup_dir = ctx.config.database.backup_dir
+        # Defense-in-depth: reject traversal / absolute paths before handing
+        # the name to the DB layer (which copies it over the live DB). The
+        # {filename} path convertor already blocks slashes, but this matches
+        # the guard every sibling backup endpoint already applies.
+        _safe_in_dir(backup_dir, filename)
         result = await ctx.db.restore_backup(
             backup_dir, filename, model_dir=_model_dir(ctx),
         )

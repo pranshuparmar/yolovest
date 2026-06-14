@@ -699,7 +699,13 @@ class ZerodhaBroker(BrokerBase):
                     margins = await asyncio.to_thread(self._kite.margins)
                 return margins
             except Exception:
-                pass
+                # Don't fail silently — a zeroed cash figure the operator
+                # can't explain is worse than the transient error itself.
+                # (Display-only: risk sizing uses the ledger, not this.)
+                logger.warning(
+                    "get_margins: Kite margins fetch failed; returning cash=0 "
+                    "fallback", exc_info=True,
+                )
         # Fallback for unauthenticated or paper-only
         return {"available": {"cash": 0}, "equity": {"available": {"cash": 0}}}
 

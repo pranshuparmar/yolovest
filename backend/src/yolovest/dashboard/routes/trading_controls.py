@@ -315,6 +315,33 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         if missing:
             raise HTTPException(400, f"Missing fields: {missing}")
 
+        # Validate types/ranges BEFORE this reaches the broker — a manual
+        # trade with an inverted SL (e.g. SL above entry on a BUY) would
+        # otherwise be placed live and stop out immediately.
+        try:
+            entry = float(body["entry_price"])
+            target = float(body["target_price"])
+            sl = float(body["stop_loss_price"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "entry/target/stop_loss prices must be numbers") from None
+        if not (entry > 0 and target > 0 and sl > 0):
+            raise HTTPException(400, "entry/target/stop_loss prices must be positive")
+        side = str(body["signal_type"]).upper()
+        if side not in ("BUY", "SELL"):
+            raise HTTPException(400, "signal_type must be BUY or SELL")
+        body["signal_type"] = side
+        if side == "BUY" and not (sl < entry < target):
+            raise HTTPException(400, "For BUY, require stop_loss < entry < target")
+        if side == "SELL" and not (target < entry < sl):
+            raise HTTPException(400, "For SELL, require target < entry < stop_loss")
+        qty = body.get("position_size", body.get("quantity"))
+        if qty is not None:
+            try:
+                if int(qty) <= 0:
+                    raise HTTPException(400, "quantity must be a positive integer")
+            except (TypeError, ValueError):
+                raise HTTPException(400, "quantity must be an integer") from None
+
         body["decided_by"] = "dashboard"
         trade_id = await ctx.db.insert_manual_trade(body)
 
