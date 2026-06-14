@@ -64,7 +64,15 @@ class TestFallbackChain:
         fallback = _make_provider()
 
         ingester = MarketDataIngester([primary, fallback])
-        result = await ingester.get_ohlcv("RELIANCE", "daily", 30)
+        # skip_stale_check: this test verifies chain ROUTING (primary wins →
+        # fallback untouched), not freshness. Without it the test is
+        # weekend-flaky — on a Sunday the freshest weekday bar (Friday) sits
+        # exactly on the 2-calendar-day staleness boundary, so the primary is
+        # deemed stale and the chain continues to the fallback. Staleness
+        # itself is covered by TestStalenessValidation below.
+        result = await ingester.get_ohlcv(
+            "RELIANCE", "daily", 30, skip_stale_check=True,
+        )
 
         assert len(result) == 3
         primary.get_ohlcv.assert_called_once()
