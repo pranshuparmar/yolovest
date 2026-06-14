@@ -1145,16 +1145,44 @@ class TradeExecuteSkill(SkillBase):
 
         Returns the terminal status string, or "COMPLETE" if timeout reached
         (assume filled — broker reconciliation will catch mismatches).
+
+        A genuine timeout (polls succeeded but the order stayed non-terminal)
+        is the documented "assume filled" case. But if EVERY poll raised —
+        the broker was unreachable for the whole window — "could not verify"
+        is indistinguishable from "filled" at the return value, so we alert
+        loudly before returning COMPLETE. Ghost-recovery + postback are still
+        the reconciliation backstops; this just makes the blind spot visible
+        so the operator can verify the position manually.
         """
         terminal = {"COMPLETE", "CANCELLED", "REJECTED", "filled"}
+        poll_succeeded = False
         for _ in range(timeout_sec):
             try:
                 status = await self.ctx.broker.get_order_status(order_id)
+                poll_succeeded = True
                 order_state = status.get("status", "").upper()
                 if order_state in terminal:
                     return order_state
             except Exception as e:
                 logger.warning("Fill verification poll failed for %s: %s", order_id, e)
             await asyncio.sleep(1)
+        if not poll_succeeded:
+            # Broker unreachable for the entire window — assuming filled is a
+            # guess, not a verification. Make it loud.
+            logger.error(
+                "trade-execute: ALL fill-verification polls failed for %s — "
+                "broker unreachable; assuming filled. Verify the position "
+                "manually; ghost-recovery will reconcile if it did not fill.",
+                order_id,
+            )
+            try:
+                await self.ctx.notify.send(
+                    f"Could not verify fill for order {order_id} — broker "
+                    f"unreachable during verification. Assuming filled; please "
+                    f"verify the position manually.",
+                    alert_type="errors",
+                )
+            except Exception:
+                logger.debug("verify-fill alert send failed", exc_info=True)
         # Timeout — assume filled; ghost recovery will catch mismatches
         return "COMPLETE"

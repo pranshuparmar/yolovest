@@ -381,25 +381,39 @@ class TradesMixin:
         exit_price: float,
         pnl: float,
         realized_costs: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         """Close a position with exit price, realized PnL, and an optional
         breakdown of the actual charges applied (brokerage/stt/other/total
         plus a `source` of "broker" or "estimate").
 
         Uses a savepoint to ensure the trade update and audit log are
         committed atomically — no half-closed positions.
+
+        Idempotent: the UPDATE is guarded by `status != 'closed'`, so a
+        second close (e.g. a manual close racing position-monitor's exit,
+        or a duplicated postback) is a no-op that returns ``False`` instead
+        of overwriting the recorded exit price / PnL with a second value
+        and writing a duplicate audit row. Returns ``True`` only when this
+        call is the one that actually closed the row.
         """
         ts_now = now_utc().isoformat()
         pos_id = str(position_id)
         costs_json = json.dumps(realized_costs) if realized_costs else None
         await self.conn.execute("SAVEPOINT close_position")
         try:
-            await self.conn.execute(
+            cursor = await self.conn.execute(
                 "UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, "
                 "closed_at = ?, realized_costs_json = COALESCE(?, realized_costs_json) "
-                "WHERE trade_id = ?",
+                "WHERE trade_id = ? AND status != 'closed'",
                 (exit_price, pnl, ts_now, costs_json, pos_id),
             )
+            if cursor.rowcount == 0:
+                # Already closed (or unknown id) — idempotent no-op. Skip the
+                # audit row + sentinel cleanup so a duplicate close leaves no
+                # second trail, then release the savepoint cleanly.
+                await self.conn.execute("RELEASE SAVEPOINT close_position")
+                await self.conn.commit()
+                return False
             await self.conn.execute(
                 "INSERT INTO audit_log (timestamp_ist, action_type, skill_name, "
                 "input_summary, output_summary) VALUES (?, ?, ?, ?, ?)",
@@ -418,6 +432,7 @@ class TradesMixin:
             )
             await self.conn.execute("RELEASE SAVEPOINT close_position")
             await self.conn.commit()
+            return True
         except Exception:
             await self.conn.execute("ROLLBACK TO SAVEPOINT close_position")
             raise

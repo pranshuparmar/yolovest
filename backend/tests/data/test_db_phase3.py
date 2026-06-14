@@ -74,7 +74,8 @@ class TestClosePosition:
         }
         await db.insert_trade(trade)
 
-        await db.close_position("T-CLOSE-001", exit_price=2550.0, pnl=500.0)
+        closed = await db.close_position("T-CLOSE-001", exit_price=2550.0, pnl=500.0)
+        assert closed is True
 
         cursor = await db.conn.execute(
             "SELECT status, exit_price, pnl, closed_at FROM trades WHERE trade_id = ?",
@@ -85,6 +86,46 @@ class TestClosePosition:
         assert row[1] == 2550.0
         assert row[2] == 500.0
         assert row[3] is not None
+
+    async def test_close_position_idempotent_double_close(self, db):
+        """A second close must be a no-op: it must not overwrite the recorded
+        exit price / PnL with a different value, and must not write a second
+        audit row. Guards the manual-close-vs-position-monitor double-close
+        race (and duplicate postbacks)."""
+        trade = {
+            "trade_id": "T-CLOSE-DUP",
+            "symbol": "RELIANCE",
+            "signal_type": "BUY",
+            "entry_price": 2500.0,
+            "quantity": 10,
+            "stop_loss_price": 2450.0,
+            "target_price": 2600.0,
+            "status": "open",
+        }
+        await db.insert_trade(trade)
+
+        first = await db.close_position("T-CLOSE-DUP", exit_price=2600.0, pnl=1000.0)
+        # Second close arrives with a DIFFERENT exit/pnl (e.g. a stale exit
+        # order fill) — it must be rejected as a no-op.
+        second = await db.close_position("T-CLOSE-DUP", exit_price=2400.0, pnl=-1000.0)
+
+        assert first is True
+        assert second is False
+
+        cursor = await db.conn.execute(
+            "SELECT exit_price, pnl FROM trades WHERE trade_id = ?",
+            ("T-CLOSE-DUP",),
+        )
+        row = await cursor.fetchone()
+        # First close wins; the second did not overwrite it.
+        assert row[0] == 2600.0
+        assert row[1] == 1000.0
+
+        cursor = await db.conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action_type = 'position_closed' "
+            "AND input_summary LIKE '%T-CLOSE-DUP%'",
+        )
+        assert (await cursor.fetchone())[0] == 1
 
 
 class TestUpdatePositionSL:
