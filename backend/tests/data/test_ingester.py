@@ -64,15 +64,11 @@ class TestFallbackChain:
         fallback = _make_provider()
 
         ingester = MarketDataIngester([primary, fallback])
-        # skip_stale_check: this test verifies chain ROUTING (primary wins →
-        # fallback untouched), not freshness. Without it the test is
-        # weekend-flaky — on a Sunday the freshest weekday bar (Friday) sits
-        # exactly on the 2-calendar-day staleness boundary, so the primary is
-        # deemed stale and the chain continues to the fallback. Staleness
-        # itself is covered by TestStalenessValidation below.
-        result = await ingester.get_ohlcv(
-            "RELIANCE", "daily", 30, skip_stale_check=True,
-        )
+        # Fresh weekday bars must not be flagged stale on ANY day, including
+        # weekends — now that _is_stale counts trading days, the last Friday
+        # bar read on a Sat/Sun/Mon is fresh. This doubles as the weekend
+        # regression guard (it failed before the trading-day fix).
+        result = await ingester.get_ohlcv("RELIANCE", "daily", 30)
 
         assert len(result) == 3
         primary.get_ohlcv.assert_called_once()
@@ -158,6 +154,38 @@ class TestStalenessValidation:
         # Both should have been called since primary was stale
         primary.get_ohlcv.assert_called_once()
         fallback.get_ohlcv.assert_called_once()
+
+
+class TestStalenessWeekendAware:
+    """Daily staleness counts TRADING days, so the last Friday bar is fresh
+    over the weekend and on Monday (the old calendar-day threshold flagged it
+    stale every Mon and flaked on Sundays)."""
+
+    def _ingester(self):
+        return MarketDataIngester([_make_provider(bars=_make_bars())])
+
+    def _bar(self, dt: datetime):
+        return [OHLCVBar(timestamp=dt, open=100, high=101, low=99, close=100, volume=1000)]
+
+    def test_friday_bar_fresh_on_monday(self, monkeypatch):
+        import yolovest.data.ingester as ing
+        monkeypatch.setattr(ing, "now_ist", lambda: datetime(2026, 6, 15, 9, 30, tzinfo=IST))  # Mon
+        assert self._ingester()._is_stale(self._bar(datetime(2026, 6, 12, 15, 30)), "daily") is False  # Fri
+
+    def test_friday_bar_fresh_on_sunday(self, monkeypatch):
+        import yolovest.data.ingester as ing
+        monkeypatch.setattr(ing, "now_ist", lambda: datetime(2026, 6, 14, 12, 0, tzinfo=IST))  # Sun
+        assert self._ingester()._is_stale(self._bar(datetime(2026, 6, 12, 15, 30)), "daily") is False  # Fri
+
+    def test_three_trading_sessions_old_is_stale(self, monkeypatch):
+        import yolovest.data.ingester as ing
+        monkeypatch.setattr(ing, "now_ist", lambda: datetime(2026, 6, 18, 9, 30, tzinfo=IST))  # Thu
+        assert self._ingester()._is_stale(self._bar(datetime(2026, 6, 15, 15, 30)), "daily") is True  # Mon
+
+    def test_same_day_is_fresh(self, monkeypatch):
+        import yolovest.data.ingester as ing
+        monkeypatch.setattr(ing, "now_ist", lambda: datetime(2026, 6, 16, 16, 0, tzinfo=IST))  # Tue
+        assert self._ingester()._is_stale(self._bar(datetime(2026, 6, 16, 9, 30)), "daily") is False
 
 
 class TestDataQualityValidation:
