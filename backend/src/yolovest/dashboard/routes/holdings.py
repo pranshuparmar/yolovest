@@ -203,6 +203,21 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             try:
                 bars = await ctx.db.get_ohlcv(symbol, "daily", days=365)
                 if not bars or len(bars) < 50:
+                    # Not in the ingested universe (or thin history) — fetch on
+                    # demand from the provider chain so the review works for ANY
+                    # NSE symbol, not just the watchlist. The model infers from
+                    # the feature vector, so a symbol that was never ingested
+                    # still gets a real recommendation. Transient: not persisted.
+                    try:
+                        fetched = await ctx.market_data.get_ohlcv(symbol, "daily", days=365)
+                        if fetched and len(fetched) > len(bars or []):
+                            bars = fetched
+                    except Exception:
+                        logger.debug(
+                            "review: on-demand OHLCV fetch failed for %s",
+                            symbol, exc_info=True,
+                        )
+                if not bars or len(bars) < 50:
                     rec["reasoning"] = f"Insufficient data ({len(bars) if bars else 0} bars)"
                     recommendations.append(rec)
                     continue

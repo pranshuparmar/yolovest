@@ -124,29 +124,35 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         except Exception:
             logger.debug("quick-context sector lookup failed", exc_info=True)
 
-        bars: list[dict[str, Any]] = []
+        # OHLCV from the DB (ingested universe), falling back to an on-demand
+        # provider fetch so the floater shows price history for ANY NSE symbol,
+        # not just the ingested watchlist. Transient — not persisted.
+        ohlcv_bars: list[Any] = []
         try:
-            ohlcv_bars = await ctx.db.get_ohlcv(sym, "daily", days=20)
-            for b in ohlcv_bars[-10:]:
-                bars.append({
-                    "timestamp": b.timestamp.isoformat(),
-                    "open": b.open,
-                    "high": b.high,
-                    "low": b.low,
-                    "close": b.close,
-                    "volume": b.volume,
-                })
+            ohlcv_bars = await ctx.db.get_ohlcv(sym, "daily", days=30)
+            if not ohlcv_bars or len(ohlcv_bars) < 10:
+                fetched = await ctx.market_data.get_ohlcv(sym, "daily", days=30)
+                if fetched and len(fetched) > len(ohlcv_bars or []):
+                    ohlcv_bars = fetched
         except Exception:
             logger.debug("quick-context ohlcv lookup failed", exc_info=True)
 
+        bars: list[dict[str, Any]] = [
+            {
+                "timestamp": b.timestamp.isoformat(),
+                "open": b.open,
+                "high": b.high,
+                "low": b.low,
+                "close": b.close,
+                "volume": b.volume,
+            }
+            for b in (ohlcv_bars or [])[-10:]
+        ]
+
         avg_volume_20d: float | None = None
-        try:
-            all_bars = await ctx.db.get_ohlcv(sym, "daily", days=30)
-            recent_vols = [b.volume for b in all_bars[-20:] if b.volume]
-            if recent_vols:
-                avg_volume_20d = sum(recent_vols) / len(recent_vols)
-        except Exception:
-            logger.debug("quick-context avg volume lookup failed", exc_info=True)
+        recent_vols = [b.volume for b in (ohlcv_bars or [])[-20:] if b.volume]
+        if recent_vols:
+            avg_volume_20d = sum(recent_vols) / len(recent_vols)
 
         ltp: float | None = None
         try:
