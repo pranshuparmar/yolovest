@@ -694,7 +694,7 @@ export const api = {
     ),
 
   reviewHoldings: (symbols?: string[]) =>
-    apiFetch<{ recommendations: { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number; trade_id?: string | null; current_sl?: number; trade_signal_type?: string | null; entry_price?: number }[] }>(
+    apiFetch<{ recommendations: { symbol: string; held: boolean; quantity: number; average_price: number; last_price: number; pnl_pct: number; action: string; confidence: number; signal_type: string; reasoning: string; target_price?: number; stop_loss_price?: number; trade_id?: string | null; current_sl?: number; trade_signal_type?: string | null; entry_price?: number; day_change_pct?: number | null; week_change_pct?: number | null; vol_ratio?: number | null; target_pct?: number | null; sl_pct?: number | null; rsi?: number | null }[] }>(
       "/api/review",
       { method: "POST", body: JSON.stringify(symbols ? { symbols } : {}) },
     ),

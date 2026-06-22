@@ -30,6 +30,7 @@ const groups: NavGroup[] = [
   {
     label: "Research",
     items: [
+      { to: "/screener", label: "Screener", icon: "Q" },
       { to: "/news", label: "News Feed", icon: "N" },
       { to: "/calendar", label: "Calendar", icon: "C" },
       { to: "/predictions", label: "Predictions", icon: "F" },
