@@ -316,6 +316,14 @@ export function QuickReviewFloater() {
                             {quickCtx.data.sector}
                           </span>
                         )}
+                        {allSymbols && !allSymbols.includes(activeSym) && (
+                          <span
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/30 text-amber-300/90"
+                            title="Not in your tracked universe — the model is running on data fetched on demand, so its confidence is less calibrated for this name."
+                          >
+                            outside universe
+                          </span>
+                        )}
                       </div>
                       <div className="text-right">
                         <div className="text-base font-mono text-gray-100">

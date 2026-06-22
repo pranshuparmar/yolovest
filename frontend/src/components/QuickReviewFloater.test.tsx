@@ -48,7 +48,7 @@ vi.mock("../hooks/useLtpStream", () => ({ useLtpStream: () => new Map() }));
 
 import { QuickReviewFloater } from "./QuickReviewFloater";
 
-function openAndReview() {
+function openAndReview(sym = "TCS") {
   render(
     <MemoryRouter>
       <QuickReviewFloater />
@@ -56,7 +56,7 @@ function openAndReview() {
   );
   fireEvent.click(screen.getByLabelText("Open Quick ML Review"));
   const input = screen.getByPlaceholderText(/Type a symbol/i);
-  fireEvent.change(input, { target: { value: "TCS" } });
+  fireEvent.change(input, { target: { value: sym } });
   fireEvent.keyDown(input, { key: "Enter" });
 }
 
@@ -67,6 +67,13 @@ describe("QuickReviewFloater — act on a review", () => {
     expect(screen.getByText("☆ Watch")).toBeInTheDocument();
     expect(screen.getByText("🔔 Alert")).toBeInTheDocument();
     expect(screen.getByText("Trade…")).toBeInTheDocument();
+    // TCS is in the (mocked) universe → no off-universe caveat.
+    expect(screen.queryByText("outside universe")).not.toBeInTheDocument();
+  });
+
+  it("flags a symbol outside the tracked universe", () => {
+    openAndReview("ZOMATO"); // not in the mocked universe
+    expect(screen.getByText("outside universe")).toBeInTheDocument();
   });
 
   it("Watch adds the symbol to the user watchlist", () => {
