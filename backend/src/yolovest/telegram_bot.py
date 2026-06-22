@@ -580,34 +580,34 @@ class TelegramBot:
         )
 
     async def _cmd_review(self, update: Any, context: Any) -> None:
-        """Handle /review [SYMBOL ...] — ML review of any symbol or all holdings."""
-        from yolovest.data.features import IndicatorConfig, compute_features
+        """Handle /review [SYMBOL ...] — ML review of any NSE symbol (held or
+        not), or all holdings when none are given.
 
-        args = context.args
+        Shares the dashboard's review engine (yolovest.review.review_symbols),
+        so it works for any symbol — not just the ingested universe — and the
+        DB->provider OHLCV fallback lives in exactly one place.
+        """
+        from yolovest.review import review_symbols
 
-        # Build symbol list: explicit args, or fall back to all holdings
-        holdings = await self._ctx.broker.get_holdings()
-        holding_map = {h["tradingsymbol"]: h for h in (holdings or []) if h.get("quantity", 0) > 0}
-
+        args = [a.upper() for a in (context.args or [])]
         if args:
-            symbols = [a.upper() for a in args]
-        elif holding_map:
-            symbols = list(holding_map.keys())
+            await update.message.reply_text(
+                f"Reviewing {len(args)} symbol{'s' if len(args) != 1 else ''}..."
+            )
         else:
-            await update.message.reply_text("Usage: /review SYMBOL [SYMBOL ...]\nOr authenticate with Kite to review all holdings.")
+            await update.message.reply_text("Reviewing your holdings...")
+
+        result = await review_symbols(self._ctx, args or None)
+        recs = result.get("recommendations") or []
+        if not recs:
+            await update.message.reply_text(
+                result.get("error")
+                or "Usage: /review SYMBOL [SYMBOL ...]\nOr authenticate with Kite to review all holdings."
+            )
             return
 
-        await update.message.reply_text(f"Reviewing {len(symbols)} symbol{'s' if len(symbols) != 1 else ''}...")
-
-        ind = self._ctx.config.strategy.indicators
-        indicator_cfg = IndicatorConfig(
-            ema_periods=self._ctx.config.strategy.ema_periods,
-            rsi=ind.rsi, macd=ind.macd, bollinger_bands=ind.bollinger_bands,
-            vwap=ind.vwap, atr=ind.atr, volume_profile=ind.volume_profile,
-            obv=ind.obv, supertrend=ind.supertrend,
-        )
-        # Sector + quarantine lookups: pull once, index in-memory so
-        # each symbol's per-row formatting is a dict hit, not a DB call.
+        # Sector + quarantine context (presentation only) — pulled once and
+        # indexed in-memory so each row's formatting is a dict hit.
         sector_map: dict[str, str] = {}
         quarantined_set: set[str] = set()
         try:
@@ -620,139 +620,65 @@ class TelegramBot:
         except Exception:
             pass
         try:
-            qrows = await self._ctx.db.get_quarantined_symbols()
             quarantined_set = {
-                (q.get("symbol") or "").upper() for q in qrows
+                (q.get("symbol") or "").upper()
+                for q in await self._ctx.db.get_quarantined_symbols()
             }
         except Exception:
             pass
 
+        icons = {"BUY": "\U0001F7E2", "BUY_MORE": "\U0001F7E2",
+                 "SELL": "\U0001F534", "SHORT": "\U0001F534",
+                 "TIGHTEN_SL": "\U0001F7E1"}
         lines = []
-        for symbol in symbols[:15]:
-            # Get price context — from holdings if held, else from market data
-            held = holding_map.get(symbol)
-            entry = held.get("average_price", 0) if held else 0
-            ltp = held.get("last_price", 0) if held else 0
-            qty = held.get("quantity", 0) if held else 0
-
-            if ltp <= 0:
-                try:
-                    ltp = await self._ctx.market_data.get_ltp(symbol)
-                except Exception:
-                    pass
-
-            pnl_pct = ((ltp - entry) / entry * 100) if entry > 0 and ltp > 0 else 0
+        for rec in recs[:15]:
+            symbol = rec["symbol"]
+            action = rec["action"]
+            icon = icons.get(action, "⚪")
+            qty = rec.get("quantity") or 0
             held_label = f"x{qty}" if qty > 0 else "not held"
             sector = sector_map.get(symbol.upper(), "")
             sector_str = f" · {sector}" if sector else ""
             quarantine_flag = " ⚠️ QUARANTINED" if symbol.upper() in quarantined_set else ""
 
-            action = "HOLD"
-            conf = 0.0
-            reason = ""
-            chosen_pred = None
-            day_change_pct: float | None = None
-            week_change_pct: float | None = None
-            vol_ratio: float | None = None
-            try:
-                bars = await self._ctx.db.get_ohlcv(symbol, "daily", days=365)
-                if not bars or len(bars) < 50:
-                    reason = f"insufficient data ({len(bars) if bars else 0} bars)"
-                    lines.append(f"⚪ <b>{symbol}</b>{sector_str} ({held_label}){quarantine_flag} — {reason}")
-                    continue
-
-                # Day / week % moves from the daily bars so the user has
-                # the same context they'd see on the symbol detail page.
-                if ltp > 0 and len(bars) >= 2 and bars[-2].close > 0:
-                    day_change_pct = (ltp - bars[-2].close) / bars[-2].close * 100
-                if ltp > 0 and len(bars) >= 8 and bars[-8].close > 0:
-                    week_change_pct = (ltp - bars[-8].close) / bars[-8].close * 100
-                # Volume vs 20-day average — > 1.5× signals "something is
-                # happening today", < 0.5× signals fading interest.
-                vols = [b.volume for b in bars[-20:] if b.volume]
-                if vols and bars[-1].volume:
-                    avg_vol = sum(vols) / len(vols)
-                    if avg_vol > 0:
-                        vol_ratio = bars[-1].volume / avg_vol
-
-                features = compute_features(bars, indicator_cfg)
-                if features and self._ctx.ml:
-                    swing_pred = None
-                    intra_pred = None
-                    try:
-                        swing_pred = await self._ctx.ml.predict_swing(symbol, features, current_price=ltp or None)
-                    except Exception:
-                        pass
-                    try:
-                        intra_pred = await self._ctx.ml.predict_intraday(symbol, features, current_price=ltp or None)
-                    except Exception:
-                        pass
-
-                    # Pick best non-HOLD prediction
-                    pred = None
-                    if swing_pred and swing_pred.signal_type != "HOLD":
-                        pred = swing_pred
-                    if intra_pred and intra_pred.signal_type != "HOLD":
-                        if pred is None or intra_pred.confidence > pred.confidence:
-                            pred = intra_pred
-
-                    if pred:
-                        action = "SELL" if pred.signal_type == "SELL" else "BUY" if not held else "BUY MORE"
-                        conf = pred.confidence
-                        reason = pred.holding_period
-                        chosen_pred = pred
-                    else:
-                        conf = max(
-                            (swing_pred.confidence if swing_pred else 0),
-                            (intra_pred.confidence if intra_pred else 0),
-                        )
-                        if held and pnl_pct > 10:
-                            action = "TIGHTEN SL"
-                            reason = f"{pnl_pct:+.1f}% — consider partial booking"
-                        else:
-                            reason = "no strong signal"
-            except Exception:
-                reason = "analysis failed"
-
-            icon = {"SELL": "🔴", "BUY": "🟢", "BUY MORE": "🟢", "TIGHTEN SL": "🟡"}.get(action, "⚪")
-            price_line = f"₹{ltp:.2f}" if ltp > 0 else "LTP unavailable"
-            if held and entry > 0:
-                price_line = f"₹{entry:.2f}→₹{ltp:.2f} ({pnl_pct:+.1f}%)"
+            ltp = rec.get("last_price") or 0
+            entry = rec.get("average_price") or 0
+            pnl = rec.get("pnl_pct") or 0
+            if rec.get("held") and entry > 0:
+                price_line = f"₹{entry:.2f}→₹{ltp:.2f} ({pnl:+.1f}%)"
+            else:
+                price_line = f"₹{ltp:.2f}" if ltp > 0 else "LTP unavailable"
 
             ctx_bits: list[str] = []
-            if day_change_pct is not None:
-                ctx_bits.append(f"day {day_change_pct:+.1f}%")
-            if week_change_pct is not None:
-                ctx_bits.append(f"7d {week_change_pct:+.1f}%")
-            if vol_ratio is not None:
-                ctx_bits.append(f"vol {vol_ratio:.1f}×")
+            if rec.get("day_change_pct") is not None:
+                ctx_bits.append(f"day {rec['day_change_pct']:+.1f}%")
+            if rec.get("week_change_pct") is not None:
+                ctx_bits.append(f"7d {rec['week_change_pct']:+.1f}%")
+            if rec.get("vol_ratio") is not None:
+                ctx_bits.append(f"vol {rec['vol_ratio']:.1f}×")
             ctx_line = " | ".join(ctx_bits)
 
             target_line = ""
-            if chosen_pred and chosen_pred.signal_type != "HOLD":
-                tgt_pct = ((chosen_pred.target_price - chosen_pred.entry_price)
-                           / chosen_pred.entry_price * 100)
-                sl_pct = ((chosen_pred.stop_loss_price - chosen_pred.entry_price)
-                          / chosen_pred.entry_price * 100)
-                if chosen_pred.signal_type == "SELL":
-                    tgt_pct = -tgt_pct
-                    sl_pct = -sl_pct
+            if rec.get("target_price") and rec.get("signal_type") != "HOLD":
+                tp_pct = rec.get("target_pct")
+                sl_pct = rec.get("sl_pct")
+                tp_str = f" ({tp_pct:+.1f}%)" if tp_pct is not None else ""
+                sl_str = f" ({sl_pct:+.1f}%)" if sl_pct is not None else ""
                 target_line = (
-                    f"\n    target ₹{chosen_pred.target_price:.2f} ({tgt_pct:+.1f}%)"
-                    f" / SL ₹{chosen_pred.stop_loss_price:.2f} ({sl_pct:+.1f}%)"
+                    f"\n    target ₹{rec['target_price']:.2f}{tp_str}"
+                    f" / SL ₹{rec['stop_loss_price']:.2f}{sl_str}"
                 )
 
             header = (
                 f"{icon} <b>{symbol}</b>{sector_str} ({held_label})"
-                f"{quarantine_flag} — {action} ({conf:.0%})"
+                f"{quarantine_flag} — {action.replace('_', ' ')} ({rec.get('confidence', 0):.0%})"
             )
             body_lines = [f"    {price_line}"]
             if ctx_line:
                 body_lines.append(f"    {ctx_line}")
-            if reason:
-                body_lines.append(f"    {reason}")
-            row_text = header + "\n" + "\n".join(body_lines) + target_line
-            lines.append(row_text)
+            if rec.get("reasoning"):
+                body_lines.append(f"    {rec['reasoning']}")
+            lines.append(header + "\n" + "\n".join(body_lines) + target_line)
 
         msg = "<b>Symbol Review</b>\n\n" + "\n\n".join(lines)
         await update.message.reply_html(msg)

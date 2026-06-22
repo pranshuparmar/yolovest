@@ -124,6 +124,14 @@ async def _review_one(
         "entry_price": (
             float(open_trade.get("entry_price") or 0) if open_trade else 0
         ),
+        # Price-context extras (Telegram review uses these; web card may too).
+        "day_change_pct": None,
+        "week_change_pct": None,
+        "vol_ratio": None,
+        "avg_volume_20d": None,
+        "rsi": None,
+        "target_pct": None,
+        "sl_pct": None,
     }
 
     entry = rec["average_price"]
@@ -156,10 +164,22 @@ async def _review_one(
             rec["reasoning"] = f"Insufficient data ({len(bars) if bars else 0} bars)"
             return rec
 
+        # Day / week % moves and today's volume vs the 20-day average.
+        if ltp and len(bars) >= 2 and bars[-2].close:
+            rec["day_change_pct"] = round((ltp - bars[-2].close) / bars[-2].close * 100, 2)
+        if ltp and len(bars) >= 8 and bars[-8].close:
+            rec["week_change_pct"] = round((ltp - bars[-8].close) / bars[-8].close * 100, 2)
+        vols = [b.volume for b in bars[-20:] if b.volume]
+        if vols:
+            rec["avg_volume_20d"] = sum(vols) / len(vols)
+            if bars[-1].volume and rec["avg_volume_20d"]:
+                rec["vol_ratio"] = round(bars[-1].volume / rec["avg_volume_20d"], 2)
+
         features = compute_features(bars, indicator_cfg)
         if not features:
             rec["reasoning"] = "Feature computation failed"
             return rec
+        rec["rsi"] = features.get("rsi_14")
 
         swing_pred = None
         intra_pred = None
@@ -213,6 +233,16 @@ async def _review_one(
                 rec["target_price"] = round(pred.target_price, 2) if hasattr(pred, "target_price") else None
                 rec["stop_loss_price"] = round(pred.stop_loss_price, 2) if hasattr(pred, "stop_loss_price") else None
                 rec["reasoning"] = f"ML BUY signal at {pred.confidence:.0%} confidence"
+            # Target / SL as a % move from the prediction's entry basis
+            # (direction-aware: favourable side is positive).
+            basis = float(getattr(pred, "entry_price", 0) or ltp or 0)
+            if basis > 0 and rec["target_price"] and rec["stop_loss_price"]:
+                tgt_pct = (rec["target_price"] - basis) / basis * 100
+                sl_pct = (rec["stop_loss_price"] - basis) / basis * 100
+                if pred.signal_type == "SELL":
+                    tgt_pct, sl_pct = -tgt_pct, -sl_pct
+                rec["target_pct"] = round(tgt_pct, 1)
+                rec["sl_pct"] = round(sl_pct, 1)
 
     except Exception as e:
         rec["reasoning"] = f"Analysis failed: {e}"
