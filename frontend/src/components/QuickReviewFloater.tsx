@@ -443,7 +443,11 @@ export function QuickReviewFloater() {
 
                   <div>
                     {review.isPending && (
-                      <div className="text-sm text-gray-500 py-2">Reviewing…</div>
+                      <div className="text-sm text-gray-500 py-2">
+                        {allSymbols && !allSymbols.includes(activeSym)
+                          ? `Fetching live data for ${activeSym}… (not in your tracked universe — this can take a few seconds)`
+                          : "Reviewing…"}
+                      </div>
                     )}
                     {review.isError && (
                       <div className="text-sm text-red-400 py-2">
