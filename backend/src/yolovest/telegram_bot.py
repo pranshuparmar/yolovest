@@ -1069,6 +1069,30 @@ class TelegramBot:
             "source": "manual_telegram",
         }
 
+        # Pre-trade sanity check: run the ML review and flag a disagreement.
+        # Warn, never block — /trade is a deliberate manual command, and a
+        # review hiccup must not stop the placement.
+        try:
+            from yolovest.review import review_symbols
+            recos = (await review_symbols(self._ctx, [symbol])).get("recommendations") or []
+            reco = recos[0] if recos else None
+            if reco:
+                model_sig = reco.get("signal_type")
+                conf = reco.get("confidence") or 0
+                if model_sig in ("BUY", "SELL") and model_sig != signal_type:
+                    await update.message.reply_text(
+                        f"⚠️ Heads up: the model signals {model_sig} ({conf:.0%}) on "
+                        f"{symbol} — the opposite of your {signal_type}. Placing it anyway."
+                    )
+                elif model_sig not in ("BUY", "SELL"):
+                    await update.message.reply_text(
+                        f"⚠️ Heads up: the model sees no clear {signal_type} signal on "
+                        f"{symbol} ({str(reco.get('action', 'HOLD')).replace('_', ' ')}). "
+                        f"Placing it anyway."
+                    )
+        except Exception:
+            logger.debug("trade: pre-trade review check failed", exc_info=True)
+
         try:
             # Insert as manual trade (pre-approved)
             await self._ctx.db.insert_manual_trade(
