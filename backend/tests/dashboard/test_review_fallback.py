@@ -49,6 +49,8 @@ def _ctx(sample_config, mock_db, mock_broker, mock_market_data, mock_llm, mock_n
 @pytest.fixture(autouse=True)
 def _empty_db_and_broker(mock_db, mock_broker, mock_market_data):
     # Symbol is NOT in the ingested universe → DB returns nothing.
+    from yolovest.data import ohlcv_cache
+    ohlcv_cache.clear()  # module-level cache must not leak across tests
     mock_db.get_ohlcv = AsyncMock(return_value=[])
     mock_db.get_open_positions = AsyncMock(return_value=[])
     mock_broker.get_holdings = AsyncMock(return_value=[])

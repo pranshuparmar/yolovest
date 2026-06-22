@@ -15,6 +15,8 @@ from fastapi import (
     Query,
 )
 
+from yolovest.data.ohlcv_cache import get_ohlcv_cached
+
 if TYPE_CHECKING:
     from yolovest.context import AppContext
     from yolovest.dashboard.deps import Deps
@@ -131,7 +133,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         try:
             ohlcv_bars = await ctx.db.get_ohlcv(sym, "daily", days=30)
             if not ohlcv_bars or len(ohlcv_bars) < 10:
-                fetched = await ctx.market_data.get_ohlcv(sym, "daily", days=30)
+                fetched = await get_ohlcv_cached(ctx.market_data, sym, 30)
                 if fetched and len(fetched) > len(ohlcv_bars or []):
                     ohlcv_bars = fetched
         except Exception:
@@ -273,7 +275,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             # deep-dive chart works for ANY NSE symbol (no delivery_pct overlay
             # for these; that's only stored for ingested bars). Transient.
             try:
-                fetched = await ctx.market_data.get_ohlcv(symbol.upper(), "daily", days=days)
+                fetched = await get_ohlcv_cached(ctx.market_data, symbol.upper(), days)
                 return [
                     {
                         "timestamp": b.timestamp.isoformat(),

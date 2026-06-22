@@ -13,6 +13,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from yolovest.data.features import IndicatorConfig, compute_features
+from yolovest.data.ohlcv_cache import get_ohlcv_cached
 
 if TYPE_CHECKING:
     from yolovest.context import AppContext
@@ -152,7 +153,7 @@ async def _review_one(
             # from the provider chain so review works for ANY NSE symbol. The
             # model infers from the feature vector. Transient: not persisted.
             try:
-                fetched = await ctx.market_data.get_ohlcv(symbol, "daily", days=365)
+                fetched = await get_ohlcv_cached(ctx.market_data, symbol, 365)
                 if fetched and len(fetched) > len(bars or []):
                     bars = fetched
             except Exception:
