@@ -268,6 +268,29 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             (symbol.upper(), iv, cutoff),
         )
         rows = await cursor.fetchall()
+        if not rows and iv == "daily":
+            # Not in the ingested universe — fetch daily bars on demand so the
+            # deep-dive chart works for ANY NSE symbol (no delivery_pct overlay
+            # for these; that's only stored for ingested bars). Transient.
+            try:
+                fetched = await ctx.market_data.get_ohlcv(symbol.upper(), "daily", days=days)
+                return [
+                    {
+                        "timestamp": b.timestamp.isoformat(),
+                        "open": b.open,
+                        "high": b.high,
+                        "low": b.low,
+                        "close": b.close,
+                        "volume": b.volume,
+                        "delivery_pct": None,
+                    }
+                    for b in (fetched or [])
+                ]
+            except Exception:
+                logger.debug(
+                    "symbol ohlcv: on-demand fetch failed for %s", symbol,
+                    exc_info=True,
+                )
         return [
             {
                 "timestamp": r[0],
