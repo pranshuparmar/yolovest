@@ -2,7 +2,11 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
-const h = vi.hoisted(() => ({ reviewMutate: vi.fn() }));
+const h = vi.hoisted(() => ({
+  reviewMutate: vi.fn(),
+  addWatchlistMutate: vi.fn(),
+  createAlertMutate: vi.fn(),
+}));
 
 vi.mock("../hooks/queries", () => ({
   useReviewHoldings: () => ({
@@ -26,26 +30,50 @@ vi.mock("../hooks/queries", () => ({
       ],
     },
   }),
+  useAddUserWatchlistSymbol: () => ({
+    mutate: h.addWatchlistMutate, isPending: false, isSuccess: false,
+  }),
+  useCreateAlert: () => ({
+    mutate: h.createAlertMutate, isPending: false, isSuccess: false,
+  }),
 }));
 
 import { ScreenerPage } from "./ScreenerPage";
 
+function scan() {
+  render(
+    <MemoryRouter>
+      <ScreenerPage />
+    </MemoryRouter>,
+  );
+  fireEvent.change(screen.getByPlaceholderText(/Paste symbols/i), {
+    target: { value: "tcs, infy  reliance\ntcs" },
+  });
+  fireEvent.click(screen.getByText("Scan"));
+}
+
 describe("ScreenerPage", () => {
   it("scans a parsed (uppercased, deduped) symbol list and renders results", () => {
-    render(
-      <MemoryRouter>
-        <ScreenerPage />
-      </MemoryRouter>,
-    );
-    fireEvent.change(screen.getByPlaceholderText(/Paste symbols/i), {
-      target: { value: "tcs, infy  reliance\ntcs" },
-    });
-    fireEvent.click(screen.getByText("Scan"));
-
+    scan();
     expect(h.reviewMutate).toHaveBeenCalledWith(["TCS", "INFY", "RELIANCE"]);
     expect(screen.getByText("TCS")).toBeInTheDocument();
     expect(screen.getByText("INFY")).toBeInTheDocument();
     expect(screen.getByText("BUY")).toBeInTheDocument();
     expect(screen.getByText("HOLD")).toBeInTheDocument();
+  });
+
+  it("Watch on a row adds that row's symbol to the watchlist", () => {
+    scan();
+    // First row is the BUY (TCS) — ranked ahead of the HOLD.
+    fireEvent.click(screen.getAllByText("☆ Watch")[0]);
+    expect(h.addWatchlistMutate).toHaveBeenCalledWith({ symbol: "TCS" });
+  });
+
+  it("Alert on a row creates an alert at the target (above current)", () => {
+    scan();
+    fireEvent.click(screen.getAllByText("🔔 Alert")[0]);
+    expect(h.createAlertMutate).toHaveBeenCalledWith({
+      symbol: "TCS", target_price: 120, direction: "above",
+    });
   });
 });
