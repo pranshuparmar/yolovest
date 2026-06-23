@@ -184,196 +184,6 @@ class NotifierProtocol(Protocol):
     async def send_trade_alert(self, trade: dict[str, Any]) -> None: ...
 
 
-@runtime_checkable
-class DatabaseProtocol(Protocol):
-    async def health_check(self) -> bool: ...
-
-    async def is_kill_switch_active(self) -> bool: ...
-
-    async def get_open_positions(self) -> list[Any]: ...
-
-    async def upsert_ohlcv(
-        self, symbol: str, interval: str, bars: list[OHLCVBar], source: str
-    ) -> int: ...
-
-    async def get_ohlcv(
-        self, symbol: str, interval: str, days: int = 30
-    ) -> list[OHLCVBar]: ...
-
-    async def set_system_state(self, key: str, value: str) -> None: ...
-
-    async def get_system_state(self, key: str) -> str | None: ...
-
-    async def log_audit(
-        self,
-        action_type: str,
-        skill_name: str | None = None,
-        input_summary: dict[str, Any] | None = None,
-        output_summary: dict[str, Any] | None = None,
-        duration_ms: float | None = None,
-    ) -> None: ...
-
-    async def get_portfolio_state(self) -> dict[str, Any]: ...
-
-    async def get_stock_sector(self, symbol: str) -> str | None: ...
-
-    async def log_llm_review(
-        self,
-        signal: dict[str, Any],
-        decision: str,
-        reasoning: str,
-        adjusted_size: int | None = None,
-    ) -> None: ...
-
-    async def get_sector_rotation(self) -> dict[str, Any]: ...
-
-    async def get_todays_trades(self) -> list[dict[str, Any]]: ...
-
-    async def get_todays_closed_trades(self) -> list[dict[str, Any]]: ...
-
-    async def get_todays_signals_count(self) -> int: ...
-
-    async def get_signal_class_counts(
-        self, days: int = 7, mode: str | None = None,
-    ) -> dict[str, Any]: ...
-
-    async def update_signal_disposition(
-        self, symbol: str, disposition: str, reason: str | None = None
-    ) -> None: ...
-
-    async def get_todays_recommendations(self) -> list[dict[str, Any]]: ...
-
-    async def get_latest_sentiment(self, symbol: str) -> dict[str, Any] | None: ...
-
-    async def insert_trade(self, trade: dict[str, Any]) -> str: ...
-
-    async def insert_signal(self, signal: dict[str, Any]) -> None: ...
-
-    async def upsert_sentiment(self, symbol: str, sentiment: Any) -> None: ...
-
-    async def update_position_sl(
-        self, position_id: int | str, new_sl: float
-    ) -> None: ...
-
-    async def update_unrealized_pnl(
-        self, position_id: int | str, current_price: float
-    ) -> None: ...
-
-    async def close_position(
-        self, position_id: int | str, exit_price: float, pnl: float
-    ) -> None: ...
-
-    async def insert_prediction(self, prediction: dict[str, Any]) -> str: ...
-
-    async def get_unscored_predictions(self) -> list[dict[str, Any]]: ...
-
-    async def score_prediction(
-        self,
-        prediction_id: str,
-        actual_price: float,
-        direction_correct: bool,
-        target_hit: bool,
-        actual_pnl_pct: float,
-    ) -> None: ...
-
-    async def refresh_prediction_scoreboard(self) -> None: ...
-
-    async def get_prediction_scoreboard(
-        self, group_type: str | None = None
-    ) -> list[dict[str, Any]]: ...
-
-    async def get_todays_predictions(self) -> list[dict[str, Any]]: ...
-
-    async def get_weekly_trades(self) -> list[dict[str, Any]]: ...
-
-    async def get_weekly_predictions(self) -> list[dict[str, Any]]: ...
-
-    async def get_weekly_llm_reviews(self) -> list[dict[str, Any]]: ...
-
-    async def store_report(self, report: dict[str, Any]) -> None: ...
-
-    async def get_shadow_models_ready(self, shadow_mode_days: int) -> list[dict[str, Any]]: ...
-
-    async def retire_model(self, model_type: str, version: str) -> None: ...
-
-    async def get_trades_history(
-        self,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        symbol: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]: ...
-
-    async def get_equity_curve(self, days: int = 30) -> list[dict[str, Any]]: ...
-
-    async def get_trade_detail(self, trade_id: str) -> dict[str, Any] | None: ...
-
-    async def get_reports_history(
-        self,
-        report_type: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        limit: int = 30,
-    ) -> list[dict[str, Any]]: ...
-
-    async def get_audit_log(
-        self, limit: int = 50, action_type: str | None = None
-    ) -> list[dict[str, Any]]: ...
-
-    async def upsert_economic_events(self, events: list[dict[str, Any]]) -> int: ...
-
-    async def get_upcoming_economic_events(
-        self, days: int = 7, country: str | None = None, event_type: str | None = None
-    ) -> list[dict[str, Any]]: ...
-
-    async def get_earnings_events(
-        self, symbol: str | None = None, days: int = 30
-    ) -> list[dict[str, Any]]: ...
-
-    async def upsert_fundamentals(self, symbol: str, data: dict[str, Any]) -> None: ...
-
-    async def get_stale_fundamentals_symbols(
-        self, symbols: list[str], max_age_hours: int = 24,
-    ) -> list[str]: ...
-
-    async def get_watchlist(self) -> list[dict[str, Any]]: ...
-
-    async def upsert_watchlist(self, stocks: list[dict[str, Any]]) -> None: ...
-
-    async def record_signal_outcome(
-        self, symbol: str, produced_signal: bool,
-        threshold: int = 8, cooldown_hours: int = 4,
-    ) -> None: ...
-
-    async def get_rotation_cooldown_symbols(self) -> set[str]: ...
-
-    async def get_latest_premarket(self) -> dict[str, Any]: ...
-
-    async def upsert_premarket(self, data: dict[str, Any]) -> None: ...
-
-    async def get_nse_universe(self) -> list[dict[str, Any]]: ...
-
-    async def backup(self, backup_dir: str) -> str: ...
-
-    async def check_integrity(self) -> str: ...
-
-    async def run_retention_cleanup(
-        self, ohlcv_days: int = 730, audit_days: int = 365, predictions_days: int = 365
-    ) -> dict[str, Any]: ...
-
-    async def get_prediction_outcomes(self) -> list[dict[str, Any]]: ...
-
-    async def store_failure_analysis(self, analysis: object) -> None: ...
-
-    async def get_slippage_stats(
-        self, symbol: str | None = None, days: int = 30
-    ) -> dict[str, Any]: ...
-
-    async def get_llm_review_accuracy(
-        self, days: int = 30
-    ) -> dict[str, Any]: ...
-
-
 # ---------------------------------------------------------------------------
 # Market Hours Checker
 # ---------------------------------------------------------------------------
@@ -570,6 +380,29 @@ class MarketHoursChecker:
                 n += 1
             d += _td(days=1)
         return n
+
+    def add_trading_days(self, start: date, n: int) -> date:
+        """Return the date `n` trading days after `start` (holiday- and
+        weekend-aware). n <= 0 returns `start` unchanged — an intraday
+        signal (0-day horizon) targets the same session it's generated in.
+
+        Used to derive a signal's target / predicted-exit date from its
+        base date plus the model's expected holding-day horizon, so the
+        UI can show "expected to close by <date>". Walks at most a few
+        hundred calendar days as a safety bound.
+        """
+        from datetime import timedelta as _td
+        if n <= 0:
+            return start
+        d = start
+        added = 0
+        for _ in range(n * 3 + 30):  # generous bound for stacked holidays
+            d += _td(days=1)
+            if self.is_trading_day(d):
+                added += 1
+                if added >= n:
+                    return d
+        return d
 
     def get_square_off_time(self, check_date: date | None = None) -> time:
         """Get the square-off time, accounting for early close days."""

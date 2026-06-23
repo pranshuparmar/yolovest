@@ -28,7 +28,10 @@ class AuthBrokerSkill(SkillBase):
 
     def __init__(self, ctx: Any) -> None:
         super().__init__(ctx)
-        self.schedule = ctx.config.heartbeat.auth_broker_cron
+        self.schedule = self.compute_schedule()
+
+    def compute_schedule(self) -> str | None:
+        return self.ctx.config.heartbeat.auth_broker_cron
 
     def should_run(self) -> bool:
         # Always run on schedule — the execute() method handles

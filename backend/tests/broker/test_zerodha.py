@@ -314,3 +314,32 @@ class TestMarketProtection:
         kwargs = live_broker._kite.place_order.call_args.kwargs
         assert kwargs["order_type"] == "LIMIT"
         assert "market_protection" not in kwargs
+
+
+class TestTickRound:
+    """Tick rounding is applied to every price/trigger before placement; a
+    wrong-grid price gets rejected by the exchange, so the snapping must be
+    exact. (conftest fakes this with round(x, 2) — the real grid logic is
+    only exercised here.)"""
+
+    def test_snaps_to_nearest_5_paise(self):
+        assert ZerodhaBroker._tick_round(34.43, 0.05) == 34.45  # .43 → up
+        assert ZerodhaBroker._tick_round(34.42, 0.05) == 34.40  # .42 → down
+        assert ZerodhaBroker._tick_round(34.46, 0.05) == 34.45  # .46 → down to .45
+
+    def test_exact_grid_value_unchanged(self):
+        assert ZerodhaBroker._tick_round(100.00, 0.05) == 100.00
+        assert ZerodhaBroker._tick_round(100.05, 0.05) == 100.05
+
+    def test_honours_non_default_tick(self):
+        assert ZerodhaBroker._tick_round(100.07, 0.10) == 100.10
+        assert ZerodhaBroker._tick_round(34.434, 0.01) == 34.43
+
+    def test_non_positive_tick_falls_back_to_5_paise(self):
+        assert ZerodhaBroker._tick_round(34.43, 0.0) == 34.45
+        assert ZerodhaBroker._tick_round(34.43, -1.0) == 34.45
+
+    def test_result_is_two_decimal_clean(self):
+        out = ZerodhaBroker._tick_round(238.50, 0.05)
+        assert out == 238.50
+        assert round(out, 2) == out

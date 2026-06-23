@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { useListSkills, useRunSkill } from "../hooks/queries";
+import { useListSkills, useRunSkill, useSetScheduleEnabled } from "../hooks/queries";
+import { formatIST } from "../utils/datetime";
 import clsx from "clsx";
 
 const TRIGGER_COLORS: Record<string, string> = {
@@ -12,6 +13,7 @@ const TRIGGER_COLORS: Record<string, string> = {
 export function SkillsPage() {
   const { data: skills, isLoading } = useListSkills();
   const runSkill = useRunSkill();
+  const toggleSchedule = useSetScheduleEnabled();
   const [runningSkills, setRunningSkills] = useState<Set<string>>(new Set());
   const [results, setResults] = useState<
     Record<string, { success: boolean; data?: Record<string, unknown>; error?: string | null; status?: string }>
@@ -125,7 +127,8 @@ export function SkillsPage() {
       <div>
         <h2 className="text-lg font-bold text-gray-100">Skills</h2>
         <p className="text-sm text-gray-500 mt-1">
-          View all registered skills and manually trigger them.
+          View all registered skills, manually trigger them, and start/stop
+          scheduled (CRON) skills.
         </p>
       </div>
 
@@ -160,24 +163,55 @@ export function SkillsPage() {
               </div>
 
               {skill.schedule && (
-                <p className="text-[11px] text-gray-600 font-mono">
-                  cron: {skill.schedule}
-                </p>
+                <div className="text-[11px] font-mono space-y-0.5">
+                  <p className="text-gray-600">cron: {skill.schedule}</p>
+                  {skill.enabled === false ? (
+                    <p className="text-amber-500/90">Schedule paused</p>
+                  ) : skill.next_run ? (
+                    <p className="text-gray-600">next run: {formatIST(skill.next_run)}</p>
+                  ) : null}
+                </div>
               )}
 
-              {isRunning ? (
-                <div className="mt-auto flex items-center gap-2 px-3 py-1.5 rounded text-xs font-medium bg-amber-900/20 border border-amber-800 text-amber-400">
-                  <div className="w-3 h-3 border-2 border-amber-800 border-t-amber-400 rounded-full animate-spin" />
-                  Running...
-                </div>
-              ) : (
-                <button
-                  onClick={() => handleRun(skill.name)}
-                  className="mt-auto px-3 py-1.5 rounded text-xs font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-700"
-                >
-                  Run Now
-                </button>
-              )}
+              {/* Stop/Start schedule sits inline with Run Now as a split
+                  control so the two actions share one row instead of
+                  stacking and eating vertical space. */}
+              <div className="mt-auto flex gap-2">
+                {/* CRON skills (enabled is bool, null for non-cron) can be
+                    started/stopped — pauses only the auto-fire, not Run Now. */}
+                {skill.enabled !== null && (
+                  <button
+                    onClick={() =>
+                      toggleSchedule.mutate({ skillName: skill.name, enabled: !skill.enabled })
+                    }
+                    disabled={toggleSchedule.isPending}
+                    className={clsx(
+                      "flex-1 px-3 py-1.5 rounded text-xs font-medium transition-colors border disabled:opacity-50 whitespace-nowrap",
+                      skill.enabled
+                        ? "bg-amber-900/20 hover:bg-amber-900/40 text-amber-400 border-amber-800"
+                        : "bg-emerald-900/20 hover:bg-emerald-900/40 text-emerald-400 border-emerald-800",
+                    )}
+                    title={skill.enabled
+                      ? "Pause this schedule — it won't auto-fire (manual Run Now still works)"
+                      : "Resume this schedule"}
+                  >
+                    {skill.enabled ? "■ Stop schedule" : "▶ Start schedule"}
+                  </button>
+                )}
+                {isRunning ? (
+                  <div className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 rounded text-xs font-medium bg-amber-900/20 border border-amber-800 text-amber-400">
+                    <div className="w-3 h-3 border-2 border-amber-800 border-t-amber-400 rounded-full animate-spin" />
+                    Running...
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => handleRun(skill.name)}
+                    className="flex-1 px-3 py-1.5 rounded text-xs font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-700"
+                  >
+                    Run Now
+                  </button>
+                )}
+              </div>
 
               {result && result.status === "completed" && (
                 <div

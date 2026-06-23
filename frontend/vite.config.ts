@@ -1,8 +1,18 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  test: {
+    // Explicit imports (globals: false) keep the production `tsc` build
+    // decoupled from test globals. jsdom so component/hook tests can mount.
+    globals: false,
+    environment: "jsdom",
+    setupFiles: ["./src/test/setup.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
+    css: false,
+  },
   server: {
     proxy: {
       "/api": "http://localhost:8080",

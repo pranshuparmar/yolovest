@@ -10,6 +10,7 @@ import {
 import { ScoreboardTable } from "../components/ScoreboardTable";
 import { Pagination } from "../components/Pagination";
 import { SymbolLink } from "../components/SymbolLink";
+import { formatPriceMovePct, priceMovePct } from "../utils/priceMove";
 import clsx from "clsx";
 import type { PredictionDetail } from "../types/api";
 
@@ -39,15 +40,50 @@ function PredictionRow({ p, occurrences }: { p: PredictionDetail; occurrences?: 
             ? <SymbolLink symbol={p.symbol} className="text-emerald-400" />
             : "\u2014"}
         </span>
-        <span className="text-xs text-gray-400 w-16">
+        <span
+          className={clsx(
+            "text-xs font-medium w-12",
+            p.signal_type === "BUY"
+              ? "text-emerald-400"
+              : p.signal_type === "SELL"
+                ? "text-red-400"
+                : "text-gray-400",
+          )}
+        >
           {p.signal_type || "\u2014"}
         </span>
+        {p.product && (
+          <span
+            className={clsx(
+              "text-[10px] px-1.5 py-0.5 rounded font-medium hidden sm:inline",
+              p.product === "MIS"
+                ? "bg-amber-900/30 text-amber-400"
+                : "bg-blue-900/30 text-blue-400",
+            )}
+          >
+            {p.product}
+          </span>
+        )}
+        {p.holding_period && (
+          <span className="text-[10px] text-gray-500 hidden md:inline">
+            {p.holding_period.replace("_", " ")}
+            {p.expected_holding_days ? ` ${p.expected_holding_days}d` : ""}
+          </span>
+        )}
         {occurrences && occurrences > 1 && (
           <span
             className="text-[10px] px-1.5 py-0.5 rounded bg-blue-900/40 text-blue-300 font-medium"
             title={`${occurrences} near-duplicate predictions grouped`}
           >
             \u00d7{occurrences}
+          </span>
+        )}
+        {/* Entry \u2192 Target at-a-glance (signal-style), hidden on narrow screens */}
+        {p.entry_price != null && p.target_price != null && (
+          <span className="text-[11px] font-mono text-gray-500 hidden lg:inline">
+            {fmt(p.entry_price)}
+            <span className="text-gray-600"> {"\u2192"} </span>
+            <span className="text-emerald-400/80">{fmt(p.target_price)}</span>
           </span>
         )}
         <span className="text-xs text-gray-400 w-20">
@@ -100,18 +136,73 @@ function PredictionRow({ p, occurrences }: { p: PredictionDetail; occurrences?: 
       </div>
       {expanded && (
         <div className="px-4 pb-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+          {/* Trade setup \u2014 mirrors the signal / dry-run detail */}
           <div>
-            <span className="text-gray-500">Prediction ID</span>
-            <p className="text-gray-300 font-mono text-xs mt-0.5">
-              {p.prediction_id}
+            <span className="text-gray-500">Direction</span>
+            <p
+              className={clsx(
+                "mt-0.5 font-medium",
+                p.signal_type === "BUY"
+                  ? "text-emerald-400"
+                  : p.signal_type === "SELL"
+                    ? "text-red-400"
+                    : "text-gray-300",
+              )}
+            >
+              {p.signal_type || "\u2014"}
             </p>
           </div>
           <div>
-            <span className="text-gray-500">Trade ID</span>
-            <p className="text-gray-300 font-mono text-xs mt-0.5">
-              {p.trade_id}
+            <span className="text-gray-500">Confidence</span>
+            <p className="text-gray-300 mt-0.5">
+              {fmt(p.confidence_score != null ? p.confidence_score * 100 : null, 1)}%
             </p>
           </div>
+          <div>
+            <span className="text-gray-500">Product</span>
+            <p className="text-gray-300 mt-0.5">{p.product || "\u2014"}</p>
+          </div>
+          <div>
+            <span className="text-gray-500">Holding</span>
+            <p className="text-gray-300 mt-0.5">
+              {p.holding_period ? p.holding_period.replace("_", " ") : "\u2014"}
+              {p.expected_holding_days != null && p.expected_holding_days > 0
+                ? ` (${p.expected_holding_days}d)`
+                : ""}
+            </p>
+          </div>
+          <div>
+            <span className="text-gray-500">Entry</span>
+            <p className="text-gray-300 font-mono mt-0.5">{fmt(p.entry_price)}</p>
+          </div>
+          <div>
+            <span className="text-gray-500">Target</span>
+            <p className="text-emerald-400 font-mono mt-0.5">
+              {fmt(p.target_price)}
+              {priceMovePct(p.entry_price, p.target_price, p.signal_type) != null && (
+                <span className="ml-1 text-[10px] text-emerald-400/70">
+                  {formatPriceMovePct(priceMovePct(p.entry_price, p.target_price, p.signal_type))}
+                </span>
+              )}
+            </p>
+          </div>
+          <div>
+            <span className="text-gray-500">Stop Loss</span>
+            <p className="text-red-400 font-mono mt-0.5">
+              {fmt(p.stop_loss_price)}
+              {priceMovePct(p.entry_price, p.stop_loss_price, p.signal_type) != null && (
+                <span className="ml-1 text-[10px] text-red-400/70">
+                  {formatPriceMovePct(priceMovePct(p.entry_price, p.stop_loss_price, p.signal_type))}
+                </span>
+              )}
+            </p>
+          </div>
+          {p.actual_price != null && (
+            <div>
+              <span className="text-gray-500">Actual Price</span>
+              <p className="text-gray-300 font-mono mt-0.5">{fmt(p.actual_price)}</p>
+            </div>
+          )}
           <div>
             <span className="text-gray-500">Created</span>
             <p className="text-gray-300 mt-0.5">
@@ -126,14 +217,20 @@ function PredictionRow({ p, occurrences }: { p: PredictionDetail; occurrences?: 
                 : "\u2014"}
             </p>
           </div>
-          {p.actual_price != null && (
-            <div>
-              <span className="text-gray-500">Actual Price</span>
-              <p className="text-gray-300 mt-0.5">{fmt(p.actual_price)}</p>
-            </div>
-          )}
+          <div>
+            <span className="text-gray-500">Prediction ID</span>
+            <p className="text-gray-300 font-mono text-xs mt-0.5">
+              {p.prediction_id}
+            </p>
+          </div>
+          <div>
+            <span className="text-gray-500">Trade ID</span>
+            <p className="text-gray-300 font-mono text-xs mt-0.5">
+              {p.trade_id}
+            </p>
+          </div>
           {p.model_version && (
-            <div>
+            <div className="col-span-2 md:col-span-4">
               <span className="text-gray-500">Model</span>
               <p className="text-gray-300 font-mono text-xs mt-0.5">{p.model_version}</p>
             </div>

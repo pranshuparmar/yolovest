@@ -2284,16 +2284,6 @@ wheels = [
 ]
 
 [[package]]
-name = "ta"
-version = "0.11.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "pandas" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e0/9a/37d92a6b470dc9088612c2399a68f1a9ac22872d4e1eff416818e22ab11b/ta-0.11.0.tar.gz", hash = "sha256:de86af43418420bd6b088a2ea9b95483071bf453c522a8441bc2f12bcf8493fd", size = 25308, upload-time = "2023-11-02T13:53:35.434Z" }
-
-[[package]]
 name = "tenacity"
 version = "9.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2698,7 +2688,6 @@ dependencies = [
     { name = "python-telegram-bot" },
     { name = "pyyaml" },
     { name = "scikit-learn" },
-    { name = "ta" },
     { name = "tvdatafeed" },
     { name = "uvicorn" },
     { name = "vadersentiment" },
@@ -2739,7 +2728,6 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.3,<1" },
     { name = "scikit-learn", specifier = ">=1.4,<2" },
-    { name = "ta", specifier = ">=0.11,<1" },
     { name = "tvdatafeed", git = "https://github.com/rongardF/tvdatafeed.git?rev=e6f6aaa7de439ac6e454d9b26d2760ded8dc4923" },
     { name = "uvicorn", specifier = ">=0.27,<1" },
     { name = "vadersentiment", specifier = ">=3.3,<4" },

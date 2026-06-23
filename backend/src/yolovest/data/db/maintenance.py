@@ -98,6 +98,7 @@ class MaintenanceMixin:
         news_days: int = 180,
         economic_events_days: int = 365,
         intraday_ohlcv_days: int | None = None,
+        dry_run_days: int | None = None,
     ) -> dict[str, Any]:
         """Delete data older than retention periods.
 
@@ -174,6 +175,16 @@ class MaintenanceMixin:
             "DELETE FROM sentiment WHERE created_at < ?", (cutoff,)
         )
         deleted["sentiment"] = cursor.rowcount
+
+        # Dry-run previews: one row per generated signal per run. No FK
+        # dependents, so safe to time-prune. Skipped when the caller doesn't
+        # pass a window (backwards-compatible).
+        if dry_run_days is not None:
+            cutoff = (now - timedelta(days=dry_run_days)).isoformat()
+            cursor = await self.conn.execute(
+                "DELETE FROM dry_run_results WHERE created_at < ?", (cutoff,)
+            )
+            deleted["dry_run_results"] = cursor.rowcount
 
         await self.conn.commit()
         logger.info("Retention cleanup: %s", deleted)

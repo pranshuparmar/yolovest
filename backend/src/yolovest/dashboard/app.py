@@ -194,6 +194,12 @@ def create_app(ctx: AppContext) -> FastAPI:
                 _password["current"] = saved_pw
         except Exception:
             logger.warning("Failed to load persisted dashboard password", exc_info=True)
+        if _password["current"] == "yolovest":
+            logger.warning(
+                "SECURITY: the dashboard password is the default 'yolovest'. "
+                "Change it now (Settings → Change Password) — this password is "
+                "the only thing gating live trade execution and config edits.",
+            )
 
     def verify_credentials(
         request: Request,

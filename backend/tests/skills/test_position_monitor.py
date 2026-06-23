@@ -415,3 +415,59 @@ class TestIsBetterSL:
 
     def test_sell_higher_sl_is_not_better(self, monitor_skill):
         assert not monitor_skill._is_better_sl("SELL", 2560, 2550)
+
+
+class TestTrailingStepCurve:
+    """The trailing-SL tighten step-up curve is shared by all three trailing
+    paths (client / GTT / MIS), so a regression here loosens or over-tightens
+    every managed stop. Pin the documented ramp with the default config."""
+
+    def _cfg(self, **overrides):
+        from yolovest.config import ExitTweaksConfig
+        return ExitTweaksConfig(**overrides)
+
+    def test_default_curve_matches_documented_ramp(self):
+        from yolovest.skills.position_monitor import PositionMonitorSkill
+        cfg = self._cfg()
+        mult = PositionMonitorSkill._trailing_step_multiplier
+        # 50% → 100% target progress: 1.00 → 0.85 → 0.70 → 0.55 → 0.40 → 0.25 → 0.20
+        assert mult(0.49, cfg) == 1.0          # below start: no tighten
+        assert mult(0.50, cfg) == pytest.approx(0.85)
+        assert mult(0.60, cfg) == pytest.approx(0.70)
+        assert mult(0.70, cfg) == pytest.approx(0.55)
+        assert mult(0.80, cfg) == pytest.approx(0.40)
+        assert mult(0.90, cfg) == pytest.approx(0.25)
+        assert mult(1.00, cfg) == pytest.approx(0.20)  # floored
+
+    def test_floor_holds_beyond_target(self):
+        from yolovest.skills.position_monitor import PositionMonitorSkill
+        cfg = self._cfg()
+        assert PositionMonitorSkill._trailing_step_multiplier(2.0, cfg) == pytest.approx(0.20)
+
+    def test_disabled_returns_full_step(self):
+        from yolovest.skills.position_monitor import PositionMonitorSkill
+        cfg = self._cfg(tighten_trailing_enabled=False)
+        assert PositionMonitorSkill._trailing_step_multiplier(0.99, cfg) == 1.0
+
+
+class TestTargetProgressPct:
+    def test_buy_halfway(self):
+        from yolovest.skills.position_monitor import PositionMonitorSkill
+        assert PositionMonitorSkill._target_progress_pct("BUY", 100, 110, 105) == pytest.approx(0.5)
+
+    def test_sell_halfway(self):
+        from yolovest.skills.position_monitor import PositionMonitorSkill
+        assert PositionMonitorSkill._target_progress_pct("SELL", 100, 90, 95) == pytest.approx(0.5)
+
+    def test_crossed_target_exceeds_one(self):
+        from yolovest.skills.position_monitor import PositionMonitorSkill
+        assert PositionMonitorSkill._target_progress_pct("BUY", 100, 110, 115) == pytest.approx(1.5)
+
+    def test_below_entry_clamps_to_zero(self):
+        from yolovest.skills.position_monitor import PositionMonitorSkill
+        assert PositionMonitorSkill._target_progress_pct("BUY", 100, 110, 95) == 0.0
+
+    def test_invalid_geometry_returns_zero(self):
+        from yolovest.skills.position_monitor import PositionMonitorSkill
+        assert PositionMonitorSkill._target_progress_pct("BUY", 100, 0, 105) == 0.0
+        assert PositionMonitorSkill._target_progress_pct("BUY", 0, 110, 105) == 0.0

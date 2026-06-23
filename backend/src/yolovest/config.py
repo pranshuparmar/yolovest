@@ -1044,6 +1044,10 @@ class RetentionConfig(BaseModel):
     predictions_days: int = 365
     news_days: int = 90
     economic_events_days: int = 365
+    # Dry-run previews accumulate one row per generated signal every time the
+    # user runs a dry-run; they have no FK dependents, so they're safe to
+    # time-prune (unlike `signals`, which trades/predictions reference).
+    dry_run_days: int = 90
 
 
 class DatabaseConfig(BaseModel):
@@ -1051,6 +1055,10 @@ class DatabaseConfig(BaseModel):
     backup_enabled: bool = True
     backup_cron: str = "0 18 * * *"
     backup_dir: str = "./backups"
+    # How many of the most-recent (unlocked) DB backups + model snapshots the
+    # daily maintenance keeps. Locked backups float out of the rotation on
+    # top of this count. Was hardcoded to 7.
+    backup_keep: int = Field(default=7, ge=1, le=365)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
 
 

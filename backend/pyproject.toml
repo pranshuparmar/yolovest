@@ -20,7 +20,6 @@ dependencies = [
     # a supply-chain hole (upstream force-push runs arbitrary code here).
     "tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git@e6f6aaa7de439ac6e454d9b26d2760ded8dc4923",
     "pandas>=2.0,<3",
-    "ta>=0.11,<1",
     "kiteconnect>=5.0,<6",
     "google-genai>=1.0,<2",
     "fastapi>=0.110,<1",

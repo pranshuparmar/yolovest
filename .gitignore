@@ -22,3 +22,9 @@ backups/
 /models/
 /logs/
 config.yaml
+
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

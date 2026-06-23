@@ -41,6 +41,7 @@ const ModelDriftPage = lazy(() => import("./pages/ModelDriftPage").then(m => ({ 
 const InstitutionalFlowsPage = lazy(() => import("./pages/InstitutionalFlowsPage").then(m => ({ default: m.InstitutionalFlowsPage })));
 const DataManagementPage = lazy(() => import("./pages/DataManagementPage").then(m => ({ default: m.DataManagementPage })));
 const DryRunPage = lazy(() => import("./pages/DryRunPage").then(m => ({ default: m.DryRunPage })));
+const ScreenerPage = lazy(() => import("./pages/ScreenerPage").then(m => ({ default: m.ScreenerPage })));
 const SkillsPage = lazy(() => import("./pages/SkillsPage").then(m => ({ default: m.SkillsPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 
@@ -123,6 +124,7 @@ function LazyRoutes() {
       <Route path="/news" element={<NewsFeedPage />} />
       <Route path="/calendar" element={<EconomicCalendarPage />} />
       <Route path="/predictions" element={<PredictionsPage />} />
+      <Route path="/screener" element={<ScreenerPage />} />
       <Route path="/ml-models" element={<MLModelsPage />} />
       <Route path="/symbol/:symbol" element={<SymbolPage />} />
       <Route path="/alerts" element={<AlertsPage />} />

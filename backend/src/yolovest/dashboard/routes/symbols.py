@@ -15,6 +15,8 @@ from fastapi import (
     Query,
 )
 
+from yolovest.data.ohlcv_cache import get_ohlcv_cached
+
 if TYPE_CHECKING:
     from yolovest.context import AppContext
     from yolovest.dashboard.deps import Deps
@@ -124,29 +126,35 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         except Exception:
             logger.debug("quick-context sector lookup failed", exc_info=True)
 
-        bars: list[dict[str, Any]] = []
+        # OHLCV from the DB (ingested universe), falling back to an on-demand
+        # provider fetch so the floater shows price history for ANY NSE symbol,
+        # not just the ingested watchlist. Transient — not persisted.
+        ohlcv_bars: list[Any] = []
         try:
-            ohlcv_bars = await ctx.db.get_ohlcv(sym, "daily", days=20)
-            for b in ohlcv_bars[-10:]:
-                bars.append({
-                    "timestamp": b.timestamp.isoformat(),
-                    "open": b.open,
-                    "high": b.high,
-                    "low": b.low,
-                    "close": b.close,
-                    "volume": b.volume,
-                })
+            ohlcv_bars = await ctx.db.get_ohlcv(sym, "daily", days=30)
+            if not ohlcv_bars or len(ohlcv_bars) < 10:
+                fetched = await get_ohlcv_cached(ctx.market_data, sym, 30)
+                if fetched and len(fetched) > len(ohlcv_bars or []):
+                    ohlcv_bars = fetched
         except Exception:
             logger.debug("quick-context ohlcv lookup failed", exc_info=True)
 
+        bars: list[dict[str, Any]] = [
+            {
+                "timestamp": b.timestamp.isoformat(),
+                "open": b.open,
+                "high": b.high,
+                "low": b.low,
+                "close": b.close,
+                "volume": b.volume,
+            }
+            for b in (ohlcv_bars or [])[-10:]
+        ]
+
         avg_volume_20d: float | None = None
-        try:
-            all_bars = await ctx.db.get_ohlcv(sym, "daily", days=30)
-            recent_vols = [b.volume for b in all_bars[-20:] if b.volume]
-            if recent_vols:
-                avg_volume_20d = sum(recent_vols) / len(recent_vols)
-        except Exception:
-            logger.debug("quick-context avg volume lookup failed", exc_info=True)
+        recent_vols = [b.volume for b in (ohlcv_bars or [])[-20:] if b.volume]
+        if recent_vols:
+            avg_volume_20d = sum(recent_vols) / len(recent_vols)
 
         ltp: float | None = None
         try:
@@ -262,6 +270,29 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             (symbol.upper(), iv, cutoff),
         )
         rows = await cursor.fetchall()
+        if not rows and iv == "daily":
+            # Not in the ingested universe — fetch daily bars on demand so the
+            # deep-dive chart works for ANY NSE symbol (no delivery_pct overlay
+            # for these; that's only stored for ingested bars). Transient.
+            try:
+                fetched = await get_ohlcv_cached(ctx.market_data, symbol.upper(), days)
+                return [
+                    {
+                        "timestamp": b.timestamp.isoformat(),
+                        "open": b.open,
+                        "high": b.high,
+                        "low": b.low,
+                        "close": b.close,
+                        "volume": b.volume,
+                        "delivery_pct": None,
+                    }
+                    for b in (fetched or [])
+                ]
+            except Exception:
+                logger.debug(
+                    "symbol ohlcv: on-demand fetch failed for %s", symbol,
+                    exc_info=True,
+                )
         return [
             {
                 "timestamp": r[0],

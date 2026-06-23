@@ -40,7 +40,10 @@ class IngestUniverseSkill(SkillBase):
 
     def __init__(self, context: Any) -> None:
         super().__init__(context)
-        self.schedule = self.ctx.config.scanning.universe_cron
+        self.schedule = self.compute_schedule()
+
+    def compute_schedule(self) -> str | None:
+        return self.ctx.config.scanning.universe_cron
 
     def should_run(self) -> bool:
         # Don't run during market hours — avoid competing with heartbeat ingestion

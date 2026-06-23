@@ -623,3 +623,51 @@ class TestModelVersionSharpeLower:
         row = await db.get_production_model("swing")
         assert row["sharpe_ratio"] == 3.0
         assert row["sharpe_lower"] is None
+
+
+class TestTodaysRecommendations:
+    async def test_sorted_by_confidence_desc(self, db):
+        """The dashboard's Today's Recommendations must rank by confidence,
+        not alphabetically. All signals in a heartbeat share a created_at
+        second, so the old `ORDER BY created_at DESC` degraded to insertion
+        (alphabetical) order — this pins the confidence ranking."""
+        # Inserted in alphabetical order with non-monotonic confidence.
+        for sym, conf in [("AAA", 0.55), ("BBB", 0.82), ("CCC", 0.61)]:
+            await db.insert_signal({
+                "symbol": sym, "signal_type": "BUY",
+                "entry_price": 100.0, "target_price": 105.0,
+                "stop_loss_price": 95.0, "position_size": 1,
+                "confidence_score": conf, "model_version": "v1",
+                "mode": "paper",
+            })
+
+        recs = await db.get_todays_recommendations()
+        confs = [r["confidence_score"] for r in recs]
+        assert confs == sorted(confs, reverse=True)            # descending
+        assert [r["symbol"] for r in recs] == ["BBB", "CCC", "AAA"]  # not alpha
+
+
+class TestOpenPositionsOrder:
+    async def test_newest_position_first(self, db):
+        """The Positions table must show newest-opened first, not arbitrary
+        insertion (alphabetical) order — get_open_positions had no ORDER BY."""
+        for sym in ("AAA", "BBB", "CCC"):
+            await db.insert_trade({
+                "trade_id": f"T-{sym}", "symbol": sym, "signal_type": "BUY",
+                "entry_price": 100.0, "stop_loss_price": 95.0,
+                "target_price": 105.0, "quantity": 1, "status": "open",
+            })
+        # Stamp distinct created_at (inserts share a second) so order is
+        # unambiguous: BBB newest, then CCC, then AAA.
+        for tid, ts in [
+            ("T-AAA", "2026-01-01T10:00:00"),
+            ("T-BBB", "2026-01-03T10:00:00"),
+            ("T-CCC", "2026-01-02T10:00:00"),
+        ]:
+            await db.conn.execute(
+                "UPDATE trades SET created_at = ? WHERE trade_id = ?", (ts, tid),
+            )
+        await db.conn.commit()
+
+        pos = await db.get_open_positions()
+        assert [p["symbol"] for p in pos] == ["BBB", "CCC", "AAA"]

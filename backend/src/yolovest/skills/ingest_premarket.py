@@ -29,7 +29,10 @@ class IngestPremarketSkill(SkillBase):
 
     def __init__(self, ctx: Any) -> None:
         super().__init__(ctx)
-        self.schedule = ctx.config.heartbeat.ingest_premarket_cron
+        self.schedule = self.compute_schedule()
+
+    def compute_schedule(self) -> str | None:
+        return self.ctx.config.heartbeat.ingest_premarket_cron
 
     def should_run(self) -> bool:
         return bool(self.ctx.market_hours.is_premarket_window())

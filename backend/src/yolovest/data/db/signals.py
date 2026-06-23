@@ -33,11 +33,15 @@ class SignalsMixin:
         """
         attribution = signal.get("attribution")
         attribution_json = json.dumps(attribution) if attribution else None
+        # product / holding_period / expected_holding_days come from the
+        # holding-period decision (signal_evaluator). Persisting them lets
+        # the recommendations view show MIS vs CNC and derive a target date.
         cursor = await self.conn.execute(
             "INSERT INTO signals (symbol, signal_type, entry_price, target_price, "
             "stop_loss_price, position_size, confidence_score, model_version, "
-            "features_snapshot, mode, attribution_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            "features_snapshot, mode, attribution_json, "
+            "product, holding_period, expected_holding_days, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
             (
                 signal["symbol"],
                 signal["signal_type"],
@@ -50,6 +54,9 @@ class SignalsMixin:
                 json.dumps(signal.get("features_snapshot", {})),
                 signal.get("mode", "paper"),
                 attribution_json,
+                signal.get("product"),
+                signal.get("expected_holding_period"),
+                signal.get("expected_holding_days"),
             ),
         )
         await self.conn.commit()
@@ -126,8 +133,10 @@ class SignalsMixin:
         cursor = await self.read_conn.execute(
             "SELECT id, symbol, signal_type, entry_price, target_price, "
             "stop_loss_price, position_size, confidence_score, model_version, "
-            "disposition, disposition_reason, attribution_json, created_at "
-            "FROM signals WHERE created_at >= ? ORDER BY created_at DESC",
+            "disposition, disposition_reason, attribution_json, "
+            "product, holding_period, expected_holding_days, created_at "
+            "FROM signals WHERE created_at >= ? "
+            "ORDER BY confidence_score DESC, created_at DESC",
             (today_start,),
         )
         rows = await cursor.fetchall()

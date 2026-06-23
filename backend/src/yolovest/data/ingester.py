@@ -255,11 +255,27 @@ class MarketDataIngester(MarketDataBase):
         # Normalize naive timestamps to IST for comparison
         if latest.tzinfo is None:
             latest = latest.replace(tzinfo=IST)
-        # For daily data, stale means no data from today or yesterday
         if interval in ("daily", "1d"):
-            threshold = timedelta(days=2)
-        else:
-            threshold = timedelta(minutes=self._stale_minutes)
+            # Weekend/holiday-aware: count TRADING days elapsed (Mon-Fri), not
+            # calendar days. The old flat 2-calendar-day threshold flagged the
+            # last Friday bar as stale every Monday (3 calendar days) and on
+            # Sundays via intraday clock drift right at the boundary — causing
+            # spurious "stale" warnings, extra provider calls, and a flaky
+            # test. "Fresh" = within ~2 trading sessions. Date-based, so the
+            # noisy intraday-time comparison is dropped. Holidays aren't
+            # modelled, but the 2-session tolerance absorbs a single one.
+            cal_days = (now.date() - latest.date()).days
+            if cal_days <= 0:
+                return False
+            if cal_days > 8:  # over a week of calendar days: unambiguously stale
+                return True
+            weekend_days = sum(
+                1
+                for i in range(1, cal_days + 1)
+                if (latest.date() + timedelta(days=i)).weekday() >= 5
+            )
+            return (cal_days - weekend_days) > 2
+        threshold = timedelta(minutes=self._stale_minutes)
         return (now - latest) > threshold
 
     @staticmethod

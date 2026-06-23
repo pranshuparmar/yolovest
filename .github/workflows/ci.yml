@@ -13,8 +13,8 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -26,8 +26,13 @@ jobs:
           pip install --no-deps -e .
       - name: Lint (ruff)
         run: ruff check src/ tests/
-      - name: Test (pytest)
-        run: pytest tests/ -q
+      - name: Test (pytest + coverage gate)
+        # Coverage floor is a ratchet below the current ~59% overall — it
+        # guards against gross regression without flaking on small swings.
+        # The core money modules (risk_check / trade_execute / position_monitor
+        # / generate_signals / signal_evaluator / ml_signal / zerodha /
+        # orchestrator) sit well above this floor; raise it as coverage grows.
+        run: pytest tests/ -q --cov=yolovest --cov-report=term-missing --cov-fail-under=55
 
   backend-types:
     name: Backend (mypy)
@@ -36,8 +41,8 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -51,14 +56,14 @@ jobs:
         run: mypy src/
 
   frontend:
-    name: Frontend (tsc + build)
+    name: Frontend (tsc + build + vitest)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: npm
@@ -67,3 +72,5 @@ jobs:
         run: npm ci
       - name: Type-check + build
         run: npm run build
+      - name: Test (vitest)
+        run: npm run test

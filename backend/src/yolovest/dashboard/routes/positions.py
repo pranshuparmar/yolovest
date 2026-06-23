@@ -135,15 +135,25 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                     if exit_price and exit_price > 0:
                         break
                 except Exception:
-                    pass
+                    logger.debug(
+                        "close_position(partial): exit-status poll failed for %s",
+                        trade_id, exc_info=True,
+                    )
                 await asyncio.sleep(0.5)
+            exit_price_unreliable = False
             if not exit_price or exit_price <= 0:
                 try:
                     exit_price = await ctx.market_data.get_ltp(symbol)
                 except Exception:
+                    logger.warning(
+                        "close_position(partial): LTP fallback failed for %s — "
+                        "exit price falls back to entry; PnL will be unreliable",
+                        symbol, exc_info=True,
+                    )
                     exit_price = float(
                         trade.get("fill_price") or trade["entry_price"] or 0
                     )
+                    exit_price_unreliable = True
 
             entry = float(trade.get("fill_price") or trade["entry_price"])
             gross_pnl = (
@@ -159,6 +169,20 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                 cost_config=ctx.config.transaction_costs,
             )
             partial_pnl = round(gross_pnl - costs, 2)
+            if exit_price_unreliable:
+                try:
+                    await ctx.notify.send(
+                        f"Partial close {symbol} x{exit_qty}: could NOT determine the "
+                        f"actual exit price (broker status + live quote both "
+                        f"unavailable). Recorded PnL ₹{partial_pnl:+,.2f} is "
+                        f"UNRELIABLE — reconcile against your broker contract note.",
+                        alert_type="errors",
+                    )
+                except Exception:
+                    logger.debug(
+                        "close_position(partial): unreliable-exit alert failed",
+                        exc_info=True,
+                    )
 
             # Resize broker-side protection to remaining_qty. GTT
             # (CNC OCO) → modify with new quantity, target/SL prices
@@ -340,14 +364,29 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                 if exit_price and exit_price > 0:
                     break
             except Exception:
-                pass
+                logger.debug(
+                    "close_position: exit-status poll failed for %s",
+                    trade_id, exc_info=True,
+                )
             await asyncio.sleep(0.5)
 
+        exit_price_unreliable = False
         if not exit_price or exit_price <= 0:
             try:
                 exit_price = await ctx.market_data.get_ltp(symbol)
             except Exception:
+                # Both the broker fill price AND the live quote are
+                # unavailable. The exit order DID go to the broker, so the
+                # position is closed — but computing PnL against the entry
+                # price fabricates a ~0 result. Record it (the row must close)
+                # but flag it loudly so the operator reconciles.
+                logger.warning(
+                    "close_position: LTP fallback failed for %s — exit price "
+                    "falls back to entry; recorded PnL will be unreliable",
+                    symbol, exc_info=True,
+                )
                 exit_price = float(trade.get("fill_price") or trade.get("entry_price") or 0)
+                exit_price_unreliable = True
 
         entry = float(trade.get("fill_price") or trade["entry_price"])
         gross_pnl = (
@@ -365,6 +404,18 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         await ctx.db.close_position(
             trade_id, float(exit_price), pnl, realized_costs=breakdown,
         )
+
+        if exit_price_unreliable:
+            try:
+                await ctx.notify.send(
+                    f"Manual close {symbol} x{qty}: could NOT determine the actual "
+                    f"exit price (broker status + live quote both unavailable). "
+                    f"Recorded PnL ₹{pnl:+,.2f} is UNRELIABLE — reconcile against "
+                    f"your broker contract note.",
+                    alert_type="errors",
+                )
+            except Exception:
+                logger.debug("close_position: unreliable-exit alert failed", exc_info=True)
 
         try:
             await ctx.notify.send(

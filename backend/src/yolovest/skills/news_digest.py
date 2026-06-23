@@ -30,8 +30,10 @@ class NewsDigestSkill(SkillBase):
 
     def __init__(self, ctx: Any) -> None:
         super().__init__(ctx)
-        cfg = ctx.config.news_digest
-        self.schedule = cfg.schedule_cron
+        self.schedule = self.compute_schedule()
+
+    def compute_schedule(self) -> str | None:
+        return self.ctx.config.news_digest.schedule_cron
 
     def should_run(self) -> bool:
         return bool(self.ctx.config.news_digest.enabled)

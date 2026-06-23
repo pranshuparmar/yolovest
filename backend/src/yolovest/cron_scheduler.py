@@ -6,6 +6,7 @@ the heartbeat orchestrator.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -20,6 +21,29 @@ logger = logging.getLogger(__name__)
 
 # How often (seconds) the scheduler checks for due skills.
 _CHECK_INTERVAL_SEC = 30
+
+# system_state key holding the JSON list of skill names whose CRON
+# schedule is currently paused via the dashboard. Read fresh every tick
+# so a Start/Stop toggle takes effect within one check interval.
+DISABLED_SCHEDULES_KEY = "disabled_schedules"
+
+
+async def load_disabled_schedules(db: Any) -> set[str]:
+    """Return the set of skill names whose schedule is paused.
+
+    Stored as a JSON list under ``system_state.disabled_schedules``.
+    Tolerant of a missing / malformed value (returns an empty set).
+    """
+    try:
+        raw = await db.get_system_state(DISABLED_SCHEDULES_KEY)
+        if not raw:
+            return set()
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return {str(x) for x in parsed}
+    except Exception:
+        logger.debug("Failed to load disabled schedules", exc_info=True)
+    return set()
 
 
 class CronScheduler:
@@ -137,9 +161,19 @@ class CronScheduler:
         if self._ctx.market_hours.is_holiday(now.date()):
             return
 
+        # Schedules the user has paused via the dashboard (read fresh each
+        # tick so Start/Stop takes effect without a restart).
+        disabled = await load_disabled_schedules(self._ctx.db)
+
         for name, skill in self._cron_skills.items():
-            # Dynamic schedules: re-read schedule each tick
-            schedule = skill.schedule
+            if name in disabled:
+                logger.debug("CRON skill '%s' schedule is paused — skipping", name)
+                continue
+
+            # Dynamic schedules: re-read the LIVE schedule each tick via
+            # compute_schedule() so a schedule changed in the Settings UI
+            # (which hot-replaces ctx.config) is honoured without restart.
+            schedule = skill.compute_schedule()
             if schedule is None:
                 continue
 

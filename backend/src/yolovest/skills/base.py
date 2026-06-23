@@ -70,6 +70,19 @@ class SkillBase(ABC):
         """Check preconditions — is it the right time/state to run this skill?"""
         ...
 
+    def compute_schedule(self) -> str | None:
+        """Return this skill's CRON schedule, resolved LIVE from config.
+
+        The CRON scheduler calls this every tick instead of reading the
+        cached ``self.schedule`` attribute, so a schedule changed via the
+        Settings UI (which hot-replaces ``ctx.config``) takes effect
+        without a restart. The default returns the cached attribute;
+        skills whose schedule derives from a config key override this to
+        re-read it (and keep ``__init__`` setting ``self.schedule`` from
+        here so the cached value and the live value never diverge).
+        """
+        return self.schedule
+
     def _ingest_source(self, symbol: str, default: str) -> str:
         """Resolve the actual data provider behind this symbol's last
         OHLCV fetch (kite / jugaad / yfinance / tvdatafeed) so it can be

@@ -40,15 +40,18 @@ class SquareOffSkill(SkillBase):
 
     def __init__(self, ctx: Any) -> None:
         super().__init__(ctx)
+        self.schedule = self.compute_schedule()
+
+    def compute_schedule(self) -> str | None:
         # Build cron from market_hours.square_off (e.g. "15:15" → "15 15 * * 1-5")
-        sq_time = ctx.config.market_hours.square_off
+        sq_time = self.ctx.config.market_hours.square_off
         try:
             parts = sq_time.split(":")
             h, m = int(parts[0]), int(parts[1])
-            self.schedule = f"{m} {h} * * 1-5"  # weekdays only
-        except (ValueError, IndexError):
+            return f"{m} {h} * * 1-5"  # weekdays only
+        except (ValueError, IndexError, AttributeError):
             logger.warning("Invalid square_off time %r, using default 15:15", sq_time)
-            self.schedule = "15 15 * * 1-5"  # fallback default
+            return "15 15 * * 1-5"  # fallback default
 
     def should_run(self) -> bool:
         return bool(self.ctx.market_hours.is_square_off_window())

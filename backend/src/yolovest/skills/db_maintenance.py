@@ -22,7 +22,10 @@ class DatabaseMaintenanceSkill(SkillBase):
 
     def __init__(self, context: Any) -> None:
         super().__init__(context)
-        self.schedule = self.ctx.config.database.backup_cron
+        self.schedule = self.compute_schedule()
+
+    def compute_schedule(self) -> str | None:
+        return self.ctx.config.database.backup_cron
 
     def should_run(self) -> bool:
         return bool(self.ctx.config.database.backup_enabled)
@@ -31,21 +34,35 @@ class DatabaseMaintenanceSkill(SkillBase):
         results: dict[str, Any] = {}
 
         # --- Step 1: Backup ---
+        backup_dir = self.ctx.config.database.backup_dir
+        keep = int(getattr(self.ctx.config.database, "backup_keep", 7))
         try:
-            backup_dir = self.ctx.config.database.backup_dir
-            model_dir = getattr(self.ctx.config.strategy, "model_dir", "./models")
-            backup_path = await self.ctx.db.backup(backup_dir, model_dir=model_dir)
-            results["backup_path"] = backup_path
-            results["backup_success"] = True
-            logger.info("DB backup created: %s", backup_path)
+            # Pre-flight: a backup copies the live DB, so it needs at least
+            # the DB's size free. Refuse (and alert) rather than filling the
+            # disk — a full disk corrupts SQLite writes and crashes the app.
+            skip_backup, low_disk_msg = self._disk_preflight(backup_dir)
+            if skip_backup:
+                results["backup_success"] = False
+                results["backup_error"] = low_disk_msg
+                logger.error("DB backup skipped: %s", low_disk_msg)
+                with contextlib.suppress(Exception):
+                    await self.ctx.notify.send(
+                        f"DB backup SKIPPED — {low_disk_msg}", alert_type="errors",
+                    )
+            else:
+                model_dir = getattr(self.ctx.config.strategy, "model_dir", "./models")
+                backup_path = await self.ctx.db.backup(backup_dir, model_dir=model_dir)
+                results["backup_path"] = backup_path
+                results["backup_success"] = True
+                logger.info("DB backup created: %s", backup_path)
 
-            # Notify on success
-            with contextlib.suppress(Exception):
-                await self.ctx.notify.send(f"DB backup created: {Path(backup_path).name}")
+                # Notify on success
+                with contextlib.suppress(Exception):
+                    await self.ctx.notify.send(f"DB backup created: {Path(backup_path).name}")
 
-            # Prune old backups (keep last 7)
-            pruned = self._prune_old_backups(backup_dir, keep=7)
-            results["backups_pruned"] = pruned
+                # Prune old backups (keep the configured count)
+                pruned = self._prune_old_backups(backup_dir, keep=keep)
+                results["backups_pruned"] = pruned
 
         except Exception as e:
             results["backup_success"] = False
@@ -100,6 +117,7 @@ class DatabaseMaintenanceSkill(SkillBase):
                 predictions_days=retention.predictions_days,
                 news_days=retention.news_days,
                 economic_events_days=retention.economic_events_days,
+                dry_run_days=getattr(retention, "dry_run_days", None),
             )
             results["retention_cleanup"] = deleted
             results["retention_success"] = True
@@ -125,7 +143,7 @@ class DatabaseMaintenanceSkill(SkillBase):
 
         # Prune old model backup directories (keep same count as DB backups)
         try:
-            self._prune_old_model_backups(backup_dir, keep=7)
+            self._prune_old_model_backups(backup_dir, keep=keep)
         except Exception as e:
             logger.warning("Model backup pruning failed: %s", e)
 
@@ -169,6 +187,38 @@ class DatabaseMaintenanceSkill(SkillBase):
 
         success = results.get("backup_success", False) and results.get("retention_success", False)
         return SkillResult(success=success, skill_name=self.name, data=results)
+
+    def _disk_preflight(self, backup_dir: str) -> tuple[bool, str]:
+        """Decide whether to skip the backup for lack of disk space.
+
+        A backup copies the live DB, so it needs roughly the DB's own size
+        free. Returns ``(should_skip, message)`` — skips only when free space
+        on the backup volume is positively below ~1.5× the DB size. Any error
+        in the check itself returns ``(False, "")`` so a flaky preflight never
+        blocks an otherwise-healthy backup.
+        """
+        import shutil
+
+        try:
+            db_path = self.ctx.config.database.path
+            db_size = Path(db_path).stat().st_size if Path(db_path).exists() else 0
+            if db_size <= 0:
+                # No DB to size against (fresh install / mocked path) — nothing
+                # to pre-flight; let the backup proceed.
+                return False, ""
+            Path(backup_dir).mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(backup_dir).free
+            needed = int(db_size * 1.5)
+            if free < needed:
+                mb = 1024 * 1024
+                return True, (
+                    f"low disk: {free // mb} MB free on the backup volume, "
+                    f"need ~{needed // mb} MB (1.5x DB size {db_size // mb} MB)"
+                )
+            return False, ""
+        except Exception as e:
+            logger.debug("disk preflight check failed: %s", e, exc_info=True)
+            return False, ""
 
     @staticmethod
     def _prune_old_backups(backup_dir: str, keep: int = 7) -> int:

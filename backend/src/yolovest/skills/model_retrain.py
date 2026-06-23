@@ -355,7 +355,10 @@ class ModelRetrainSkill(SkillBase):
 
     def __init__(self, context: Any) -> None:
         super().__init__(context)
-        self.schedule = self.ctx.config.retraining.schedule_cron
+        self.schedule = self.compute_schedule()
+
+    def compute_schedule(self) -> str | None:
+        return self.ctx.config.retraining.schedule_cron
 
     def should_run(self) -> bool:
         return not self.ctx.market_hours.is_market_hours()
