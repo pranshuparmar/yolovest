@@ -623,3 +623,25 @@ class TestModelVersionSharpeLower:
         row = await db.get_production_model("swing")
         assert row["sharpe_ratio"] == 3.0
         assert row["sharpe_lower"] is None
+
+
+class TestTodaysRecommendations:
+    async def test_sorted_by_confidence_desc(self, db):
+        """The dashboard's Today's Recommendations must rank by confidence,
+        not alphabetically. All signals in a heartbeat share a created_at
+        second, so the old `ORDER BY created_at DESC` degraded to insertion
+        (alphabetical) order — this pins the confidence ranking."""
+        # Inserted in alphabetical order with non-monotonic confidence.
+        for sym, conf in [("AAA", 0.55), ("BBB", 0.82), ("CCC", 0.61)]:
+            await db.insert_signal({
+                "symbol": sym, "signal_type": "BUY",
+                "entry_price": 100.0, "target_price": 105.0,
+                "stop_loss_price": 95.0, "position_size": 1,
+                "confidence_score": conf, "model_version": "v1",
+                "mode": "paper",
+            })
+
+        recs = await db.get_todays_recommendations()
+        confs = [r["confidence_score"] for r in recs]
+        assert confs == sorted(confs, reverse=True)            # descending
+        assert [r["symbol"] for r in recs] == ["BBB", "CCC", "AAA"]  # not alpha

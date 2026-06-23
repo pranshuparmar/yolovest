@@ -135,7 +135,8 @@ class SignalsMixin:
             "stop_loss_price, position_size, confidence_score, model_version, "
             "disposition, disposition_reason, attribution_json, "
             "product, holding_period, expected_holding_days, created_at "
-            "FROM signals WHERE created_at >= ? ORDER BY created_at DESC",
+            "FROM signals WHERE created_at >= ? "
+            "ORDER BY confidence_score DESC, created_at DESC",
             (today_start,),
         )
         rows = await cursor.fetchall()
