@@ -33,6 +33,10 @@ class TradesMixin:
         if mode:
             query += " AND mode = ?"
             params.append(mode)
+        # Newest position first — without this the table renders in rowid
+        # (oldest-opened) order, inconsistent with the rest of the app.
+        # All 23 callers iterate/aggregate, so the order is display-only.
+        query += " ORDER BY created_at DESC"
         cursor = await self.read_conn.execute(query, params)
         rows = await cursor.fetchall()
         return [dict[str, Any](row) for row in rows]
