@@ -17,9 +17,10 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from yolovest.dashboard.helpers import _model_dir
+from yolovest.strategy.model_signing import signing_key, unwrap, wrap
 
 if TYPE_CHECKING:
     from yolovest.context import AppContext
@@ -133,19 +134,34 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
     @app.get("/api/ml-models/{version}/download")
     async def download_model(
         version: str, _user: str = Depends(verify_download_credentials),
-    ) -> FileResponse:
+    ) -> Response:
         """Stream a trained model artifact (.pkl) to the browser so it
         can be moved to another machine (e.g. import a model trained on
-        a higher-memory box)."""
+        a higher-memory box).
+
+        When MODEL_SIGNING_KEY is set, the artifact is wrapped in a signed
+        HMAC envelope so the import side can verify authenticity before
+        joblib.load (see strategy/model_signing). Without a key it streams the
+        raw .pkl as before.
+        """
         model_dir = _model_dir(ctx)
         if "/" in version or "\\" in version or ".." in version:
             raise HTTPException(status_code=400, detail="Invalid version")
         path = Path(model_dir) / f"{version}.pkl"
         if not path.is_file():
             raise HTTPException(status_code=404, detail=f"{version}.pkl not found")
-        return FileResponse(
-            str(path), media_type="application/octet-stream",
-            filename=f"{version}.pkl",
+        key = signing_key()
+        if key is None:
+            return FileResponse(
+                str(path), media_type="application/octet-stream",
+                filename=f"{version}.pkl",
+            )
+        data = await asyncio.to_thread(path.read_bytes)
+        envelope = wrap(key, data)
+        return Response(
+            content=envelope,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{version}.pkl"'},
         )
 
     @app.post("/api/ml-models/upload")
@@ -165,15 +181,34 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             raise HTTPException(status_code=400, detail="Expected a .pkl file")
         if "/" in name or "\\" in name or ".." in name:
             raise HTTPException(status_code=400, detail="Invalid filename")
+        # Buffer the upload so its signature can be verified BEFORE the bytes
+        # are written to disk and joblib.load()ed — pickle executes arbitrary
+        # code on load, so an unsigned/forged artifact must never reach joblib.
+        raw = await file.read()
+
+        key = signing_key()
+        if key is not None:
+            try:
+                payload = unwrap(key, raw)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Model signature check failed: {e}. Upload an artifact "
+                        "downloaded from a YoloVest instance that shares this "
+                        "MODEL_SIGNING_KEY."
+                    ),
+                ) from e
+        else:
+            payload = raw
+            logger.warning(
+                "MODEL_SIGNING_KEY not set — accepting UNVERIFIED model upload "
+                "%s. Set MODEL_SIGNING_KEY on both machines to require signed "
+                "artifacts (guards against malicious-pickle RCE).", name,
+            )
+
         dest = Path(model_dir) / name
-        size = 0
-        with open(dest, "wb") as out:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                out.write(chunk)
-                size += len(chunk)
+        dest.write_bytes(payload)
         # Sanity-check it loads as a YoloVest model bundle before
         # reporting success — a bad file shouldn't sit around looking
         # importable.
@@ -188,10 +223,10 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                 status_code=400, detail=f"Invalid model artifact: {e}",
             ) from e
         version = name[:-4]  # strip .pkl
-        logger.info("Uploaded model artifact %s (%d bytes)", name, size)
+        logger.info("Uploaded model artifact %s (%d bytes)", name, len(payload))
         return {
             "success": True, "version": version, "filename": name,
-            "size_bytes": size,
+            "size_bytes": len(payload),
             "metrics": artifact.get("metrics", {}),
         }
 
