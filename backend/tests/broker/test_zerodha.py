@@ -232,7 +232,9 @@ class TestMarketProtection:
         b._kite = MagicMock()
         b._kite.place_order = MagicMock(return_value="ORD-RESIDUAL")
         # Patch _retry_api_call to invoke fn directly so we can inspect kwargs.
-        async def _direct(fn):
+        # Accepts the idempotent kwarg the real signature now carries (order
+        # creation passes idempotent=False).
+        async def _direct(fn, *, idempotent=True):
             return fn()
         b._retry_api_call = _direct  # type: ignore[assignment]
         return b

@@ -48,6 +48,10 @@ class _Sizing:
     entry: float = 0.0
     sl: float = 0.0
     capital: float = 0.0
+    # Largest size that fits available cash / margin at the rate the margin
+    # check used. The post-margin multiplier stack must not grow size past
+    # this, or the margin/cash clamp stops being the last word on affordability.
+    affordable_size: int | None = None
 
 
 
@@ -555,6 +559,7 @@ class RiskCheckSkill(SkillBase):
         # full notional plus any STT/duty add-ons. We pick the broker
         # number when available, else fall back to notional.
         product = signal.get("product", "CNC")
+        affordable_size: int | None = None
         if entry > 0 and position_size > 0:
             margin_required: float | None = None
             if cfg.margin_usage_enabled:
@@ -579,6 +584,14 @@ class RiskCheckSkill(SkillBase):
                 # Notional fallback (also used when margin_usage_enabled is False)
                 margin_required = entry * position_size
 
+            # Largest size that fits available cash at this margin rate
+            # (linear approximation — exact for the notional path, where
+            # margin_required = entry * size, so this reduces to
+            # available_cash / entry; conservative under broker leverage).
+            # Computed off the pre-shrink size so it respects margin_usage.
+            if margin_required > 0:
+                affordable_size = int(available_cash * position_size / margin_required)
+
             if margin_required > available_cash and position_size > 0:
                 # Shrink to whatever fits, scaling proportionally
                 shrink = available_cash / margin_required
@@ -601,6 +614,7 @@ class RiskCheckSkill(SkillBase):
             entry=entry,
             sl=sl,
             capital=capital,
+            affordable_size=affordable_size,
         )
 
     async def _apply_size_multipliers(
@@ -703,6 +717,21 @@ class RiskCheckSkill(SkillBase):
                     effective_risk, max_allowed_risk, cfg.risk_uplift_cap,
                 )
                 position_size = clamped
+
+        # Affordability clamp — the last word on size. The conviction /
+        # regime / institutional multipliers above can grow the size past
+        # what _compute_base_size's margin/cash check allowed (each is only
+        # capped to max_by_exposure, which is derived from capital, not from
+        # available cash). Re-apply the cash/margin ceiling here so an
+        # up-multiplier can never re-inflate a position past what the account
+        # can actually fund.
+        if sizing.affordable_size is not None and position_size > sizing.affordable_size:
+            logger.info(
+                "risk-check: affordability clamp for %s — size %d -> %d "
+                "(exceeds cash/margin-affordable size)",
+                signal["symbol"], position_size, sizing.affordable_size,
+            )
+            position_size = sizing.affordable_size
 
         # Cumulative size-multiplier audit. Logs the net effect of
         # every gate that touched position_size since base_position_size
@@ -823,8 +852,9 @@ class RiskCheckSkill(SkillBase):
     async def _get_slippage_penalty(self, symbol: str) -> float:
         """Compute position sizing penalty based on historical slippage.
 
-        Returns a reduction factor (0.0 to 0.3). If avg slippage > 0.5% of entry,
-        reduce size proportionally, capped at 30%.
+        Returns a reduction factor (0.0 to 0.3). Above a 0.2% average-slippage
+        threshold, size is reduced proportionally (excess fraction × 10),
+        capped at 30%.
         """
         try:
             stats = await self.ctx.db.get_slippage_stats(symbol=symbol, days=30)
@@ -837,7 +867,9 @@ class RiskCheckSkill(SkillBase):
             if avg_slippage_pct <= threshold:
                 return 0.0
 
-            # Scale penalty: 0.2% -> 0%, 0.5% -> 10%, 1% -> 27%, cap at 30%
+            # Scale penalty: excess fraction over the threshold × 10, capped
+            # at 30%. avg_slippage_pct is a fraction (slippage/entry), so:
+            # 0.2% -> 0%, 0.5% -> 3%, 1% -> 8%, 3.2%+ -> 30% (cap).
             excess = avg_slippage_pct - threshold
             penalty = min(excess * 10, 0.30)
             return penalty

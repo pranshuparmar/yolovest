@@ -335,12 +335,24 @@ def create_app(ctx: AppContext) -> FastAPI:
         # Serve built React assets
         app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="static")
 
+        _dist_root = frontend_dist.resolve()
+
         @app.get("/{full_path:path}")
         async def serve_spa(full_path: str) -> FileResponse:
             """Serve the React SPA for any non-API route."""
-            file_path = frontend_dist / full_path
-            if file_path.is_file():
-                return FileResponse(str(file_path))
-            return FileResponse(str(frontend_dist / "index.html"))
+            index = _dist_root / "index.html"
+            # Contain the join before touching the filesystem: a crafted
+            # path ('../../../etc/passwd', or an absolute path) must never
+            # escape the build dir into an arbitrary file read. Anything
+            # that doesn't resolve to a real file *inside* the dist root
+            # falls back to index.html (normal SPA-route behaviour).
+            try:
+                candidate = (_dist_root / full_path).resolve()
+                candidate.relative_to(_dist_root)
+            except (ValueError, OSError):
+                return FileResponse(str(index))
+            if candidate.is_file():
+                return FileResponse(str(candidate))
+            return FileResponse(str(index))
 
     return app

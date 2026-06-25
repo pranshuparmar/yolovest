@@ -92,12 +92,27 @@ class LLMReviewSkill(SkillBase):
                             "llm_reasoning": f"Invalid adjusted_size: {review.adjusted_size}",
                         },
                     )
+                # The LLM may only TRIM size, never inflate it. risk-check
+                # already sized this against every cap (risk budget,
+                # single-stock exposure, margin) and llm-review runs after
+                # it — an up-resize would bypass all of them. The LLM context
+                # also embeds externally-scraped news sentiment, a
+                # prompt-injection surface. Clamp to the risk-checked size.
+                risk_checked_size = int(signal.get("position_size") or 0)
+                adjusted_size = review.adjusted_size
+                if risk_checked_size > 0 and adjusted_size > risk_checked_size:
+                    logger.warning(
+                        "llm-review: clamping LLM up-resize %d→%d for %s "
+                        "(LLM may only trim, never exceed the risk-checked size)",
+                        adjusted_size, risk_checked_size, signal["symbol"],
+                    )
+                    adjusted_size = risk_checked_size
                 logger.info(
                     "llm-review: RESIZE %s %d→%d — %s",
                     signal["symbol"], signal["position_size"],
-                    review.adjusted_size, review.reasoning[:100],
+                    adjusted_size, review.reasoning[:100],
                 )
-                resized_signal = {**signal, "position_size": review.adjusted_size}
+                resized_signal = {**signal, "position_size": adjusted_size}
                 return SkillResult(
                     success=True,
                     skill_name=self.name,
@@ -105,7 +120,7 @@ class LLMReviewSkill(SkillBase):
                         "approved": True,
                         "resized": True,
                         "original_size": signal["position_size"],
-                        "adjusted_size": review.adjusted_size,
+                        "adjusted_size": adjusted_size,
                         "signal": resized_signal,
                         "llm_reasoning": review.reasoning,
                     },
