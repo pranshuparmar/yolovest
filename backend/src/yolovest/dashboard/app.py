@@ -79,6 +79,7 @@ from yolovest.dashboard.routes import (
 )
 from yolovest.dashboard.security import (
     _TOKEN_TTL_SEC,
+    DEFAULT_DASHBOARD_PASSWORD,
     _client_ip,
     _LoginThrottle,
     _sign_token,
@@ -176,7 +177,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     dash_password = (
         ctx.config.dashboard.password.get_secret_value()
         if hasattr(ctx.config.dashboard, "password")
-        else "yolovest"
+        else DEFAULT_DASHBOARD_PASSWORD
     )
 
     # Mutable password container (allows runtime change)
@@ -194,7 +195,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 _password["current"] = saved_pw
         except Exception:
             logger.warning("Failed to load persisted dashboard password", exc_info=True)
-        if _password["current"] == "yolovest":
+        if _password["current"] == DEFAULT_DASHBOARD_PASSWORD:
             logger.warning(
                 "SECURITY: the dashboard password is the default 'yolovest'. "
                 "Change it now (Settings → Change Password) — this password is "

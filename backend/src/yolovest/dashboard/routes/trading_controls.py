@@ -14,6 +14,10 @@ from fastapi import (
     Request,
 )
 
+from yolovest.dashboard.security import (
+    DEFAULT_DASHBOARD_PASSWORD,
+    MIN_PASSWORD_LENGTH,
+)
 from yolovest.dashboard.ws import broadcast_ws
 
 if TYPE_CHECKING:
@@ -375,8 +379,16 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
     ) -> dict[str, Any]:
         """Change the dashboard password at runtime."""
         new_password = body.get("new_password", "").strip()
-        if len(new_password) < 4:
-            raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+        if len(new_password) < MIN_PASSWORD_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters",
+            )
+        if new_password == DEFAULT_DASHBOARD_PASSWORD:
+            raise HTTPException(
+                status_code=400,
+                detail="Choose a password other than the shipped default",
+            )
         _password["current"] = new_password
         # Persist to DB so it survives restarts
         await ctx.db.set_system_state("dashboard_password", new_password)
