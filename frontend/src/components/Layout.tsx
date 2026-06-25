@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { Sidebar } from "./Sidebar";
 import { StatusBadge } from "./StatusBadge";
 import {
@@ -16,6 +17,7 @@ export function Layout() {
   const { notifications, clearAll, dismiss } = useNotifications();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const location = useLocation();
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-gray-950">
@@ -105,7 +107,12 @@ export function Layout() {
           onMobileClose={() => setMobileOpen(false)}
         />
         <main className="flex-1 p-3 sm:p-4 md:p-6 overflow-auto">
-          <Outlet />
+          {/* Per-route boundary: a crash in one page shows a recoverable
+              fallback without taking down the nav shell. Keyed by path so
+              navigating elsewhere clears a stuck error. */}
+          <ErrorBoundary key={location.pathname} scope="page">
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
       <QuickReviewFloater />
