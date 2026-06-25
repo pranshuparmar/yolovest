@@ -60,9 +60,13 @@ def unwrap(key: bytes, blob: bytes) -> bytes:
     newline = rest.find(b"\n")
     if newline != _SIG_HEX_LEN:
         raise ValueError("malformed signature header")
-    sig = rest[:newline].decode("ascii", "replace")
+    # Compare as bytes: decoding the signature to str and comparing strings
+    # makes hmac.compare_digest raise TypeError on a forged non-ASCII
+    # signature (it refuses non-ASCII str), which would escape the caller's
+    # ValueError handling. Bytes-vs-bytes always returns a bool.
+    sig = rest[:newline]
     payload = rest[newline + 1:]
-    expected = _hmac_hex(key, payload)
+    expected = _hmac_hex(key, payload).encode("ascii")
     if not hmac.compare_digest(sig, expected):
         raise ValueError("signature mismatch")
     return payload

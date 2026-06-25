@@ -39,6 +39,14 @@ class TestEnvelope:
         with pytest.raises(ValueError, match="malformed"):
             unwrap(KEY, b"YVSIG1 deadbeef\npayload")
 
+    def test_non_ascii_signature_rejected_cleanly(self):
+        # A forged signature of 64 non-ASCII bytes must reject as a plain
+        # ValueError (not a TypeError from comparing non-ASCII strings), so the
+        # upload handler's `except ValueError` returns a clean 400.
+        forged = b"YVSIG1 " + bytes([0xC8]) * 64 + b"\n" + b"payload"
+        with pytest.raises(ValueError, match="signature mismatch"):
+            unwrap(KEY, forged)
+
 
 class TestSigningKey:
     def test_absent_env_disables_signing(self, monkeypatch):
