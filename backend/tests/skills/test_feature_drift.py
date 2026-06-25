@@ -6,11 +6,13 @@ Covers the three layers added for it:
   - drift-watch's end-to-end check against a stub model's training stats.
 """
 
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 
 from yolovest.skills.drift_watch import DriftWatchSkill, compute_psi
+from yolovest.timezone import now_ist
 
 
 def _edges(lo: float = 0.0, hi: float = 10.0) -> list[float]:
@@ -56,20 +58,25 @@ class TestSnapshotRoundtrip:
         await database.close()
 
     async def test_upsert_get_and_prune(self, db):
+        # Anchor on "now" (like get_feature_snapshots' rolling window does)
+        # rather than a hard-coded date — a fixed date silently ages out of
+        # the days=14 window and the test starts failing once the wall clock
+        # passes it.
+        recent_day = (now_ist() - timedelta(days=1)).strftime("%Y-%m-%d")
         await db.upsert_feature_snapshot(
-            "2026-06-10", "RELIANCE", "paper",
+            recent_day, "RELIANCE", "paper",
             {"rsi_14": 55.0, "atr_pct": 0.02, "non_numeric": "drop-me"},
         )
         # Same (day, symbol, mode) overwrites — one row, latest values.
         await db.upsert_feature_snapshot(
-            "2026-06-10", "RELIANCE", "paper", {"rsi_14": 60.0},
+            recent_day, "RELIANCE", "paper", {"rsi_14": 60.0},
         )
         await db.upsert_feature_snapshot(
-            "2026-06-10", "TCS", "paper", {"rsi_14": 40.0},
+            recent_day, "TCS", "paper", {"rsi_14": 40.0},
         )
         # Different mode is scoped out.
         await db.upsert_feature_snapshot(
-            "2026-06-10", "INFY", "live", {"rsi_14": 70.0},
+            recent_day, "INFY", "live", {"rsi_14": 70.0},
         )
 
         rows = await db.get_feature_snapshots(days=14, mode="paper")
