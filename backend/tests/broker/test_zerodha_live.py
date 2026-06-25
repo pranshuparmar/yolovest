@@ -143,27 +143,31 @@ class TestLiveOrderPlacement:
 
 
 class TestLiveRetry:
-    async def test_retry_on_api_failure(self, live_broker):
+    async def test_place_order_does_not_retry_on_failure(self, live_broker):
+        # Order creation is non-idempotent: Kite can return an error AFTER
+        # the exchange already accepted the order, so a retry would place a
+        # DUPLICATE. place_order must make exactly one attempt and surface the
+        # error to the skill layer (which reconciles via kite.orders()),
+        # never retry under the broker.
         mock_kite_instance = MagicMock()
         mock_kite_instance.place_order.side_effect = [
             ConnectionError("timeout"),
             "ORD-RETRY-001",
         ]
-        # LTP source so MARKET→LIMIT conversion succeeds before the
-        # place_order retry path is exercised.
         mock_kite_instance.ohlc.return_value = {"NSE:RELIANCE": {"last_price": 2500.0}}
         live_broker._kite = mock_kite_instance
         live_broker._access_token = "token"
 
-        order_id = await live_broker.place_order(
-            symbol="RELIANCE", side="BUY", quantity=10,
-            order_type="MARKET", product="MIS",
-        )
+        with pytest.raises(ConnectionError, match="timeout"):
+            await live_broker.place_order(
+                symbol="RELIANCE", side="BUY", quantity=10,
+                order_type="MARKET", product="MIS",
+            )
 
-        assert order_id == "ORD-RETRY-001"
-        assert mock_kite_instance.place_order.call_count == 2
+        # Single attempt — the second side_effect value is never reached.
+        assert mock_kite_instance.place_order.call_count == 1
 
-    async def test_retry_exhausted_raises(self, live_broker):
+    async def test_place_order_failure_raises(self, live_broker):
         mock_kite_instance = MagicMock()
         mock_kite_instance.place_order.side_effect = ConnectionError("always fails")
         mock_kite_instance.ohlc.return_value = {"NSE:RELIANCE": {"last_price": 2500.0}}
@@ -175,6 +179,34 @@ class TestLiveRetry:
                 symbol="RELIANCE", side="BUY", quantity=10,
                 order_type="MARKET", product="MIS",
             )
+        assert mock_kite_instance.place_order.call_count == 1
+
+    async def test_idempotent_call_retries(self, live_broker):
+        # The generic retry loop still applies to idempotent calls (reads,
+        # absolute-state modifies): a transient failure is retried.
+        calls = {"n": 0}
+
+        def fn():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionError("transient")
+            return "OK"
+
+        result = await live_broker._retry_api_call(fn)  # idempotent=True default
+        assert result == "OK"
+        assert calls["n"] == 2
+
+    async def test_non_idempotent_call_single_attempt(self, live_broker):
+        # idempotent=False breaks out after the first attempt.
+        calls = {"n": 0}
+
+        def fn():
+            calls["n"] += 1
+            raise ConnectionError("boom")
+
+        with pytest.raises(ConnectionError, match="boom"):
+            await live_broker._retry_api_call(fn, idempotent=False)
+        assert calls["n"] == 1
 
 
 class TestLiveOrderManagement:

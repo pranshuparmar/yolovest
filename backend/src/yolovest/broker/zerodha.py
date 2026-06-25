@@ -570,8 +570,12 @@ class ZerodhaBroker(BrokerBase):
         if tag:
             params["tag"] = tag[:20]
 
+        # Order creation is non-idempotent: Kite can error after the
+        # exchange accepted the order, so a blind retry would place a
+        # duplicate. Single attempt; the skill layer reconciles on failure.
         return str(await self._retry_api_call(
-            lambda: self._kite.place_order(variety="regular", **params)
+            lambda: self._kite.place_order(variety="regular", **params),
+            idempotent=False,
         ))
 
     # ------------------------------------------------------------------
@@ -777,7 +781,10 @@ class ZerodhaBroker(BrokerBase):
         if not self._kite:
             raise RuntimeError("Not authenticated")
 
-        # Round to symbol tick (same path as place_order)
+        # Round to symbol tick (same path as place_order). `sym` is bound
+        # up front so the trigger-rounding branch below can't raise
+        # UnboundLocalError when the kite.orders() lookup throws.
+        sym: str | None = None
         if price is not None:
             try:
                 # Best-effort symbol resolution from kite.orders(); skip
@@ -937,7 +944,9 @@ class ZerodhaBroker(BrokerBase):
                 orders=legs,
             )
 
-        result = await self._retry_api_call(_place)
+        # GTT creation is non-idempotent — a retry would leave a duplicate
+        # resting OCO trigger. Single attempt; caller handles attach failure.
+        result = await self._retry_api_call(_place, idempotent=False)
         trigger_id = int(result.get("trigger_id") or 0)
         logger.info(
             "GTT placed: %s %s qty=%d trigger_id=%d (sl_trig=%.2f sl_lim=%.2f "
@@ -1218,13 +1227,24 @@ class ZerodhaBroker(BrokerBase):
     # Retry Helper
     # ------------------------------------------------------------------
 
-    async def _retry_api_call(self, fn: Any) -> Any:
-        """Retry with exponential backoff and circuit breaker protection."""
+    async def _retry_api_call(self, fn: Any, *, idempotent: bool = True) -> Any:
+        """Retry with exponential backoff and circuit breaker protection.
+
+        ``idempotent`` defaults True — safe for reads and absolute-state
+        modifies (set SL trigger to X, modify a GTT) where re-running the
+        call converges to the same broker state. Pass ``idempotent=False``
+        for order/GTT *creation* calls: Kite is known to return an error
+        AFTER the exchange has already accepted the order, so a blind retry
+        places a duplicate. For those we make a single attempt and let the
+        caller — which has order-reconciliation logic
+        (`_find_recently_placed_order`) — decide whether the order landed.
+        """
         # Fail fast if circuit breaker is open
         self._circuit_breaker.check()
 
         last_error: Exception | None = None
-        for attempt in range(self._max_retries):
+        attempts = self._max_retries if idempotent else 1
+        for attempt in range(attempts):
             try:
                 async with self._rate_limiter:
                     result = await asyncio.to_thread(fn)
@@ -1233,6 +1253,10 @@ class ZerodhaBroker(BrokerBase):
             except Exception as e:
                 last_error = e
                 self._circuit_breaker.record_failure()
+                # Never auto-retry a non-idempotent mutation — a duplicate
+                # live order is worse than surfacing the error to the caller.
+                if not idempotent:
+                    break
                 # If circuit just opened, don't retry — fail fast
                 if self._circuit_breaker.state == "OPEN":
                     logger.error(

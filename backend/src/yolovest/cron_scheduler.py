@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 # How often (seconds) the scheduler checks for due skills.
 _CHECK_INTERVAL_SEC = 30
 
+# Hard ceiling on how long a single CRON skill may run before the scheduler
+# abandons it. The scheduler fires skills inline on one loop, so a hung skill
+# (e.g. stuck on a network call) would otherwise block the loop and starve
+# every other scheduled skill indefinitely. Set generously so genuinely
+# long-running skills (model-retrain, ingest-universe) finish normally —
+# only a true hang trips it.
+_SKILL_TIMEOUT_SEC = 3600.0
+
 # system_state key holding the JSON list of skill names whose CRON
 # schedule is currently paused via the dashboard. Read fresh every tick
 # so a Start/Stop toggle takes effect within one check interval.
@@ -188,8 +196,22 @@ class CronScheduler:
                 )
                 continue
 
-            # Fire the skill
-            result = await self._run_skill(name, skill)
+            # Fire the skill — bounded so one hung skill can't freeze the
+            # whole scheduler loop and starve every other CRON skill.
+            try:
+                result = await asyncio.wait_for(
+                    self._run_skill(name, skill), timeout=_SKILL_TIMEOUT_SEC,
+                )
+            except TimeoutError:
+                logger.error(
+                    "CRON skill '%s' exceeded %.0fs timeout — abandoned this "
+                    "run so other scheduled skills aren't starved",
+                    name, _SKILL_TIMEOUT_SEC,
+                )
+                # Record the attempt so it retries at its next scheduled time
+                # rather than re-firing into the same hang every tick.
+                self._last_run[name] = now
+                continue
             # Only mark as run if the skill actually executed (not skipped)
             skipped = result.data.get("skipped", False) if result.data else False
             if not skipped:

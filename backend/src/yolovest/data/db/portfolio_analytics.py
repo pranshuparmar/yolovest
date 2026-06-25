@@ -144,7 +144,13 @@ class PortfolioAnalyticsMixin:
                 symbol = pos.get("symbol", "")
                 qty = pos.get("quantity", 0)
                 entry = pos.get("entry_price", 0)
-                stock_exposures[symbol] = (qty * entry) / total_capital
+                # Accumulate, don't overwrite: a symbol can have more than one
+                # open row (e.g. an adopted holding plus a system position in
+                # the same name), and the single-stock-exposure gate must see
+                # their combined exposure, not just the last row's.
+                stock_exposures[symbol] = (
+                    stock_exposures.get(symbol, 0.0) + (qty * entry) / total_capital
+                )
 
         # Available cash: only deduct system-traded positions, not adopted holdings
         # (adopted holdings represent money already invested outside the system)

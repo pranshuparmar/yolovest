@@ -4,13 +4,14 @@ The concrete DB layer injected into AppContext.db. Uses aiosqlite for async acce
 Schema versioned via numbered SQL migration files in migrations/ directory.
 """
 
+import asyncio
 import logging
 from contextvars import ContextVar
 from datetime import UTC, datetime
 
 UTC = UTC
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import aiosqlite
 
@@ -114,6 +115,109 @@ def _source_priority_sql(col: str) -> str:
     return f"(CASE {col} {whens} ELSE 0 END)"
 
 
+# Statement prefixes that open / continue a write transaction. A statement
+# starting with any of these acquires the write-serialization lock; everything
+# else (SELECT / PRAGMA / EXPLAIN / VACUUM / WITH…SELECT) is treated as a read
+# and runs lock-free. NOTE: there are deliberately NO CTE-prefixed writes
+# (`WITH … INSERT`) in this codebase — if one is ever added it must be
+# classified here, or its write won't be serialized. Classifying a *read* as a
+# write would be worse (a SELECT never commits, so the lock would never
+# release), which is why WITH stays on the read side.
+_WRITE_PREFIXES = (
+    "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER",
+    "SAVEPOINT", "RELEASE", "ROLLBACK", "BEGIN",
+)
+
+
+def _is_write_sql(sql: str) -> bool:
+    """True if `sql` begins a write/transaction-control statement."""
+    head = sql.lstrip()[:12].upper()
+    return any(head.startswith(p) for p in _WRITE_PREFIXES)
+
+
+class _SerializedWriteConnection:
+    """Serializes write transactions on the single shared write connection.
+
+    The app reaches one aiosqlite write connection from many concurrent
+    actors (heartbeat skills, FastAPI endpoints, the Telegram bot, the
+    order-postback handler, KiteTicker callbacks). Under deferred isolation
+    the first write auto-opens ONE connection-global transaction that the
+    next ``commit()``/``rollback()`` ends — so without coordination, two
+    coroutines that interleave their ``execute``/``commit`` calls can bleed
+    one transaction's writes into another's commit, or have a rollback
+    discard a third party's in-flight write.
+
+    This wrapper acquires an ``asyncio.Lock`` on the FIRST write statement of
+    a transaction and releases it on ``commit()``/``rollback()``. Ownership is
+    keyed by the running ``asyncio.Task`` so the lock is re-entrant within a
+    single multi-statement write method (and across SAVEPOINT/RELEASE), while
+    being mutually exclusive across actors. Pure reads (SELECT/PRAGMA) never
+    take the lock, so dashboard reads on this connection aren't blocked.
+
+    A task-done callback is the safety net: if a task acquires the lock but
+    dies before commit/rollback (unhandled exception after ``ROLLBACK TO
+    SAVEPOINT``, cancellation), the lock is released when the task finishes
+    rather than deadlocking every future writer.
+    """
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn = conn
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task[Any] | None = None
+
+    async def _begin(self) -> None:
+        task = asyncio.current_task()
+        if self._owner is task and task is not None:
+            return  # already inside this task's transaction — re-entrant
+        await self._lock.acquire()
+        self._owner = task
+        if task is not None:
+            task.add_done_callback(self._on_owner_done)
+
+    def _end(self) -> None:
+        task = asyncio.current_task()
+        if self._owner is not task:
+            return  # not this task's transaction to end
+        self._owner = None
+        if task is not None:
+            task.remove_done_callback(self._on_owner_done)
+        self._lock.release()
+
+    def _on_owner_done(self, task: "asyncio.Task[Any]") -> None:
+        if self._owner is task:
+            self._owner = None
+            self._lock.release()
+
+    async def execute(self, sql: str, parameters: Any = None) -> Any:
+        if _is_write_sql(sql):
+            await self._begin()
+        if parameters is None:
+            return await self._conn.execute(sql)
+        return await self._conn.execute(sql, parameters)
+
+    async def executemany(self, sql: str, parameters: Any) -> Any:
+        await self._begin()
+        return await self._conn.executemany(sql, parameters)
+
+    async def commit(self) -> None:
+        try:
+            await self._conn.commit()
+        finally:
+            self._end()
+
+    async def rollback(self) -> None:
+        try:
+            await self._conn.rollback()
+        finally:
+            self._end()
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate everything else (cursor(), row_factory, in_transaction, …)
+        # to the real connection. _conn is set in __init__ so this never
+        # recurses for it.
+        return getattr(self._conn, name)
+
+
 class DatabaseCore:
     """Async SQLite database with WAL mode, read/write separation, and migration support.
 
@@ -128,6 +232,10 @@ class DatabaseCore:
         self._db_path = db_path
         self._migrations_dir = migrations_dir or _DEFAULT_MIGRATIONS_DIR
         self._conn: aiosqlite.Connection | None = None
+        # Write-serialization wrapper over _conn (set in initialize). All
+        # writes funnel through this so transactions on the single shared
+        # write connection can't interleave across concurrent actors.
+        self._write_proxy: _SerializedWriteConnection | None = None
         self._read_conn: aiosqlite.Connection | None = None
         # Dedicated read connection for the dashboard, so UI reads don't
         # queue behind the engine's heartbeat reads on _read_conn.
@@ -148,6 +256,10 @@ class DatabaseCore:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._db_path)
         self._conn.row_factory = aiosqlite.Row
+        # Wrap the write connection so every write (including the migrations
+        # below) is serialized per-transaction. PRAGMAs are issued on the raw
+        # connection above/below; they're reads to the proxy anyway.
+        self._write_proxy = _SerializedWriteConnection(self._conn)
 
         # -- Durability & concurrency hardening --
         # WAL mode: concurrent reads during writes, crash-safe journal
@@ -243,13 +355,21 @@ class DatabaseCore:
         if self._conn:
             await self._conn.close()
             self._conn = None
+        # Drop the write proxy too so `conn` raises after close (the proxy
+        # holds a now-closed connection otherwise).
+        self._write_proxy = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
-        """Write connection — use for INSERT/UPDATE/DELETE."""
-        if self._conn is None:
+        """Write connection — use for INSERT/UPDATE/DELETE.
+
+        Returns the write-serialization proxy (not the raw aiosqlite
+        connection) so concurrent writers can't interleave transactions on
+        the single shared connection. Quacks like aiosqlite.Connection.
+        """
+        if self._write_proxy is None:
             raise RuntimeError("Database not initialized. Call initialize() first.")
-        return self._conn
+        return cast("aiosqlite.Connection", self._write_proxy)
 
     @property
     def read_conn(self) -> aiosqlite.Connection:

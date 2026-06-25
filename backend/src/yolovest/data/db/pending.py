@@ -140,17 +140,27 @@ class PendingTradesMixin:
                     set_parts.append(f"{col} = ?")
                     params.append(overrides[key])
             params.append(trade_id)
-            await self.conn.execute(
-                f"UPDATE pending_trades SET {', '.join(set_parts)} WHERE id = ?",
+            cursor = await self.conn.execute(
+                f"UPDATE pending_trades SET {', '.join(set_parts)} "
+                "WHERE id = ? AND status = 'pending'",
                 tuple(params),
             )
         else:
-            await self.conn.execute(
+            cursor = await self.conn.execute(
                 "UPDATE pending_trades SET status = ?, decided_by = ?, "
-                "decided_at = datetime('now') WHERE id = ?",
+                "decided_at = datetime('now') WHERE id = ? AND status = 'pending'",
                 (decision, decided_by, trade_id),
             )
         await self.conn.commit()
+
+        # The guarded UPDATE — not the SELECT above — is the real gate. Two
+        # concurrent approvers (dashboard double-click, or dashboard +
+        # Telegram /approve) can both pass the SELECT while the row is still
+        # 'pending', but only the first UPDATE matches. rowcount == 0 means we
+        # lost the race and the trade was already decided — return None so the
+        # caller doesn't execute the same trade twice.
+        if cursor.rowcount == 0:
+            return None
 
         if decision == "rejected":
             # Reflect the rejection on the originating signal row so the
