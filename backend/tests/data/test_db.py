@@ -671,3 +671,142 @@ class TestOpenPositionsOrder:
 
         pos = await db.get_open_positions()
         assert [p["symbol"] for p in pos] == ["BBB", "CCC", "AAA"]
+
+
+def _pending_signal(symbol="RELIANCE"):
+    return {
+        "symbol": symbol,
+        "signal_type": "BUY",
+        "entry_price": 2500.0,
+        "target_price": 2600.0,
+        "stop_loss_price": 2450.0,
+        "position_size": 10,
+        "confidence_score": 0.85,
+        "model_version": "v1",
+        "mode": "paper",
+    }
+
+
+class TestPendingTradeDoubleApprove:
+    """A pending trade must execute at most once even if two approvers race
+    (dashboard double-click, or dashboard + Telegram /approve). The guarded
+    UPDATE (WHERE status='pending') is the real gate, not the prior SELECT."""
+
+    async def test_second_approve_returns_none(self, db):
+        pid = await db.insert_pending_trade(_pending_signal())
+
+        first = await db.decide_pending_trade(pid, "approved", "user1")
+        second = await db.decide_pending_trade(pid, "approved", "user2")
+
+        assert first is not None
+        assert first["symbol"] == "RELIANCE"
+        # Already decided — second caller gets None, so it can't re-execute.
+        assert second is None
+
+    async def test_concurrent_approve_executes_once(self, db):
+        import asyncio
+
+        pid = await db.insert_pending_trade(_pending_signal())
+
+        r1, r2 = await asyncio.gather(
+            db.decide_pending_trade(pid, "approved", "dashboard"),
+            db.decide_pending_trade(pid, "approved", "telegram"),
+        )
+
+        approved = [r for r in (r1, r2) if r is not None]
+        assert len(approved) == 1, "exactly one approver may win the race"
+
+    async def test_approve_after_reject_returns_none(self, db):
+        pid = await db.insert_pending_trade(_pending_signal())
+
+        rejected = await db.decide_pending_trade(pid, "rejected", "user1")
+        late_approve = await db.decide_pending_trade(pid, "approved", "user2")
+
+        # reject path returns None by contract; the key assertion is that a
+        # late approve can't resurrect an already-decided trade.
+        assert rejected is None
+        assert late_approve is None
+
+
+class TestWriteSerialization:
+    """The shared write connection is wrapped so concurrent write
+    transactions can't interleave (see core._SerializedWriteConnection)."""
+
+    def test_is_write_sql_classification(self):
+        from yolovest.data.db.core import _is_write_sql
+
+        writes = [
+            "INSERT INTO t VALUES (1)", "  update t set x=1", "DELETE FROM t",
+            "REPLACE INTO t VALUES (1)", "CREATE TABLE t (a INT)", "DROP TABLE t",
+            "ALTER TABLE t ADD COLUMN b INT", "SAVEPOINT sp", "RELEASE sp",
+            "ROLLBACK", "BEGIN",
+        ]
+        for sql in writes:
+            assert _is_write_sql(sql) is True, sql
+
+        # Reads (incl. WITH...SELECT and VACUUM) must NOT take the write lock —
+        # they never commit, so classifying one as a write would deadlock.
+        reads = [
+            "SELECT * FROM t", "  select 1", "PRAGMA journal_mode",
+            "EXPLAIN QUERY PLAN SELECT 1", "WITH cte AS (SELECT 1) SELECT * FROM cte",
+            "VACUUM",
+        ]
+        for sql in reads:
+            assert _is_write_sql(sql) is False, sql
+
+    async def test_concurrent_write_transactions_do_not_interleave(self, db):
+        """Two coroutines each running a multi-statement write transaction on
+        the shared connection must fully serialize — one transaction's
+        statements + commit complete before the other's begin."""
+        import asyncio
+
+        await db.conn.execute(
+            "CREATE TABLE IF NOT EXISTS _ser_test (id INTEGER PRIMARY KEY, who TEXT)"
+        )
+        await db.conn.commit()
+
+        events: list[str] = []
+
+        async def writer(name: str) -> None:
+            await db.conn.execute("INSERT INTO _ser_test (who) VALUES (?)", (name,))
+            events.append(f"{name}:start")
+            await asyncio.sleep(0)  # yield — invite the other writer to interleave
+            await db.conn.execute("INSERT INTO _ser_test (who) VALUES (?)", (name,))
+            await db.conn.commit()
+            events.append(f"{name}:end")
+
+        await asyncio.gather(writer("A"), writer("B"))
+
+        # Each writer's [start, end] window must not overlap the other's.
+        a0, a1 = events.index("A:start"), events.index("A:end")
+        b0, b1 = events.index("B:start"), events.index("B:end")
+        assert a1 < b0 or b1 < a0, f"write transactions interleaved: {events}"
+
+        # Both transactions committed all their rows (2 each).
+        cursor = await db.conn.execute("SELECT COUNT(*) FROM _ser_test")
+        assert (await cursor.fetchone())[0] == 4
+
+
+class TestStockExposureAccumulation:
+    """The single-stock-exposure gate must see a symbol's COMBINED exposure
+    across all its open rows (e.g. an adopted holding plus a system position
+    in the same name), not just the last row's."""
+
+    async def test_exposure_sums_across_multiple_rows(self, db):
+        from unittest.mock import AsyncMock
+
+        # Two open rows for the same symbol: a system position and an adopted
+        # holding. Sector is provided inline so get_stock_sector isn't needed.
+        db.get_open_positions = AsyncMock(return_value=[
+            {"symbol": "RELIANCE", "quantity": 10, "entry_price": 2500.0,
+             "origin": "system", "sector": "Energy"},
+            {"symbol": "RELIANCE", "quantity": 5, "entry_price": 2400.0,
+             "origin": "adopted", "sector": "Energy"},
+        ])
+
+        state = await db.get_portfolio_state()
+
+        # No trades -> total_capital = default 100_000.
+        # combined = (10*2500 + 5*2400) / 100_000 = (25000 + 12000)/100000 = 0.37
+        # (the old overwrite bug would report only the last row: 12000/100000 = 0.12)
+        assert state["stock_exposures"]["RELIANCE"] == pytest.approx(0.37)

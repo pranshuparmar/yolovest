@@ -86,6 +86,68 @@ class TestRiskCheckApproval:
         assert result.data["adjusted_size"] == 10
 
 
+class TestRiskCheckAffordabilityClamp:
+    """The post-multiplier affordability clamp is the last word on size.
+
+    Conviction / regime / institutional up-multipliers each clamp only to
+    max_by_exposure (derived from capital, not available cash), so a hot
+    multiplier stack can grow a position past what the account can fund.
+    The affordability clamp re-applies the cash/margin ceiling afterwards.
+    """
+
+    async def test_affordability_clamp_caps_multiplier_inflation(self, risk_skill):
+        from yolovest.skills.risk_check import _Sizing
+
+        risk_skill._get_slippage_penalty = AsyncMock(return_value=0.0)
+        cfg = risk_skill.ctx.config.risk
+        cfg.conviction_sizing.enabled = False
+        cfg.institutional_flow.enabled = False
+        cfg.regime_gate.enabled = True
+        signal = {"symbol": "RELIANCE", "confidence_score": 0.85}
+        sizing = _Sizing(
+            position_size=100,
+            base_position_size=100,
+            max_by_exposure=1000,
+            risk_per_share=0.0,  # skip the effective-risk clamp, isolate affordability
+            capital=100_000,
+            affordable_size=150,
+        )
+
+        size, _penalty = await risk_skill._apply_size_multipliers(
+            signal, cfg, sizing,
+            depth_size_multiplier=1.0, regime_size_multiplier=3.0,
+        )
+
+        # regime x3 -> 300 (<= max_by_exposure 1000), then affordability -> 150
+        assert size == 150
+
+    async def test_no_affordable_size_means_no_clamp(self, risk_skill):
+        from yolovest.skills.risk_check import _Sizing
+
+        risk_skill._get_slippage_penalty = AsyncMock(return_value=0.0)
+        cfg = risk_skill.ctx.config.risk
+        cfg.conviction_sizing.enabled = False
+        cfg.institutional_flow.enabled = False
+        cfg.regime_gate.enabled = True
+        signal = {"symbol": "RELIANCE", "confidence_score": 0.85}
+        sizing = _Sizing(
+            position_size=100,
+            base_position_size=100,
+            max_by_exposure=1000,
+            risk_per_share=0.0,
+            capital=100_000,
+            affordable_size=None,  # no margin/cash info -> clamp must not fire
+        )
+
+        size, _penalty = await risk_skill._apply_size_multipliers(
+            signal, cfg, sizing,
+            depth_size_multiplier=1.0, regime_size_multiplier=3.0,
+        )
+
+        # regime x3 -> 300, capped only by max_by_exposure (1000), no clamp
+        assert size == 300
+
+
 class TestRiskCheckRejections:
     """Test all rejection scenarios."""
 
