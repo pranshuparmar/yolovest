@@ -28,3 +28,10 @@ config.yaml
 .coverage.*
 coverage.xml
 htmlcov/
+
+# OS & editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
