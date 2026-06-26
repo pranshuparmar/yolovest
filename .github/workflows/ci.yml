@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: every job here only checks out and runs read-only checks
+# (lint / type / test / audit) — none push, comment, or release. A read-only
+# default token means a compromised dependency in CI can't mutate the repo.
+permissions:
+  contents: read
+
 jobs:
   backend:
     name: Backend (ruff + pytest)

@@ -708,11 +708,11 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         gtts: list[dict[str, Any]] = []
         try:
             orders = list(await ctx.broker.get_orders() or [])
-        except Exception as e:
+        except Exception:
             logger.exception("get_broker_orders: get_orders failed")
             return {
                 "authenticated": True, "orders": [], "gtts": [],
-                "error": f"orders fetch failed: {e}",
+                "error": "orders fetch failed",
             }
         try:
             if hasattr(ctx.broker, "get_gtts"):

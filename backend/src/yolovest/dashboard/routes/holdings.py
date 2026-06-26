@@ -209,7 +209,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             return {
                 "authenticated": True, "needs_auth": False,
                 "checked_at": None,
-                "error": str(e),
+                "error": "could not fetch holdings from broker",
                 "pending_symbols": [], "pending_count": 0,
                 "ddpi_likely_enabled": False,
             }
@@ -350,5 +350,8 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                         "source": "manual-order",
                     },
                 )
-            return {"success": False, "error": msg}
+            return {
+                "success": False,
+                "error": "Order rejected by broker — see server logs for the reason.",
+            }
 
