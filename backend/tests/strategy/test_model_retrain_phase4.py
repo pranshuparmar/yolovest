@@ -1,7 +1,7 @@
 """Tests for model-retrain shadow promotion."""
 
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -98,6 +98,12 @@ def retrain_skill(app_context):
     app_context.ml.save_model = AsyncMock(return_value="v2.0")
     app_context.ml.deploy_shadow = AsyncMock()
     app_context.ml.load_model = AsyncMock()
+    # Synchronous model methods — keep them sync Mocks so production calls that
+    # don't await them (e.g. the shadow-slot hygiene get_shadow_version /
+    # clear_shadow) don't leave unawaited coroutines.
+    app_context.ml.get_shadow_version = MagicMock(return_value=None)
+    app_context.ml.clear_shadow = MagicMock()
+    app_context.ml.clear_model = MagicMock()
     return ModelRetrainSkill(app_context)
 
 

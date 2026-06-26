@@ -5,7 +5,7 @@ for schemas. No external services required.
 """
 
 from datetime import datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -142,7 +142,6 @@ def mock_broker() -> AsyncMock:
     # return coroutines that signal_evaluator stores as the target/SL
     # price. Use MagicMock with identity rounding (0.05 tick is the
     # NSE default; tests don't assert exact tick snapping).
-    from unittest.mock import MagicMock
     broker.tick_for = MagicMock(return_value=0.05)
     broker.round_to_tick = MagicMock(side_effect=lambda _sym, price: round(price, 2))
     return broker
@@ -318,6 +317,9 @@ def mock_market_data() -> AsyncMock:
     md.get_ohlcv = AsyncMock(return_value=[])
     md.get_quote = AsyncMock(return_value={"ltp": 2500.0})
     md.get_ltp = AsyncMock(return_value=2500.0)
+    # get_fetch_meta is a synchronous provenance lookup; keep it a sync Mock so
+    # callers (e.g. SkillBase._ingest_source) don't get an unawaited coroutine.
+    md.get_fetch_meta = MagicMock(return_value=None)
     return md
 
 

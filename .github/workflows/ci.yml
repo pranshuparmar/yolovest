@@ -13,7 +13,7 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
@@ -41,7 +41,7 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
@@ -62,7 +62,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: "20"
@@ -76,16 +76,16 @@ jobs:
         run: npm run test
 
   audit:
-    name: Dependency audit (advisory)
+    name: Dependency audit
     runs-on: ubuntu-latest
-    # Advisory only: surfaces known CVEs in the dependency tree without
-    # blocking merges. Some deps are pinned transitively (e.g. autobahn via
-    # kiteconnect), so a hard gate would red-line CI on packages we can't
-    # unilaterally bump. Review this job's log per run; promote to a blocking
-    # gate (drop continue-on-error) once the tree is clean.
-    continue-on-error: true
+    # Blocking gate: a known CVE in the dependency tree fails CI. The single
+    # transitively-pinned exception (autobahn via kiteconnect) is allow-listed
+    # explicitly below via --ignore-vuln, so the gate stays green on packages
+    # we can't unilaterally bump while still catching anything new. Add a
+    # narrowly-scoped --ignore-vuln (with a comment) only for a genuinely
+    # unfixable, justified advisory.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"

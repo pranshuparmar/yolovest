@@ -53,7 +53,7 @@ each tick and skips paused skills. `GET /api/skills` reports per-skill `enabled`
 (bool for CRON, null otherwise) + `next_run`; `POST /api/skills/{name}/schedule`
 `{enabled}` toggles it. Surfaced on the Skills page as a Start/Stop control.
 
-### Heartbeat Pipeline (market hours, every 15min)
+### Heartbeat Pipeline (market hours, every 15min — configurable)
 
 ```
 expire-pending → health-check → ingest-data → depth-snapshot → market-scan → generate-signals

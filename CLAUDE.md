@@ -61,9 +61,7 @@ YoloVest is an AI-driven Indian stock trading platform. It uses Google Gemini fo
 │   ├── conventions.md      — coding conventions
 │   ├── telegram-commands.md
 │   ├── tls.md              — TLS reliability overview
-│   ├── tls-recovery.md
-│   ├── kite-features-backlog.md
-│   └── intraday-model-design.md   — Design notes for a future 5-min intraday model
+│   └── tls-recovery.md
 ├── backups/                — Volume snapshots (.gitignored)
 ├── docker-compose.yml
 └── CLAUDE.md
@@ -78,7 +76,7 @@ YoloVest layers cleanly: `orchestrator.py` drives a heartbeat pipeline of
 `LLMBase`→`GeminiLLM`, `MarketDataBase`→`MarketDataIngester` (provider
 fallback chain), `MLBase`→`XGBoostSignalModel`.
 
-**Heartbeat pipeline** (market hours, every 15 min):
+**Heartbeat pipeline** (market hours, every 15 min — configurable):
 `expire-pending → health-check → ingest-data → depth-snapshot → market-scan
 → generate-signals → [per signal: risk-check → llm-review → trade-execute →
 predict-track] → position-monitor`.
@@ -156,6 +154,4 @@ only when a task needs it:
 - **[docs/conventions.md](docs/conventions.md)** — full coding conventions
 - **[docs/telegram-commands.md](docs/telegram-commands.md)** — bot command reference
 - **[docs/tls.md](docs/tls.md)** — TLS / nginx-proxy reliability overview
-- **[docs/intraday-model-design.md](docs/intraday-model-design.md)** — design notes for the future 5-min intraday model
-- **[docs/kite-features-backlog.md](docs/kite-features-backlog.md)** — Kite integration backlog
 - **[docs/tls-recovery.md](docs/tls-recovery.md)** — TLS / nginx-proxy recovery runbook

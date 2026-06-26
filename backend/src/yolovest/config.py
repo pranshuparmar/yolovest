@@ -1285,7 +1285,7 @@ def _flatten_model(
     import json as _json
 
     result: dict[str, str] = {}
-    for field_name, _field_info in model.model_fields.items():
+    for field_name, _field_info in type(model).model_fields.items():
         key = f"{prefix}{field_name}" if prefix else field_name
         value = getattr(model, field_name)
 
@@ -1417,7 +1417,7 @@ def config_field_kinds(
     if model is None:
         model = AppConfig()
     kinds: dict[str, str] = {}
-    for field_name, field_info in model.model_fields.items():
+    for field_name, field_info in type(model).model_fields.items():
         key = f"{prefix}{field_name}" if prefix else field_name
         value = getattr(model, field_name)
         if isinstance(value, SecretStr):
