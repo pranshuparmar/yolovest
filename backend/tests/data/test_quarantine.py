@@ -17,7 +17,8 @@ class TestQuarantineDB:
         """Create a real DB with migrations applied."""
         db = Database(str(tmp_path / "test.db"), migrations_dir=_MIGRATIONS_DIR)
         await db.initialize()
-        return db
+        yield db
+        await db.close()
 
     async def test_record_failure_increments(self, db):
         result = await db.record_fetch_failure("GMRINFRA", "delisted")
