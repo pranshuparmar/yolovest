@@ -4,9 +4,9 @@
 
 ### You Only Look Once + Invest
 
-*Hands-off, ML-driven trading for Indian markets — paper-traded by default, self-hosted, and yours.*
+*Hands-off, ML-driven trading for Indian markets — autonomous, self-hosted, and yours.*
 
-[![CI](https://img.shields.io/github/actions/workflow/status/pranshuparmar/yolovest/ci.yml?style=flat-square&label=CI)](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml) [![License](https://img.shields.io/github/license/pranshuparmar/yolovest?style=flat-square)](LICENSE) [![Default mode](https://img.shields.io/badge/default-paper%20trading-2ea44f?style=flat-square)](#paper-mode-vs-live-mode)
+[![CI](https://img.shields.io/github/actions/workflow/status/pranshuparmar/yolovest/ci.yml?style=flat-square&label=CI)](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml) [![CodeFactor](https://www.codefactor.io/repository/github/pranshuparmar/yolovest/badge/main)](https://www.codefactor.io/repository/github/pranshuparmar/yolovest/overview/main)
 
 <img width="2736" height="1536" alt="YoloVest Dashboard" src="https://github.com/user-attachments/assets/ec821d46-9cef-41d2-a835-29ec4e540296" />
 
@@ -16,9 +16,9 @@
 
 <div align="center">
 
-[**Features**](#what-you-get) • [**How It Works**](#how-it-works-the-short-version) • [**Paper vs Live**](#paper-mode-vs-live-mode) • [**Setup**](#setup) • [**Daily Re-Auth**](#daily-kite-re-authentication) • [**Using It**](#using-yolovest)
+[**Features**](#what-you-get) • [**How It Works**](#how-it-works-the-short-version) • [**Paper vs Live**](#paper-mode-vs-live-mode) • [**Setup**](#setup)
 <br>
-[**First Month**](#recommended-first-month) • [**Market Context**](#indian-market-context-good-to-know) • [**Docs**](#documentation)
+[**Daily Re-Auth**](#daily-kite-re-authentication) • [**Using It**](#using-yolovest) • [**First Month**](#recommended-first-month) • [**Market Context**](#indian-market-context-good-to-know) • [**Docs**](#documentation)
 
 </div>
 
@@ -83,9 +83,11 @@ The recommended way to run YoloVest is with Docker on a server you control (a sm
 |---|---|---|
 | **A server with Docker** | Yes | Any always-on machine that can run Docker — a small cloud VM or a home server — reachable during market hours |
 | **A domain name** | Recommended | For automatic HTTPS on the dashboard |
-| **Zerodha Kite Connect** | For live trading only | Paper mode works without it. Sign up at [kite.trade](https://kite.trade/) |
+| **Zerodha Kite Connect** | Optional, recommended | Paper mode runs on free public data without it. Needed for live order execution, and for the paid data plan (see below). Sign up at [kite.trade](https://kite.trade/) |
 | **Google Gemini API key** | Optional | Unlocks AI trade review and news sentiment. Free key at [ai.google.dev](https://ai.google.dev/) |
 | **Telegram bot** | Optional, recommended | The easiest way to monitor and control the system from your phone — create one via [@BotFather](https://t.me/botfather) |
+
+> **Recommended: a paid Zerodha data plan.** YoloVest works out of the box on free public data sources, but a paid **Kite Connect data subscription** is strongly recommended — it gives noticeably more accurate, lower-latency market data, unlocks the live **WebSocket** tick feed (which powers near-instant exits), and enables features the free providers can't. The free sources stay as an automatic fallback. If you care about results — and especially before going live — turn it on.
 
 **Before you start**, a couple of host basics the rest of this guide assumes:
 
