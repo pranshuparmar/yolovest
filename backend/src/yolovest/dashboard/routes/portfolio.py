@@ -180,5 +180,6 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             await ctx.db.set_system_state("initial_capital", str(broker_capital))
             return {"success": True, "initial_capital": broker_capital}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            logger.warning("initial-capital sync failed: %s", e)
+            return {"success": False, "error": "Failed to sync initial capital"}
 

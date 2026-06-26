@@ -171,10 +171,17 @@ class TestKillSwitchCommands:
 
 class TestBrokerLoginUrl:
     def test_zerodha_login_url(self):
+        from urllib.parse import parse_qs, urlparse
+
         from yolovest.broker.zerodha import ZerodhaBroker
 
         broker = ZerodhaBroker(api_key="test_key", api_secret="test_secret")
         url = broker.get_login_url()
 
-        assert "test_key" in url
-        assert "kite.zerodha.com" in url
+        # Check the host exactly (not a substring — "kite.zerodha.com" is a
+        # substring of "kite.zerodha.com.evil.com" too) and the api_key via
+        # the parsed query rather than a loose `in url`.
+        parsed = urlparse(url)
+        assert parsed.scheme == "https"
+        assert parsed.netloc == "kite.zerodha.com"
+        assert parse_qs(parsed.query).get("api_key") == ["test_key"]

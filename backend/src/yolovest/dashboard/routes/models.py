@@ -6,7 +6,6 @@ Moved verbatim out of app.py's create_app; endpoints close over
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import (
@@ -19,7 +18,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, Response
 
-from yolovest.dashboard.helpers import _model_dir
+from yolovest.dashboard.helpers import _model_dir, _safe_path_in
 from yolovest.strategy.model_signing import signing_key, unwrap, wrap
 
 if TYPE_CHECKING:
@@ -96,7 +95,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         if "/" in version or "\\" in version or ".." in version:
             raise HTTPException(status_code=400, detail="Invalid version")
         if not force:
-            pkl_path = Path(_model_dir(ctx)) / f"{version}.pkl"
+            pkl_path = _safe_path_in(_model_dir(ctx), f"{version}.pkl")
             if pkl_path.exists():
                 try:
                     import joblib
@@ -147,7 +146,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         model_dir = _model_dir(ctx)
         if "/" in version or "\\" in version or ".." in version:
             raise HTTPException(status_code=400, detail="Invalid version")
-        path = Path(model_dir) / f"{version}.pkl"
+        path = _safe_path_in(model_dir, f"{version}.pkl")
         if not path.is_file():
             raise HTTPException(status_code=404, detail=f"{version}.pkl not found")
         key = signing_key()
@@ -207,7 +206,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                 "artifacts (guards against malicious-pickle RCE).", name,
             )
 
-        dest = Path(model_dir) / name
+        dest = _safe_path_in(model_dir, name)
         dest.write_bytes(payload)
         # Sanity-check it loads as a YoloVest model bundle before
         # reporting success — a bad file shouldn't sit around looking
@@ -260,7 +259,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             )
 
         model_dir = _model_dir(ctx)
-        pkl_path = Path(model_dir) / f"{version}.pkl"
+        pkl_path = _safe_path_in(model_dir, f"{version}.pkl")
         if not pkl_path.exists():
             raise HTTPException(
                 status_code=404,
@@ -412,7 +411,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         """Move a retired model back to shadow for re-evaluation."""
         # Check if .pkl file exists before changing status
         model_dir = _model_dir(ctx)
-        pkl_path = Path(model_dir) / f"{version}.pkl"
+        pkl_path = _safe_path_in(model_dir, f"{version}.pkl")
         if not pkl_path.exists():
             return {
                 "reshadowed": False,
@@ -429,7 +428,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                 logger.warning("Failed to load re-shadowed model %s/%s: %s", model_type, version, e)
                 return {
                     "reshadowed": False,
-                    "error": f"Model file exists but failed to load: {e}",
+                    "error": "Model file exists but failed to load (see server logs)",
                 }
         return {"reshadowed": ok, "model_type": model_type, "version": version}
 

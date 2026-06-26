@@ -18,7 +18,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 
-from yolovest.dashboard.helpers import _model_dir
+from yolovest.dashboard.helpers import _model_dir, _safe_path_in
 
 if TYPE_CHECKING:
     from yolovest.context import AppContext
@@ -111,11 +111,8 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
         traversal (../, absolute paths, separators). Raises HTTP 400."""
         if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
             raise HTTPException(status_code=400, detail="Invalid filename")
-        base = Path(base_dir).resolve()
-        target = (base / filename).resolve()
-        if base not in target.parents and target != base:
-            raise HTTPException(status_code=400, detail="Path traversal rejected")
-        return target
+        # Containment via realpath + commonpath (CodeQL-recognised barrier).
+        return _safe_path_in(base_dir, filename)
 
     @app.get("/api/backups/{filename}/download")
     async def download_backup(

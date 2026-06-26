@@ -120,7 +120,7 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             return {"success": ok}
         except Exception as exc:
             logger.warning("Gemini ping failed: %s", exc)
-            return {"success": False, "error": str(exc)}
+            return {"success": False, "error": "Gemini connection test failed"}
 
     @app.post("/api/integrations/zerodha/logout")
     async def logout_zerodha(
@@ -166,7 +166,8 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                     logger.debug("Failed to fetch margins after Zerodha auth", exc_info=True)
             return {"success": ok, "margins": margins}
         except Exception as exc:
-            return {"success": False, "error": str(exc)}
+            logger.warning("Zerodha authenticate failed: %s", exc)
+            return {"success": False, "error": "Authentication failed"}
 
     @app.get("/api/auth/zerodha/callback", response_model=None)
     async def zerodha_oauth_callback(
@@ -292,7 +293,8 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             ok = await ctx.notify.send("YoloVest: Test message from dashboard")
             return {"success": ok}
         except Exception as exc:
-            return {"success": False, "error": str(exc)}
+            logger.warning("Telegram test message failed: %s", exc)
+            return {"success": False, "error": "Telegram test message failed"}
 
     @app.post("/api/integrations/telegram/send")
     async def send_telegram_message(
@@ -307,5 +309,6 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
             ok = await ctx.notify.send(message)
             return {"success": ok}
         except Exception as exc:
-            return {"success": False, "error": str(exc)}
+            logger.warning("Telegram send failed: %s", exc)
+            return {"success": False, "error": "Telegram message send failed"}
 

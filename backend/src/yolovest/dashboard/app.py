@@ -53,6 +53,7 @@ from yolovest.dashboard.helpers import (  # noqa: F401  (re-exports)
     _extract_utilised_margin,
     _holdings_value,
     _is_cdsl_tpin_error,
+    _safe_path_in,
 )
 from yolovest.dashboard.postback import (  # noqa: F401  (re-exports)
     _apply_order_postback,
@@ -364,9 +365,8 @@ def create_app(ctx: AppContext) -> FastAPI:
             # that doesn't resolve to a real file *inside* the dist root
             # falls back to index.html (normal SPA-route behaviour).
             try:
-                candidate = (_dist_root / full_path).resolve()
-                candidate.relative_to(_dist_root)
-            except (ValueError, OSError):
+                candidate = _safe_path_in(_dist_root, full_path)
+            except HTTPException:
                 return FileResponse(str(index))
             if candidate.is_file():
                 return FileResponse(str(candidate))

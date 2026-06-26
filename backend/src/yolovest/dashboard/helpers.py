@@ -3,10 +3,32 @@ CDSL TPIN handling, market-scan scoring. No FastAPI dependencies
 beyond response shapes."""
 
 import logging
+import os
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException
+
 logger = logging.getLogger(__name__)
+
+
+def _safe_path_in(base_dir: str | Path, *segments: str) -> Path:
+    """Join user-supplied ``segments`` under ``base_dir`` and confirm the
+    result stays inside it — rejecting ``../`` traversal and absolute-path
+    injection. Returns the resolved ``Path``; raises ``HTTPException(400)``
+    on any escape.
+
+    Containment is checked with ``os.path.realpath`` + ``os.path.commonpath``
+    (the form CodeQL models as a path-injection *barrier*). A pathlib
+    ``resolve()`` / ``relative_to()`` guard is equivalent at runtime but isn't
+    recognised as a sanitizer, so sinks fed through it stay flagged.
+    """
+    root = os.path.realpath(str(base_dir))
+    target = os.path.realpath(os.path.join(root, *segments))
+    if root != target and os.path.commonpath((root, target)) != root:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return Path(target)
 
 
 def _to_base_date(raw: Any) -> date | None:
@@ -642,7 +664,10 @@ async def _build_cdsl_response(
 
     return {
         "success": False,
-        "error": error_msg,
+        # Fixed, user-facing message — the UI keys off error_type / auth_url to
+        # render the CDSL authorise button, so the raw broker string isn't
+        # needed in the HTTP response (it still rides the Telegram alert above).
+        "error": "CDSL TPIN authorisation required before this holding can be sold.",
         "error_type": "cdsl_tpin_required",
         "auth_url": resolved_url,
         "auth_url_static": auth_url is None,
