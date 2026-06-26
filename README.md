@@ -1,5 +1,11 @@
 # YoloVest
 
+[![CI](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml/badge.svg)](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
+
+> **Status:** Alpha — a personal project, run on a best-effort basis. Expect rough edges, and always start in paper mode.
+
 **YoloVest is a self-hosted, AI-driven trading assistant for the Indian stock market.** It watches the market for you during trading hours, finds opportunities using machine learning, double-checks each one against your risk rules (and, optionally, an AI second opinion), and can place and manage trades through your Zerodha account — all on autopilot, with you in control from a web dashboard or Telegram.
 
 **It runs in paper (simulated) mode by default.** Live trading with real money is strictly opt-in, and only after you've watched it long enough to trust it.
@@ -141,7 +147,7 @@ Once connected, the bot sends real-time alerts (trade entries/exits, daily summa
 | `/resume` | Resume trading |
 | `/auth TOKEN` | Daily Zerodha re-authorization (fallback) |
 | `/holiday` | View or edit the market-holiday list |
-| `/dashboard` | Link to the web dashboard |
+| `/dashboard` | High-level overview of portfolio, trades, and system |
 
 ### What You Can Tune
 
