@@ -17,13 +17,22 @@ import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import joblib
 import pytest
 
 from yolovest.skills.model_retrain import ModelRetrainSkill
 from yolovest.strategy.ml_signal import XGBoostSignalModel
+
+
+def _sync_ml_methods(ml: AsyncMock) -> None:
+    """Mark the model's synchronous methods (clear_model / clear_shadow /
+    get_shadow_version) as sync Mocks. Production calls these without await, so
+    an AsyncMock would leave unawaited coroutines and emit RuntimeWarnings."""
+    ml.clear_model = MagicMock()
+    ml.clear_shadow = MagicMock()
+    ml.get_shadow_version = MagicMock(return_value=None)
 
 
 class _StubModel:
@@ -166,6 +175,7 @@ class TestBootstrapEdgeGate:
 
     def _mock_ml(self, ctx, argmax: float) -> None:
         ctx.ml = AsyncMock()
+        _sync_ml_methods(ctx.ml)
         ctx.ml.train = AsyncMock(return_value={
             "sharpe": 1.5, "sharpe_lower": 1.2, "argmax_sharpe": argmax,
             "win_rate": 0.5,
@@ -205,6 +215,7 @@ class TestRetrainFailureVisibility:
         retrain leaves a stale model trading with nobody told."""
         ctx, _ = retrain_ctx
         ctx.ml = AsyncMock()
+        _sync_ml_methods(ctx.ml)
         ctx.ml.train = AsyncMock(side_effect=RuntimeError("boom"))
 
         result = await ModelRetrainSkill(ctx).execute()

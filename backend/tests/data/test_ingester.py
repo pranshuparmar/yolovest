@@ -1,7 +1,7 @@
 """Tests for the market data ingester (fallback chain)."""
 
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -53,6 +53,9 @@ def _make_provider(bars=None, quote=None, healthy=True, fail=False):
         provider.get_ohlcv = AsyncMock(return_value=bars or [])
         provider.get_quote = AsyncMock(return_value=quote or {"ltp": 100.0})
         provider.health_check = AsyncMock(return_value=healthy)
+    # is_available is a synchronous flag check; keep it a sync Mock so the
+    # ingester's availability filter doesn't leave an unawaited coroutine.
+    provider.is_available = MagicMock(return_value=True)
     provider.source_name = "jugaad"
     return provider
 

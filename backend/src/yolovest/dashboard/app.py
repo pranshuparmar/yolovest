@@ -12,6 +12,8 @@ Security:
 
 import logging
 import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -116,10 +118,32 @@ class _DashboardReadConnMiddleware:
 
 def create_app(ctx: AppContext) -> FastAPI:
     """Create and configure the FastAPI dashboard application."""
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # Load any persisted dashboard password override before serving, and
+        # warn loudly if the default password is still in effect. (_password is
+        # bound below; the closure resolves it at startup, after create_app
+        # returns — same pattern as _csrf_token.)
+        try:
+            saved_pw = await ctx.db.get_system_state("dashboard_password")
+            if saved_pw:
+                _password["current"] = saved_pw
+        except Exception:
+            logger.warning("Failed to load persisted dashboard password", exc_info=True)
+        if _password["current"] == DEFAULT_DASHBOARD_PASSWORD:
+            logger.warning(
+                "SECURITY: the dashboard password is the default 'yolovest'. "
+                "Change it now (Settings → Change Password) — this password is "
+                "the only thing gating live trade execution and config edits.",
+            )
+        yield
+
     app = FastAPI(
         title="YoloVest Dashboard",
         description="Autonomous AI-driven Indian stock trading platform",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     # CORS for development (Vite dev server)
@@ -186,27 +210,13 @@ def create_app(ctx: AppContext) -> FastAPI:
         else DEFAULT_DASHBOARD_PASSWORD
     )
 
-    # Mutable password container (allows runtime change)
-    # Check DB for a persisted password override (set via /api/change-password)
+    # Mutable password container (allows runtime change). A persisted override
+    # (set via /api/change-password) is loaded at startup by the lifespan
+    # handler above, which also warns if the default password is still in use.
     _password = {"current": dash_password}
 
     # Brute-force throttle shared by /api/auth/login and Basic auth.
     _throttle = _LoginThrottle()
-
-    @app.on_event("startup")
-    async def _load_persisted_password() -> None:
-        try:
-            saved_pw = await ctx.db.get_system_state("dashboard_password")
-            if saved_pw:
-                _password["current"] = saved_pw
-        except Exception:
-            logger.warning("Failed to load persisted dashboard password", exc_info=True)
-        if _password["current"] == DEFAULT_DASHBOARD_PASSWORD:
-            logger.warning(
-                "SECURITY: the dashboard password is the default 'yolovest'. "
-                "Change it now (Settings → Change Password) — this password is "
-                "the only thing gating live trade execution and config edits.",
-            )
 
     def verify_credentials(
         request: Request,
