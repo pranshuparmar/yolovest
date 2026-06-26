@@ -1,7 +1,6 @@
 # YoloVest
 
 [![CI](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml/badge.svg)](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 
 > **Status:** Alpha — a personal project, run on a best-effort basis. Expect rough edges, and always start in paper mode.
