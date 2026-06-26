@@ -97,7 +97,7 @@ const TABS: Tab[] = [
   {
     id: "risk",
     label: "Risk & Execution",
-    sections: ["risk", "_risk_mis", "_risk_cnc", "execution", "transaction_costs"],
+    sections: ["risk", "execution", "_risk_mis", "_risk_cnc", "transaction_costs"],
   },
   {
     id: "schedule",
@@ -1526,7 +1526,15 @@ export default function SettingsPage() {
       return STRATEGY_FEATURE_KEYS.map((k) => [k, flatConfig[k]] as [string, unknown]).filter(([, v]) => v !== undefined);
     }
     // Normal section — filter out relocated keys
-    return Object.entries(localConfig[sectionKey] ?? {}).filter(([k]) => !RELOCATED_KEYS.has(k));
+    const entries = Object.entries(localConfig[sectionKey] ?? {}).filter(([k]) => !RELOCATED_KEYS.has(k));
+    if (sectionKey === "execution") {
+      // Surface Transaction Mode at the very top of the Execution card
+      // (stable sort keeps the remaining fields in their existing order).
+      entries.sort(([a], [b]) =>
+        a === "execution.transaction_mode" ? -1 : b === "execution.transaction_mode" ? 1 : 0,
+      );
+    }
+    return entries;
   }, [localConfig, flatConfig]);
 
   if (isLoading) {

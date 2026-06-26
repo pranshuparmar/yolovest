@@ -6,7 +6,7 @@
 
 *Hands-off, ML-driven trading for Indian markets — autonomous, self-hosted, and yours.*
 
-[![CI](https://img.shields.io/github/actions/workflow/status/pranshuparmar/yolovest/ci.yml?style=flat-square&label=CI)](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml) [![CodeFactor](https://www.codefactor.io/repository/github/pranshuparmar/yolovest/badge/main)](https://www.codefactor.io/repository/github/pranshuparmar/yolovest/overview/main)
+[![CI](https://img.shields.io/github/actions/workflow/status/pranshuparmar/yolovest/ci.yml?label=CI)](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml) [![CodeFactor](https://www.codefactor.io/repository/github/pranshuparmar/yolovest/badge/main)](https://www.codefactor.io/repository/github/pranshuparmar/yolovest/overview/main)
 
 <img width="2736" height="1536" alt="YoloVest Dashboard" src="https://github.com/user-attachments/assets/ec821d46-9cef-41d2-a835-29ec4e540296" />
 
