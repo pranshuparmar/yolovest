@@ -19,10 +19,18 @@ class BrokerCircuitBreaker:
     States:
     - CLOSED: normal operation, requests pass through
     - OPEN: too many consecutive failures, all requests fail fast
-    - HALF_OPEN: cooldown expired, allow one probe request
+    - HALF_OPEN: cooldown expired, allow ONE probe request through
 
     Prevents hammering a failing/rate-limited Kite API, which would
     compound the problem and potentially trigger IP bans.
+
+    No lock is needed: every method here is synchronous (no ``await``), so on
+    the single-threaded event loop each runs atomically w.r.t. other
+    coroutines. The two cross-call hazards are handled explicitly:
+    - exactly one HALF_OPEN probe is admitted at a time (the rest fail fast),
+      so callers don't flood the still-fragile API at the cooldown boundary;
+    - a stale success from a call that was already in flight when the breaker
+      opened cannot reset a deliberately-open breaker.
     """
 
     def __init__(
@@ -35,21 +43,41 @@ class BrokerCircuitBreaker:
         self._consecutive_failures = 0
         self._opened_at: float = 0.0  # monotonic time when circuit opened
         self._state = "CLOSED"
+        # True while a single HALF_OPEN probe is in flight; further callers
+        # fail fast until it resolves (success → CLOSED, failure → OPEN).
+        self._probe_in_flight = False
+
+    def _refresh_state(self) -> None:
+        """Flip OPEN → HALF_OPEN once the cooldown has elapsed."""
+        if self._state == "OPEN" and (
+            time.monotonic() - self._opened_at >= self._cooldown_sec
+        ):
+            self._state = "HALF_OPEN"
 
     @property
     def state(self) -> str:
-        if self._state == "OPEN":
-            if time.monotonic() - self._opened_at >= self._cooldown_sec:
-                self._state = "HALF_OPEN"
+        self._refresh_state()
         return self._state
 
     def record_success(self) -> None:
+        # A success that lands while the breaker is OPEN is stale — it came
+        # from a call already in flight when the breaker tripped, so it must
+        # NOT reset a deliberately-open breaker. The cooldown + HALF_OPEN
+        # probe is the only path back to CLOSED.
+        if self._state == "OPEN":
+            return
         self._consecutive_failures = 0
         self._state = "CLOSED"
+        self._probe_in_flight = False
 
     def record_failure(self) -> None:
         self._consecutive_failures += 1
-        if self._consecutive_failures >= self._failure_threshold:
+        # Re-open immediately if a HALF_OPEN probe just failed, or if the
+        # consecutive-failure threshold is breached.
+        if (
+            self._state == "HALF_OPEN"
+            or self._consecutive_failures >= self._failure_threshold
+        ):
             if self._state != "OPEN":
                 logger.warning(
                     "Broker circuit breaker OPEN after %d consecutive failures "
@@ -58,16 +86,30 @@ class BrokerCircuitBreaker:
                 )
             self._state = "OPEN"
             self._opened_at = time.monotonic()
+        self._probe_in_flight = False
 
     def check(self) -> None:
-        """Raise if circuit is open (requests should fail fast)."""
-        state = self.state
-        if state == "OPEN":
+        """Raise if requests should fail fast.
+
+        CLOSED passes. OPEN fails fast. Once the cooldown elapses the breaker
+        is HALF_OPEN and admits a SINGLE probe (returns normally, marking a
+        probe in flight); any further caller fails fast until that probe
+        resolves via record_success / record_failure.
+        """
+        self._refresh_state()
+        if self._state == "OPEN":
             remaining = self._cooldown_sec - (time.monotonic() - self._opened_at)
             raise RuntimeError(
                 f"Broker circuit breaker is OPEN — API calls blocked for "
                 f"{remaining:.0f}s after {self._consecutive_failures} consecutive failures"
             )
+        if self._state == "HALF_OPEN":
+            if self._probe_in_flight:
+                raise RuntimeError(
+                    "Broker circuit breaker is HALF_OPEN — a probe request is "
+                    "already in flight; failing fast until it resolves"
+                )
+            self._probe_in_flight = True
 
 
 class ZerodhaBroker(BrokerBase):
