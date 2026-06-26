@@ -28,11 +28,13 @@ from yolovest.strategy.ml_signal import XGBoostSignalModel
 
 def _sync_ml_methods(ml: AsyncMock) -> None:
     """Mark the model's synchronous methods (clear_model / clear_shadow /
-    get_shadow_version) as sync Mocks. Production calls these without await, so
-    an AsyncMock would leave unawaited coroutines and emit RuntimeWarnings."""
+    get_shadow_version / predict_labels_batch) as sync Mocks. Production calls
+    these without await, so an AsyncMock would leave unawaited coroutines and
+    emit RuntimeWarnings."""
     ml.clear_model = MagicMock()
     ml.clear_shadow = MagicMock()
     ml.get_shadow_version = MagicMock(return_value=None)
+    ml.predict_labels_batch = MagicMock(return_value=[0, 1, 2])
 
 
 class _StubModel:
