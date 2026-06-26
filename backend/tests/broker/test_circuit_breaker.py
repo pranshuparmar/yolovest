@@ -98,3 +98,38 @@ class TestCircuitBreakerEdgeCases:
             cb.record_failure()
         assert cb._consecutive_failures == 7
         assert cb.state == "CLOSED"
+
+
+class TestCircuitBreakerConcurrency:
+    """Cross-call hazards the audit flagged: single HALF_OPEN probe, and a
+    stale in-flight success not resetting a deliberately-open breaker."""
+
+    def test_half_open_admits_only_one_probe(self):
+        cb = BrokerCircuitBreaker(failure_threshold=1, cooldown_sec=0.01)
+        cb.record_failure()
+        time.sleep(0.02)
+        assert cb.state == "HALF_OPEN"
+        cb.check()  # first caller is admitted as THE probe
+        # Every other caller fails fast until the probe resolves — without
+        # this they'd all flood the still-fragile API at the cooldown boundary.
+        with pytest.raises(RuntimeError, match="probe request is"):
+            cb.check()
+
+    def test_probe_success_then_closed_passes(self):
+        cb = BrokerCircuitBreaker(failure_threshold=1, cooldown_sec=0.01)
+        cb.record_failure()
+        time.sleep(0.02)
+        cb.check()  # admit probe
+        cb.record_success()  # probe succeeds
+        assert cb.state == "CLOSED"
+        cb.check()  # CLOSED — no raise, no probe gate
+
+    def test_stale_success_does_not_reset_open_breaker(self):
+        cb = BrokerCircuitBreaker(failure_threshold=2, cooldown_sec=30.0)
+        cb.record_failure()
+        cb.record_failure()
+        assert cb.state == "OPEN"
+        # A success from a call that was already in flight when the breaker
+        # tripped must NOT close it — only the cooldown + probe path may.
+        cb.record_success()
+        assert cb.state == "OPEN"

@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import secrets
 import time
 
@@ -136,15 +137,39 @@ class _LoginThrottle:
         self._global_locked_until = 0.0
 
 
+# Trusted reverse-proxy hops in front of the backend. The default deployment
+# is nginx-proxy → frontend-nginx → backend: two proxies each APPEND one
+# X-Forwarded-For entry, so the real client is the entry that many positions
+# from the RIGHT. Entries further left are client-supplied and must NOT be
+# trusted — an attacker forges them to rotate the per-IP throttle key and
+# evade the lockout. Override via env for other topologies (0 disables XFF
+# trust entirely and keys throttling on the socket peer).
+_TRUSTED_PROXY_HOPS = max(0, int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS") or "2"))
+
+
 def _client_ip(request: Request) -> str:
-    """Best-effort client identity behind the nginx-proxy → frontend-nginx
-    chain. Leftmost X-Forwarded-For entry is the real client (both
-    proxies append); X-Real-IP and the socket peer are fallbacks."""
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
+    """Real client IP for brute-force throttling, resistant to X-Forwarded-For
+    spoofing.
+
+    Both nginx hops APPEND to XFF, so the rightmost ``_TRUSTED_PROXY_HOPS``
+    entries are the ones our trusted proxies added; the real client is the
+    leftmost of those (index ``-_TRUSTED_PROXY_HOPS``). Anything further left
+    is attacker-supplied and ignored — the previous "leftmost wins" logic let
+    an attacker set the throttle key to any value per request, sidestepping the
+    per-IP lockout. If the header is missing or shorter than the expected chain
+    (a direct hit or a misconfigured proxy), fall back to the socket peer
+    rather than trusting a possibly-forged value.
+    """
+    hops = _TRUSTED_PROXY_HOPS
+    if hops > 0:
+        xff = request.headers.get("x-forwarded-for", "")
+        if xff:
+            parts = [p.strip() for p in xff.split(",") if p.strip()]
+            if len(parts) >= hops:
+                return parts[-hops]
+    # No usable XFF chain — trust the immediate peer, then X-Real-IP.
+    if request.client:
+        return request.client.host
     xri = request.headers.get("x-real-ip", "")
-    if xri:
-        return xri
-    return request.client.host if request.client else "unknown"
+    return xri or "unknown"
 
