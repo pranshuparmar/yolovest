@@ -471,7 +471,8 @@ class TestE2EReplay:
              patch.object(e2e_ctx.market_hours, "is_premarket_window", return_value=False):
             results = await orchestrator.run_heartbeat()
 
-        # No new trades should be placed when kill switch is active
+        # The pipeline still runs, but risk-check rejects every signal while
+        # the kill switch is active — so NO trades may be placed.
         trades = await e2e_ctx.db.get_todays_trades()
-        # Pipeline runs but risk check rejects all (kill switch active)
         assert results is not None
+        assert trades == [], f"kill switch active but {len(trades)} trade(s) placed"

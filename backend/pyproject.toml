@@ -23,6 +23,11 @@ dependencies = [
     "kiteconnect>=5.0,<6",
     "google-genai>=1.0,<2",
     "fastapi>=0.110,<1",
+    # Starlette is FastAPI's transitive ASGI core; pin a security floor here so
+    # the lock can't resolve below the fix for CVE-2026-54282 (request.url host
+    # injection) / CVE-2026-54283 (urlencoded form-parse DoS). FastAPI only
+    # requires starlette>=0.46.0, so this is in-range.
+    "starlette>=1.3.1",
     "python-multipart>=0.0.9,<1",
     "uvicorn>=0.27,<1",
     "websockets>=12.0,<17",

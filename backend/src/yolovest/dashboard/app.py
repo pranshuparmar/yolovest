@@ -79,6 +79,7 @@ from yolovest.dashboard.routes import (
 )
 from yolovest.dashboard.security import (
     _TOKEN_TTL_SEC,
+    DEFAULT_DASHBOARD_PASSWORD,
     _client_ip,
     _LoginThrottle,
     _sign_token,
@@ -144,19 +145,25 @@ def create_app(ctx: AppContext) -> FastAPI:
     async def csrf_middleware(request: Request, call_next: Any) -> Any:
         if request.method in ("POST", "PUT", "DELETE"):
             if request.url.path not in _CSRF_EXEMPT_PATHS:
+                from starlette.responses import JSONResponse
                 csrf_header = request.headers.get("X-CSRF-Token", "")
-                # Only enforce CSRF when using Bearer auth (session-based).
-                # Basic auth requests (curl, CLI) are exempt since they
-                # already prove identity per-request.
                 auth_header = request.headers.get("Authorization", "")
-                if auth_header.startswith("Bearer ") and not csrf_header:
-                    from starlette.responses import JSONResponse
+                # Require the CSRF token whenever the request is browser-issued:
+                # a Bearer session (the SPA) OR anything carrying an Origin /
+                # Referer header. Browsers always attach one of those on a
+                # state-changing request; curl / CLI tools do not. This closes
+                # the Basic-auth CSRF gap (a browser with cached Basic creds
+                # being cross-site-posted) while leaving tokenless CLI working.
+                is_bearer = auth_header.startswith("Bearer ")
+                browser_issued = bool(
+                    request.headers.get("origin") or request.headers.get("referer")
+                )
+                if (is_bearer or browser_issued) and not csrf_header:
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Missing X-CSRF-Token header"},
                     )
                 if csrf_header and not secrets.compare_digest(csrf_header, _csrf_token):
-                    from starlette.responses import JSONResponse
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Invalid CSRF token"},
@@ -176,7 +183,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     dash_password = (
         ctx.config.dashboard.password.get_secret_value()
         if hasattr(ctx.config.dashboard, "password")
-        else "yolovest"
+        else DEFAULT_DASHBOARD_PASSWORD
     )
 
     # Mutable password container (allows runtime change)
@@ -194,7 +201,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                 _password["current"] = saved_pw
         except Exception:
             logger.warning("Failed to load persisted dashboard password", exc_info=True)
-        if _password["current"] == "yolovest":
+        if _password["current"] == DEFAULT_DASHBOARD_PASSWORD:
             logger.warning(
                 "SECURITY: the dashboard password is the default 'yolovest'. "
                 "Change it now (Settings → Change Password) — this password is "

@@ -24,6 +24,13 @@ security = HTTPBasic(auto_error=False)
 _TOKEN_SECRET = secrets.token_bytes(32)
 _TOKEN_TTL_SEC = 24 * 60 * 60  # 24 hours
 
+# The dashboard password shipped as the default. It's the only gate on
+# real-money execution, so the app refuses to arm live trading — or to
+# accept this string as a *new* password — while it's still in use.
+DEFAULT_DASHBOARD_PASSWORD = "yolovest"  # the shipped default, rejected when in use
+# Minimum length enforced when changing the dashboard password.
+MIN_PASSWORD_LENGTH = 8
+
 
 def _sign_token(username: str, ttl: int = _TOKEN_TTL_SEC) -> str:
     """Create a signed session token: base64(payload).signature.

@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from "./hooks/useAuth";
 import { ThemeProvider } from "./hooks/useTheme";
 import { setAuthHeader, setCsrfToken, setOnUnauthorized } from "./api/client";
 import { Layout } from "./components/Layout";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LoginPage } from "./pages/LoginPage";
 
 // Eager: landing + the few pages users hit on every session. Keeping
@@ -150,15 +151,19 @@ function LazyRoutes() {
 
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <ThemeProvider>
-          <BrowserRouter>
-            <AuthSync />
-            <AppRoutes />
-          </BrowserRouter>
-        </ThemeProvider>
-      </AuthProvider>
-    </QueryClientProvider>
+    // Last-resort boundary: a crash in the shell itself (Layout, providers)
+    // still renders a fallback instead of a blank page.
+    <ErrorBoundary scope="dashboard">
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <ThemeProvider>
+            <BrowserRouter>
+              <AuthSync />
+              <AppRoutes />
+            </BrowserRouter>
+          </ThemeProvider>
+        </AuthProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }

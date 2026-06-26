@@ -1,4 +1,5 @@
 import { apiFetch, apiDownload, apiUpload } from "./client";
+import { expectObject, expectArray } from "./validate";
 import type {
   HealthResponse,
   PortfolioState,
@@ -62,7 +63,7 @@ import type {
 export const api = {
   health: () => apiFetch<HealthResponse>("/api/health"),
 
-  portfolio: () => apiFetch<PortfolioState>("/api/portfolio"),
+  portfolio: () => apiFetch<PortfolioState>("/api/portfolio", undefined, expectObject),
 
   fundsHistory: (days = 90) =>
     apiFetch<{
@@ -107,7 +108,7 @@ export const api = {
       };
     }>("/api/funds"),
 
-  positions: () => apiFetch<Trade[]>("/api/positions"),
+  positions: () => apiFetch<Trade[]>("/api/positions", undefined, expectArray),
 
   closePosition: (tradeId: string, qty?: number) =>
     apiFetch<{
@@ -171,7 +172,7 @@ export const api = {
 
   tradesToday: () => apiFetch<Trade[]>("/api/trades/today"),
 
-  holdings: () => apiFetch<HoldingsResponse>("/api/holdings"),
+  holdings: () => apiFetch<HoldingsResponse>("/api/holdings", undefined, expectObject),
 
   placeOrder: (order: ManualOrder) =>
     apiFetch<{

@@ -58,6 +58,43 @@ class TestLLMReviewApprove:
         assert result.data["adjusted_size"] == 5
         assert result.data["signal"]["position_size"] == 5
 
+    async def test_resize_up_is_clamped_to_risk_checked_size(self, llm_skill, base_signal):
+        """The LLM may only TRIM size, never inflate it. risk-check already
+        sized the position against every cap (risk budget, single-stock
+        exposure, margin) before llm-review runs, and the review prompt
+        embeds externally-scraped news sentiment — a prompt-injection
+        surface. An up-resize must be clamped to the risk-checked size."""
+        review = MagicMock()
+        review.decision = "RESIZE"
+        review.reasoning = "High conviction — size up"
+        review.adjusted_size = 50  # > risk-checked size of 10
+        llm_skill.ctx.llm.review_trade = AsyncMock(return_value=review)
+
+        result = await llm_skill.execute(signal=base_signal)
+
+        assert result.success
+        assert result.data["approved"]
+        # Clamped down to the risk-checked size (10), never the LLM's 50.
+        assert result.data["adjusted_size"] == 10
+        assert result.data["signal"]["position_size"] == 10
+
+    async def test_resize_equal_to_risk_checked_size_is_unchanged(
+        self, llm_skill, base_signal,
+    ):
+        """A resize exactly at the risk-checked size is not treated as an
+        up-resize and passes through untouched."""
+        review = MagicMock()
+        review.decision = "RESIZE"
+        review.reasoning = "Hold size"
+        review.adjusted_size = 10  # == risk-checked size
+        llm_skill.ctx.llm.review_trade = AsyncMock(return_value=review)
+
+        result = await llm_skill.execute(signal=base_signal)
+
+        assert result.success
+        assert result.data["adjusted_size"] == 10
+        assert result.data["signal"]["position_size"] == 10
+
 
 class TestLLMReviewReject:
     async def test_reject_signal(self, llm_skill, base_signal):

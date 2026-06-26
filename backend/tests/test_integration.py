@@ -241,15 +241,15 @@ class TestHeartbeatIntegration:
         assert len(bars) > 0
 
     async def test_trade_recorded_in_db(self, integration_ctx):
-        """If a signal is generated and approved, the trade should be in the DB."""
+        """A full heartbeat completes and any recorded trades are well-formed.
+
+        Whether a trade is actually placed depends on the synthetic data's
+        signal conditions, so this asserts the pipeline ran through to
+        position-monitor and that every persisted trade has a symbol and a
+        positive quantity. The deterministic no-trade case is covered by
+        test_kill_switch_stops_trading.
+        """
         orchestrator = HeartbeatOrchestrator(integration_ctx)
-
-        # Force generate-signals to produce a signal
-        from yolovest.skills.generate_signals import GenerateSignalsSkill
-        original_execute = GenerateSignalsSkill.execute
-
-        async def _fake_signals(self, **kwargs):
-            return type(original_execute).__self__  # Unused, we inject via mock
 
         with patch.object(
             integration_ctx.market_hours, "is_market_hours", return_value=True,
@@ -260,11 +260,13 @@ class TestHeartbeatIntegration:
         ):
             results = await orchestrator.run_heartbeat()
 
-        # Check if any trades were recorded
-        trades = await integration_ctx.db.get_todays_trades()
-        # Trades may or may not be generated depending on signal conditions
-        # The key assertion is: if signals were generated, they flowed through
-        assert results is not None  # Pipeline completed
+        # Pipeline ran to completion (position-monitor always runs unless
+        # health-check aborts), and any trades placed are well-formed.
+        assert results is not None
+        assert "position-monitor" in results
+        for trade in await integration_ctx.db.get_todays_trades():
+            assert trade["symbol"]
+            assert trade["quantity"] > 0
 
     async def test_pipeline_resilient_to_ingest_failure(self, integration_ctx):
         """If ingest fails, position-monitor should still run."""

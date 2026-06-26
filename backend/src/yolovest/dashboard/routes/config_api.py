@@ -19,6 +19,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 
 from yolovest.context import MarketHoursChecker
+from yolovest.dashboard.security import DEFAULT_DASHBOARD_PASSWORD
 
 if TYPE_CHECKING:
     from yolovest.context import AppContext
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
     verify_credentials = deps.verify_credentials
     verify_download_credentials = deps.verify_download_credentials
+    _password = deps.password
 
 
     # ------------------------------------------------------------------
@@ -191,6 +193,24 @@ def register(app: "FastAPI", ctx: "AppContext", deps: "Deps") -> None:
                 status_code=422,
                 detail=f"Validation failed: {e}",
             ) from e
+
+        # Refuse to arm live trading while the dashboard password is still the
+        # shipped default — that password is the only gate on real-money
+        # execution, so flipping to live behind it would expose the account to
+        # anyone who reaches the dashboard. Change the password first.
+        if (
+            "mode" in updates
+            and str(new_config.mode).lower() == "live"
+            and _password.get("current") == DEFAULT_DASHBOARD_PASSWORD
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Refusing to switch to live trading while the dashboard "
+                    "password is the default. Change the password first "
+                    "(Settings → Change Password)."
+                ),
+            )
 
         # Capture old values BEFORE persisting so the diff log shows
         # what each key actually changed from. `db_values` was loaded
