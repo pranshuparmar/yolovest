@@ -1,8 +1,26 @@
+<div align="center">
+
 # YoloVest
 
-[![CI](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml/badge.svg)](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml)
+### You Only Look Once + Invest
 
-<img width="2736" height="1536" alt="Gemini Modified YoloVest Dashboard" src="https://github.com/user-attachments/assets/ec821d46-9cef-41d2-a835-29ec4e540296" />
+*Hands-off, ML-driven trading for Indian markets — autonomous, self-hosted, and yours.*
+
+[![CI](https://img.shields.io/github/actions/workflow/status/pranshuparmar/yolovest/ci.yml?label=CI)](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml) [![CodeFactor](https://www.codefactor.io/repository/github/pranshuparmar/yolovest/badge/main)](https://www.codefactor.io/repository/github/pranshuparmar/yolovest/overview/main)
+
+<img width="2736" height="1536" alt="YoloVest Dashboard" src="https://github.com/user-attachments/assets/ec821d46-9cef-41d2-a835-29ec4e540296" />
+
+</div>
+
+---
+
+<div align="center">
+
+[**Features**](#what-you-get) • [**How It Works**](#how-it-works-the-short-version) • [**Paper vs Live**](#paper-mode-vs-live-mode) • [**Setup**](#setup)
+<br>
+[**Daily Re-Auth**](#daily-kite-re-authentication) • [**Using It**](#using-yolovest) • [**First Month**](#recommended-first-month) • [**Market Context**](#indian-market-context-good-to-know) • [**Docs**](#documentation)
+
+</div>
 
 ---
 
@@ -63,11 +81,18 @@ The recommended way to run YoloVest is with Docker on a server you control (a sm
 
 | | Required? | Notes |
 |---|---|---|
-| **A server with Docker** | Yes | Any Linux host that can stay online 9 AM–4 PM IST on weekdays |
+| **A server with Docker** | Yes | Any always-on machine that can run Docker — a small cloud VM or a home server — reachable during market hours |
 | **A domain name** | Recommended | For automatic HTTPS on the dashboard |
-| **Zerodha Kite Connect** | For live trading only | Paper mode works without it. Sign up at [kite.trade](https://kite.trade/) |
+| **Zerodha Kite Connect** | Optional, recommended | Paper mode runs on free public data without it. Needed for live order execution, and for the paid data plan (see below). Sign up at [kite.trade](https://kite.trade/) |
 | **Google Gemini API key** | Optional | Unlocks AI trade review and news sentiment. Free key at [ai.google.dev](https://ai.google.dev/) |
 | **Telegram bot** | Optional, recommended | The easiest way to monitor and control the system from your phone — create one via [@BotFather](https://t.me/botfather) |
+
+> **Recommended: a paid Zerodha data plan.** YoloVest works out of the box on free public data sources, but a paid **Kite Connect data subscription** is strongly recommended — it gives noticeably more accurate, lower-latency market data, unlocks the live **WebSocket** tick feed (which powers near-instant exits), and enables features the free providers can't. The free sources stay as an automatic fallback. If you care about results — and especially before going live — turn it on.
+
+**Before you start**, a couple of host basics the rest of this guide assumes:
+
+- **DNS + ports for HTTPS.** If you're using a domain, point a DNS **A record** at your server's public IP and make sure inbound **ports 80 and 443** are open. The HTTPS certificate is then issued automatically on first boot (it can take a few minutes). For purely local testing you can skip the domain, but you won't get HTTPS.
+- **Room to train.** A fresh install backfills a few years of price history and trains an ML model from it, so give the host at least **~2 GB RAM and ~10 GB free disk** (both the database and saved models grow over time).
 
 ### Get it running
 
@@ -92,15 +117,28 @@ TELEGRAM_BOT_TOKEN=                  # Telegram — optional
 TELEGRAM_CHAT_ID=
 ```
 
+> **Getting your `TELEGRAM_CHAT_ID`:** after creating the bot with [@BotFather](https://t.me/botfather), send the bot any message, then open `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates` in a browser — your numeric ID is the `chat.id` field in the response. The `.env.example` also lists an optional `MODEL_SIGNING_KEY`, only needed if you upload or import model files through the dashboard (generate one with `python -c "import secrets; print(secrets.token_hex(32))"`).
+
 Then start everything:
 
 ```bash
 docker compose up -d --build
 ```
 
-The dashboard comes up at `https://your-domain`. **Log in with the default password `yolovest` and change it immediately** from the Settings page — it's the only thing standing between the internet and your trading controls. Docker handles HTTPS certificates, the web server, database backups, and log rotation automatically, and your data persists across restarts.
+The dashboard comes up at `https://your-domain` — give it a few minutes on the very first boot, while it runs database migrations, warms up its data/broker/LLM connections, and provisions the HTTPS certificate. **Log in with the default password `yolovest` and change it immediately** from the Settings page — it's the only thing standing between the internet and your trading controls. Docker handles HTTPS certificates, the web server, database backups, and log rotation automatically, and your data persists across restarts.
 
-That's it — out of the box you're paper trading with free market data.
+### First run: seed data and train your first model
+
+**A brand-new install has no price history and no trained model yet**, so it won't generate any trade ideas until you bootstrap it once. (It fails safe in the meantime — while no model exists, signal generation simply does nothing rather than erroring.) Two one-time steps get you there:
+
+1. **Seed historical data.** Pull a few years of daily price history for the whole scanning universe, so the model has something to learn from. Run the **`ingest-universe`** task — from Telegram send `/run ingest-universe`, or trigger it on demand from the dashboard's **Admin** area. It fetches ~3 years (configurable) of daily bars across the Nifty 500; the first run takes a while because the free data providers are rate-limited.
+2. **Train your first model.** Once the history is in, run **`model-retrain`** — `/run model-retrain` from Telegram, or from the dashboard's **Admin** area. It needs at least ~200 daily bars to train (step 1 provides far more); below that it safely skips. Training takes a few minutes.
+
+In Telegram, send `/skills` to see every task you can run on demand this way.
+
+> **Want intraday signals too?** Also run **`backfill-intraday`** before retraining — it seeds 5-minute history so the intraday model can train alongside the daily (swing) one. The default "balanced" strategy works fine with just the daily model to start, so this is optional.
+
+After the model is trained, the next trading cycle starts producing signals — and from then on the **weekly retrain keeps the model fresh automatically**, so you won't need to repeat these steps. Now you're paper trading with free market data.
 
 ---
 
@@ -149,6 +187,8 @@ Once connected, the bot sends real-time alerts (trade entries/exits, daily summa
 | `/auth TOKEN` | Daily Zerodha re-authorization (fallback) |
 | `/holiday` | View or edit the market-holiday list |
 | `/dashboard` | High-level overview of portfolio, trades, and system |
+| `/skills` | List the background tasks you can run on demand |
+| `/run TASK` | Run a task now — e.g. `/run ingest-universe`, `/run model-retrain` |
 
 ### What You Can Tune
 
@@ -194,4 +234,16 @@ Only then, if you're convinced, switch to live mode — pull your real account c
 
 ---
 
-*Questions about the internals? Technical and architecture documentation lives in `CLAUDE.md` and the `docs/` folder.*
+## Documentation
+
+Curious about the internals? Start with **[CLAUDE.md](CLAUDE.md)** for the high-level architecture overview, then dive into the [`docs/`](docs/) folder:
+
+- **[docs/architecture.md](docs/architecture.md)** — subsystems, heartbeat pipeline, skills, risk gates, exit paths, inter-skill contracts
+- **[docs/database.md](docs/database.md)** — key tables, quarantine, universe resolution
+- **[docs/configuration.md](docs/configuration.md)** — file-only keys, config sections, service toggles
+- **[docs/key-files.md](docs/key-files.md)** — file-by-file backend / frontend / infra map
+- **[docs/domain-context.md](docs/domain-context.md)** — Indian-market trading specifics
+- **[docs/conventions.md](docs/conventions.md)** — coding conventions
+- **[docs/telegram-commands.md](docs/telegram-commands.md)** — full Telegram bot command reference
+- **[docs/tls.md](docs/tls.md)** — TLS / nginx-proxy reliability overview
+- **[docs/tls-recovery.md](docs/tls-recovery.md)** — TLS / nginx-proxy recovery runbook
