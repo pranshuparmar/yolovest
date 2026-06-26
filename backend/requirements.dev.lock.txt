@@ -24,7 +24,7 @@ attrs==26.1.0
     #   aiohttp
     #   service-identity
     #   twisted
-autobahn==19.11.2
+autobahn==20.12.3
     # via kiteconnect
 automat==25.4.16
     # via twisted
@@ -187,7 +187,7 @@ pygments==2.20.0
     #   rich
 pyopenssl==26.2.0
     # via kiteconnect
-pytest==8.4.2
+pytest==9.0.3
     # via
     #   pytest-asyncio
     #   pytest-cov

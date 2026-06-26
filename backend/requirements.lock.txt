@@ -24,7 +24,7 @@ attrs==26.1.0
     #   aiohttp
     #   service-identity
     #   twisted
-autobahn==19.11.2
+autobahn==20.12.3
     # via kiteconnect
 automat==25.4.16
     # via twisted
