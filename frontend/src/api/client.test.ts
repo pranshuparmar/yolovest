@@ -103,4 +103,23 @@ describe("apiFetch", () => {
     vi.stubGlobal("fetch", fetchMock(500, null, { rejectJson: true }));
     await expect(apiFetch("/api/x")).rejects.toMatchObject({ status: 500 });
   });
+
+  it("runs the optional validator on the parsed body and returns its result", async () => {
+    vi.stubGlobal("fetch", fetchMock(200, { ok: true }));
+    const validate = vi.fn((raw: unknown) => raw as { ok: boolean });
+    const data = await apiFetch("/api/x", undefined, validate);
+    expect(validate).toHaveBeenCalledWith({ ok: true });
+    expect(data).toEqual({ ok: true });
+  });
+
+  it("propagates a validator failure (shape drift) as a thrown error", async () => {
+    // e.g. an endpoint that should return an array returns an object instead.
+    vi.stubGlobal("fetch", fetchMock(200, { not: "an array" }));
+    const validate = () => {
+      throw new Error("expected an array, got object");
+    };
+    await expect(apiFetch("/api/x", undefined, validate)).rejects.toThrow(
+      /expected an array/
+    );
+  });
 });

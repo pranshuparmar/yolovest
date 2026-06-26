@@ -16,7 +16,11 @@ export function setOnUnauthorized(fn: () => void) {
 
 export async function apiFetch<T>(
   path: string,
-  options?: RequestInit
+  options?: RequestInit,
+  // Optional structural guard run on the parsed JSON (see api/validate.ts).
+  // Lets the critical money endpoints fail loudly on shape drift at the fetch
+  // boundary instead of crashing a downstream render.
+  validate?: (raw: unknown) => T
 ): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -61,7 +65,8 @@ export async function apiFetch<T>(
     throw err;
   }
 
-  return res.json();
+  const data = await res.json();
+  return validate ? validate(data) : (data as T);
 }
 
 function _authHeaders(includeCsrf: boolean): Record<string, string> {
