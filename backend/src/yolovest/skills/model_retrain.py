@@ -604,7 +604,7 @@ class ModelRetrainSkill(SkillBase):
                 # triple-barrier label resolution, walked to the session close
                 # (MIS auto-squares EOD). The old daily-bar "intraday" model
                 # (1-day lookahead) was really a next-day predictor with no
-                # real intraday edge — see docs/intraday-model-design.md.
+                # real intraday edge.
                 intraday_label_mode = str(
                     getattr(self.ctx.config.strategy, "intraday_label_mode",
                             "triple_barrier")

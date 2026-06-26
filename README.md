@@ -1,9 +1,6 @@
 # YoloVest
 
 [![CI](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml/badge.svg)](https://github.com/pranshuparmar/yolovest/actions/workflows/ci.yml)
-![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
-
-> **Status:** Alpha — a personal project, run on a best-effort basis. Expect rough edges, and always start in paper mode.
 
 **YoloVest is a self-hosted, AI-driven trading assistant for the Indian stock market.** It watches the market for you during trading hours, finds opportunities using machine learning, double-checks each one against your risk rules (and, optionally, an AI second opinion), and can place and manage trades through your Zerodha account — all on autopilot, with you in control from a web dashboard or Telegram.
 
@@ -21,6 +18,7 @@
 - **Your positions stay protected** — Stop-loss and target are placed *at the broker*, so an open position is guarded even if the app restarts or your server briefly goes down.
 - **It learns from itself** — Every prediction is scored against what actually happened, and that feedback flows into a weekly model refresh.
 - **Try before you trust** — Paper mode simulates everything (including costs and slippage) with no real money, and a one-click "dry run" shows you exactly what the system *would* do today.
+- **Research on demand** — Run the ML model against any stocks or your own holdings to get a ranked buy / sell / hold call with reasoning, set your own price alerts, and trade or manage positions manually when you want to take the wheel.
 - **Monitor from anywhere** — A full web dashboard plus a Telegram bot that sends alerts and takes commands from your phone.
 
 ---
@@ -29,10 +27,10 @@
 
 You don't need to understand the internals to use YoloVest, but here's the gist:
 
-- **A trading cycle runs every 15 minutes** while the market is open: pull fresh prices, scan the market, rank candidates with a machine-learning model, run each through risk checks and an optional AI review, then act.
+- **A trading cycle runs every 15 minutes (configurable)** while the market is open: pull fresh prices, scan the market, rank candidates with a machine-learning model, run each through risk checks and an optional AI review, then act.
 - **The brain is a machine-learning model** (gradient-boosted trees) that outputs a calibrated confidence for each stock. It's validated with realistic backtests that account for actual brokerage, taxes, and slippage — not a rosy simulation — and is **retrained weekly**. New models run quietly in "shadow" mode alongside the live one for a week and are only promoted if they genuinely perform better.
 - **Market data** comes from your paid Zerodha data plan when enabled, with free public sources as an automatic fallback so the system keeps working even if one source fails. An optional live price feed enables near-instant exits.
-- **News & sentiment** from major Indian financial outlets is folded into the signal.
+- **Market context beyond price** is folded into the signal: news sentiment from major Indian financial outlets, India VIX, F&O option-chain signals (put-call ratio, open-interest buildup), and institutional (FII/DII) flows.
 - **Self-hosted and private** — everything runs on your own server in Docker, with automatic HTTPS, database backups, and log rotation. Your data and keys never leave your machine.
 
 ---
@@ -93,7 +91,7 @@ TELEGRAM_CHAT_ID=
 Then start everything:
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
 The dashboard comes up at `https://your-domain`. **Log in with the default password `yolovest` and change it immediately** from the Settings page — it's the only thing standing between the internet and your trading controls. Docker handles HTTPS certificates, the web server, database backups, and log rotation automatically, and your data persists across restarts.
@@ -121,10 +119,10 @@ The authorization is remembered for the rest of the day, even if you restart the
 A web dashboard gives you a full view of the system, organized into a few areas:
 
 - **Trading** — your portfolio and equity curve, open positions with live P&L, trade history, and a detailed breakdown of any single trade (why it was taken, how it was executed, and how it turned out).
-- **Research** — sentiment-scored news, a market calendar (holidays and economic events), the watchlist/shortlist, and brokerage holdings.
+- **Research** — sentiment-scored news, a market calendar (holidays and economic events), the watchlist/shortlist, brokerage holdings, an on-demand **screener** that runs the model against any stocks you choose, your own **price alerts**, institutional (FII/DII) flows, and a cross-stock correlation view.
 - **Models & predictions** — how accurate the system has been, model versions and their shadow-test results, and a one-click **dry run** that previews today's signals without trading.
 - **Analysis** — win rate, returns, risk-adjusted performance, execution/slippage quality, and a risk simulator that replays history under different settings.
-- **Admin** — settings, data management and backups, an audit log, and manual controls.
+- **Admin** — settings, data management and backups, an audit log, and manual controls: place and manage your own orders, close positions, tighten stop-losses, lock holdings so the system won't touch them, and run any pipeline step on demand or toggle its schedule.
 
 ### Telegram Bot
 
@@ -192,4 +190,4 @@ Only then, if you're convinced, switch to live mode — pull your real account c
 
 ---
 
-*Questions about the internals or contributing? Technical and architecture documentation lives in `CLAUDE.md` and the `docs/` folder.*
+*Questions about the internals? Technical and architecture documentation lives in `CLAUDE.md` and the `docs/` folder.*
