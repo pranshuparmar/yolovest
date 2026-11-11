@@ -157,9 +157,9 @@ export default function App() {
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <ThemeProvider>
-            <BrowserRouter
-              future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
-            >
+            {/* v7_startTransition / v7_relativeSplatPath are the default
+                behaviour in react-router v7, so the v6 `future` opt-ins are gone. */}
+            <BrowserRouter>
               <AuthSync />
               <AppRoutes />
             </BrowserRouter>
