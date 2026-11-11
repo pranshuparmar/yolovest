@@ -53,3 +53,22 @@ class TestJugaadTradingDate:
 
     def test_string_date_parsed(self):
         assert _ist_trading_date("2026-05-18").isoformat() == "2026-05-18"
+
+    def test_numpy_stripped_utc_resolves_to_ist_day(self):
+        # What jugaad actually hands back: NSE's "+05:30" CH_TIMESTAMP goes
+        # through np.datetime64, which converts to UTC and DROPS the tz —
+        # Monday's bar becomes a naive Sunday 18:30.
+        import warnings
+
+        import numpy as np
+        import pandas as pd
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            raw = pd.Series([np.datetime64("2026-11-09T00:00:00+05:30")]).iloc[0]
+        assert raw.tzinfo is None
+        assert (raw.weekday(), raw.hour, raw.minute) == (6, 18, 30)
+        assert _ist_trading_date(raw).isoformat() == "2026-11-09"
+
+    def test_naive_utc_string_resolves_to_ist_day(self):
+        assert _ist_trading_date("2026-11-08T18:30:00").isoformat() == "2026-11-09"

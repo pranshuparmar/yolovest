@@ -6,7 +6,7 @@ Scrapes NSE directly. Built-in caching. History from 2013+.
 import asyncio
 import logging
 import warnings
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from yolovest.data.base import MarketDataBase
@@ -25,12 +25,24 @@ def _ist_trading_date(raw: Any) -> date:
     back (Mon 00:00 IST == Sun 18:30 UTC), which stamped daily bars on the
     wrong (often weekend) date. Normalise to IST before taking the date so
     the bar lands on its real trading day.
+
+    The common path is actually NAIVE: NSE sends ``CH_TIMESTAMP`` with a
+    ``+05:30`` offset and jugaad parses it via ``np.datetime64``, which
+    converts to UTC and drops the tz (the "no explicit representation of
+    timezones" warning filtered below). Monday's bar arrives as a naive
+    ``Sunday 18:30``. A naive value with a non-midnight time-of-day is
+    therefore treated as UTC; a naive midnight is a plain date and passes
+    through unchanged.
     """
+    if isinstance(raw, str):
+        raw = datetime.fromisoformat(raw)
     if getattr(raw, "tzinfo", None) is not None:
         try:
             raw = raw.astimezone(IST)
         except Exception:
             pass
+    elif isinstance(raw, datetime) and (raw.hour, raw.minute, raw.second) != (0, 0, 0):
+        raw = raw.replace(tzinfo=UTC).astimezone(IST)
     if hasattr(raw, "date"):
         return raw.date()
     return datetime.fromisoformat(str(raw)).date()
