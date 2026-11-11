@@ -52,9 +52,14 @@ the tags deliberately after testing.
 `nginx/tls-healthcheck.sh` runs as the nginx-proxy container's
 healthcheck. It marks the container unhealthy when either:
 
-- the generated config contains `ssl_reject_handshake on;`, or
+- a domain with an issued cert has no `listen 443` server block in the
+  generated config, or that block carries `ssl_reject_handshake on;`, or
 - a per-domain cert directory exists without its expected top-level
   `<domain>.crt` / `<domain>.key` symlinks.
+
+`ssl_reject_handshake on;` in the catch-all `server_name _` block is
+expected and ignored: nginx-proxy always emits it there when no
+`default.crt` exists, so unknown hostnames are refused.
 
 An unhealthy state triggers Docker's restart policy, which in turn
 runs the heal step on the next start.
