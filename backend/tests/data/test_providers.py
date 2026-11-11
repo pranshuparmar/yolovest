@@ -79,6 +79,15 @@ class TestJugaadDataProvider:
         with pytest.raises(ValueError, match="only supports daily"):
             await provider.get_ohlcv("RELIANCE", "5minute", 30)
 
+    async def test_index_symbol_returns_empty_without_fetch(self):
+        """stock_df can't serve indices — skip them so the chain falls through."""
+        from yolovest.data.jugaad import JugaadDataProvider
+
+        provider = JugaadDataProvider()
+        with patch("jugaad_data.nse.stock_df") as mock_stock_df:
+            assert await provider.get_ohlcv("NIFTY 50", "daily", 30) == []
+        mock_stock_df.assert_not_called()
+
 
 @pytest.mark.skipif(
     not _has_module("yfinance"),
@@ -124,6 +133,16 @@ class TestYFinanceProvider:
         provider = YFinanceProvider()
         assert provider._nse_symbol("RELIANCE") == "RELIANCE.NS"
         assert provider._nse_symbol("RELIANCE.NS") == "RELIANCE.NS"
+
+    async def test_index_symbols_map_to_yahoo_tickers(self):
+        """Indices use Yahoo caret tickers, not "<name>.NS" (which 404s)."""
+        from yolovest.data.base import NSE_INDEX_SYMBOLS
+        from yolovest.data.yfinance_provider import _YF_INDEX_TICKERS, YFinanceProvider
+
+        provider = YFinanceProvider()
+        assert provider._nse_symbol("NIFTY 50") == "^NSEI"
+        assert provider._nse_symbol("NIFTY BANK") == "^NSEBANK"
+        assert set(_YF_INDEX_TICKERS) == NSE_INDEX_SYMBOLS
 
     async def test_unsupported_interval_raises(self):
         """Test that unsupported intervals raise ValueError."""

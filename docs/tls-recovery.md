@@ -83,6 +83,16 @@ re-issues from Let's Encrypt automatically on next boot. The
 default rate limit (50 certs per registered domain per week) is
 well above what a single-domain deploy could ever burn through.
 
+acme-companion's own state (ACME account key, per-domain renewal
+config) lives in the `acme` named volume at `/etc/acme.sh`. Without
+it, every `letsencrypt` container recreate registers a new ACME
+account and starts renewal tracking from scratch.
+
+Don't loop restarts of `letsencrypt` while port 80 is unreachable:
+each attempt counts toward Let's Encrypt's failed-validation limit
+(5 per hostname per account per hour). Fix reachability first, then
+trigger one attempt with `docker exec letsencrypt /app/force_renew`.
+
 ## Manual recovery
 
 ### Recover from a missing-symlink state (no volume restore needed)

@@ -9,7 +9,7 @@ import warnings
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from yolovest.data.base import MarketDataBase
+from yolovest.data.base import NSE_INDEX_SYMBOLS, MarketDataBase
 from yolovest.models.schemas import OHLCVBar, is_valid_ohlc
 from yolovest.timezone import IST
 
@@ -74,6 +74,12 @@ class JugaadDataProvider(MarketDataBase):
         """Fetch daily OHLCV via jugaad-data. Only supports daily interval."""
         if interval not in ("daily", "1d"):
             raise ValueError(f"JugaadDataProvider only supports daily interval, got {interval}")
+        if symbol.upper() in NSE_INDEX_SYMBOLS:
+            # stock_df only serves equities; an index name comes back as an
+            # empty frame and a KeyError on its columns every heartbeat.
+            # Return empty so the ingester falls through to a provider that
+            # handles indices (yfinance / Kite) without a WARNING.
+            return []
 
         end_date = date.today()
         start_date = end_date - timedelta(days=days)
