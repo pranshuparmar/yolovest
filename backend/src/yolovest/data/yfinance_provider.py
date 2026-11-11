@@ -54,6 +54,16 @@ _YF_INTERVALS = {
     "15minute": "15m",
 }
 
+# NSE index names → Yahoo tickers. Indices aren't `<name>.NS` on Yahoo
+# ("NIFTY 50.NS" 404s); they use caret symbols. Keys mirror
+# data.base.NSE_INDEX_SYMBOLS.
+_YF_INDEX_TICKERS = {
+    "NIFTY 50": "^NSEI",
+    "NIFTY BANK": "^NSEBANK",
+    "NIFTY IT": "^CNXIT",
+    "NIFTY NEXT 50": "^NSMIDCP",
+}
+
 
 class YFinanceProvider(MarketDataBase):
     """Fallback data provider using yfinance for NSE data via .NS suffix."""
@@ -65,6 +75,9 @@ class YFinanceProvider(MarketDataBase):
 
     def _nse_symbol(self, symbol: str) -> str:
         """Convert NSE symbol to yfinance format."""
+        index_ticker = _YF_INDEX_TICKERS.get(symbol.upper())
+        if index_ticker is not None:
+            return index_ticker
         if not symbol.endswith(".NS"):
             return f"{symbol}.NS"
         return symbol

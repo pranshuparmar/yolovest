@@ -6,7 +6,7 @@ The stack hosts the dashboard behind `nginxproxy/nginx-proxy` + `nginxproxy/acme
 
 1. **Pinned image versions** prevent silent upstream behaviour drift.
 2. **`nginx/heal-cert-symlinks.sh`** runs as the nginx-proxy entrypoint before nginx boots, recreating any missing symlinks.
-3. **`nginx/tls-healthcheck.sh`** marks the container unhealthy when `ssl_reject_handshake on;` is present in generated config or when a per-domain dir exists without its top-level symlinks — Docker's `restart: always` then re-runs the entrypoint heal. Worst-case dashboard downtime after a botched mid-life renewal is ~3 min (healthcheck interval 60s × 3 retries) which is fine for a single-user app.
+3. **`nginx/tls-healthcheck.sh`** marks the container unhealthy when a domain with an issued cert has no working `listen 443` server block (missing, or carrying `ssl_reject_handshake on;` — the catch-all `server_name _` block is ignored, since nginx-proxy always emits that there without a `default.crt`) or when a per-domain dir exists without its top-level symlinks — Docker's `restart: always` then re-runs the entrypoint heal. Worst-case dashboard downtime after a botched mid-life renewal is ~3 min (healthcheck interval 60s × 3 retries) which is fine for a single-user app.
 
 Details and manual recovery steps in `docs/tls-recovery.md`.
 

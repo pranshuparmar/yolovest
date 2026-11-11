@@ -16,7 +16,7 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from yolovest.data.base import MarketDataBase
+from yolovest.data.base import NSE_INDEX_SYMBOLS, MarketDataBase
 from yolovest.models.schemas import OHLCVBar, is_valid_ohlc
 from yolovest.timezone import now_ist
 
@@ -163,7 +163,7 @@ class KiteDataProvider(MarketDataBase):
         self._kite = kite
         return self._kite
 
-    _INDEX_SYMBOLS = {"NIFTY 50", "NIFTY BANK", "NIFTY IT", "NIFTY NEXT 50"}
+    _INDEX_SYMBOLS = NSE_INDEX_SYMBOLS
 
     async def _prewarm_token_cache(self) -> None:
         """Fetch the NSE instrument master once and cache every

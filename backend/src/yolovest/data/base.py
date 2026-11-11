@@ -8,6 +8,12 @@ from typing import Any
 
 from yolovest.models.schemas import OHLCVBar
 
+# NSE index names the app requests (e.g. `strategy.market_regime.index_symbol`).
+# Index names contain a space; equity tradingsymbols never do. Providers
+# that serve equities only (jugaad's stock_df) skip these, and yfinance maps
+# them to Yahoo's caret tickers instead of appending `.NS`.
+NSE_INDEX_SYMBOLS = frozenset({"NIFTY 50", "NIFTY BANK", "NIFTY IT", "NIFTY NEXT 50"})
+
 
 class MarketDataBase(ABC):
     """Abstract base for market data providers.

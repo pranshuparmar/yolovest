@@ -51,7 +51,7 @@ YoloVest is an AI-driven Indian stock trading platform. It uses Google Gemini fo
 ├── nginx/                  — Shared nginx-proxy assets
 │   ├── custom.conf         — Global HTTP-level overrides
 │   ├── heal-cert-symlinks.sh   — Restore <domain>.crt / <domain>.key on each boot
-│   └── tls-healthcheck.sh  — Detect ssl_reject_handshake / missing symlinks
+│   └── tls-healthcheck.sh  — Detect a cert-holding domain without a working TLS block / missing symlinks
 ├── docs/                   — Detail split out of CLAUDE.md + operational docs
 │   ├── architecture.md     — subsystems, heartbeat, risk gates, exit paths
 │   ├── database.md         — key tables, quarantine, universe resolution
