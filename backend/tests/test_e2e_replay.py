@@ -51,7 +51,12 @@ def _generate_ohlcv(
     rng = random.Random(seed)
     bars = []
     price = start_price
-    base_date = datetime(2025, 3, 1, 0, 0)
+    # Anchor the series so it ends today: tests read "the last N days"
+    # relative to now, so a fixed start date silently shrinks that window
+    # as the calendar moves on (this test began failing ~a year after the
+    # hard-coded 2025-03-01 start).
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    base_date = today - timedelta(days=days)
 
     for i in range(days):
         dt = base_date + timedelta(days=i)
