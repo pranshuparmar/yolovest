@@ -101,9 +101,14 @@ jobs:
         # so it can't be bumped from our side, and autobahn here serves only the
         # authenticated Kite ticker WebSocket — not a web-facing surface. Drop
         # this ignore once kiteconnect relaxes its pin.
+        # --ignore-vuln PYSEC-2026-4027: same pinned autobahn. The advisory is a
+        # server-side permessage-deflate size-limit bypass (a client frame
+        # inflating past maxMessagePayloadSize); we only run autobahn as a
+        # CLIENT of Kite's authenticated ticker feed, never as a WebSocket
+        # server. Drop with the pin above.
         run: |
           pip install pip-audit
-          pip-audit -r backend/requirements.lock.txt --desc --ignore-vuln PYSEC-2020-25
+          pip-audit -r backend/requirements.lock.txt --desc --ignore-vuln PYSEC-2020-25 --ignore-vuln PYSEC-2026-4027
       - uses: actions/setup-node@v6
         with:
           node-version: "20"

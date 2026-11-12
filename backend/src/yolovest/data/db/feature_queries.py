@@ -229,7 +229,7 @@ class FeatureQueriesMixin:
 
         # By hour of entry
         cursor = await self.conn.execute(
-            f"SELECT CAST(strftime('%H', created_at) AS INTEGER) as hour, "
+            f"SELECT CAST(strftime('%H', created_at, '+330 minutes') AS INTEGER) as hour, "
             f"COUNT(*) as cnt, "
             f"SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, "
             f"SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses, "
@@ -243,14 +243,16 @@ class FeatureQueriesMixin:
 
         # By sector
         cursor = await self.conn.execute(
-            f"SELECT COALESCE(w.sector, 'Unknown') as sector, COUNT(*) as cnt, "
+            f"SELECT COALESCE(ss.sector, w.sector, 'Unknown') as sector, COUNT(*) as cnt, "
             f"SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END) as wins, "
             f"SUM(CASE WHEN t.pnl < 0 THEN 1 ELSE 0 END) as losses, "
             f"COALESCE(SUM(t.pnl), 0) as total_pnl, "
             f"COALESCE(AVG(t.pnl), 0) as avg_pnl "
             f"FROM trades t LEFT JOIN watchlist w ON t.symbol = w.symbol "
+            f"LEFT JOIN symbol_sectors ss ON t.symbol = ss.symbol "
             f"WHERE t.pnl IS NOT NULL{mct} "
-            f"GROUP BY sector ORDER BY total_pnl DESC", mp,
+            # GROUP BY 1: `sector` alone is ambiguous with ss/w.sector
+            f"GROUP BY 1 ORDER BY total_pnl DESC", mp,
         )
         rows = await cursor.fetchall()
         result["by_sector"] = [dict[str, Any](r) for r in rows]
@@ -290,7 +292,7 @@ class FeatureQueriesMixin:
 
         # Slippage by hour
         cursor = await self.conn.execute(
-            f"SELECT CAST(strftime('%H', created_at) AS INTEGER) as hour, "
+            f"SELECT CAST(strftime('%H', created_at, '+330 minutes') AS INTEGER) as hour, "
             f"COUNT(*) as cnt, "
             f"AVG(ABS(slippage)) as avg_slippage, "
             f"MAX(ABS(slippage)) as max_slippage "
@@ -461,7 +463,7 @@ class FeatureQueriesMixin:
             "   LIMIT 1)"
             ") as pnl, "
             "t.quantity, t.fill_price, t.slippage, t.status as trade_status, "
-            "COALESCE(w.sector, 'Unknown') as sector "
+            "COALESCE(ss.sector, w.sector, 'Unknown') as sector "
             "FROM signals s "
             "LEFT JOIN trades t ON t.trade_id = COALESCE("
             "  (SELECT t2.trade_id FROM trades t2 "
@@ -475,6 +477,7 @@ class FeatureQueriesMixin:
             "   ORDER BY t3.created_at ASC LIMIT 1)"
             ") "
             "LEFT JOIN watchlist w ON s.symbol = w.symbol "
+            "LEFT JOIN symbol_sectors ss ON s.symbol = ss.symbol "
             "WHERE 1=1"
         )
         params: list[Any] = []
